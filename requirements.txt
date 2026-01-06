@@ -1,8 +1,9 @@
 # APEX Trading System - Production Dependencies
-# All versions pinned for reproducibility
+# Python 3.9–3.10 compatible
+# Last updated: January 6, 2026
 
 # Core Async & Utilities
-asyncio-contextmanager==1.0.0
+asyncio-contextmanager==1.0.1
 aiofiles==23.2.1
 python-dotenv==1.0.0
 pytz==2023.3
@@ -23,8 +24,7 @@ lightgbm==4.0.0
 catboost==1.2.2
 
 # Hyperparameter Optimization
-optuna==3.12.0
-hyperopt==0.2.7
+optuna==4.6.0
 
 # IBKR Connectivity
 ib-insync==0.9.17

@@ -4,12 +4,14 @@ models/ensemble_signal_generator.py
 APEX TRADING SYSTEM - 5-MODEL ENSEMBLE WITH VOTING
 ================================================================================
 
+
 Advanced ensemble learning with:
 - Random Forest (robust, feature importance)
 - Gradient Boosting (strong learner)
 - XGBoost (fast, handles missing data)
 - LightGBM (memory efficient)
 - Logistic Regression (interpretable)
+
 
 Features:
 - Weighted voting mechanism
@@ -19,6 +21,7 @@ Features:
 - Consensus confidence scoring
 """
 
+
 import numpy as np
 import pandas as pd
 import logging
@@ -26,6 +29,7 @@ from typing import Dict, Optional, Tuple, List
 from datetime import datetime
 import pickle
 import os
+
 
 from sklearn.ensemble import RandomForestClassifier, GradientBoostingClassifier
 from sklearn.linear_model import LogisticRegression
@@ -35,7 +39,9 @@ import xgboost as xgb
 import lightgbm as lgb
 from joblib import dump, load
 
+
 logger = logging.getLogger(__name__)
+
 
 
 class EnsembleSignalGenerator:
@@ -158,18 +164,18 @@ class EnsembleSignalGenerator:
         results = {}
         
         # ═══════════════════════════════════════════════════════════════
-        # MODEL 1: RANDOM FOREST
+        # MODEL 1: RANDOM FOREST (REGULARIZED)
         # ═══════════════════════════════════════════════════════════════
         
         try:
             logger.info("\n[1/5] Training Random Forest...")
             
             self.rf_model = RandomForestClassifier(
-                n_estimators=150,
-                max_depth=20,
-                min_samples_split=5,
-                min_samples_leaf=2,
-                max_features='sqrt',
+                n_estimators=100,
+                max_depth=10,              # ← Prevent overfitting
+                min_samples_split=20,      # ← Require splits
+                min_samples_leaf=10,       # ← Prevent small leaves
+                max_features='sqrt',       # ← Random feature selection
                 bootstrap=True,
                 oob_score=True,
                 n_jobs=-1,
@@ -206,18 +212,18 @@ class EnsembleSignalGenerator:
             self.rf_model = None
         
         # ═══════════════════════════════════════════════════════════════
-        # MODEL 2: GRADIENT BOOSTING
+        # MODEL 2: GRADIENT BOOSTING (REGULARIZED)
         # ═══════════════════════════════════════════════════════════════
         
         try:
             logger.info("[2/5] Training Gradient Boosting...")
             
             self.gb_model = GradientBoostingClassifier(
-                n_estimators=150,
-                learning_rate=0.1,
-                max_depth=7,
-                min_samples_split=5,
-                min_samples_leaf=2,
+                n_estimators=100,
+                learning_rate=0.05,        # ← Lower learning rate to prevent overfitting
+                max_depth=5,               # ← Shallow trees
+                min_samples_split=20,      # ← Require splits
+                min_samples_leaf=10,       # ← Prevent small leaves
                 subsample=0.8,
                 max_features='sqrt',
                 random_state=42,
@@ -252,22 +258,22 @@ class EnsembleSignalGenerator:
             self.gb_model = None
         
         # ═══════════════════════════════════════════════════════════════
-        # MODEL 3: XGBOOST
+        # MODEL 3: XGBOOST (REGULARIZED)
         # ═══════════════════════════════════════════════════════════════
         
         try:
             logger.info("[3/5] Training XGBoost...")
             
             self.xgb_model = xgb.XGBClassifier(
-                n_estimators=150,
-                max_depth=7,
-                learning_rate=0.1,
+                n_estimators=100,
+                max_depth=5,               # ← Shallow trees
+                learning_rate=0.05,        # ← Lower learning rate
                 subsample=0.8,
                 colsample_bytree=0.8,
                 gamma=1,
-                min_child_weight=1,
-                reg_alpha=0.5,
-                reg_lambda=1.0,
+                min_child_weight=5,        # ← Higher minimum child weight
+                reg_alpha=1.0,             # ← L1 regularization
+                reg_lambda=1.0,            # ← L2 regularization
                 random_state=42,
                 n_jobs=-1,
                 eval_metric='logloss'
@@ -301,22 +307,22 @@ class EnsembleSignalGenerator:
             self.xgb_model = None
         
         # ═══════════════════════════════════════════════════════════════
-        # MODEL 4: LIGHTGBM
+        # MODEL 4: LIGHTGBM (REGULARIZED)
         # ═══════════════════════════════════════════════════════════════
         
         try:
             logger.info("[4/5] Training LightGBM...")
             
             self.lgb_model = lgb.LGBMClassifier(
-                n_estimators=150,
-                max_depth=7,
-                learning_rate=0.1,
-                num_leaves=31,
+                n_estimators=100,
+                max_depth=5,               # ← Shallow trees
+                learning_rate=0.05,        # ← Lower learning rate
+                num_leaves=15,             # ← Fewer leaves
                 subsample=0.8,
                 colsample_bytree=0.8,
-                min_child_samples=20,
-                reg_alpha=0.5,
-                reg_lambda=1.0,
+                min_child_samples=20,      # ← Require more samples
+                reg_alpha=1.0,             # ← L1 regularization
+                reg_lambda=1.0,            # ← L2 regularization
                 random_state=42,
                 n_jobs=-1,
                 verbose=-1
@@ -708,6 +714,7 @@ class EnsembleSignalGenerator:
         sorted_importance = sorted(importance_dict.items(), key=lambda x: x[1], reverse=True)
         
         return dict(sorted_importance[:top_n])
+
 
 
 if __name__ == "__main__":

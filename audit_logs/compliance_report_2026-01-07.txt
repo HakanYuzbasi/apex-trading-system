@@ -1,0 +1,21 @@
+
+================================================================================
+APEX TRADING SYSTEM - DAILY COMPLIANCE REPORT
+================================================================================
+Date: 2026-01-07
+Generated: 2026-01-07 00:05:20
+
+SUMMARY
+-------
+Total Compliance Checks: 0
+Approved Checks: 0
+Rejected Checks: 0
+Total Trades Executed: 0
+Compliance Violations: 0
+
+
+✅ No compliance violations detected.
+
+================================================================================
+End of Report
+================================================================================

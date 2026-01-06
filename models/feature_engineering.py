@@ -93,7 +93,7 @@ class FeatureEngineering:
         result = self._create_derived_features(result)
         
         # Fill NaN values
-        result = result.fillna(method='bfill').fillna(method='ffill').fillna(0)
+        result = result.bfill().ffill().fillna(0)
         
         logger.info(f"✅ Created {len(result.columns) - len(df.columns)} features")
         
@@ -223,8 +223,8 @@ class FeatureEngineering:
         # Return statistics (20-period)
         df['Return_Mean_20'] = df['Returns'].rolling(20).mean()
         df['Return_Std_20'] = df['Returns'].rolling(20).std()
-        df['Skewness_20'] = df['Returns'].rolling(20).skew()
-        df['Kurtosis_20'] = df['Returns'].rolling(20).kurtosis()
+        df['Skewness_20'] = df['Returns'].rolling(20).apply(lambda x: x.skew())
+        df['Kurtosis_20'] = df['Returns'].rolling(20).apply(lambda x: x.kurtosis())
         
         logger.debug("✓ Statistical features created")
         
