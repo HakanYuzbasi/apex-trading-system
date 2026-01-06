@@ -1,42 +1,81 @@
-# Core Trading
-ib-insync>=0.9.86
-numpy>=1.24.0
-pandas>=2.0.0
-scipy>=1.11.0
+# APEX Trading System - Production Dependencies
+# All versions pinned for reproducibility
 
-# Machine Learning
-scikit-learn>=1.3.0
-xgboost>=2.0.0
-lightgbm>=4.0.0
-optuna>=3.3.0
-torch>=2.0.0
-tensorflow>=2.13.0
+# Core Async & Utilities
+asyncio-contextmanager==1.0.0
+aiofiles==23.2.1
+python-dotenv==1.0.0
+pytz==2023.3
+tqdm==4.66.1
 
-# Technical Analysis
-ta-lib>=0.4.28
-ta>=0.11.0
+# Data Processing
+numpy==1.24.3
+pandas==2.0.3
+scipy==1.11.2
 
-# Data
-yfinance>=0.2.28
-pandas-datareader>=0.10.0
-alpha-vantage>=2.3.1
+# Machine Learning - Base
+scikit-learn==1.3.0
+joblib==1.3.2
 
-# Visualization & Monitoring
-matplotlib>=3.7.0
-seaborn>=0.12.0
-plotly>=5.16.0
-streamlit>=1.26.0
+# Machine Learning - Gradient Boosting
+xgboost==1.7.6
+lightgbm==4.0.0
+catboost==1.2.2
 
-# Utilities
-python-dateutil>=2.8.2
-pytz>=2023.3
-requests>=2.31.0
-aiohttp>=3.8.5
+# Hyperparameter Optimization
+optuna==3.12.0
+hyperopt==0.2.7
 
-# Database & Storage
-sqlalchemy>=2.0.0
-redis>=5.0.0
+# IBKR Connectivity
+ib-insync==0.9.17
 
-# Testing
-pytest>=7.4.0
-pytest-asyncio>=0.21.0
+# Visualization
+matplotlib==3.7.2
+plotly==5.16.1
+seaborn==0.12.2
+
+# Web Frameworks
+streamlit==1.27.0
+dash==2.14.0
+flask==3.0.0
+
+# Data Storage
+sqlalchemy==2.0.20
+pymongo==4.4.1
+redis==5.0.0
+
+# Security & Encryption
+cryptography==41.0.3
+pyjwt==2.8.0
+
+# Configuration
+pyyaml==6.0.1
+python-json-logger==2.0.7
+
+# Logging
+python-logstash-async==2.5.0
+
+# API & HTTP
+requests==2.31.0
+aiohttp==3.9.0
+
+# Development & Testing
+pytest==7.4.0
+pytest-cov==4.1.0
+pytest-asyncio==0.21.0
+pytest-mock==3.11.1
+
+# Code Quality
+black==23.9.1
+flake8==6.1.0
+mypy==1.5.1
+pylint==2.17.5
+isort==5.12.0
+
+# Documentation
+sphinx==7.2.6
+sphinx-rtd-theme==1.3.0
+
+# Parallel Processing
+ray==2.7.0
+dask==2023.9.2

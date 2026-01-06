@@ -1,313 +1,486 @@
 """
 market/market_regime_detector.py
-DETECT MARKET REGIMES AND ADAPT STRATEGY
-- Bull, Bear, Sideways, Crisis
-- Dynamic parameter adjustment
+================================================================================
+APEX TRADING SYSTEM - MARKET REGIME DETECTION
+================================================================================
+
+Sophisticated market regime detection with:
+- Bull/Bear/Sideways/Crisis classification
+- Volatility-based regime identification
+- Confidence scoring
+- Regime-specific trading parameters
+- Trend analysis and classification
+
+The system adapts trading parameters based on detected regime:
+- BULL: Aggressive trading, long bias, high position sizing
+- BEAR: Conservative trading, short allowed, reduced position sizes
+- SIDEWAYS: Mean reversion focus, neutral bias
+- CRISIS: Extreme risk management, minimal positions
 """
 
 import numpy as np
 import pandas as pd
 import logging
-from typing import Dict, Tuple
-from datetime import datetime, timedelta
-from scipy import stats
+from typing import Dict, Optional, Tuple
+from datetime import datetime
 
 logger = logging.getLogger(__name__)
 
 
 class MarketRegimeDetector:
     """
-    Detect market regime and adjust trading parameters.
+    Detect and classify market regimes in real-time.
     
     Regimes:
-    - BULL: Trending up, low volatility
-    - BEAR: Trending down, high volatility
-    - SIDEWAYS: Range-bound, mean reverting
-    - CRISIS: Extreme volatility, high correlation
+    1. BULL - Rising trend, low volatility, positive sentiment
+       - Return > 5%, Vol < Historical * 1.2
+    
+    2. BEAR - Falling trend, high volatility, negative sentiment
+       - Return < -5% OR Vol > Historical * 1.5
+    
+    3. SIDEWAYS - Range-bound, normal volatility
+       - No strong trend, normal volatility
+    
+    4. CRISIS - Extreme volatility spike, crash conditions
+       - Vol > Historical * 3.0
+    
+    Usage:
+    ```python
+    detector = MarketRegimeDetector()
+    result = detector.detect_regime(returns_series, lookback=60)
+    
+    print(result['regime'])  # 'BULL', 'BEAR', etc
+    print(result['confidence'])  # 0.85
+    params = result['params']  # Regime-specific trading parameters
+    ```
     """
     
     def __init__(self):
-        self.current_regime = 'UNKNOWN'
+        """Initialize the detector."""
         self.regime_history = []
-        self.regime_confidence = 0.0
+        self.volatility_history = []
         
         logger.info("✅ Market Regime Detector initialized")
     
     def detect_regime(
         self,
         returns: pd.Series,
-        volatility: pd.Series = None,
-        lookback: int = 60
+        lookback: int = 60,
+        crisis_vol_threshold: float = 3.0,
+        bull_return_threshold: float = 0.05,
+        bear_return_threshold: float = -0.05,
+        bear_vol_multiplier: float = 1.5,
+        bull_vol_multiplier: float = 1.2
     ) -> Dict:
         """
-        Detect current market regime.
+        Detect current market regime from returns.
         
         Args:
-            returns: Daily returns series
-            volatility: Volatility series (optional, will calculate if not provided)
-            lookback: Lookback period for analysis
+            returns: Daily returns series (e.g., daily % changes)
+            lookback: Number of days to analyze (default: 60 = ~3 months)
+            crisis_vol_threshold: Crisis threshold in std devs (default: 3.0)
+            bull_return_threshold: Minimum return for bull (default: 5%)
+            bear_return_threshold: Maximum return for bear (default: -5%)
+            bear_vol_multiplier: Vol multiplier for bear detection (default: 1.5)
+            bull_vol_multiplier: Vol multiplier for bull detection (default: 1.2)
         
         Returns:
             {
-                'regime': str,
-                'confidence': float,
-                'metrics': dict,
-                'params': dict
+                'regime': str ('BULL', 'BEAR', 'SIDEWAYS', 'CRISIS'),
+                'confidence': float (0-1),
+                'volatility': float (annualized),
+                'trend': float (-1 to 1),
+                'vol_ratio': float (current vol / historical vol),
+                'cumulative_return': float,
+                'params': dict (regime-specific parameters),
+                'timestamp': str (ISO format)
             }
         """
-        # Calculate volatility if not provided
-        if volatility is None:
-            volatility = returns.rolling(20).std() * np.sqrt(252)  # Annualized
         
-        # Get recent data
-        recent_returns = returns.tail(lookback)
-        recent_vol = volatility.tail(lookback)
+        # Validation
+        if len(returns) < lookback:
+            logger.warning(f"Insufficient data: {len(returns)} < {lookback}")
+            return self._default_regime()
         
-        # Calculate key metrics
-        avg_return = recent_returns.mean() * 252  # Annualized
-        avg_vol = recent_vol.mean()
-        trend_strength = abs(stats.linregress(range(len(recent_returns)), recent_returns).slope)
-        skewness = stats.skew(recent_returns)
+        # Use recent window
+        recent_returns = returns.tail(lookback).copy()
         
-        # Calculate regime indicators
-        is_bull = avg_return > 0.10 and avg_vol < 0.20 and skewness > -0.5
-        is_bear = avg_return < -0.05 and avg_vol > 0.20
-        is_crisis = avg_vol > 0.35
-        is_sideways = abs(avg_return) < 0.05 and avg_vol < 0.20
+        # ═══════════════════════════════════════════════════════════════
+        # CALCULATE METRICS
+        # ═══════════════════════════════════════════════════════════════
         
-        # Determine regime with confidence
-        regime_scores = {
-            'BULL': 0.0,
-            'BEAR': 0.0,
-            'SIDEWAYS': 0.0,
-            'CRISIS': 0.0
-        }
+        # 1. Cumulative return over lookback period
+        cumulative_return = (1 + recent_returns).prod() - 1
         
-        # BULL scoring
-        if avg_return > 0:
-            regime_scores['BULL'] += min(avg_return / 0.30, 1.0) * 0.4  # Up to 40% weight
-        if avg_vol < 0.20:
-            regime_scores['BULL'] += (1 - avg_vol / 0.20) * 0.3  # Up to 30% weight
-        if skewness > 0:
-            regime_scores['BULL'] += min(skewness / 1.0, 1.0) * 0.3  # Up to 30% weight
+        # 2. Current volatility (annualized)
+        volatility = recent_returns.std() * np.sqrt(252)
         
-        # BEAR scoring
-        if avg_return < 0:
-            regime_scores['BEAR'] += min(abs(avg_return) / 0.30, 1.0) * 0.4
-        if avg_vol > 0.20:
-            regime_scores['BEAR'] += min((avg_vol - 0.20) / 0.30, 1.0) * 0.3
-        if skewness < 0:
-            regime_scores['BEAR'] += min(abs(skewness) / 1.0, 1.0) * 0.3
+        # 3. Historical volatility (baseline)
+        if len(returns) > 252:
+            historical_returns = returns.tail(252)
+        else:
+            historical_returns = returns
         
-        # CRISIS scoring
-        if avg_vol > 0.35:
-            regime_scores['CRISIS'] = min((avg_vol - 0.35) / 0.50, 1.0)
+        historical_volatility = historical_returns.std() * np.sqrt(252)
         
-        # SIDEWAYS scoring
-        if abs(avg_return) < 0.10:
-            regime_scores['SIDEWAYS'] += (1 - abs(avg_return) / 0.10) * 0.4
-        if avg_vol < 0.20:
-            regime_scores['SIDEWAYS'] += (1 - avg_vol / 0.20) * 0.3
-        if trend_strength < 0.0001:
-            regime_scores['SIDEWAYS'] += 0.3
+        # Handle zero volatility
+        if historical_volatility == 0:
+            historical_volatility = 0.01
+        if volatility == 0:
+            volatility = 0.01
         
-        # Get regime with highest score
-        regime = max(regime_scores, key=regime_scores.get)
-        confidence = regime_scores[regime]
+        # 4. Volatility ratio (current vs historical)
+        vol_ratio = volatility / historical_volatility
         
-        # Get parameters for this regime
-        params = self.get_regime_parameters(regime)
+        # 5. Trend strength (using moving averages)
+        ma_short = recent_returns.rolling(10).mean().iloc[-1]
+        ma_long = recent_returns.rolling(30).mean().iloc[-1]
+        trend_diff = ma_short - ma_long
         
-        # Log regime detection
-        if regime != self.current_regime:
-            logger.info(f"📊 Regime Change: {self.current_regime} → {regime} (confidence: {confidence:.2f})")
-            logger.info(f"   Metrics: Return={avg_return:.1%}, Vol={avg_vol:.1%}, Skew={skewness:.2f}")
+        # Normalize trend to [-1, 1]
+        if volatility > 0:
+            trend_normalized = np.clip(trend_diff / (volatility / 10), -1, 1)
+        else:
+            trend_normalized = 0
         
-        self.current_regime = regime
-        self.regime_confidence = confidence
+        # 6. Downside capture (consecutive negative returns)
+        negative_returns = (recent_returns < 0).sum()
+        downside_ratio = negative_returns / len(recent_returns)
         
-        self.regime_history.append({
+        # ═══════════════════════════════════════════════════════════════
+        # DETECT REGIME
+        # ═══════════════════════════════════════════════════════════════
+        
+        regime = 'UNKNOWN'
+        confidence = 0.0
+        regime_reason = ""
+        
+        # Priority 1: CRISIS (highest priority)
+        if vol_ratio > crisis_vol_threshold:
+            regime = 'CRISIS'
+            confidence = min((vol_ratio / (crisis_vol_threshold * 1.5)), 1.0)
+            regime_reason = f"Extreme volatility spike: {vol_ratio:.2f}x historical"
+        
+        # Priority 2: BEAR (strong downtrend or high volatility + downside)
+        elif (cumulative_return < bear_return_threshold or 
+              (vol_ratio > bear_vol_multiplier and downside_ratio > 0.45)):
+            regime = 'BEAR'
+            confidence = min(
+                max(
+                    abs(cumulative_return) / abs(bear_return_threshold),
+                    (vol_ratio - bear_vol_multiplier) / bear_vol_multiplier
+                ),
+                1.0
+            )
+            regime_reason = f"Downtrend/High Vol: Return={cumulative_return:.2%}, Vol_ratio={vol_ratio:.2f}x"
+        
+        # Priority 3: BULL (strong uptrend and controlled volatility)
+        elif (cumulative_return > bull_return_threshold and 
+              vol_ratio < bull_vol_multiplier):
+            regime = 'BULL'
+            confidence = min(
+                cumulative_return / (bull_return_threshold * 1.5),
+                1.0
+            )
+            regime_reason = f"Uptrend/Low Vol: Return={cumulative_return:.2%}, Vol_ratio={vol_ratio:.2f}x"
+        
+        # Priority 4: SIDEWAYS (default)
+        else:
+            regime = 'SIDEWAYS'
+            confidence = max(0.5, 1.0 - abs(trend_normalized) * 0.5)
+            regime_reason = f"Range-bound: Return={cumulative_return:.2%}, Vol_ratio={vol_ratio:.2f}x"
+        
+        # Get regime-specific parameters
+        params = self._get_regime_params(regime, volatility, trend_normalized)
+        
+        # Store in history
+        regime_data = {
             'timestamp': datetime.now(),
             'regime': regime,
             'confidence': confidence,
-            'metrics': {
-                'avg_return': avg_return,
-                'avg_volatility': avg_vol,
-                'skewness': skewness,
-                'trend_strength': trend_strength
-            }
-        })
+            'volatility': volatility,
+            'vol_ratio': vol_ratio
+        }
+        self.regime_history.append(regime_data)
+        self.volatility_history.append(volatility)
+        
+        # Keep only recent history
+        if len(self.regime_history) > 1000:
+            self.regime_history = self.regime_history[-500:]
+            self.volatility_history = self.volatility_history[-500:]
+        
+        # Log results
+        logger.info(f"\n📊 MARKET REGIME: {regime}")
+        logger.info(f"   Confidence: {confidence:.2%}")
+        logger.info(f"   {regime_reason}")
+        logger.info(f"   Volatility: {volatility*100:.2f}% (historical: {historical_volatility*100:.2f}%)")
+        logger.info(f"   Return ({lookback}d): {cumulative_return*100:+.2f}%")
+        logger.info(f"   Downside ratio: {downside_ratio:.2%}")
         
         return {
             'regime': regime,
-            'confidence': confidence,
-            'metrics': {
-                'avg_return': avg_return,
-                'avg_volatility': avg_vol,
-                'skewness': skewness,
-                'trend_strength': trend_strength
-            },
-            'regime_scores': regime_scores,
-            'params': params
+            'confidence': float(confidence),
+            'volatility': float(volatility),
+            'historical_volatility': float(historical_volatility),
+            'trend': float(trend_normalized),
+            'vol_ratio': float(vol_ratio),
+            'cumulative_return': float(cumulative_return),
+            'downside_ratio': float(downside_ratio),
+            'params': params,
+            'reason': regime_reason,
+            'timestamp': datetime.now().isoformat()
         }
     
-    def get_regime_parameters(self, regime: str) -> Dict:
+    def _get_regime_params(
+        self,
+        regime: str,
+        volatility: float,
+        trend: float
+    ) -> Dict:
         """
-        Get trading parameters optimized for each regime.
+        Get trading parameters optimized for the detected regime.
         
-        Returns:
-            Dictionary of trading parameters
+        Each regime has different optimal parameters based on market conditions.
         """
-        params = {
-            'BULL': {
-                'position_size_mult': 1.3,          # Larger positions
-                'min_signal_threshold': 0.30,       # Lower threshold (more trades)
-                'take_profit_pct': 20.0,            # Let winners run
-                'stop_loss_pct': -8.0,              # Wider stops
-                'max_holding_days': 60,             # Hold longer
-                'max_positions': 20,                # More diversification
-                'trade_cooldown': 180,              # 3 minutes
-                'adaptive_sizing': True,
-                'allow_shorts': False               # Long-only in bull
-            },
-            'BEAR': {
-                'position_size_mult': 0.5,          # Smaller positions
-                'min_signal_threshold': 0.60,       # Much higher threshold (fewer trades)
-                'take_profit_pct': 8.0,             # Quick profits
-                'stop_loss_pct': -3.0,              # Tight stops
-                'max_holding_days': 15,             # Exit fast
-                'max_positions': 10,                # Less diversification
-                'trade_cooldown': 600,              # 10 minutes
-                'adaptive_sizing': True,
-                'allow_shorts': True                # Shorts allowed
-            },
-            'SIDEWAYS': {
-                'position_size_mult': 1.0,          # Normal size
-                'min_signal_threshold': 0.45,       # Standard threshold
-                'take_profit_pct': 5.0,             # Quick scalps
-                'stop_loss_pct': -4.0,              # Medium stops
-                'max_holding_days': 10,             # Short hold
-                'max_positions': 15,                # Medium diversification
-                'trade_cooldown': 300,              # 5 minutes
-                'adaptive_sizing': True,
-                'allow_shorts': True                # Both directions
-            },
-            'CRISIS': {
-                'position_size_mult': 0.2,          # Tiny positions!
-                'min_signal_threshold': 0.80,       # Only strongest signals
-                'take_profit_pct': 5.0,             # Take any profit
-                'stop_loss_pct': -2.0,              # Very tight stops
-                'max_holding_days': 3,              # Exit very fast
-                'max_positions': 5,                 # Minimal exposure
-                'trade_cooldown': 900,              # 15 minutes
-                'adaptive_sizing': True,
-                'allow_shorts': False               # Stay on sidelines
-            },
-            'UNKNOWN': {
-                'position_size_mult': 0.7,
-                'min_signal_threshold': 0.50,
-                'take_profit_pct': 10.0,
-                'stop_loss_pct': -5.0,
-                'max_holding_days': 20,
-                'max_positions': 10,
-                'trade_cooldown': 300,
-                'adaptive_sizing': True,
-                'allow_shorts': False
+        
+        if regime == 'BULL':
+            # Bullish market: Aggressive, long bias, high position sizing
+            return {
+                'regime_name': 'BULL',
+                'description': 'Uptrend with low volatility - Aggressive trading',
+                'max_positions': 25,
+                'position_size_mult': 1.3,
+                'min_signal_threshold': 0.40,
+                'take_profit_pct': 15.0,
+                'stop_loss_pct': -6.0,
+                'allow_shorts': False,
+                'short_bias': 0.0,
+                'trade_cooldown_seconds': 300,
+                'max_sector_exposure': 0.50,
+                'rebalance_frequency': 'weekly',
+                'trading_hours_est': (9.5, 16.0),
+                'max_daily_loss_pct': 3.0,
+                'max_drawdown_pct': 15.0,
+                'kelly_fraction': 0.25,
+                'volatility_target': 0.18
             }
+        
+        elif regime == 'BEAR':
+            # Bearish market: Conservative, allow shorts, reduced positions
+            return {
+                'regime_name': 'BEAR',
+                'description': 'Downtrend or high volatility - Conservative trading',
+                'max_positions': 12,
+                'position_size_mult': 0.65,
+                'min_signal_threshold': 0.55,
+                'take_profit_pct': 8.0,
+                'stop_loss_pct': -3.0,
+                'allow_shorts': True,
+                'short_bias': 0.3,
+                'trade_cooldown_seconds': 600,
+                'max_sector_exposure': 0.35,
+                'rebalance_frequency': 'biweekly',
+                'trading_hours_est': (10.0, 15.0),
+                'max_daily_loss_pct': 2.0,
+                'max_drawdown_pct': 10.0,
+                'kelly_fraction': 0.15,
+                'volatility_target': 0.12
+            }
+        
+        elif regime == 'SIDEWAYS':
+            # Sideways market: Mean reversion, neutral
+            return {
+                'regime_name': 'SIDEWAYS',
+                'description': 'Range-bound market - Mean reversion focus',
+                'max_positions': 18,
+                'position_size_mult': 0.85,
+                'min_signal_threshold': 0.48,
+                'take_profit_pct': 5.0,
+                'stop_loss_pct': -4.0,
+                'allow_shorts': True,
+                'short_bias': 0.1,
+                'trade_cooldown_seconds': 450,
+                'max_sector_exposure': 0.42,
+                'rebalance_frequency': 'weekly',
+                'trading_hours_est': (9.5, 16.0),
+                'max_daily_loss_pct': 2.5,
+                'max_drawdown_pct': 12.0,
+                'kelly_fraction': 0.20,
+                'volatility_target': 0.15
+            }
+        
+        elif regime == 'CRISIS':
+            # Crisis: Extreme risk management, minimal positions
+            return {
+                'regime_name': 'CRISIS',
+                'description': 'Extreme volatility - Defensive trading',
+                'max_positions': 5,
+                'position_size_mult': 0.25,
+                'min_signal_threshold': 0.70,
+                'take_profit_pct': 3.0,
+                'stop_loss_pct': -2.0,
+                'allow_shorts': True,
+                'short_bias': 0.5,
+                'trade_cooldown_seconds': 900,
+                'max_sector_exposure': 0.20,
+                'rebalance_frequency': 'daily',
+                'trading_hours_est': (10.0, 14.0),
+                'max_daily_loss_pct': 1.0,
+                'max_drawdown_pct': 5.0,
+                'kelly_fraction': 0.05,
+                'volatility_target': 0.08
+            }
+        
+        else:
+            # Unknown/Default
+            return self._get_default_params()
+    
+    def _get_default_params(self) -> Dict:
+        """Get conservative default parameters."""
+        return {
+            'regime_name': 'DEFAULT',
+            'description': 'Unknown regime - Conservative defaults',
+            'max_positions': 15,
+            'position_size_mult': 1.0,
+            'min_signal_threshold': 0.45,
+            'take_profit_pct': 10.0,
+            'stop_loss_pct': -5.0,
+            'allow_shorts': False,
+            'short_bias': 0.0,
+            'trade_cooldown_seconds': 300,
+            'max_sector_exposure': 0.40,
+            'rebalance_frequency': 'weekly',
+            'trading_hours_est': (9.5, 16.0),
+            'max_daily_loss_pct': 2.5,
+            'max_drawdown_pct': 12.0,
+            'kelly_fraction': 0.20,
+            'volatility_target': 0.15
         }
-        
-        return params.get(regime, params['UNKNOWN'])
     
-    def should_trade(self, regime: str = None) -> Tuple[bool, str]:
-        """
-        Determine if we should trade in current regime.
-        
-        Returns:
-            (should_trade: bool, reason: str)
-        """
-        regime = regime or self.current_regime
-        
-        if regime == 'CRISIS':
-            if self.regime_confidence > 0.7:
-                return False, "Crisis regime - staying on sidelines"
-        
-        if regime == 'UNKNOWN':
-            return False, "Regime unclear - waiting for clarity"
-        
-        return True, f"{regime} regime - trading enabled"
+    def _default_regime(self) -> Dict:
+        """Return default regime when detection fails."""
+        return {
+            'regime': 'UNKNOWN',
+            'confidence': 0.0,
+            'volatility': 0.0,
+            'historical_volatility': 0.0,
+            'trend': 0.0,
+            'vol_ratio': 1.0,
+            'cumulative_return': 0.0,
+            'downside_ratio': 0.5,
+            'params': self._get_default_params(),
+            'reason': 'Insufficient data',
+            'timestamp': datetime.now().isoformat()
+        }
     
-    def get_historical_regime_stats(self) -> pd.DataFrame:
-        """Get statistics about historical regime changes."""
+    def get_regime_history(self, periods: int = 100) -> pd.DataFrame:
+        """Get recent regime history as DataFrame."""
         if not self.regime_history:
             return pd.DataFrame()
         
-        df = pd.DataFrame(self.regime_history)
+        recent = self.regime_history[-periods:]
         
-        # Calculate regime durations
-        regime_durations = {}
-        for regime in df['regime'].unique():
-            regime_df = df[df['regime'] == regime]
-            if len(regime_df) > 1:
-                duration = (regime_df['timestamp'].iloc[-1] - regime_df['timestamp'].iloc[0]).total_seconds() / 3600
-                regime_durations[regime] = duration
+        return pd.DataFrame({
+            'timestamp': [r['timestamp'] for r in recent],
+            'regime': [r['regime'] for r in recent],
+            'confidence': [r['confidence'] for r in recent],
+            'volatility': [r['volatility'] for r in recent],
+            'vol_ratio': [r['vol_ratio'] for r in recent]
+        })
+    
+    def get_regime_distribution(self) -> Dict[str, int]:
+        """Get count of each regime in history."""
+        if not self.regime_history:
+            return {}
         
-        logger.info(f"\n📊 Historical Regime Stats:")
-        for regime, duration in regime_durations.items():
-            logger.info(f"   {regime:15s}: {duration:.1f} hours")
+        distribution = {}
+        for regime_data in self.regime_history:
+            regime = regime_data['regime']
+            distribution[regime] = distribution.get(regime, 0) + 1
         
-        return df
+        return distribution
+    
+    def get_average_volatility_by_regime(self) -> Dict[str, float]:
+        """Get average volatility for each regime."""
+        if not self.regime_history:
+            return {}
+        
+        regime_vols = {}
+        regime_counts = {}
+        
+        for regime_data in self.regime_history:
+            regime = regime_data['regime']
+            vol = regime_data['volatility']
+            
+            if regime not in regime_vols:
+                regime_vols[regime] = 0
+                regime_counts[regime] = 0
+            
+            regime_vols[regime] += vol
+            regime_counts[regime] += 1
+        
+        return {
+            regime: regime_vols[regime] / regime_counts[regime]
+            for regime in regime_vols
+        }
 
 
 if __name__ == "__main__":
     # Test market regime detector
-    logging.basicConfig(level=logging.INFO)
+    logging.basicConfig(
+        level=logging.INFO,
+        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+    )
     
-    # Generate sample data
+    print("\n" + "="*80)
+    print("MARKET REGIME DETECTOR - TEST")
+    print("="*80 + "\n")
+    
+    # Generate sample returns
     np.random.seed(42)
-    dates = pd.date_range('2020-01-01', '2023-01-01', freq='D')
     
-    # Simulate different regimes
-    regime_periods = [
-        ('BULL', 0, 300, 0.0005, 0.01),      # Bull market
-        ('SIDEWAYS', 300, 500, 0.0, 0.015),   # Sideways
-        ('BEAR', 500, 700, -0.0003, 0.025),  # Bear market
-        ('BULL', 700, 900, 0.0004, 0.012),   # Recovery
-        ('CRISIS', 900, 950, -0.001, 0.05),  # Crisis
-        ('BULL', 950, len(dates), 0.0005, 0.01)  # Recovery
-    ]
+    # Bull market
+    print("TEST 1: BULL MARKET")
+    bull_returns = pd.Series(np.random.randn(100) * 0.008 + 0.001)  # +0.1% daily
     
-    returns = []
-    for regime, start, end, mu, sigma in regime_periods:
-        period_returns = np.random.normal(mu, sigma, end - start)
-        returns.extend(period_returns)
-    
-    returns_series = pd.Series(returns, index=dates)
-    
-    # Test detector
     detector = MarketRegimeDetector()
+    bull_result = detector.detect_regime(bull_returns)
     
-    print("\n" + "="*60)
-    print("TESTING REGIME DETECTION")
-    print("="*60)
+    print(f"Detected: {bull_result['regime']}")
+    print(f"Confidence: {bull_result['confidence']:.2%}")
+    assert bull_result['regime'] == 'BULL', "Should detect BULL regime"
+    print("✅ PASSED\n")
     
-    # Test at different points
-    test_points = [150, 400, 600, 800, 925, 1000]
+    # Bear market
+    print("TEST 2: BEAR MARKET")
+    bear_returns = pd.Series(np.random.randn(100) * 0.015 - 0.002)  # -0.2% daily
     
-    for point in test_points:
-        result = detector.detect_regime(
-            returns_series[:point],
-            lookback=60
-        )
-        
-        print(f"\nDay {point}:")
-        print(f"  Regime: {result['regime']} (confidence: {result['confidence']:.2f})")
-        print(f"  Return: {result['metrics']['avg_return']:.2%}")
-        print(f"  Volatility: {result['metrics']['avg_volatility']:.2%}")
-        print(f"  Parameters:")
-        for key, value in result['params'].items():
-            print(f"    {key}: {value}")
+    bear_result = detector.detect_regime(bear_returns)
     
-    # Get stats
-    stats_df = detector.get_historical_regime_stats()
+    print(f"Detected: {bear_result['regime']}")
+    print(f"Confidence: {bear_result['confidence']:.2%}")
+    assert bear_result['regime'] == 'BEAR', "Should detect BEAR regime"
+    print("✅ PASSED\n")
     
-    print("\n✅ Regime detector tests complete!")
+    # Crisis
+    print("TEST 3: CRISIS")
+    crisis_returns = pd.Series(np.random.randn(100) * 0.05)  # Huge swings
+    
+    crisis_result = detector.detect_regime(crisis_returns)
+    
+    print(f"Detected: {crisis_result['regime']}")
+    print(f"Confidence: {crisis_result['confidence']:.2%}")
+    assert crisis_result['regime'] == 'CRISIS', "Should detect CRISIS regime"
+    print("✅ PASSED\n")
+    
+    # Regime-specific parameters
+    print("TEST 4: REGIME PARAMETERS")
+    print(f"BULL params: {bull_result['params']['max_positions']} max positions")
+    print(f"BEAR params: {bear_result['params']['max_positions']} max positions")
+    print(f"CRISIS params: {crisis_result['params']['max_positions']} max positions")
+    assert bull_result['params']['max_positions'] > crisis_result['params']['max_positions']
+    print("✅ PASSED\n")
+    
+    print("="*80)
+    print("✅ ALL TESTS PASSED!")
+    print("="*80)
