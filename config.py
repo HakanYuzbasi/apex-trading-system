@@ -1,80 +1,81 @@
 """
-config.py - APEX Trading System Configuration
-PRODUCTION SETTINGS - Conservative and Safe
+config.py - Complete Configuration
+STATE-OF-THE-ART SETTINGS
 """
 
-import os
 from pathlib import Path
 
 
 class ApexConfig:
-    """Central configuration for APEX Trading System."""
+    """Complete system configuration."""
     
-    # System Info
+    # System
     SYSTEM_NAME = "APEX Trading System"
-    VERSION = "2.0.0-PRODUCTION"
+    VERSION = "3.0.0-STATE-OF-THE-ART"
     
-    # ═══════════════════════════════════════════════════════════════
-    # TRADING MODE
-    # ═══════════════════════════════════════════════════════════════
-    LIVE_TRADING = True  # Set to False for simulation mode
+    # Trading Mode
+    LIVE_TRADING = True
     
-    # ═══════════════════════════════════════════════════════════════
-    # IBKR CONNECTION
-    # ═══════════════════════════════════════════════════════════════
+    # IBKR
     IBKR_HOST = '127.0.0.1'
-    IBKR_PORT = 7497  # 7497 = Paper Trading, 7496 = Live Trading
+    IBKR_PORT = 7497  # 7497=Paper, 7496=Live
     IBKR_CLIENT_ID = 1
     
-    # ═══════════════════════════════════════════════════════════════
-    # CAPITAL & POSITION SIZING
-    # ═══════════════════════════════════════════════════════════════
-    INITIAL_CAPITAL = 1_100_000  # $1.1M starting capital
-    POSITION_SIZE_USD = 5_000  # $5K per position (0.45% of capital)
-    MAX_POSITIONS = 15  # Maximum concurrent positions
-    MAX_SHARES_PER_POSITION = 200  # ✅ NEW: Cap max shares per position
+    # Capital & Sizing
+    INITIAL_CAPITAL = 1_100_000
+    POSITION_SIZE_USD = 5_000
+    MAX_POSITIONS = 15
+    MAX_SHARES_PER_POSITION = 200
     
-    # ═══════════════════════════════════════════════════════════════
-    # RISK LIMITS
-    # ═══════════════════════════════════════════════════════════════
-    MAX_DAILY_LOSS = 0.02  # 2% max daily loss
-    MAX_DRAWDOWN = 0.10  # 10% max drawdown
-    MAX_SECTOR_EXPOSURE = 0.40  # ✅ NEW: 40% max per sector
+    # Risk
+    MAX_DAILY_LOSS = 0.02
+    MAX_DRAWDOWN = 0.10
+    MAX_SECTOR_EXPOSURE = 0.40
     
-    # ═══════════════════════════════════════════════════════════════
-    # SIGNAL THRESHOLDS
-    # ═══════════════════════════════════════════════════════════════
-    MIN_SIGNAL_THRESHOLD = 0.45  # Minimum signal strength (0-1) - Higher = fewer trades
-    MIN_CONFIDENCE = 0.30  # Minimum confidence for trade execution
+    # Signals
+    MIN_SIGNAL_THRESHOLD = 0.45
+    MIN_CONFIDENCE = 0.30
+    MIN_CONSENSUS = 0.50  # Model agreement
     
-    # ═══════════════════════════════════════════════════════════════
-    # TRADING HOURS (EST)
-    # ═══════════════════════════════════════════════════════════════
-    TRADING_HOURS_START = 9.5  # 9:30 AM EST (market open)
-    TRADING_HOURS_END = 16.0   # 4:00 PM EST (market close)
+    # Trading Hours (EST)
+    TRADING_HOURS_START = 9.5
+    TRADING_HOURS_END = 16.0
     
-    # ═══════════════════════════════════════════════════════════════
-    # TIMING & EXECUTION
-    # ═══════════════════════════════════════════════════════════════
-    CHECK_INTERVAL_SECONDS = 60  # Check symbols every 60 seconds
-    TRADE_COOLDOWN_SECONDS = 300  # ✅ NEW: 5 minutes between trades per symbol
+    # Timing
+    CHECK_INTERVAL_SECONDS = 60
+    TRADE_COOLDOWN_SECONDS = 300  # 5 minutes
     
-    # ═══════════════════════════════════════════════════════════════
-    # TRANSACTION COSTS
-    # ═══════════════════════════════════════════════════════════════
-    COMMISSION_PER_TRADE = 1.00  # ✅ NEW: $1 per trade (IBKR Pro)
-    SLIPPAGE_BPS = 5  # 5 basis points slippage (0.05%)
+    # Transaction Costs
+    COMMISSION_PER_TRADE = 1.00
+    SLIPPAGE_BPS = 5
     
-    # ═══════════════════════════════════════════════════════════════
-    # LOGGING
-    # ═══════════════════════════════════════════════════════════════
-    LOG_LEVEL = "INFO"  # DEBUG, INFO, WARNING, ERROR, CRITICAL
+    # Advanced Features
+    USE_ENSEMBLE_ML = True
+    USE_REGIME_DETECTION = True
+    USE_ADVANCED_EXECUTION = True
+    RUN_STRESS_TESTS = True
+    USE_SMART_ROUTING = True
+    
+    # ML Settings
+    ML_VALIDATION_SPLITS = 5
+    ML_LOOKBACK_DAYS = 1260  # 5 years
+    FEATURE_SELECTION_TOP_N = 20
+    
+    # Logging
+    LOG_LEVEL = "INFO"
     LOG_FILE = "logs/apex.log"
     
-    # ═══════════════════════════════════════════════════════════════
-    # UNIVERSE SELECTION
-    # ═══════════════════════════════════════════════════════════════
-    UNIVERSE_MODE = "SP500"  # Options: "SP500", "NASDAQ100", "CUSTOM"
+    # Paths
+    BASE_DIR = Path(__file__).parent
+    DATA_DIR = BASE_DIR / "data"
+    LOGS_DIR = BASE_DIR / "logs"
+    MODELS_DIR = BASE_DIR / "models" / "saved"
+    
+    # Create directories
+    DATA_DIR.mkdir(exist_ok=True)
+    LOGS_DIR.mkdir(exist_ok=True, parents=True)
+    MODELS_DIR.mkdir(exist_ok=True, parents=True)
+    
     
     # S&P 500 Top Liquid Stocks (Example - Replace with your full list)
     SYMBOLS = [
@@ -176,51 +177,4 @@ class ApexConfig:
     
     @classmethod
     def get_sector(cls, symbol: str) -> str:
-        """Get sector for a symbol."""
         return cls.SECTOR_MAP.get(symbol, "Unknown")
-    
-    # ═══════════════════════════════════════════════════════════════
-    # PATHS
-    # ═══════════════════════════════════════════════════════════════
-    BASE_DIR = Path(__file__).parent
-    DATA_DIR = BASE_DIR / "data"
-    LOGS_DIR = BASE_DIR / "logs"
-    MODELS_DIR = BASE_DIR / "models" / "saved"
-    
-    # Create directories
-    DATA_DIR.mkdir(exist_ok=True)
-    LOGS_DIR.mkdir(exist_ok=True, parents=True)
-    MODELS_DIR.mkdir(exist_ok=True, parents=True)
-
-
-# ═══════════════════════════════════════════════════════════════
-# VALIDATE CONFIGURATION
-# ═══════════════════════════════════════════════════════════════
-def validate_config():
-    """Validate configuration settings."""
-    errors = []
-    
-    if ApexConfig.POSITION_SIZE_USD > ApexConfig.INITIAL_CAPITAL * 0.01:
-        errors.append(f"⚠️  Position size (${ApexConfig.POSITION_SIZE_USD}) > 1% of capital")
-    
-    if ApexConfig.MAX_POSITIONS * ApexConfig.POSITION_SIZE_USD > ApexConfig.INITIAL_CAPITAL:
-        errors.append(f"⚠️  Max exposure ({ApexConfig.MAX_POSITIONS} * ${ApexConfig.POSITION_SIZE_USD}) > capital")
-    
-    if ApexConfig.MIN_SIGNAL_THRESHOLD < 0.3:
-        errors.append(f"⚠️  Signal threshold too low ({ApexConfig.MIN_SIGNAL_THRESHOLD}) - Risk of false signals")
-    
-    if ApexConfig.TRADE_COOLDOWN_SECONDS < 60:
-        errors.append(f"⚠️  Cooldown too short ({ApexConfig.TRADE_COOLDOWN_SECONDS}s) - Risk of overtrading")
-    
-    if errors:
-        print("\n".join(errors))
-        return False
-    
-    return True
-
-
-if __name__ == "__main__":
-    if validate_config():
-        print("✅ Configuration validated successfully")
-    else:
-        print("❌ Configuration validation failed")

@@ -1,34 +1,42 @@
-# APEX Trading System - Dependencies
+# Core Trading
+ib-insync>=0.9.86
+numpy>=1.24.0
+pandas>=2.0.0
+scipy>=1.11.0
 
-# Core
-python-dotenv==1.0.0
-numpy==1.26.2
-pandas==2.1.3
+# Machine Learning
+scikit-learn>=1.3.0
+xgboost>=2.0.0
+lightgbm>=4.0.0
+optuna>=3.3.0
+torch>=2.0.0
+tensorflow>=2.13.0
 
-# IBKR
-ib_insync==0.9.86
-
-# ML
-torch==2.1.1
-scikit-learn==1.3.2
-xgboost==2.0.2
-lightgbm==4.1.0
+# Technical Analysis
+ta-lib>=0.4.28
+ta>=0.11.0
 
 # Data
-yfinance==0.2.28
+yfinance>=0.2.28
+pandas-datareader>=0.10.0
+alpha-vantage>=2.3.1
 
-# Monitoring
-streamlit==1.28.2
-plotly==5.18.0
+# Visualization & Monitoring
+matplotlib>=3.7.0
+seaborn>=0.12.0
+plotly>=5.16.0
+streamlit>=1.26.0
 
-# Web
-fastapi==0.104.1
-uvicorn[standard]==0.24.0
+# Utilities
+python-dateutil>=2.8.2
+pytz>=2023.3
+requests>=2.31.0
+aiohttp>=3.8.5
+
+# Database & Storage
+sqlalchemy>=2.0.0
+redis>=5.0.0
 
 # Testing
-pytest==7.4.3
-pytest-asyncio==0.21.1
-
-# Utils
-pyyaml==6.0.1
-requests==2.31.0
+pytest>=7.4.0
+pytest-asyncio>=0.21.0
