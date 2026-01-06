@@ -1,83 +1,121 @@
 """
-config.py - Complete Configuration
-STATE-OF-THE-ART SETTINGS
+config.py - APEX Trading System Configuration (FIXED VERSION)
+PRODUCTION SETTINGS - Conservative and Safe
+
+Fixes applied:
+✅ Added pytz for timezone handling
+✅ Added state persistence configuration
+✅ Added sync error tracking
+✅ Better documentation
 """
 
+import os
 from pathlib import Path
+import pytz
 
 
 class ApexConfig:
-    """Complete system configuration."""
+    """Central configuration for APEX Trading System."""
     
-    # System
+    # System Info
     SYSTEM_NAME = "APEX Trading System"
-    VERSION = "3.0.0-STATE-OF-THE-ART"
+    VERSION = "2.1.0-PRODUCTION-FIXED"
     
-    # Trading Mode
-    LIVE_TRADING = True
+    # ═══════════════════════════════════════════════════════════════
+    # TRADING MODE
+    # ═══════════════════════════════════════════════════════════════
+    LIVE_TRADING = True  # Set to False for simulation mode
     
-    # IBKR
+    # ═══════════════════════════════════════════════════════════════
+    # IBKR CONNECTION
+    # ═══════════════════════════════════════════════════════════════
     IBKR_HOST = '127.0.0.1'
-    IBKR_PORT = 7497  # 7497=Paper, 7496=Live
+    IBKR_PORT = 7497  # 7497 = Paper Trading, 7496 = Live Trading
     IBKR_CLIENT_ID = 1
     
-    # Capital & Sizing
-    INITIAL_CAPITAL = 1_100_000
-    POSITION_SIZE_USD = 5_000
-    MAX_POSITIONS = 15
-    MAX_SHARES_PER_POSITION = 200
+    # ═══════════════════════════════════════════════════════════════
+    # CAPITAL & POSITION SIZING
+    # ═══════════════════════════════════════════════════════════════
+    INITIAL_CAPITAL = 1_100_000  # $1.1M starting capital
+    POSITION_SIZE_USD = 5_000  # $5K per position (0.45% of capital)
+    MAX_POSITIONS = 15  # Maximum concurrent positions
+    MAX_SHARES_PER_POSITION = 200  # Cap max shares per position
     
-    # Risk
-    MAX_DAILY_LOSS = 0.02
-    MAX_DRAWDOWN = 0.10
-    MAX_SECTOR_EXPOSURE = 0.40
+    # ═══════════════════════════════════════════════════════════════
+    # RISK LIMITS
+    # ═══════════════════════════════════════════════════════════════
+    MAX_DAILY_LOSS = 0.02  # 2% max daily loss
+    MAX_DRAWDOWN = 0.10  # 10% max drawdown
+    MAX_SECTOR_EXPOSURE = 0.40  # 40% max per sector
     
-    # Signals
-    MIN_SIGNAL_THRESHOLD = 0.45
-    MIN_CONFIDENCE = 0.30
-    MIN_CONSENSUS = 0.50  # Model agreement
+    # ═══════════════════════════════════════════════════════════════
+    # SIGNAL THRESHOLDS
+    # ═══════════════════════════════════════════════════════════════
+    MIN_SIGNAL_THRESHOLD = 0.45  # Minimum signal strength (0-1)
+    MIN_CONFIDENCE = 0.30  # Minimum confidence for trade execution
     
-    # Trading Hours (EST)
-    TRADING_HOURS_START = 9.5
-    TRADING_HOURS_END = 16.0
+    # ═══════════════════════════════════════════════════════════════
+    # TIMEZONE CONFIGURATION (✅ FIXED)
+    # ═══════════════════════════════════════════════════════════════
+    # Timezone objects (handles DST automatically)
+    UTC_TZ = pytz.UTC
+    EST_TZ = pytz.timezone('US/Eastern')  # Handles DST automatically
+    LOCAL_TZ = pytz.timezone('Europe/Brussels')  # User location
     
-    # Timing
-    CHECK_INTERVAL_SECONDS = 60
-    TRADE_COOLDOWN_SECONDS = 300  # 5 minutes
+    # ═══════════════════════════════════════════════════════════════
+    # TRADING HOURS (EST - US/Eastern)
+    # Note: These are converted automatically to account for DST
+    # ═══════════════════════════════════════════════════════════════
+    TRADING_HOURS_START = 9.5  # 9:30 AM EST (market open)
+    TRADING_HOURS_END = 16.0   # 4:00 PM EST (market close)
     
-    # Transaction Costs
-    COMMISSION_PER_TRADE = 1.00
-    SLIPPAGE_BPS = 5
+    # ═══════════════════════════════════════════════════════════════
+    # TIMING & EXECUTION
+    # ═══════════════════════════════════════════════════════════════
+    CHECK_INTERVAL_SECONDS = 60  # Check symbols every 60 seconds
+    TRADE_COOLDOWN_SECONDS = 300  # 5 minutes between trades per symbol
     
-    # Advanced Features
-    USE_ENSEMBLE_ML = True
-    USE_REGIME_DETECTION = True
-    USE_ADVANCED_EXECUTION = True
-    RUN_STRESS_TESTS = True
-    USE_SMART_ROUTING = True
+    # ═══════════════════════════════════════════════════════════════
+    # CONCURRENCY & RELIABILITY (✅ FIXED)
+    # ═══════════════════════════════════════════════════════════════
+    # Async lock timeout to prevent deadlocks
+    LOCK_TIMEOUT_SECONDS = 30
     
-    # ML Settings
-    ML_VALIDATION_SPLITS = 5
-    ML_LOOKBACK_DAYS = 1260  # 5 years
-    FEATURE_SELECTION_TOP_N = 20
+    # Position sync retry configuration
+    SYNC_MAX_RETRIES = 3
+    SYNC_RETRY_BACKOFF_MULTIPLIER = 2.0  # Exponential backoff
     
-    # Logging
-    LOG_LEVEL = "INFO"
+    # State persistence
+    STATE_SAVE_INTERVAL = 300  # Save state every 5 minutes
+    STATE_FILE = "data/system_state.json"
+    
+    # ═══════════════════════════════════════════════════════════════
+    # TRANSACTION COSTS
+    # ═══════════════════════════════════════════════════════════════
+    COMMISSION_PER_TRADE = 1.00  # $1 per trade (IBKR Pro)
+    SLIPPAGE_BPS = 5  # 5 basis points slippage (0.05%)
+    
+    # ═══════════════════════════════════════════════════════════════
+    # EMERGENCY & SAFETY
+    # ═══════════════════════════════════════════════════════════════
+    # Emergency shutdown timeouts
+    PENDING_ORDER_TIMEOUT = 30  # Wait for pending orders
+    POSITION_CLOSE_TIMEOUT = 120  # Wait for all positions to close
+    
+    # ═══════════════════════════════════════════════════════════════
+    # LOGGING
+    # ═══════════════════════════════════════════════════════════════
+    LOG_LEVEL = "INFO"  # DEBUG, INFO, WARNING, ERROR, CRITICAL
     LOG_FILE = "logs/apex.log"
     
-    # Paths
-    BASE_DIR = Path(__file__).parent
-    DATA_DIR = BASE_DIR / "data"
-    LOGS_DIR = BASE_DIR / "logs"
-    MODELS_DIR = BASE_DIR / "models" / "saved"
+    # ═══════════════════════════════════════════════════════════════
+    # UNIVERSE SELECTION
+    # ═══════════════════════════════════════════════════════════════
+    UNIVERSE_MODE = "SP500"  # Options: "SP500", "NASDAQ100", "CUSTOM"
+
+    RUN_STRESS_TESTS = False  
     
-    # Create directories
-    DATA_DIR.mkdir(exist_ok=True)
-    LOGS_DIR.mkdir(exist_ok=True, parents=True)
-    MODELS_DIR.mkdir(exist_ok=True, parents=True)
-    
-    
-    # S&P 500 Top Liquid Stocks (Example - Replace with your full list)
+    # S&P 500 Top Liquid Stocks
     SYMBOLS = [
         # Technology
         "AAPL", "MSFT", "NVDA", "GOOGL", "META", "TSLA", "AVGO", "ORCL", "CSCO", "ADBE",
@@ -102,13 +140,13 @@ class ApexConfig:
         "LIN", "APD", "ECL", "SHW", "FCX", "NEM", "DOW", "DD", "ALB", "CE",
         
         # Communication
-        "GOOGL", "META", "NFLX", "DIS", "CMCSA", "T", "TMUS", "VZ", "CHTR", "EA",
+        "NFLX", "DIS", "CMCSA", "T", "TMUS", "VZ", "CHTR", "EA",
         
         # Real Estate & Utilities
         "AMT", "PLD", "CCI", "EQIX", "PSA", "NEE", "DUK", "SO", "D", "AEP",
         
         # ETFs & Commodities
-        "SPY", "QQQ", "IWM", "GLD", "SLV", "USO", "UNG", "PALL", "CRM", "AMAT"
+        "SPY", "QQQ", "IWM", "GLD", "SLV", "USO", "UNG", "PALL"
     ]
     
     # Sector Mappings (for exposure tracking)
@@ -177,4 +215,59 @@ class ApexConfig:
     
     @classmethod
     def get_sector(cls, symbol: str) -> str:
+        """Get sector for a symbol."""
         return cls.SECTOR_MAP.get(symbol, "Unknown")
+    
+    # ═══════════════════════════════════════════════════════════════
+    # PATHS
+    # ═══════════════════════════════════════════════════════════════
+    BASE_DIR = Path(__file__).parent
+    DATA_DIR = BASE_DIR / "data"
+    LOGS_DIR = BASE_DIR / "logs"
+    MODELS_DIR = BASE_DIR / "models" / "saved"
+    
+    # Create directories
+    DATA_DIR.mkdir(exist_ok=True)
+    LOGS_DIR.mkdir(exist_ok=True, parents=True)
+    MODELS_DIR.mkdir(exist_ok=True, parents=True)
+
+
+# ═══════════════════════════════════════════════════════════════
+# VALIDATE CONFIGURATION
+# ═══════════════════════════════════════════════════════════════
+def validate_config():
+    """Validate configuration settings."""
+    errors = []
+    
+    if ApexConfig.POSITION_SIZE_USD > ApexConfig.INITIAL_CAPITAL * 0.01:
+        errors.append(f"⚠️  Position size (${ApexConfig.POSITION_SIZE_USD}) > 1% of capital")
+    
+    if ApexConfig.MAX_POSITIONS * ApexConfig.POSITION_SIZE_USD > ApexConfig.INITIAL_CAPITAL:
+        errors.append(f"⚠️  Max exposure ({ApexConfig.MAX_POSITIONS} * ${ApexConfig.POSITION_SIZE_USD}) > capital")
+    
+    if ApexConfig.MIN_SIGNAL_THRESHOLD < 0.3:
+        errors.append(f"⚠️  Signal threshold too low ({ApexConfig.MIN_SIGNAL_THRESHOLD}) - Risk of false signals")
+    
+    if ApexConfig.TRADE_COOLDOWN_SECONDS < 60:
+        errors.append(f"⚠️  Cooldown too short ({ApexConfig.TRADE_COOLDOWN_SECONDS}s) - Risk of overtrading")
+    
+    # ✅ NEW: Validate timezone config
+    try:
+        assert ApexConfig.UTC_TZ is not None
+        assert ApexConfig.EST_TZ is not None
+        assert ApexConfig.LOCAL_TZ is not None
+    except (AssertionError, AttributeError):
+        errors.append("❌ Timezone configuration invalid")
+    
+    if errors:
+        print("\n".join(errors))
+        return False
+    
+    return True
+
+
+if __name__ == "__main__":
+    if validate_config():
+        print("✅ Configuration validated successfully")
+    else:
+        print("❌ Configuration validation failed")

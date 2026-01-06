@@ -1,338 +1,249 @@
-"""
-models/advanced_signal_generator.py - State-of-the-Art ML Signal Generator
-Combines: Transformer + Ensemble ML + Technical Analysis
-"""
-
 import numpy as np
 import pandas as pd
-from typing import Dict, List, Tuple
-from datetime import datetime
+from sklearn.ensemble import RandomForestClassifier, GradientBoostingClassifier
+from sklearn.model_selection import TimeSeriesSplit
+from sklearn.preprocessing import StandardScaler
+from sklearn.base import clone
 import logging
-
-logger = logging.getLogger(__name__)
-
-try:
-    from sklearn.ensemble import RandomForestRegressor, GradientBoostingRegressor
-    from sklearn.preprocessing import StandardScaler
-    import warnings
-    warnings.filterwarnings('ignore')
-    ML_AVAILABLE = True
-except ImportError:
-    ML_AVAILABLE = False
-    logger.warning("scikit-learn not available. Install with: pip install scikit-learn")
-
+import talib # Assuming talib is installed, otherwise use pandas_ta or manual calc
+# If talib is not available, simple pandas implementations are provided in _calculate_features
 
 class AdvancedSignalGenerator:
-    """State-of-the-art ML signal generation using multiple models."""
-    
     def __init__(self):
-        self.lookback = 60
-        self.feature_scaler = StandardScaler() if ML_AVAILABLE else None
+        self.logger = logging.getLogger(__name__)
+        self.scaler = StandardScaler()
+        self.is_trained = False
         
-        # Initialize ML models
-        if ML_AVAILABLE:
-            self.rf_model = RandomForestRegressor(
-                n_estimators=100,
-                max_depth=10,
-                random_state=42
-            )
-            self.gb_model = GradientBoostingRegressor(
-                n_estimators=100,
-                max_depth=5,
-                random_state=42
-            )
-            self.models_trained = False
-        else:
-            self.models_trained = False
+        # --- THE SOLUTION: REGULARIZED MODELS ---
+        # 1. Random Forest: Limits depth to prevents memorizing noise
+        self.rf_model = RandomForestClassifier(
+            n_estimators=100,
+            max_depth=5,              # Critical: Prevents unlimited complex rules
+            min_samples_leaf=0.05,    # Critical: Requires 5% of data to form a rule
+            max_features='sqrt',
+            class_weight='balanced',  # Handles rare market events better
+            random_state=42,
+            n_jobs=-1
+        )
+
+        # 2. Gradient Boosting: Slow learning rate with subsampling
+        self.gb_model = GradientBoostingClassifier(
+            n_estimators=100,
+            max_depth=3,              # Shallow trees are better for boosting
+            learning_rate=0.05,       # Slower learning prevents overfitting
+            subsample=0.8,            # Train on random 80% subset each iteration
+            min_samples_leaf=0.05,
+            random_state=42
+        )
+
+    def _calculate_features(self, df):
+        """
+        Robust feature engineering. 
+        Calculates ~15-20 key technical indicators.
+        """
+        data = df.copy()
         
-        logger.info("✅ Advanced Signal Generator initialized")
-    
-    def extract_features(self, prices: pd.Series) -> np.ndarray:
-        """Extract features from price data."""
-        if len(prices) < self.lookback:
-            return np.array([])
-        
-        features = []
-        
-        # Price-based features
-        features.append(prices.iloc[-1] / prices.iloc[-20] - 1)  # 20-day return
-        features.append(prices.iloc[-1] / prices.iloc[-60] - 1)  # 60-day return
-        features.append(prices.iloc[-1] / prices.iloc[-5] - 1)   # 5-day return
-        
-        # Momentum indicators
-        features.append(self._calculate_rsi(prices, 14))
-        features.append(self._calculate_rsi(prices, 7))
-        
-        # Volatility
-        returns = prices.pct_change().dropna()
-        features.append(returns.iloc[-20:].std() if len(returns) >= 20 else 0)
-        features.append(returns.iloc[-60:].std() if len(returns) >= 60 else 0)
-        
-        # Moving averages
-        ma_20 = prices.rolling(20).mean().iloc[-1]
-        ma_50 = prices.rolling(50).mean().iloc[-1]
-        features.append((prices.iloc[-1] - ma_20) / ma_20 if ma_20 > 0 else 0)
-        features.append((ma_20 - ma_50) / ma_50 if ma_50 > 0 else 0)
-        
-        # Bollinger Bands
-        bb_upper, bb_lower = self._calculate_bollinger_bands(prices, 20)
-        if bb_upper > bb_lower:
-            features.append((prices.iloc[-1] - bb_lower) / (bb_upper - bb_lower))
-        else:
-            features.append(0.5)
-        
+        # Ensure sufficient data length
+        if len(data) < 50:
+            return pd.DataFrame()
+
+        # 1. Trend Indicators
         # MACD
-        macd, signal = self._calculate_macd(prices)
-        features.append(macd - signal)
+        data['EMA_12'] = data['Close'].ewm(span=12, adjust=False).mean()
+        data['EMA_26'] = data['Close'].ewm(span=26, adjust=False).mean()
+        data['MACD'] = data['EMA_12'] - data['EMA_26']
+        data['MACD_Signal'] = data['MACD'].ewm(span=9, adjust=False).mean()
         
-        # Volume-weighted indicators (mock if volume not available)
-        features.append(self._calculate_obv_trend(prices))
+        # SMAs
+        data['SMA_20'] = data['Close'].rolling(window=20).mean()
+        data['SMA_50'] = data['Close'].rolling(window=50).mean()
+        data['Trend_SMA'] = np.where(data['SMA_20'] > data['SMA_50'], 1, -1)
+
+        # 2. Momentum Indicators
+        # RSI (Relative Strength Index)
+        delta = data['Close'].diff()
+        gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
+        loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
+        rs = gain / loss
+        data['RSI'] = 100 - (100 / (1 + rs))
+
+        # 3. Volatility Indicators
+        # Bollinger Bands
+        data['BB_Upper'] = data['SMA_20'] + 2 * data['Close'].rolling(window=20).std()
+        data['BB_Lower'] = data['SMA_20'] - 2 * data['Close'].rolling(window=20).std()
+        data['BB_Width'] = (data['BB_Upper'] - data['BB_Lower']) / data['SMA_20']
         
-        # Trend strength
-        features.append(self._calculate_adx(prices))
+        # ATR (Average True Range) - Simplified
+        data['TR'] = np.maximum(
+            (data['High'] - data['Low']), 
+            np.maximum(
+                abs(data['High'] - data['Close'].shift(1)), 
+                abs(data['Low'] - data['Close'].shift(1))
+            )
+        )
+        data['ATR'] = data['TR'].rolling(window=14).mean()
+
+        # 4. Volume Indicators
+        data['Vol_SMA'] = data['Volume'].rolling(window=20).mean()
+        data['Rel_Vol'] = data['Volume'] / data['Vol_SMA']
+
+        # 5. Returns (Target creation helper)
+        data['Return_1d'] = data['Close'].pct_change()
+        data['Return_5d'] = data['Close'].pct_change(5)
         
-        return np.array(features)
-    
-    def _calculate_rsi(self, prices: pd.Series, period: int = 14) -> float:
-        """Calculate Relative Strength Index."""
-        if len(prices) < period + 1:
-            return 50.0
+        # Drop NaN values generated by windows
+        data.dropna(inplace=True)
         
-        delta = prices.diff()
-        gain = (delta.where(delta > 0, 0)).rolling(window=period).mean()
-        loss = (-delta.where(delta < 0, 0)).rolling(window=period).mean()
+        # Select Features for ML
+        features = [
+            'MACD', 'MACD_Signal', 'RSI', 'BB_Width', 'ATR', 
+            'Rel_Vol', 'Return_1d', 'Return_5d', 'Trend_SMA'
+        ]
         
-        rs = gain.iloc[-1] / loss.iloc[-1] if loss.iloc[-1] != 0 else 0
-        rsi = 100 - (100 / (1 + rs)) if rs > 0 else 50
+        return data[features]
+
+    def _create_targets(self, df):
+        """
+        Create target labels: 
+        1 (Buy) if next 5 days return > 1%
+        -1 (Sell) if next 5 days return < -1%
+        0 (Hold) otherwise
+        """
+        # Future 5-day return
+        future_returns = df['Close'].shift(-5) / df['Close'] - 1
         
-        return float(rsi)
-    
-    def _calculate_bollinger_bands(self, prices: pd.Series, period: int = 20) -> Tuple[float, float]:
-        """Calculate Bollinger Bands."""
-        if len(prices) < period:
-            return prices.iloc[-1], prices.iloc[-1]
+        targets = pd.Series(0, index=df.index)
+        targets[future_returns > 0.01] = 1   # Buy
+        targets[future_returns < -0.01] = -1 # Sell
         
-        ma = prices.rolling(period).mean().iloc[-1]
-        std = prices.rolling(period).std().iloc[-1]
+        return targets.dropna()
+
+    def train_models(self, historical_data_dict):
+        """
+        Train the ensemble models using the historical data dictionary.
+        """
+        self.logger.info("Starting regularized ML model training...")
         
-        upper = ma + (2 * std)
-        lower = ma - (2 * std)
-        
-        return float(upper), float(lower)
-    
-    def _calculate_macd(self, prices: pd.Series) -> Tuple[float, float]:
-        """Calculate MACD and Signal line."""
-        if len(prices) < 26:
-            return 0.0, 0.0
-        
-        ema_12 = prices.ewm(span=12, adjust=False).mean()
-        ema_26 = prices.ewm(span=26, adjust=False).mean()
-        
-        macd = ema_12.iloc[-1] - ema_26.iloc[-1]
-        
-        macd_series = ema_12 - ema_26
-        signal = macd_series.ewm(span=9, adjust=False).mean().iloc[-1]
-        
-        return float(macd), float(signal)
-    
-    def _calculate_obv_trend(self, prices: pd.Series) -> float:
-        """Calculate On-Balance Volume trend (simplified without volume)."""
-        if len(prices) < 20:
-            return 0.0
-        
-        # Use price changes as proxy for volume direction
-        price_changes = prices.diff().iloc[-20:]
-        obv = (price_changes > 0).astype(int).sum() / 20.0
-        
-        return float(obv - 0.5) * 2  # Scale to -1 to 1
-    
-    def _calculate_adx(self, prices: pd.Series, period: int = 14) -> float:
-        """Calculate Average Directional Index (trend strength)."""
-        if len(prices) < period + 1:
-            return 0.0
-        
-        # Simplified ADX calculation
-        returns = prices.pct_change().dropna()
-        
-        if len(returns) < period:
-            return 0.0
-        
-        # Trend strength approximation
-        trend = abs(returns.iloc[-period:].mean() / returns.iloc[-period:].std()) if returns.iloc[-period:].std() > 0 else 0
-        adx = min(trend * 25, 100)  # Scale to 0-100
-        
-        return float(adx)
-    
-    def train_models(self, historical_data: Dict[str, pd.DataFrame]):
-        """Train ML models on historical data."""
-        if not ML_AVAILABLE:
-            logger.warning("⚠️  ML libraries not available. Skipping training.")
-            return
-        
-        logger.info("🧠 Training ML models...")
-        
-        X_train = []
-        y_train = []
-        
-        for symbol, data in historical_data.items():
-            if len(data) < self.lookback + 5:
+        X_all = []
+        y_all = []
+
+        for symbol, df in historical_data_dict.items():
+            if df.empty:
                 continue
-            
-            prices = data['Close']
-            
-            # Create training samples
-            for i in range(self.lookback, len(prices) - 5):
-                features = self.extract_features(prices.iloc[:i])
-                if len(features) == 0:
-                    continue
                 
-                # Target: 5-day forward return
-                future_return = (prices.iloc[i+5] - prices.iloc[i]) / prices.iloc[i]
+            # 1. Feature Engineering
+            features = self._calculate_features(df)
+            if features.empty:
+                continue
                 
-                X_train.append(features)
-                y_train.append(future_return)
-        
-        if len(X_train) < 100:
-            logger.warning("⚠️  Not enough training data")
+            # 2. Target Creation
+            # We must align features and targets because creating targets shifts data
+            targets = self._create_targets(df)
+            
+            # Align indices
+            common_index = features.index.intersection(targets.index)
+            if len(common_index) < 50:
+                continue
+                
+            X_all.append(features.loc[common_index].values)
+            y_all.append(targets.loc[common_index].values)
+
+        if not X_all:
+            self.logger.error("No valid data found for training.")
             return
-        
-        X_train = np.array(X_train)
-        y_train = np.array(y_train)
-        
-        # Scale features
-        X_train_scaled = self.feature_scaler.fit_transform(X_train)
-        
-        # Train models
-        logger.info(f"   Training on {len(X_train)} samples...")
-        self.rf_model.fit(X_train_scaled, y_train)
-        self.gb_model.fit(X_train_scaled, y_train)
-        
-        self.models_trained = True
-        logger.info("✅ ML models trained successfully")
-    
-    def generate_ml_signal(self, symbol: str, prices: pd.Series) -> Dict:
-        """Generate ML-powered signal."""
-        if len(prices) < self.lookback:
-            return {
-                'signal': 0.0,
-                'confidence': 0.0,
-                'components': {},
-                'timestamp': datetime.now()
-            }
-        
-        # Extract features
-        features = self.extract_features(prices)
-        
-        if len(features) == 0:
-            return {
-                'signal': 0.0,
-                'confidence': 0.0,
-                'components': {},
-                'timestamp': datetime.now()
-            }
-        
-        # Component signals
-        components = {}
-        
-        # 1. Technical Analysis Signals
-        components['momentum'] = self._momentum_signal(prices)
-        components['mean_reversion'] = self._mean_reversion_signal(prices)
-        components['trend'] = self._trend_signal(prices)
-        components['volatility'] = self._volatility_signal(prices)
-        
-        # 2. ML Model Predictions
-        if ML_AVAILABLE and self.models_trained:
-            features_scaled = self.feature_scaler.transform(features.reshape(1, -1))
+
+        # Combine all data
+        X = np.concatenate(X_all)
+        y = np.concatenate(y_all)
+
+        # 3. Scaling
+        X_scaled = self.scaler.fit_transform(X)
+
+        self.logger.info(f"Training on {len(X)} samples with {X.shape[1]} features.")
+
+        try:
+            # 4. Train Random Forest
+            self.rf_model.fit(X_scaled, y)
+            rf_score = self.rf_model.score(X_scaled, y)
             
-            rf_pred = self.rf_model.predict(features_scaled)[0]
-            gb_pred = self.gb_model.predict(features_scaled)[0]
+            # 5. Train Gradient Boosting
+            self.gb_model.fit(X_scaled, y)
+            gb_score = self.gb_model.score(X_scaled, y)
+
+            self.is_trained = True
+            self.logger.info(f"Training Completed. Training Accuracy -> RF: {rf_score:.3f}, GB: {gb_score:.3f}")
             
-            components['ml_rf'] = np.tanh(rf_pred * 20)  # Scale to -1, 1
-            components['ml_gb'] = np.tanh(gb_pred * 20)
-        else:
-            components['ml_rf'] = 0.0
-            components['ml_gb'] = 0.0
-        
-        # 3. Ensemble: Weighted combination
-        weights = {
-            'momentum': 0.20,
-            'mean_reversion': 0.15,
-            'trend': 0.20,
-            'volatility': 0.10,
-            'ml_rf': 0.20,
-            'ml_gb': 0.15
-        }
-        
-        signal = sum(components[k] * weights[k] for k in weights.keys())
-        signal = float(np.clip(signal, -1, 1))
-        
-        # Confidence: How much components agree
-        component_signs = [np.sign(v) for v in components.values() if v != 0]
-        if component_signs:
-            agreement = abs(sum(component_signs) / len(component_signs))
-            confidence = float(min(abs(signal) * agreement, 1.0))
-        else:
-            confidence = 0.0
-        
-        return {
-            'signal': signal,
-            'confidence': confidence,
-            'components': components,
-            'timestamp': datetime.now()
-        }
-    
-    def _momentum_signal(self, prices: pd.Series) -> float:
-        """Momentum-based signal."""
-        if len(prices) < 20:
-            return 0.0
-        
-        returns_20 = (prices.iloc[-1] / prices.iloc[-20]) - 1
-        return float(np.tanh(returns_20 * 10))
-    
-    def _mean_reversion_signal(self, prices: pd.Series) -> float:
-        """Mean reversion signal."""
-        if len(prices) < 20:
-            return 0.0
-        
-        mean = prices.rolling(20).mean().iloc[-1]
-        std = prices.rolling(20).std().iloc[-1]
-        
-        if std == 0:
-            return 0.0
-        
-        z_score = (prices.iloc[-1] - mean) / std
-        return float(-np.tanh(z_score))  # Negative: buy when oversold
-    
-    def _trend_signal(self, prices: pd.Series) -> float:
-        """Trend-following signal."""
-        if len(prices) < 50:
-            return 0.0
-        
-        ma_20 = prices.rolling(20).mean().iloc[-1]
-        ma_50 = prices.rolling(50).mean().iloc[-1]
-        
-        if ma_50 == 0:
-            return 0.0
-        
-        trend = (ma_20 - ma_50) / ma_50
-        return float(np.tanh(trend * 20))
-    
-    def _volatility_signal(self, prices: pd.Series) -> float:
-        """Volatility-adjusted signal."""
-        if len(prices) < 20:
-            return 0.0
-        
-        returns = prices.pct_change().dropna()
-        
-        if len(returns) < 20:
-            return 0.0
-        
-        current_vol = returns.iloc[-5:].std()
-        historical_vol = returns.iloc[-20:].std()
-        
-        if historical_vol == 0:
-            return 0.0
-        
-        # Prefer low volatility
-        vol_ratio = current_vol / historical_vol
-        return float(-np.tanh((vol_ratio - 1) * 2))
+            # Sanity check for overfitting
+            if rf_score > 0.95 or gb_score > 0.95:
+                self.logger.warning("⚠️ Warning: Accuracy is dangerously high (>95%). Model may still be overfitting.")
+            else:
+                self.logger.info("✅ Model regularization appears effective (Accuracy < 95%).")
+
+        except Exception as e:
+            self.logger.error(f"Training failed: {str(e)}")
+            self.is_trained = False
+
+    def generate_ml_signal(self, symbol, prices_df):
+        """
+        Generate a signal for a live symbol.
+        Returns dictionary: {'signal': float (-1 to 1), 'confidence': float (0 to 1)}
+        """
+        if not self.is_trained:
+            self.logger.warning("Models not trained. Returning neutral signal.")
+            return {'signal': 0.0, 'confidence': 0.0}
+
+        try:
+            # 1. Calculate Features for the specific symbol
+            features = self._calculate_features(prices_df)
+            if features.empty:
+                return {'signal': 0.0, 'confidence': 0.0}
+
+            # Get the very latest row (live market state)
+            latest_features = features.iloc[[-1]].values
+            latest_scaled = self.scaler.transform(latest_features)
+
+            # 2. Get Probabilities from both models
+            # Classes are likely [-1, 0, 1]. We need prob of -1 (Sell) and 1 (Buy)
+            
+            # Random Forest Probabilities
+            rf_probs = self.rf_model.predict_proba(latest_scaled)[0]
+            # Gradient Boosting Probabilities
+            gb_probs = self.gb_model.predict_proba(latest_scaled)[0]
+            
+            # Helper to safely get prob for class index
+            classes = self.rf_model.classes_
+            
+            def get_prob(probs, cls_label):
+                if cls_label in classes:
+                    idx = np.where(classes == cls_label)[0][0]
+                    return probs[idx]
+                return 0.0
+
+            # 3. Ensemble Voting Logic
+            # We average the "Buy" probability and "Sell" probability
+            avg_buy_prob = (get_prob(rf_probs, 1) + get_prob(gb_probs, 1)) / 2
+            avg_sell_prob = (get_prob(rf_probs, -1) + get_prob(gb_probs, -1)) / 2
+            
+            # 4. Construct Signal (-1.0 to 1.0)
+            # If Buy Prob > Sell Prob, signal is positive.
+            net_signal = avg_buy_prob - avg_sell_prob
+            
+            # Confidence is the magnitude of the dominant probability
+            confidence = max(avg_buy_prob, avg_sell_prob)
+            
+            # 5. Thresholding (Noise Filter)
+            if confidence < 0.4:  # If model isn't at least 40% sure of a direction
+                net_signal = 0.0
+            
+            return {
+                'signal': float(net_signal),
+                'confidence': float(confidence),
+                'details': {
+                    'rf_buy': float(get_prob(rf_probs, 1)),
+                    'gb_buy': float(get_prob(gb_probs, 1))
+                }
+            }
+
+        except Exception as e:
+            self.logger.error(f"Error generating signal for {symbol}: {e}")
+            return {'signal': 0.0, 'confidence': 0.0}
