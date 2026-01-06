@@ -1,0 +1,14 @@
+version: '3.8'
+
+services:
+  apex:
+    build: .
+    container_name: apex-trading
+    restart: unless-stopped
+    environment:
+      - LIVE_TRADING=True
+      - IBKR_HOST=host.docker.internal
+      - IBKR_PORT=7497
+    volumes:
+      - ./logs:/app/logs
+    network_mode: host

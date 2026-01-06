@@ -1,0 +1,155 @@
+# Navigate to your project directory
+cd /path/to/your/apex-trading-system
+
+# Create .gitignore file
+cat > .gitignore << 'EOF'
+# ═══════════════════════════════════════════════════════════════
+# APEX TRADING SYSTEM - GIT IGNORE
+# ═══════════════════════════════════════════════════════════════
+
+# ═════════════════════════════════════════════
+# SENSITIVE DATA - NEVER COMMIT!
+# ═════════════════════════════════════════════
+*.key
+*.pem
+*.p12
+*.pfx
+*.env
+.env
+.env.*
+secrets/
+credentials/
+config/secrets.py
+config/*secrets*.py
+ibkr_credentials.json
+api_keys.txt
+passwords.txt
+
+# Trading data and logs
+data/
+logs/
+*.log
+*.csv
+*.json
+equity_curve.csv
+trades.csv
+trading_state.json
+
+# Model files (can be large)
+models/saved/
+*.pkl
+*.joblib
+*.h5
+*.pth
+*.onnx
+
+# Backtest results
+backtest_results/
+performance/
+
+# ═════════════════════════════════════════════
+# PYTHON
+# ═════════════════════════════════════════════
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# Virtual environments
+venv/
+env/
+ENV/
+env.bak/
+venv.bak/
+.venv
+.conda
+
+# Jupyter Notebook
+.ipynb_checkpoints
+*.ipynb
+
+# PyCharm
+.idea/
+*.iml
+
+# VS Code
+.vscode/
+*.code-workspace
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Windows
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+
+# Linux
+*~
+
+# Temporary files
+*.tmp
+*.bak
+*.swp
+*.swo
+*~
+
+# Database
+*.db
+*.sqlite
+*.sqlite3
+
+# Docker
+docker-compose.override.yml
+.dockerignore
+
+# Test coverage
+htmlcov/
+.tox/
+.coverage
+.coverage.*
+.cache
+nosetests.xml
+coverage.xml
+*.cover
+.pytest_cache/
+
+# ═════════════════════════════════════════════
+# PROJECT SPECIFIC
+# ═════════════════════════════════════════════
+# Keep structure but ignore actual data files
+data/*.csv
+data/*.json
+data/*.parquet
+!data/.gitkeep
+
+logs/*.log
+!logs/.gitkeep
+
+models/saved/*.pkl
+models/saved/*.h5
+!models/saved/.gitkeep
+
+# Documentation builds
+docs/_build/
+EOF

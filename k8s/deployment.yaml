@@ -1,0 +1,22 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: apex-trading
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: apex
+  template:
+    metadata:
+      labels:
+        app: apex
+    spec:
+      containers:
+      - name: apex
+        image: apex-trading:latest
+        env:
+        - name: LIVE_TRADING
+          value: "True"
+        - name: IBKR_PORT
+          value: "7497"
