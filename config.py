@@ -76,39 +76,42 @@ class ApexConfig:
     # ═══════════════════════════════════════════════════════════════
     UNIVERSE_MODE = "SP500"  # Options: "SP500", "NASDAQ100", "CUSTOM"
     
-    # S&P 500 Top Liquid Stocks (Example - Replace with your full list)
+    # S&P 500 Top Liquid Stocks (deduplicated)
     SYMBOLS = [
         # Technology
         "AAPL", "MSFT", "NVDA", "GOOGL", "META", "TSLA", "AVGO", "ORCL", "CSCO", "ADBE",
         "CRM", "ACN", "AMD", "INTC", "IBM", "QCOM", "TXN", "AMAT", "MU", "LRCX",
-        
+
         # Financials
         "JPM", "BAC", "WFC", "GS", "MS", "C", "BLK", "AXP", "SCHW", "USB",
-        
+
         # Healthcare
         "UNH", "JNJ", "LLY", "ABBV", "MRK", "TMO", "ABT", "DHR", "PFE", "BMY",
-        
+
         # Consumer
         "AMZN", "WMT", "HD", "MCD", "NKE", "SBUX", "LOW", "TGT", "DG", "DLTR",
-        
+
         # Industrials
         "BA", "CAT", "GE", "HON", "UPS", "RTX", "LMT", "DE", "MMM", "UNP",
-        
+
         # Energy
         "XOM", "CVX", "COP", "SLB", "EOG", "MPC", "PSX", "VLO", "OXY", "HAL",
-        
+
         # Materials
         "LIN", "APD", "ECL", "SHW", "FCX", "NEM", "DOW", "DD", "ALB", "CE",
-        
-        # Communication
-        "GOOGL", "META", "NFLX", "DIS", "CMCSA", "T", "TMUS", "VZ", "CHTR", "EA",
-        
+
+        # Communication (removed duplicate GOOGL, META)
+        "NFLX", "DIS", "CMCSA", "T", "TMUS", "VZ", "CHTR", "EA",
+
         # Real Estate & Utilities
         "AMT", "PLD", "CCI", "EQIX", "PSA", "NEE", "DUK", "SO", "D", "AEP",
-        
-        # ETFs & Commodities
-        "SPY", "QQQ", "IWM", "GLD", "SLV", "USO", "UNG", "PALL", "CRM", "AMAT"
+
+        # ETFs & Commodities (removed duplicate CRM, AMAT)
+        "SPY", "QQQ", "IWM", "GLD", "SLV", "USO", "UNG", "PALL"
     ]
+
+    # Commodity symbols for special handling
+    COMMODITY_SYMBOLS = {'GLD', 'SLV', 'USO', 'UNG', 'PALL'}
     
     # Sector Mappings (for exposure tracking)
     SECTOR_MAP = {
@@ -178,7 +181,33 @@ class ApexConfig:
     def get_sector(cls, symbol: str) -> str:
         """Get sector for a symbol."""
         return cls.SECTOR_MAP.get(symbol, "Unknown")
-    
+
+    @classmethod
+    def is_commodity(cls, symbol: str) -> bool:
+        """
+        Check if symbol is a commodity.
+
+        Args:
+            symbol: Stock ticker symbol
+
+        Returns:
+            True if symbol is a commodity, False otherwise
+        """
+        return symbol in cls.COMMODITY_SYMBOLS or cls.SECTOR_MAP.get(symbol) == "Commodities"
+
+    @classmethod
+    def is_etf(cls, symbol: str) -> bool:
+        """
+        Check if symbol is an ETF.
+
+        Args:
+            symbol: Stock ticker symbol
+
+        Returns:
+            True if symbol is an ETF, False otherwise
+        """
+        return cls.SECTOR_MAP.get(symbol) == "ETF"
+
     # ═══════════════════════════════════════════════════════════════
     # PATHS
     # ═══════════════════════════════════════════════════════════════

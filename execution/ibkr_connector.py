@@ -251,6 +251,50 @@ class IBKRConnector:
         except Exception as e:
             logger.debug(f"Error setting delayed data mode: {e}")
 
+    def _is_market_open(self) -> bool:
+        """
+        Check if US stock market is currently open.
+
+        Uses UTC time to determine EST market hours (9:30 AM - 4:00 PM EST).
+        Handles basic DST approximation.
+
+        Returns:
+            True if market is likely open, False otherwise
+        """
+        try:
+            # Try using pytz for accurate timezone handling
+            try:
+                import pytz
+                eastern = pytz.timezone('America/New_York')
+                now_est = datetime.now(pytz.UTC).astimezone(eastern)
+                hour = now_est.hour
+                minute = now_est.minute
+                weekday = now_est.weekday()
+            except ImportError:
+                # Fallback: Use UTC with EST offset (UTC-5, ignoring DST for simplicity)
+                from datetime import timezone, timedelta
+                utc_now = datetime.now(timezone.utc)
+                est_offset = timedelta(hours=-5)
+                now_est = utc_now + est_offset
+                hour = now_est.hour
+                minute = now_est.minute
+                weekday = now_est.weekday()
+
+            # Market closed on weekends
+            if weekday >= 5:  # Saturday = 5, Sunday = 6
+                return False
+
+            # Market hours: 9:30 AM - 4:00 PM EST
+            market_open = (hour > 9) or (hour == 9 and minute >= 30)
+            market_close = hour < 16
+
+            return market_open and market_close
+
+        except Exception as e:
+            logger.debug(f"Error checking market hours: {e}")
+            # Default to True to allow trading in case of errors
+            return True
+
     async def execute_order(self, symbol: str, side: str, quantity: int, 
                         confidence: float = 0.5, force_market: bool = False) -> Optional[dict]:
         """
@@ -301,18 +345,8 @@ class IBKRConnector:
                 logger.error(f"❌ Cannot execute: no price for {symbol}")
                 return None
             
-            # Determine if market is open
-            now = datetime.now()
-            
-            # Market hours: 15:30-22:00 CET (9:30 AM - 4:00 PM EST)
-            market_open_hour = 15
-            market_open_minute = 30
-            market_close_hour = 22
-            
-            market_open_time = now.replace(hour=market_open_hour, minute=market_open_minute, second=0)
-            market_close_time = now.replace(hour=market_close_hour, minute=0, second=0)
-            
-            is_market_hours = market_open_time <= now < market_close_time
+            # Determine if market is open (US market hours in EST)
+            is_market_hours = self._is_market_open()
             
             # Decision logic
             if force_market or is_market_hours:
@@ -362,10 +396,13 @@ class IBKRConnector:
                     logger.error(f"❌ Order {action} {quantity} {symbol} cancelled")
                     return None
             
-            # Timeout
+            # Timeout - cancel the order using the trade object
             if trade.orderStatus.status != 'Filled':
                 logger.warning(f"⚠️  Order timeout for {symbol}")
-                self.ib.cancelOrder(order)
+                try:
+                    self.ib.cancelOrder(trade.order)
+                except Exception as cancel_err:
+                    logger.debug(f"Error cancelling order: {cancel_err}")
                 return None
             
             return {

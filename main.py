@@ -14,6 +14,11 @@ import asyncio
 import logging
 from datetime import datetime, timedelta
 from typing import Dict, Optional, List, Tuple
+try:
+    import pytz
+    PYTZ_AVAILABLE = True
+except ImportError:
+    PYTZ_AVAILABLE = False
 import pandas as pd
 from pathlib import Path
 import json
@@ -89,7 +94,7 @@ class ApexTradingSystem:
         self.capital = ApexConfig.INITIAL_CAPITAL
         self.positions: Dict[str, int] = {}  # symbol -> quantity (positive=long, negative=short)
         self.is_running = False
-        self.position_count = 0
+        self._cached_ibkr_positions: Optional[Dict[str, int]] = None  # Cycle-level cache
         
         # Cache
         self.price_cache: Dict[str, float] = {}
@@ -113,7 +118,26 @@ class ApexTradingSystem:
         logger.info(f"📱 Dashboard: Enabled")
         logger.info("✅ All modules initialized!")
         logger.info("=" * 80)
-    
+
+    @property
+    def position_count(self) -> int:
+        """Get current number of active positions (derived from positions dict)."""
+        return len([qty for qty in self.positions.values() if qty != 0])
+
+    def _get_est_hour(self) -> float:
+        """Get current hour in Eastern Time (handles DST properly)."""
+        if PYTZ_AVAILABLE:
+            eastern = pytz.timezone('America/New_York')
+            now_est = datetime.now(pytz.UTC).astimezone(eastern)
+            return now_est.hour + now_est.minute / 60.0
+        else:
+            # Fallback: approximate EST (UTC-5)
+            now = datetime.utcnow()
+            est_hour = now.hour - 5 + now.minute / 60.0
+            if est_hour < 0:
+                est_hour += 24
+            return est_hour
+
     def print_banner(self):
         print("""
 ╔═══════════════════════════════════════════════════════════════╗
@@ -139,9 +163,8 @@ class ApexTradingSystem:
             self.risk_manager.set_starting_capital(self.capital)
             logger.info(f"💰 IBKR Account: ${self.capital:,.2f}")
             
-            # ✅ Load existing positions
+            # Load existing positions from IBKR
             self.positions = await self.ibkr.get_all_positions()
-            self.position_count = len([p for p in self.positions.values() if p != 0])
             
             if self.positions:
                 logger.info(f"📊 Loaded {self.position_count} existing positions:")
@@ -232,8 +255,7 @@ class ApexTradingSystem:
             
             # Replace our tracking with IBKR truth
             self.positions = actual_positions.copy()
-            self.position_count = len([p for p in self.positions.values() if p != 0])
-            
+
             logger.debug(f"✅ Position sync: {self.position_count} active positions")
         
         except Exception as e:
@@ -296,22 +318,20 @@ class ApexTradingSystem:
             return
         
         try:
-            # ✅ Check 3: Verify position against IBKR
+            # Use cached positions (refreshed at cycle start) to avoid race conditions
             if self.ibkr:
-                actual_positions = await self.ibkr.get_all_positions()
-                current_pos = actual_positions.get(symbol, 0)
-                
-                # Sync if mismatch
-                if current_pos != self.positions.get(symbol, 0):
-                    logger.warning(f"⚠️ Position sync: {symbol} Local={self.positions.get(symbol, 0)} → IBKR={current_pos}")
-                    self.positions[symbol] = current_pos
-                
+                # Use cycle-level cached positions if available
+                if self._cached_ibkr_positions is not None:
+                    current_pos = self._cached_ibkr_positions.get(symbol, 0)
+                else:
+                    current_pos = self.positions.get(symbol, 0)
+
                 # Get current price
                 price = await self.ibkr.get_market_price(symbol)
                 if not price or price == 0:
                     logger.debug(f"⚠️ {symbol}: No price available")
                     return
-                
+
                 self.price_cache[symbol] = price
             else:
                 current_pos = self.positions.get(symbol, 0)
@@ -438,7 +458,8 @@ class ApexTradingSystem:
                         else:
                             self.pending_orders.discard(symbol)
                     else:
-                        # Simulation mode
+                        # Simulation mode - close position
+                        order_side = 'SELL' if current_pos > 0 else 'BUY'
                         if symbol in self.positions:
                             del self.positions[symbol]
                         if symbol in self.position_entry_prices:
@@ -447,10 +468,9 @@ class ApexTradingSystem:
                             del self.position_entry_times[symbol]
                         if symbol in self.position_peak_prices:
                             del self.position_peak_prices[symbol]
-                        
-                        self.position_count -= 1
-                        self.live_monitor.log_trade(symbol, 'SELL' if current_pos > 0 else 'BUY', abs(current_pos), price, pnl)
-                        self.performance_tracker.record_trade(symbol, 'SELL' if current_pos > 0 else 'BUY', abs(current_pos), price, 0)
+
+                        self.live_monitor.log_trade(symbol, order_side, abs(current_pos), price, pnl)
+                        self.performance_tracker.record_trade(symbol, order_side, abs(current_pos), price, 0)
                         self.last_trade_time[symbol] = datetime.now()
                     
                     return
@@ -529,14 +549,13 @@ class ApexTradingSystem:
                 else:
                     self.pending_orders.discard(symbol)
             else:
-                # Simulation mode
+                # Simulation mode - open new position
                 qty = shares if side == 'BUY' else -shares
                 self.positions[symbol] = qty
                 self.position_entry_prices[symbol] = price
                 self.position_entry_times[symbol] = datetime.now()
                 self.position_peak_prices[symbol] = price
-                self.position_count += 1
-                
+
                 self.live_monitor.log_trade(symbol, side, shares, price, 0)
                 self.performance_tracker.record_trade(symbol, side, shares, price, 0)
                 self.last_trade_time[symbol] = datetime.now()
@@ -673,7 +692,7 @@ class ApexTradingSystem:
         self.positions = {}
         self.position_entry_prices = {}
         self.position_entry_times = {}
-        self.position_count = 0
+        self.position_peak_prices = {}
         self.pending_orders.clear()
         logger.warning("✅ All positions closed")
     
@@ -917,41 +936,46 @@ class ApexTradingSystem:
                 try:
                     cycle += 1
                     now = datetime.now()
-                    
-                    # Convert to EST (simplified - consider using pytz for DST)
-                    hour = now.hour + now.minute / 60.0
-                    est_hour = hour - 6.0  # CET to EST
-                    if est_hour < 0:
-                        est_hour += 24
-                    
-                    # ✅ Sync positions periodically
-                    if self.ibkr and cycle % 5 == 0:
-                        await self.sync_positions_with_ibkr()
-                    
+
+                    # Get EST hour using proper timezone handling
+                    est_hour = self._get_est_hour()
+
+                    # Cache positions at start of each cycle (avoids race conditions)
+                    if self.ibkr:
+                        self._cached_ibkr_positions = await self.ibkr.get_all_positions()
+                        self.positions = self._cached_ibkr_positions.copy()
+
                     # Refresh pending orders
                     if self.ibkr:
                         await self.refresh_pending_orders()
-                    
+
                     # Refresh data hourly
                     if (now - last_data_refresh).total_seconds() > 3600:
                         await self.refresh_data()
                         last_data_refresh = now
-                    
+
                     # Check trading hours
                     if ApexConfig.TRADING_HOURS_START <= est_hour <= ApexConfig.TRADING_HOURS_END:
-                        logger.info(f"⏰ Cycle #{cycle}: {now.strftime('%Y-%m-%d %H:%M:%S')} CET")
+                        logger.info(f"⏰ Cycle #{cycle}: {now.strftime('%Y-%m-%d %H:%M:%S')} (EST: {est_hour:.1f}h)")
                         logger.info("─" * 80)
-                        
-                        # ✅ Process symbols in parallel (10x faster)
+
+                        # Process symbols in parallel
                         await self.process_symbols_parallel(ApexConfig.SYMBOLS)
-                        
+
+                        # Sync positions after processing (captures any trades)
+                        if self.ibkr:
+                            await self.sync_positions_with_ibkr()
+
                         await self.check_risk()
                         logger.info("")
                     else:
                         if cycle % 10 == 0:
-                            logger.info(f"🌙 Outside trading hours ({now.strftime('%H:%M')} CET = {est_hour:.1f} EST)")
-                            logger.info(f"   Next session: Tomorrow at {int(ApexConfig.TRADING_HOURS_START)}:30 EST")
-                    
+                            logger.info(f"🌙 Outside trading hours (EST: {est_hour:.1f}h)")
+                            logger.info(f"   Market hours: {ApexConfig.TRADING_HOURS_START:.1f} - {ApexConfig.TRADING_HOURS_END:.1f} EST")
+
+                    # Clear cycle cache
+                    self._cached_ibkr_positions = None
+
                     await asyncio.sleep(ApexConfig.CHECK_INTERVAL_SECONDS)
                 
                 except KeyboardInterrupt:
