@@ -579,9 +579,32 @@ class ApexTradingSystem:
             logger.debug(traceback.format_exc())
     
     async def process_symbols_parallel(self, symbols: List[str]):
-        """Process multiple symbols in parallel for speed."""
-        tasks = [self.process_symbol(symbol) for symbol in symbols]
-        await asyncio.gather(*tasks, return_exceptions=True)
+        """
+        Process symbols in batches to respect IBKR's 100 market data line limit.
+
+        IBKR limits simultaneous market data subscriptions to 100.
+        We process in batches of 50 with cleanup between batches.
+        """
+        BATCH_SIZE = 50  # Max symbols per batch (IBKR limit is 100, we use 50 for safety)
+
+        total = len(symbols)
+        num_batches = (total + BATCH_SIZE - 1) // BATCH_SIZE
+
+        if num_batches > 1:
+            logger.debug(f"📊 Processing {total} symbols in {num_batches} batches ({BATCH_SIZE} max per batch)")
+
+        for batch_num in range(num_batches):
+            start_idx = batch_num * BATCH_SIZE
+            end_idx = min(start_idx + BATCH_SIZE, total)
+            batch_symbols = symbols[start_idx:end_idx]
+
+            # Process batch in parallel
+            tasks = [self.process_symbol(symbol) for symbol in batch_symbols]
+            await asyncio.gather(*tasks, return_exceptions=True)
+
+            # Small delay between batches to allow cleanup of market data subscriptions
+            if batch_num < num_batches - 1:
+                await asyncio.sleep(0.5)
 
     async def check_and_execute_rebalance(self, est_hour: float):
         """
