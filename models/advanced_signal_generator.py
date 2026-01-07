@@ -38,13 +38,23 @@ class AdvancedSignalGenerator:
 
     def _calculate_features(self, df):
         """
-        Robust feature engineering. 
+        Robust feature engineering.
         Calculates ~15-20 key technical indicators.
         """
         data = df.copy()
-        
+
+        # Normalize column names (handle both 'Close' and 'close')
+        data.columns = [col.capitalize() if col.lower() in ['open', 'high', 'low', 'close', 'volume'] else col for col in data.columns]
+
         # Ensure sufficient data length
         if len(data) < 50:
+            return pd.DataFrame()
+
+        # Verify required columns exist
+        required = ['Close', 'High', 'Low', 'Volume']
+        missing = [col for col in required if col not in data.columns]
+        if missing:
+            self.logger.debug(f"Missing columns: {missing}")
             return pd.DataFrame()
 
         # 1. Trend Indicators
@@ -104,13 +114,17 @@ class AdvancedSignalGenerator:
 
     def _create_targets(self, df):
         """
-        Create target labels: 
+        Create target labels:
         1 (Buy) if next 5 days return > 1%
         -1 (Sell) if next 5 days return < -1%
         0 (Hold) otherwise
         """
+        # Normalize column names
+        data = df.copy()
+        data.columns = [col.capitalize() if col.lower() in ['open', 'high', 'low', 'close', 'volume'] else col for col in data.columns]
+
         # Future 5-day return
-        future_returns = df['Close'].shift(-5) / df['Close'] - 1
+        future_returns = data['Close'].shift(-5) / data['Close'] - 1
         
         targets = pd.Series(0, index=df.index)
         targets[future_returns > 0.01] = 1   # Buy
