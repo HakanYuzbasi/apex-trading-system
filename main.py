@@ -344,9 +344,9 @@ class ApexTradingSystem:
                 price = float(self.historical_data[symbol]['Close'].iloc[-1])
                 self.price_cache[symbol] = price
             
-            # Generate signal
-            prices = self.historical_data[symbol]['Close']
-            signal_data = self.signal_generator.generate_ml_signal(symbol, prices)
+            # Generate signal - pass full DataFrame (not just Close)
+            price_data = self.historical_data[symbol]
+            signal_data = self.signal_generator.generate_ml_signal(symbol, price_data)
             
             signal = signal_data['signal']
             confidence = signal_data['confidence']
@@ -867,9 +867,9 @@ class ApexTradingSystem:
         
         for symbol in list(self.historical_data.keys())[:50]:
             try:
-                prices = self.historical_data[symbol]['Close']
-                signal_data = self.signal_generator.generate_ml_signal(symbol, prices)
-                
+                price_data = self.historical_data[symbol]
+                signal_data = self.signal_generator.generate_ml_signal(symbol, price_data)
+
                 signals[symbol] = {
                     'signal': signal_data['signal'],
                     'confidence': signal_data['confidence'],
