@@ -69,8 +69,8 @@ class ApexConfig:
     # ═══════════════════════════════════════════════════════════════
     # SIGNAL THRESHOLDS
     # ═══════════════════════════════════════════════════════════════
-    MIN_SIGNAL_THRESHOLD = 0.45  # Minimum signal strength (0-1) - Higher = fewer trades
-    MIN_CONFIDENCE = 0.30  # Minimum confidence for trade execution
+    MIN_SIGNAL_THRESHOLD = 0.40  # Minimum signal strength (0-1) - Lower = more trades
+    MIN_CONFIDENCE = 0.25  # Minimum confidence for trade execution (lowered for more signals)
     
     # ═══════════════════════════════════════════════════════════════
     # TRADING HOURS (EST)
