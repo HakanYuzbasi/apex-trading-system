@@ -5,8 +5,7 @@ from sklearn.model_selection import TimeSeriesSplit
 from sklearn.preprocessing import StandardScaler
 from sklearn.base import clone
 import logging
-import talib # Assuming talib is installed, otherwise use pandas_ta or manual calc
-# If talib is not available, simple pandas implementations are provided in _calculate_features
+# Technical indicators are calculated using pandas (no talib dependency needed)
 
 class AdvancedSignalGenerator:
     def __init__(self):
