@@ -69,8 +69,34 @@ class ApexConfig:
     # ═══════════════════════════════════════════════════════════════
     # SIGNAL THRESHOLDS
     # ═══════════════════════════════════════════════════════════════
-    MIN_SIGNAL_THRESHOLD = 0.50  # Minimum signal strength - Balanced for win rate + returns
+    MIN_SIGNAL_THRESHOLD = 0.40  # Minimum signal strength (god-level optimized)
     MIN_CONFIDENCE = 0.35  # Minimum confidence for trade execution
+
+    # ═══════════════════════════════════════════════════════════════
+    # GOD LEVEL PARAMETERS
+    # ═══════════════════════════════════════════════════════════════
+    # Position Sizing (ATR-based)
+    ATR_MULTIPLIER_STOP = 2.0  # Stop loss = ATR * this multiplier
+    ATR_MULTIPLIER_PROFIT = 3.0  # Take profit = ATR * this multiplier
+    TRAILING_STOP_ATR = 1.5  # Trailing stop = ATR * this multiplier
+    USE_KELLY_SIZING = True  # Use Kelly criterion for position sizing
+    KELLY_FRACTION = 0.5  # Use half-Kelly for safety
+
+    # Market Regime
+    REGIME_LOOKBACK_DAYS = 60  # Days to analyze for regime detection
+    REGIME_BULL_THRESHOLD = 0.05  # MA crossover threshold for bull regime
+    REGIME_BEAR_THRESHOLD = -0.05  # MA crossover threshold for bear regime
+    HIGH_VOL_THRESHOLD = 0.35  # Annualized volatility threshold for high-vol regime
+
+    # Correlation Management
+    MAX_CORRELATION = 0.70  # Max correlation between positions
+    CORRELATION_LOOKBACK = 60  # Days for correlation calculation
+
+    # Advanced Risk
+    VAR_CONFIDENCE = 0.95  # VaR confidence level
+    MAX_PORTFOLIO_VAR = 0.03  # Maximum daily VaR (3%)
+    DRAWDOWN_REDUCE_THRESHOLD = 0.05  # Reduce position size after 5% drawdown
+    DRAWDOWN_HALT_THRESHOLD = 0.10  # Halt new trades after 10% drawdown
     
     # ═══════════════════════════════════════════════════════════════
     # TRADING HOURS (EST)
