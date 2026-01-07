@@ -163,52 +163,86 @@ class AdvancedSignalGenerator:
         
         return float(adx)
     
-    def train_models(self, historical_data: Dict[str, pd.DataFrame]):
-        """Train ML models on historical data."""
+    def train_models(self, historical_data: Dict[str, pd.DataFrame], validation_split: float = 0.2):
+        """
+        Train ML models with proper train/validation split.
+
+        Args:
+            historical_data: Dict of {symbol: DataFrame with OHLCV}
+            validation_split: Fraction of data for validation (0.2 = 20%)
+        """
         if not ML_AVAILABLE:
             logger.warning("⚠️  ML libraries not available. Skipping training.")
             return
-        
-        logger.info("🧠 Training ML models...")
-        
-        X_train = []
-        y_train = []
-        
+
+        logger.info("🧠 Training ML models with validation...")
+
+        X_all = []
+        y_all = []
+
         for symbol, data in historical_data.items():
             if len(data) < self.lookback + 5:
                 continue
-            
+
             prices = data['Close']
-            
+
             # Create training samples
             for i in range(self.lookback, len(prices) - 5):
                 features = self.extract_features(prices.iloc[:i])
                 if len(features) == 0:
                     continue
-                
+
                 # Target: 5-day forward return
                 future_return = (prices.iloc[i+5] - prices.iloc[i]) / prices.iloc[i]
-                
-                X_train.append(features)
-                y_train.append(future_return)
-        
-        if len(X_train) < 100:
+
+                X_all.append(features)
+                y_all.append(future_return)
+
+        if len(X_all) < 100:
             logger.warning("⚠️  Not enough training data")
             return
-        
-        X_train = np.array(X_train)
-        y_train = np.array(y_train)
-        
+
+        X_all = np.array(X_all)
+        y_all = np.array(y_all)
+
+        # Train/validation split (time-based to avoid look-ahead bias)
+        split_idx = int(len(X_all) * (1 - validation_split))
+        X_train, X_val = X_all[:split_idx], X_all[split_idx:]
+        y_train, y_val = y_all[:split_idx], y_all[split_idx:]
+
         # Scale features
         X_train_scaled = self.feature_scaler.fit_transform(X_train)
-        
+        X_val_scaled = self.feature_scaler.transform(X_val)
+
         # Train models
-        logger.info(f"   Training on {len(X_train)} samples...")
+        logger.info(f"   Training on {len(X_train)} samples, validating on {len(X_val)}...")
+
         self.rf_model.fit(X_train_scaled, y_train)
         self.gb_model.fit(X_train_scaled, y_train)
-        
-        self.models_trained = True
-        logger.info("✅ ML models trained successfully")
+
+        # Validation metrics
+        rf_pred_val = self.rf_model.predict(X_val_scaled)
+        gb_pred_val = self.gb_model.predict(X_val_scaled)
+
+        # Calculate R² scores
+        from sklearn.metrics import r2_score, mean_squared_error
+
+        rf_r2 = r2_score(y_val, rf_pred_val)
+        gb_r2 = r2_score(y_val, gb_pred_val)
+        rf_mse = mean_squared_error(y_val, rf_pred_val)
+        gb_mse = mean_squared_error(y_val, gb_pred_val)
+
+        logger.info(f"   ✅ Random Forest - R²: {rf_r2:.3f}, MSE: {rf_mse:.6f}")
+        logger.info(f"   ✅ Gradient Boost - R²: {gb_r2:.3f}, MSE: {gb_mse:.6f}")
+
+        # Check if models are better than baseline
+        baseline_mse = np.var(y_val)  # Predicting mean
+        if rf_mse < baseline_mse and gb_mse < baseline_mse:
+            self.models_trained = True
+            logger.info("✅ ML models trained successfully (beating baseline)")
+        else:
+            self.models_trained = False
+            logger.warning("⚠️  ML models underperforming baseline, will use technical analysis only")
     
     def generate_ml_signal(self, symbol: str, prices: pd.Series) -> Dict:
         """Generate ML-powered signal."""
