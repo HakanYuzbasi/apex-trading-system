@@ -39,7 +39,32 @@ class ApexConfig:
     # ═══════════════════════════════════════════════════════════════
     MAX_DAILY_LOSS = 0.02  # 2% max daily loss
     MAX_DRAWDOWN = 0.10  # 10% max drawdown
-    MAX_SECTOR_EXPOSURE = 0.40  # ✅ NEW: 40% max per sector
+    MAX_SECTOR_EXPOSURE = 0.40  # 40% max per sector
+
+    # ═══════════════════════════════════════════════════════════════
+    # CIRCUIT BREAKER (Automatic Trading Halt)
+    # ═══════════════════════════════════════════════════════════════
+    CIRCUIT_BREAKER_ENABLED = True  # Enable automatic trading halt
+    CIRCUIT_BREAKER_DAILY_LOSS = 0.02  # Halt if daily loss exceeds 2%
+    CIRCUIT_BREAKER_DRAWDOWN = 0.08  # Halt if drawdown exceeds 8%
+    CIRCUIT_BREAKER_CONSECUTIVE_LOSSES = 5  # Halt after 5 consecutive losing trades
+    CIRCUIT_BREAKER_COOLDOWN_HOURS = 24  # Hours before trading resumes after halt
+
+    # ═══════════════════════════════════════════════════════════════
+    # PORTFOLIO REBALANCING
+    # ═══════════════════════════════════════════════════════════════
+    REBALANCE_ENABLED = True  # Enable automatic rebalancing
+    REBALANCE_DRIFT_THRESHOLD = 0.10  # Rebalance when position drifts >10% from target
+    REBALANCE_MIN_INTERVAL_HOURS = 24  # Minimum hours between rebalances
+    REBALANCE_AT_MARKET_CLOSE = True  # Prefer rebalancing near market close (3:30 PM EST)
+
+    # ═══════════════════════════════════════════════════════════════
+    # NETWORK RESILIENCE
+    # ═══════════════════════════════════════════════════════════════
+    IBKR_MAX_RETRIES = 5  # Maximum retry attempts for IBKR operations
+    IBKR_RETRY_BASE_DELAY = 2.0  # Base delay in seconds (exponential backoff)
+    IBKR_RETRY_MAX_DELAY = 60.0  # Maximum delay between retries
+    IBKR_CONNECTION_TIMEOUT = 30  # Connection timeout in seconds
     
     # ═══════════════════════════════════════════════════════════════
     # SIGNAL THRESHOLDS
@@ -76,39 +101,42 @@ class ApexConfig:
     # ═══════════════════════════════════════════════════════════════
     UNIVERSE_MODE = "SP500"  # Options: "SP500", "NASDAQ100", "CUSTOM"
     
-    # S&P 500 Top Liquid Stocks (Example - Replace with your full list)
+    # S&P 500 Top Liquid Stocks (deduplicated)
     SYMBOLS = [
         # Technology
         "AAPL", "MSFT", "NVDA", "GOOGL", "META", "TSLA", "AVGO", "ORCL", "CSCO", "ADBE",
         "CRM", "ACN", "AMD", "INTC", "IBM", "QCOM", "TXN", "AMAT", "MU", "LRCX",
-        
+
         # Financials
         "JPM", "BAC", "WFC", "GS", "MS", "C", "BLK", "AXP", "SCHW", "USB",
-        
+
         # Healthcare
         "UNH", "JNJ", "LLY", "ABBV", "MRK", "TMO", "ABT", "DHR", "PFE", "BMY",
-        
+
         # Consumer
         "AMZN", "WMT", "HD", "MCD", "NKE", "SBUX", "LOW", "TGT", "DG", "DLTR",
-        
+
         # Industrials
         "BA", "CAT", "GE", "HON", "UPS", "RTX", "LMT", "DE", "MMM", "UNP",
-        
+
         # Energy
         "XOM", "CVX", "COP", "SLB", "EOG", "MPC", "PSX", "VLO", "OXY", "HAL",
-        
+
         # Materials
         "LIN", "APD", "ECL", "SHW", "FCX", "NEM", "DOW", "DD", "ALB", "CE",
-        
-        # Communication
-        "GOOGL", "META", "NFLX", "DIS", "CMCSA", "T", "TMUS", "VZ", "CHTR", "EA",
-        
+
+        # Communication (removed duplicate GOOGL, META)
+        "NFLX", "DIS", "CMCSA", "T", "TMUS", "VZ", "CHTR", "EA",
+
         # Real Estate & Utilities
         "AMT", "PLD", "CCI", "EQIX", "PSA", "NEE", "DUK", "SO", "D", "AEP",
-        
-        # ETFs & Commodities
-        "SPY", "QQQ", "IWM", "GLD", "SLV", "USO", "UNG", "PALL", "CRM", "AMAT"
+
+        # ETFs & Commodities (removed duplicate CRM, AMAT)
+        "SPY", "QQQ", "IWM", "GLD", "SLV", "USO", "UNG", "PALL"
     ]
+
+    # Commodity symbols for special handling
+    COMMODITY_SYMBOLS = {'GLD', 'SLV', 'USO', 'UNG', 'PALL'}
     
     # Sector Mappings (for exposure tracking)
     SECTOR_MAP = {
@@ -178,7 +206,33 @@ class ApexConfig:
     def get_sector(cls, symbol: str) -> str:
         """Get sector for a symbol."""
         return cls.SECTOR_MAP.get(symbol, "Unknown")
-    
+
+    @classmethod
+    def is_commodity(cls, symbol: str) -> bool:
+        """
+        Check if symbol is a commodity.
+
+        Args:
+            symbol: Stock ticker symbol
+
+        Returns:
+            True if symbol is a commodity, False otherwise
+        """
+        return symbol in cls.COMMODITY_SYMBOLS or cls.SECTOR_MAP.get(symbol) == "Commodities"
+
+    @classmethod
+    def is_etf(cls, symbol: str) -> bool:
+        """
+        Check if symbol is an ETF.
+
+        Args:
+            symbol: Stock ticker symbol
+
+        Returns:
+            True if symbol is an ETF, False otherwise
+        """
+        return cls.SECTOR_MAP.get(symbol) == "ETF"
+
     # ═══════════════════════════════════════════════════════════════
     # PATHS
     # ═══════════════════════════════════════════════════════════════

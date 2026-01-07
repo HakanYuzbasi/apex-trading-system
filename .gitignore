@@ -1,8 +1,3 @@
-# Navigate to your project directory
-cd /path/to/your/apex-trading-system
-
-# Create .gitignore file
-cat > .gitignore << 'EOF'
 # ═══════════════════════════════════════════════════════════════
 # APEX TRADING SYSTEM - GIT IGNORE
 # ═══════════════════════════════════════════════════════════════
@@ -25,12 +20,13 @@ ibkr_credentials.json
 api_keys.txt
 passwords.txt
 
-# Trading data and logs
-data/
+# Trading data files (but keep Python modules)
+data/*.csv
+data/*.json
+data/*.parquet
+data/*.pkl
 logs/
 *.log
-*.csv
-*.json
 equity_curve.csv
 trades.csv
 trading_state.json
@@ -84,7 +80,6 @@ venv.bak/
 
 # Jupyter Notebook
 .ipynb_checkpoints
-*.ipynb
 
 # PyCharm
 .idea/
@@ -112,7 +107,6 @@ Desktop.ini
 *.bak
 *.swp
 *.swo
-*~
 
 # Database
 *.db
@@ -121,7 +115,6 @@ Desktop.ini
 
 # Docker
 docker-compose.override.yml
-.dockerignore
 
 # Test coverage
 htmlcov/
@@ -137,19 +130,10 @@ coverage.xml
 # ═════════════════════════════════════════════
 # PROJECT SPECIFIC
 # ═════════════════════════════════════════════
-# Keep structure but ignore actual data files
-data/*.csv
-data/*.json
-data/*.parquet
+# Keep gitkeep files
 !data/.gitkeep
-
-logs/*.log
 !logs/.gitkeep
-
-models/saved/*.pkl
-models/saved/*.h5
 !models/saved/.gitkeep
 
 # Documentation builds
 docs/_build/
-EOF

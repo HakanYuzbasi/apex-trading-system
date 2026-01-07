@@ -1,7 +1,6 @@
 """
 scripts/quick_test.py - Quick System Test
 Run this to verify everything works before live trading
-FIXED VERSION - Event loop issue resolved
 """
 
 import sys
@@ -16,12 +15,12 @@ from config import ApexConfig
 
 
 def test_all():
-    """Test all components (synchronous - no async issues)."""
+    """Test all components."""
     print("=" * 70)
     print("APEX TRADING SYSTEM - COMPLETE SYSTEM TEST")
     print("=" * 70)
     print()
-    
+
     # Test 1: Config
     print("Test 1: Configuration")
     print(f"  Universe: {ApexConfig.UNIVERSE_MODE}")
@@ -30,7 +29,7 @@ def test_all():
     print(f"  Live Trading: {ApexConfig.LIVE_TRADING}")
     print("  ✅ Config OK")
     print()
-    
+
     # Test 2: Market Data
     print("Test 2: Market Data Fetcher")
     try:
@@ -40,23 +39,33 @@ def test_all():
         if price > 0:
             print("  ✅ Market Data OK")
         else:
-            print("  ❌ Market Data FAILED")
+            print("  ⚠️  Market Data returned 0 (might be outside market hours)")
     except Exception as e:
         print(f"  ❌ Market Data Error: {e}")
     print()
-    
-    # Test 3: Signal Generator
+
+    # Test 3: Signal Generator with Real Data
     print("Test 3: Signal Generator")
     try:
         signal_gen = SignalGenerator()
-        signal = signal_gen.generate_ml_signal('AAPL')
-        print(f"  AAPL Signal: {signal['signal']:.3f}")
-        print(f"  Confidence: {signal['confidence']:.3f}")
-        print("  ✅ Signals OK")
+
+        # Fetch historical data for signal generation
+        hist_data = market_data.fetch_historical_data('AAPL', days=60)
+
+        if not hist_data.empty:
+            prices = hist_data['Close']
+            signal = signal_gen.generate_ml_signal('AAPL', prices)
+            print(f"  AAPL Signal: {signal['signal']:+.3f}")
+            print(f"  Confidence: {signal['confidence']:.3f}")
+            print(f"  Momentum: {signal['momentum']:+.3f}")
+            print(f"  Mean Rev: {signal['mean_reversion']:+.3f}")
+            print("  ✅ Signals OK")
+        else:
+            print("  ⚠️  No historical data available")
     except Exception as e:
         print(f"  ❌ Signal Error: {e}")
     print()
-    
+
     # Test 4: Risk Manager
     print("Test 4: Risk Manager")
     try:
@@ -69,7 +78,7 @@ def test_all():
     except Exception as e:
         print(f"  ❌ Risk Manager Error: {e}")
     print()
-    
+
     # Test 5: Sector Classification
     print("Test 5: Sector Classification")
     try:
@@ -78,20 +87,38 @@ def test_all():
         for symbol in test_symbols:
             sector = ApexConfig.get_sector(symbol)
             is_commodity = ApexConfig.is_commodity(symbol)
-            commodity_label = " (Commodity)" if is_commodity else ""
-            print(f"    {symbol}: {sector}{commodity_label}")
+            is_etf = ApexConfig.is_etf(symbol)
+            labels = []
+            if is_commodity:
+                labels.append("Commodity")
+            if is_etf:
+                labels.append("ETF")
+            label_str = f" ({', '.join(labels)})" if labels else ""
+            print(f"    {symbol}: {sector}{label_str}")
         print("  ✅ Sector Classification OK")
     except Exception as e:
         print(f"  ❌ Sector Error: {e}")
     print()
-    
-    # Test 6: IBKR Connection (Optional - not required)
-    print("Test 6: IBKR Connection (Optional)")
+
+    # Test 6: Configuration Validation
+    print("Test 6: Configuration Validation")
+    try:
+        from config import validate_config
+        if validate_config():
+            print("  ✅ Configuration Valid")
+        else:
+            print("  ⚠️  Configuration has warnings (see above)")
+    except Exception as e:
+        print(f"  ❌ Validation Error: {e}")
+    print()
+
+    # Test 7: IBKR Connection (Optional - not required)
+    print("Test 7: IBKR Connection (Optional)")
     print("  Note: TWS must be running for this to work")
     print("  If you haven't installed TWS yet, skip this test")
     print("  ⏭️  SKIPPED (TWS not required for backtesting/simulation)")
     print()
-    
+
     print("=" * 70)
     print("✅ ALL TESTS COMPLETED")
     print("=" * 70)
@@ -101,8 +128,10 @@ def test_all():
     print("Next steps:")
     print("  1. Run the system: python main.py")
     print("  2. Or for simulation mode (no IBKR needed):")
-    print("     - Edit .env: LIVE_TRADING=False")
+    print("     - Set LIVE_TRADING=False in config.py")
     print("     - Run: python main.py")
+    print("  3. Run backtest: python scripts/backtest.py")
+    print("  4. Launch dashboard: streamlit run dashboard/streamlit_app.py")
     print()
 
 

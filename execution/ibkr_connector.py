@@ -1,26 +1,123 @@
 """
 execution/ibkr_connector.py - Interactive Brokers Connector
 Handles live/paper trading with IBKR TWS/Gateway
-FIXED VERSION: Delayed market data + Position sync + LONG/SHORT enabled
+
+Features:
+- Delayed market data support (free for paper trading)
+- Position sync with IBKR
+- Long/Short position support
+- Exponential backoff retry logic for network resilience
+- Slippage tracking for performance analysis
 """
 
 import asyncio
 import logging
-from typing import Dict, Optional
+import random
+from datetime import datetime
+from typing import Dict, Optional, Callable, TypeVar, Any
+from functools import wraps
 from ib_insync import IB, Stock, MarketOrder, LimitOrder, util
 import pandas as pd
 
+from config import ApexConfig
 
 logger = logging.getLogger(__name__)
 
+T = TypeVar('T')
+
+
+def with_retry(
+    max_retries: int = None,
+    base_delay: float = None,
+    max_delay: float = None,
+    retryable_exceptions: tuple = (Exception,)
+):
+    """
+    Decorator for exponential backoff retry logic.
+
+    Args:
+        max_retries: Maximum number of retry attempts
+        base_delay: Initial delay between retries (seconds)
+        max_delay: Maximum delay between retries (seconds)
+        retryable_exceptions: Tuple of exception types to retry on
+    """
+    def decorator(func: Callable[..., T]) -> Callable[..., T]:
+        @wraps(func)
+        async def async_wrapper(*args, **kwargs) -> T:
+            retries = max_retries or ApexConfig.IBKR_MAX_RETRIES
+            delay = base_delay or ApexConfig.IBKR_RETRY_BASE_DELAY
+            max_d = max_delay or ApexConfig.IBKR_RETRY_MAX_DELAY
+
+            last_exception = None
+
+            for attempt in range(retries + 1):
+                try:
+                    return await func(*args, **kwargs)
+                except retryable_exceptions as e:
+                    last_exception = e
+                    if attempt < retries:
+                        # Calculate delay with exponential backoff and jitter
+                        current_delay = min(delay * (2 ** attempt), max_d)
+                        jitter = random.uniform(0, current_delay * 0.1)
+                        sleep_time = current_delay + jitter
+
+                        logger.warning(
+                            f"⚠️  {func.__name__} failed (attempt {attempt + 1}/{retries + 1}): {e}"
+                        )
+                        logger.info(f"   Retrying in {sleep_time:.1f}s...")
+                        await asyncio.sleep(sleep_time)
+                    else:
+                        logger.error(
+                            f"❌ {func.__name__} failed after {retries + 1} attempts: {e}"
+                        )
+
+            raise last_exception
+
+        @wraps(func)
+        def sync_wrapper(*args, **kwargs) -> T:
+            retries = max_retries or ApexConfig.IBKR_MAX_RETRIES
+            delay = base_delay or ApexConfig.IBKR_RETRY_BASE_DELAY
+            max_d = max_delay or ApexConfig.IBKR_RETRY_MAX_DELAY
+
+            last_exception = None
+
+            for attempt in range(retries + 1):
+                try:
+                    return func(*args, **kwargs)
+                except retryable_exceptions as e:
+                    last_exception = e
+                    if attempt < retries:
+                        import time
+                        current_delay = min(delay * (2 ** attempt), max_d)
+                        jitter = random.uniform(0, current_delay * 0.1)
+                        sleep_time = current_delay + jitter
+                        logger.warning(f"⚠️  {func.__name__} retry {attempt + 1}/{retries}")
+                        time.sleep(sleep_time)
+
+            raise last_exception
+
+        if asyncio.iscoroutinefunction(func):
+            return async_wrapper
+        return sync_wrapper
+
+    return decorator
+
 
 class IBKRConnector:
-    """Interactive Brokers connector with delayed market data support."""
-    
+    """
+    Interactive Brokers connector with enhanced features.
+
+    Features:
+    - Delayed market data support (free for paper trading)
+    - Exponential backoff retry logic
+    - Slippage and commission tracking
+    - Long/Short position support
+    """
+
     def __init__(self, host: str = '127.0.0.1', port: int = 7497, client_id: int = 1):
         """
         Initialize IBKR connector.
-        
+
         Args:
             host: TWS/Gateway host (default: localhost)
             port: 7497 for paper, 7496 for live
@@ -31,13 +128,88 @@ class IBKRConnector:
         self.client_id = client_id
         self.ib = IB()
         self.account = None
-        
+
         # Cache for contracts
         self.contracts = {}
-        
+
         # Market data request IDs
         self.req_id_counter = 0
+
+        # Execution metrics tracking
+        self.execution_metrics = {
+            'total_trades': 0,
+            'total_slippage': 0.0,
+            'total_commission': 0.0,
+            'slippage_history': [],  # List of (symbol, expected_price, fill_price, slippage_bps)
+        }
+
+    def record_execution_metrics(
+        self,
+        symbol: str,
+        expected_price: float,
+        fill_price: float,
+        commission: float = 0.0
+    ):
+        """
+        Record execution metrics for performance analysis.
+
+        Args:
+            symbol: Stock ticker
+            expected_price: Price at signal generation
+            fill_price: Actual fill price
+            commission: Commission paid
+        """
+        if expected_price > 0:
+            slippage_bps = ((fill_price - expected_price) / expected_price) * 10000
+        else:
+            slippage_bps = 0.0
+
+        self.execution_metrics['total_trades'] += 1
+        self.execution_metrics['total_slippage'] += abs(slippage_bps)
+        self.execution_metrics['total_commission'] += commission
+
+        self.execution_metrics['slippage_history'].append({
+            'timestamp': datetime.now().isoformat(),
+            'symbol': symbol,
+            'expected_price': expected_price,
+            'fill_price': fill_price,
+            'slippage_bps': slippage_bps,
+            'commission': commission
+        })
+
+        # Log significant slippage
+        if abs(slippage_bps) > 10:  # > 10 bps
+            logger.warning(
+                f"⚠️  High slippage on {symbol}: {slippage_bps:+.1f} bps "
+                f"(expected ${expected_price:.2f}, filled ${fill_price:.2f})"
+            )
+        else:
+            logger.debug(
+                f"📊 {symbol} slippage: {slippage_bps:+.1f} bps, commission: ${commission:.2f}"
+            )
+
+    def get_execution_summary(self) -> Dict:
+        """Get summary of execution metrics."""
+        metrics = self.execution_metrics
+        n_trades = metrics['total_trades']
+
+        if n_trades == 0:
+            return {
+                'total_trades': 0,
+                'avg_slippage_bps': 0.0,
+                'total_commission': 0.0,
+                'avg_commission': 0.0
+            }
+
+        return {
+            'total_trades': n_trades,
+            'avg_slippage_bps': metrics['total_slippage'] / n_trades,
+            'total_commission': metrics['total_commission'],
+            'avg_commission': metrics['total_commission'] / n_trades,
+            'recent_slippage': metrics['slippage_history'][-10:]  # Last 10 trades
+        }
     
+    @with_retry(retryable_exceptions=(ConnectionError, TimeoutError, OSError))
     async def connect(self):
         """Connect to Interactive Brokers with delayed market data."""
         logger.info(f"🔌 Connecting to IBKR at {self.host}:{self.port}...")
@@ -103,13 +275,14 @@ class IBKRConnector:
             logger.error(f"❌ Error getting contract for {symbol}: {e}")
             return None
     
+    @with_retry(max_retries=3, retryable_exceptions=(ConnectionError, TimeoutError))
     async def get_market_price(self, symbol: str) -> float:
         """
         Get current market price for a symbol.
-        
+
         Args:
             symbol: Stock ticker
-            
+
         Returns:
             Current price or 0 if unavailable
         """
@@ -251,6 +424,50 @@ class IBKRConnector:
         except Exception as e:
             logger.debug(f"Error setting delayed data mode: {e}")
 
+    def _is_market_open(self) -> bool:
+        """
+        Check if US stock market is currently open.
+
+        Uses UTC time to determine EST market hours (9:30 AM - 4:00 PM EST).
+        Handles basic DST approximation.
+
+        Returns:
+            True if market is likely open, False otherwise
+        """
+        try:
+            # Try using pytz for accurate timezone handling
+            try:
+                import pytz
+                eastern = pytz.timezone('America/New_York')
+                now_est = datetime.now(pytz.UTC).astimezone(eastern)
+                hour = now_est.hour
+                minute = now_est.minute
+                weekday = now_est.weekday()
+            except ImportError:
+                # Fallback: Use UTC with EST offset (UTC-5, ignoring DST for simplicity)
+                from datetime import timezone, timedelta
+                utc_now = datetime.now(timezone.utc)
+                est_offset = timedelta(hours=-5)
+                now_est = utc_now + est_offset
+                hour = now_est.hour
+                minute = now_est.minute
+                weekday = now_est.weekday()
+
+            # Market closed on weekends
+            if weekday >= 5:  # Saturday = 5, Sunday = 6
+                return False
+
+            # Market hours: 9:30 AM - 4:00 PM EST
+            market_open = (hour > 9) or (hour == 9 and minute >= 30)
+            market_close = hour < 16
+
+            return market_open and market_close
+
+        except Exception as e:
+            logger.debug(f"Error checking market hours: {e}")
+            # Default to True to allow trading in case of errors
+            return True
+
     async def execute_order(self, symbol: str, side: str, quantity: int, 
                         confidence: float = 0.5, force_market: bool = False) -> Optional[dict]:
         """
@@ -301,24 +518,14 @@ class IBKRConnector:
                 logger.error(f"❌ Cannot execute: no price for {symbol}")
                 return None
             
-            # Determine if market is open
-            now = datetime.now()
-            
-            # Market hours: 15:30-22:00 CET (9:30 AM - 4:00 PM EST)
-            market_open_hour = 15
-            market_open_minute = 30
-            market_close_hour = 22
-            
-            market_open_time = now.replace(hour=market_open_hour, minute=market_open_minute, second=0)
-            market_close_time = now.replace(hour=market_close_hour, minute=0, second=0)
-            
-            is_market_hours = market_open_time <= now < market_close_time
+            # Determine if market is open (US market hours in EST)
+            is_market_hours = self._is_market_open()
             
             # Decision logic
             if force_market or is_market_hours:
                 # Use market order during trading hours
                 logger.info(f"   📈 Market order (hours={is_market_hours})")
-                return await self._execute_market_order(symbol, side, quantity)
+                return await self._execute_market_order(symbol, side, quantity, expected_price=price)
             else:
                 # Use limit order pre-market with confidence-based buffer
                 return await self._execute_limit_order(symbol, side, quantity, price, confidence)
@@ -327,52 +534,90 @@ class IBKRConnector:
             logger.error(f"❌ Error executing order {side} {quantity} {symbol}: {e}")
             return None
 
-    async def _execute_market_order(self, symbol: str, side: str, quantity: int) -> Optional[dict]:
-        """Execute market order."""
+    async def _execute_market_order(
+        self,
+        symbol: str,
+        side: str,
+        quantity: int,
+        expected_price: float = 0.0
+    ) -> Optional[dict]:
+        """
+        Execute market order with slippage tracking.
+
+        Args:
+            symbol: Stock ticker
+            side: 'BUY' or 'SELL'
+            quantity: Number of shares
+            expected_price: Price at signal generation (for slippage calculation)
+        """
         try:
             contract = await self.get_contract(symbol)
             if not contract:
                 logger.error(f"❌ Invalid contract for {symbol}")
                 return None
-            
+
             # Create market order
             action = 'BUY' if side.upper() == 'BUY' else 'SELL'
             order = MarketOrder(action, quantity)
-            
+
             # Place order
             trade = self.ib.placeOrder(contract, order)
-            
+
             # Wait for order to fill (max 10 seconds)
             for _ in range(100):
                 await asyncio.sleep(0.1)
-                
+
                 if trade.orderStatus.status == 'Filled':
                     fill_price = trade.orderStatus.avgFillPrice
+                    commission = ApexConfig.COMMISSION_PER_TRADE
+
+                    # Record execution metrics (slippage + commission)
+                    self.record_execution_metrics(
+                        symbol=symbol,
+                        expected_price=expected_price,
+                        fill_price=fill_price,
+                        commission=commission
+                    )
+
                     logger.info(f"✅ {action} {quantity} {symbol} @ ${fill_price:.2f}")
-                    
+
                     return {
                         'symbol': symbol,
                         'side': side,
                         'quantity': quantity,
                         'price': fill_price,
+                        'expected_price': expected_price,
+                        'slippage_bps': ((fill_price - expected_price) / expected_price * 10000) if expected_price > 0 else 0,
+                        'commission': commission,
                         'status': 'FILLED'
                     }
-                
+
                 elif trade.orderStatus.status in ['Cancelled', 'ApiCancelled', 'Inactive']:
                     logger.error(f"❌ Order {action} {quantity} {symbol} cancelled")
                     return None
-            
-            # Timeout
+
+            # Timeout - cancel the order using the trade object
             if trade.orderStatus.status != 'Filled':
                 logger.warning(f"⚠️  Order timeout for {symbol}")
-                self.ib.cancelOrder(order)
+                try:
+                    self.ib.cancelOrder(trade.order)
+                except Exception as cancel_err:
+                    logger.debug(f"Error cancelling order: {cancel_err}")
                 return None
-            
+
+            fill_price = trade.orderStatus.avgFillPrice
+            commission = ApexConfig.COMMISSION_PER_TRADE
+
+            self.record_execution_metrics(symbol, expected_price, fill_price, commission)
+
             return {
                 'symbol': symbol,
                 'side': side,
                 'quantity': quantity,
-                'price': trade.orderStatus.avgFillPrice,
+                'price': fill_price,
+                'expected_price': expected_price,
+                'slippage_bps': ((fill_price - expected_price) / expected_price * 10000) if expected_price > 0 else 0,
+                'commission': commission,
                 'status': 'FILLED'
             }
             
