@@ -1,17 +1,10 @@
 """
-config.py - APEX Trading System Configuration (FIXED VERSION)
+config.py - APEX Trading System Configuration
 PRODUCTION SETTINGS - Conservative and Safe
-
-Fixes applied:
-✅ Added pytz for timezone handling
-✅ Added state persistence configuration
-✅ Added sync error tracking
-✅ Better documentation
 """
 
 import os
 from pathlib import Path
-import pytz
 
 
 class ApexConfig:
@@ -19,7 +12,7 @@ class ApexConfig:
     
     # System Info
     SYSTEM_NAME = "APEX Trading System"
-    VERSION = "2.1.0-PRODUCTION-FIXED"
+    VERSION = "2.0.0-PRODUCTION"
     
     # ═══════════════════════════════════════════════════════════════
     # TRADING MODE
@@ -39,7 +32,7 @@ class ApexConfig:
     INITIAL_CAPITAL = 1_100_000  # $1.1M starting capital
     POSITION_SIZE_USD = 5_000  # $5K per position (0.45% of capital)
     MAX_POSITIONS = 15  # Maximum concurrent positions
-    MAX_SHARES_PER_POSITION = 200  # Cap max shares per position
+    MAX_SHARES_PER_POSITION = 200  # ✅ NEW: Cap max shares per position
     
     # ═══════════════════════════════════════════════════════════════
     # RISK LIMITS
@@ -47,24 +40,40 @@ class ApexConfig:
     MAX_DAILY_LOSS = 0.02  # 2% max daily loss
     MAX_DRAWDOWN = 0.10  # 10% max drawdown
     MAX_SECTOR_EXPOSURE = 0.40  # 40% max per sector
+
+    # ═══════════════════════════════════════════════════════════════
+    # CIRCUIT BREAKER (Automatic Trading Halt)
+    # ═══════════════════════════════════════════════════════════════
+    CIRCUIT_BREAKER_ENABLED = True  # Enable automatic trading halt
+    CIRCUIT_BREAKER_DAILY_LOSS = 0.02  # Halt if daily loss exceeds 2%
+    CIRCUIT_BREAKER_DRAWDOWN = 0.08  # Halt if drawdown exceeds 8%
+    CIRCUIT_BREAKER_CONSECUTIVE_LOSSES = 5  # Halt after 5 consecutive losing trades
+    CIRCUIT_BREAKER_COOLDOWN_HOURS = 24  # Hours before trading resumes after halt
+
+    # ═══════════════════════════════════════════════════════════════
+    # PORTFOLIO REBALANCING
+    # ═══════════════════════════════════════════════════════════════
+    REBALANCE_ENABLED = True  # Enable automatic rebalancing
+    REBALANCE_DRIFT_THRESHOLD = 0.10  # Rebalance when position drifts >10% from target
+    REBALANCE_MIN_INTERVAL_HOURS = 24  # Minimum hours between rebalances
+    REBALANCE_AT_MARKET_CLOSE = True  # Prefer rebalancing near market close (3:30 PM EST)
+
+    # ═══════════════════════════════════════════════════════════════
+    # NETWORK RESILIENCE
+    # ═══════════════════════════════════════════════════════════════
+    IBKR_MAX_RETRIES = 5  # Maximum retry attempts for IBKR operations
+    IBKR_RETRY_BASE_DELAY = 2.0  # Base delay in seconds (exponential backoff)
+    IBKR_RETRY_MAX_DELAY = 60.0  # Maximum delay between retries
+    IBKR_CONNECTION_TIMEOUT = 30  # Connection timeout in seconds
     
     # ═══════════════════════════════════════════════════════════════
     # SIGNAL THRESHOLDS
     # ═══════════════════════════════════════════════════════════════
-    MIN_SIGNAL_THRESHOLD = 0.45  # Minimum signal strength (0-1)
+    MIN_SIGNAL_THRESHOLD = 0.45  # Minimum signal strength (0-1) - Higher = fewer trades
     MIN_CONFIDENCE = 0.30  # Minimum confidence for trade execution
     
     # ═══════════════════════════════════════════════════════════════
-    # TIMEZONE CONFIGURATION (✅ FIXED)
-    # ═══════════════════════════════════════════════════════════════
-    # Timezone objects (handles DST automatically)
-    UTC_TZ = pytz.UTC
-    EST_TZ = pytz.timezone('US/Eastern')  # Handles DST automatically
-    LOCAL_TZ = pytz.timezone('Europe/Brussels')  # User location
-    
-    # ═══════════════════════════════════════════════════════════════
-    # TRADING HOURS (EST - US/Eastern)
-    # Note: These are converted automatically to account for DST
+    # TRADING HOURS (EST)
     # ═══════════════════════════════════════════════════════════════
     TRADING_HOURS_START = 9.5  # 9:30 AM EST (market open)
     TRADING_HOURS_END = 16.0   # 4:00 PM EST (market close)
@@ -73,34 +82,13 @@ class ApexConfig:
     # TIMING & EXECUTION
     # ═══════════════════════════════════════════════════════════════
     CHECK_INTERVAL_SECONDS = 60  # Check symbols every 60 seconds
-    TRADE_COOLDOWN_SECONDS = 300  # 5 minutes between trades per symbol
-    
-    # ═══════════════════════════════════════════════════════════════
-    # CONCURRENCY & RELIABILITY (✅ FIXED)
-    # ═══════════════════════════════════════════════════════════════
-    # Async lock timeout to prevent deadlocks
-    LOCK_TIMEOUT_SECONDS = 30
-    
-    # Position sync retry configuration
-    SYNC_MAX_RETRIES = 3
-    SYNC_RETRY_BACKOFF_MULTIPLIER = 2.0  # Exponential backoff
-    
-    # State persistence
-    STATE_SAVE_INTERVAL = 300  # Save state every 5 minutes
-    STATE_FILE = "data/system_state.json"
+    TRADE_COOLDOWN_SECONDS = 300  # ✅ NEW: 5 minutes between trades per symbol
     
     # ═══════════════════════════════════════════════════════════════
     # TRANSACTION COSTS
     # ═══════════════════════════════════════════════════════════════
-    COMMISSION_PER_TRADE = 1.00  # $1 per trade (IBKR Pro)
+    COMMISSION_PER_TRADE = 1.00  # ✅ NEW: $1 per trade (IBKR Pro)
     SLIPPAGE_BPS = 5  # 5 basis points slippage (0.05%)
-    
-    # ═══════════════════════════════════════════════════════════════
-    # EMERGENCY & SAFETY
-    # ═══════════════════════════════════════════════════════════════
-    # Emergency shutdown timeouts
-    PENDING_ORDER_TIMEOUT = 30  # Wait for pending orders
-    POSITION_CLOSE_TIMEOUT = 120  # Wait for all positions to close
     
     # ═══════════════════════════════════════════════════════════════
     # LOGGING
@@ -112,42 +100,43 @@ class ApexConfig:
     # UNIVERSE SELECTION
     # ═══════════════════════════════════════════════════════════════
     UNIVERSE_MODE = "SP500"  # Options: "SP500", "NASDAQ100", "CUSTOM"
-
-    RUN_STRESS_TESTS = False  
     
-    # S&P 500 Top Liquid Stocks
+    # S&P 500 Top Liquid Stocks (deduplicated)
     SYMBOLS = [
         # Technology
         "AAPL", "MSFT", "NVDA", "GOOGL", "META", "TSLA", "AVGO", "ORCL", "CSCO", "ADBE",
         "CRM", "ACN", "AMD", "INTC", "IBM", "QCOM", "TXN", "AMAT", "MU", "LRCX",
-        
+
         # Financials
         "JPM", "BAC", "WFC", "GS", "MS", "C", "BLK", "AXP", "SCHW", "USB",
-        
+
         # Healthcare
         "UNH", "JNJ", "LLY", "ABBV", "MRK", "TMO", "ABT", "DHR", "PFE", "BMY",
-        
+
         # Consumer
         "AMZN", "WMT", "HD", "MCD", "NKE", "SBUX", "LOW", "TGT", "DG", "DLTR",
-        
+
         # Industrials
         "BA", "CAT", "GE", "HON", "UPS", "RTX", "LMT", "DE", "MMM", "UNP",
-        
+
         # Energy
         "XOM", "CVX", "COP", "SLB", "EOG", "MPC", "PSX", "VLO", "OXY", "HAL",
-        
+
         # Materials
         "LIN", "APD", "ECL", "SHW", "FCX", "NEM", "DOW", "DD", "ALB", "CE",
-        
-        # Communication
+
+        # Communication (removed duplicate GOOGL, META)
         "NFLX", "DIS", "CMCSA", "T", "TMUS", "VZ", "CHTR", "EA",
-        
+
         # Real Estate & Utilities
         "AMT", "PLD", "CCI", "EQIX", "PSA", "NEE", "DUK", "SO", "D", "AEP",
-        
-        # ETFs & Commodities
+
+        # ETFs & Commodities (removed duplicate CRM, AMAT)
         "SPY", "QQQ", "IWM", "GLD", "SLV", "USO", "UNG", "PALL"
     ]
+
+    # Commodity symbols for special handling
+    COMMODITY_SYMBOLS = {'GLD', 'SLV', 'USO', 'UNG', 'PALL'}
     
     # Sector Mappings (for exposure tracking)
     SECTOR_MAP = {
@@ -217,7 +206,33 @@ class ApexConfig:
     def get_sector(cls, symbol: str) -> str:
         """Get sector for a symbol."""
         return cls.SECTOR_MAP.get(symbol, "Unknown")
-    
+
+    @classmethod
+    def is_commodity(cls, symbol: str) -> bool:
+        """
+        Check if symbol is a commodity.
+
+        Args:
+            symbol: Stock ticker symbol
+
+        Returns:
+            True if symbol is a commodity, False otherwise
+        """
+        return symbol in cls.COMMODITY_SYMBOLS or cls.SECTOR_MAP.get(symbol) == "Commodities"
+
+    @classmethod
+    def is_etf(cls, symbol: str) -> bool:
+        """
+        Check if symbol is an ETF.
+
+        Args:
+            symbol: Stock ticker symbol
+
+        Returns:
+            True if symbol is an ETF, False otherwise
+        """
+        return cls.SECTOR_MAP.get(symbol) == "ETF"
+
     # ═══════════════════════════════════════════════════════════════
     # PATHS
     # ═══════════════════════════════════════════════════════════════
@@ -250,14 +265,6 @@ def validate_config():
     
     if ApexConfig.TRADE_COOLDOWN_SECONDS < 60:
         errors.append(f"⚠️  Cooldown too short ({ApexConfig.TRADE_COOLDOWN_SECONDS}s) - Risk of overtrading")
-    
-    # ✅ NEW: Validate timezone config
-    try:
-        assert ApexConfig.UTC_TZ is not None
-        assert ApexConfig.EST_TZ is not None
-        assert ApexConfig.LOCAL_TZ is not None
-    except (AssertionError, AttributeError):
-        errors.append("❌ Timezone configuration invalid")
     
     if errors:
         print("\n".join(errors))

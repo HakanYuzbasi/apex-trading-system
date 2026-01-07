@@ -75,21 +75,16 @@ class ApexBacktester:
         """Generate signal for a specific date."""
         if date_idx < 20 or len(data) < 20:
             return 0.0
-        
+
         try:
-            # Get prices up to this date
+            # Get prices up to this date (not including future data)
             prices = data['Close'].iloc[:date_idx+1]
-            
-            # Generate signal
-            signal_data = self.signal_generator.generate_ml_signal(symbol)
-            
-            # Use historical data for better signals
-            momentum = self.signal_generator.generate_momentum_signal(prices)
-            mean_rev = self.signal_generator.generate_mean_reversion_signal(prices)
-            signal = 0.7 * momentum + 0.3 * mean_rev
-            
-            return float(np.clip(signal, -1, 1))
-        except:
+
+            # Use the signal generator with actual price data
+            signal_data = self.signal_generator.generate_ml_signal(symbol, prices)
+
+            return float(np.clip(signal_data['signal'], -1, 1))
+        except Exception as e:
             return 0.0
     
     def run_backtest(self, start_date: str, end_date: str):
@@ -233,6 +228,41 @@ class ApexBacktester:
         print()
         self.print_summary()
     
+    def _calculate_win_rate(self) -> float:
+        """
+        Calculate win rate based on completed round-trip trades.
+
+        Returns:
+            Win rate as percentage (0-100)
+        """
+        # Match buys with sells to calculate round-trip P&L
+        positions = {}  # symbol -> list of (qty, price)
+        completed_trades = []
+
+        for trade in self.trades:
+            symbol = trade['symbol']
+            side = trade['side']
+            qty = trade['qty']
+            price = trade['price']
+
+            if side == 'BUY':
+                if symbol not in positions:
+                    positions[symbol] = []
+                positions[symbol].append({'qty': qty, 'price': price})
+
+            elif side == 'SELL':
+                if symbol in positions and len(positions[symbol]) > 0:
+                    # FIFO matching
+                    entry = positions[symbol].pop(0)
+                    pnl = (price - entry['price']) * qty
+                    completed_trades.append({'symbol': symbol, 'pnl': pnl})
+
+        if not completed_trades:
+            return 0.0
+
+        winners = sum(1 for t in completed_trades if t['pnl'] > 0)
+        return (winners / len(completed_trades)) * 100
+
     def print_summary(self):
         """Print backtest summary."""
         if not self.equity_curve:
@@ -266,9 +296,8 @@ class ApexBacktester:
         drawdown = (equity_array - running_max) / running_max
         max_drawdown = np.min(drawdown) if len(drawdown) > 0 else 0.0
         
-        # Win rate
-        win_trades = len([t for t in self.trades if t['side'] == 'SELL'])
-        win_rate = (win_trades / max(1, len([t for t in self.trades if t['side'] == 'BUY']))) * 100
+        # Win rate - calculate based on actual P&L of completed trades
+        win_rate = self._calculate_win_rate()
         
         print("="*70)
         print("PERFORMANCE SUMMARY")
