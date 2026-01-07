@@ -298,17 +298,23 @@ class ApexTradingSystem:
         return True
     
     async def process_symbol(self, symbol: str):
-        """✅ FULLY FIXED: Process symbol with all protections."""
-        
-        # ✅ Check 1: Cooldown protection
+        """Process symbol with all protections including circuit breaker."""
+
+        # Check 0: Circuit breaker check
+        can_trade, reason = self.risk_manager.can_trade()
+        if not can_trade:
+            logger.debug(f"🛑 {symbol}: Trading halted - {reason}")
+            return
+
+        # Check 1: Cooldown protection
         last_trade = self.last_trade_time.get(symbol, datetime(2000, 1, 1))
         seconds_since = (datetime.now() - last_trade).total_seconds()
-        
+
         if seconds_since < ApexConfig.TRADE_COOLDOWN_SECONDS:
             logger.debug(f"⏸️  {symbol}: Cooldown ({int(ApexConfig.TRADE_COOLDOWN_SECONDS - seconds_since)}s left)")
             return
-        
-        # ✅ Check 2: Skip if order pending
+
+        # Check 2: Skip if order pending
         if symbol in self.pending_orders:
             logger.debug(f"⏳ {symbol}: Order pending")
             return
@@ -447,11 +453,14 @@ class ApexTradingSystem:
                                 del self.position_peak_prices[symbol]
                             
                             logger.info(f"   ✅ Position closed (commission: ${commission:.2f})")
-                            
+
                             self.live_monitor.log_trade(symbol, order_side, abs(current_pos), price, pnl - commission)
                             self.performance_tracker.record_trade(symbol, order_side, abs(current_pos), price, commission)
-                            
-                            # ✅ Update cooldown
+
+                            # Record trade result for circuit breaker
+                            self.risk_manager.record_trade_result(pnl - commission)
+
+                            # Update cooldown
                             self.last_trade_time[symbol] = datetime.now()
                             
                             self.pending_orders.discard(symbol)
@@ -471,6 +480,10 @@ class ApexTradingSystem:
 
                         self.live_monitor.log_trade(symbol, order_side, abs(current_pos), price, pnl)
                         self.performance_tracker.record_trade(symbol, order_side, abs(current_pos), price, 0)
+
+                        # Record trade result for circuit breaker
+                        self.risk_manager.record_trade_result(pnl)
+
                         self.last_trade_time[symbol] = datetime.now()
                     
                     return
@@ -566,9 +579,113 @@ class ApexTradingSystem:
             logger.debug(traceback.format_exc())
     
     async def process_symbols_parallel(self, symbols: List[str]):
-        """✅ Process multiple symbols in parallel for speed."""
+        """Process multiple symbols in parallel for speed."""
         tasks = [self.process_symbol(symbol) for symbol in symbols]
         await asyncio.gather(*tasks, return_exceptions=True)
+
+    async def check_and_execute_rebalance(self, est_hour: float):
+        """
+        Check if rebalancing is needed and execute if conditions are met.
+
+        Args:
+            est_hour: Current hour in EST
+        """
+        if not ApexConfig.REBALANCE_ENABLED:
+            return
+
+        # Check if it's a good time to rebalance
+        if not self.portfolio_optimizer.should_rebalance_now(est_hour):
+            return
+
+        # Check circuit breaker
+        can_trade, reason = self.risk_manager.can_trade()
+        if not can_trade:
+            logger.debug(f"🛑 Rebalancing skipped - {reason}")
+            return
+
+        try:
+            # Get current portfolio value
+            if self.ibkr:
+                total_value = await self.ibkr.get_portfolio_value()
+            else:
+                total_value = self.capital
+                for symbol, qty in self.positions.items():
+                    price = self.price_cache.get(symbol, 0)
+                    if price and qty:
+                        total_value += abs(qty) * price
+
+            # Check if rebalancing is needed
+            needs_rebal, reason = self.portfolio_optimizer.needs_rebalance(
+                self.positions,
+                self.price_cache
+            )
+
+            if not needs_rebal:
+                logger.debug(f"📊 Rebalance check: {reason}")
+                return
+
+            logger.info(f"📊 Rebalancing triggered: {reason}")
+
+            # Calculate current weights before rebalance
+            before_weights = self.portfolio_optimizer.calculate_current_weights(
+                self.positions, self.price_cache
+            )
+
+            # Calculate rebalance trades
+            trades = self.portfolio_optimizer.calculate_rebalance_trades(
+                self.positions,
+                self.price_cache,
+                total_value
+            )
+
+            if not trades:
+                logger.info("📊 No rebalancing trades needed")
+                return
+
+            logger.info(f"📊 Executing {len(trades)} rebalance trades...")
+
+            # Execute trades
+            for symbol, trade_qty in trades.items():
+                if trade_qty == 0:
+                    continue
+
+                side = 'BUY' if trade_qty > 0 else 'SELL'
+                qty = abs(trade_qty)
+
+                logger.info(f"   {side} {qty} {symbol}")
+
+                if self.ibkr:
+                    result = await self.ibkr.execute_order(
+                        symbol, side, qty,
+                        confidence=0.7,
+                        force_market=True  # Use market orders for rebalancing
+                    )
+
+                    if result and result.get('status') == 'FILLED':
+                        self.total_commissions += ApexConfig.COMMISSION_PER_TRADE
+                else:
+                    # Simulation mode
+                    price = self.price_cache.get(symbol, 0)
+                    if price > 0:
+                        if trade_qty > 0:
+                            self.positions[symbol] = self.positions.get(symbol, 0) + qty
+                        else:
+                            self.positions[symbol] = self.positions.get(symbol, 0) - qty
+
+            # Calculate weights after rebalance
+            after_weights = self.portfolio_optimizer.calculate_current_weights(
+                self.positions, self.price_cache
+            )
+
+            # Record rebalance
+            self.portfolio_optimizer.record_rebalance(trades, before_weights, after_weights)
+
+            logger.info("✅ Rebalancing complete")
+
+        except Exception as e:
+            logger.error(f"❌ Rebalancing error: {e}")
+            import traceback
+            logger.debug(traceback.format_exc())
     
     async def check_risk(self):
         """Check risk limits and update metrics."""
@@ -959,8 +1076,16 @@ class ApexTradingSystem:
                         logger.info(f"⏰ Cycle #{cycle}: {now.strftime('%Y-%m-%d %H:%M:%S')} (EST: {est_hour:.1f}h)")
                         logger.info("─" * 80)
 
-                        # Process symbols in parallel
-                        await self.process_symbols_parallel(ApexConfig.SYMBOLS)
+                        # Check circuit breaker status
+                        can_trade, cb_reason = self.risk_manager.can_trade()
+                        if not can_trade:
+                            logger.warning(f"🛑 Trading halted: {cb_reason}")
+                        else:
+                            # Process symbols in parallel
+                            await self.process_symbols_parallel(ApexConfig.SYMBOLS)
+
+                            # Check for rebalancing (near market close)
+                            await self.check_and_execute_rebalance(est_hour)
 
                         # Sync positions after processing (captures any trades)
                         if self.ibkr:

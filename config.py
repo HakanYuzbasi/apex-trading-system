@@ -39,7 +39,32 @@ class ApexConfig:
     # ═══════════════════════════════════════════════════════════════
     MAX_DAILY_LOSS = 0.02  # 2% max daily loss
     MAX_DRAWDOWN = 0.10  # 10% max drawdown
-    MAX_SECTOR_EXPOSURE = 0.40  # ✅ NEW: 40% max per sector
+    MAX_SECTOR_EXPOSURE = 0.40  # 40% max per sector
+
+    # ═══════════════════════════════════════════════════════════════
+    # CIRCUIT BREAKER (Automatic Trading Halt)
+    # ═══════════════════════════════════════════════════════════════
+    CIRCUIT_BREAKER_ENABLED = True  # Enable automatic trading halt
+    CIRCUIT_BREAKER_DAILY_LOSS = 0.02  # Halt if daily loss exceeds 2%
+    CIRCUIT_BREAKER_DRAWDOWN = 0.08  # Halt if drawdown exceeds 8%
+    CIRCUIT_BREAKER_CONSECUTIVE_LOSSES = 5  # Halt after 5 consecutive losing trades
+    CIRCUIT_BREAKER_COOLDOWN_HOURS = 24  # Hours before trading resumes after halt
+
+    # ═══════════════════════════════════════════════════════════════
+    # PORTFOLIO REBALANCING
+    # ═══════════════════════════════════════════════════════════════
+    REBALANCE_ENABLED = True  # Enable automatic rebalancing
+    REBALANCE_DRIFT_THRESHOLD = 0.10  # Rebalance when position drifts >10% from target
+    REBALANCE_MIN_INTERVAL_HOURS = 24  # Minimum hours between rebalances
+    REBALANCE_AT_MARKET_CLOSE = True  # Prefer rebalancing near market close (3:30 PM EST)
+
+    # ═══════════════════════════════════════════════════════════════
+    # NETWORK RESILIENCE
+    # ═══════════════════════════════════════════════════════════════
+    IBKR_MAX_RETRIES = 5  # Maximum retry attempts for IBKR operations
+    IBKR_RETRY_BASE_DELAY = 2.0  # Base delay in seconds (exponential backoff)
+    IBKR_RETRY_MAX_DELAY = 60.0  # Maximum delay between retries
+    IBKR_CONNECTION_TIMEOUT = 30  # Connection timeout in seconds
     
     # ═══════════════════════════════════════════════════════════════
     # SIGNAL THRESHOLDS
