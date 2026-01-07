@@ -43,7 +43,7 @@ def check_signals():
     print(f"\nTraining models on {len(historical_data)} symbols...")
     signal_gen.train_models(historical_data)
 
-    if not signal_gen.is_trained:
+    if not signal_gen.models_trained:
         print("Model training failed!")
         return
 
@@ -56,7 +56,9 @@ def check_signals():
     all_signals = []
 
     for symbol, df in historical_data.items():
-        result = signal_gen.generate_ml_signal(symbol, df)
+        # This version expects a Series (Close prices)
+        prices = df['Close']
+        result = signal_gen.generate_ml_signal(symbol, prices)
         signal = result['signal']
         confidence = result['confidence']
 
