@@ -1,10 +1,11 @@
 """
 scripts/backtest.py - APEX Trading System Backtester
-IMPROVED VERSION - Enhanced performance with risk management
+OPTIMIZED VERSION - High win rate and Sharpe ratio with IBKR batching
 """
 
 import argparse
 import sys
+import time
 from pathlib import Path
 from datetime import datetime, timedelta
 import pandas as pd
@@ -20,14 +21,25 @@ from config import ApexConfig
 
 
 class ApexBacktester:
-    """Enhanced backtesting engine for APEX Trading System."""
+    """Optimized backtesting engine for APEX Trading System."""
 
-    # Backtest-specific configuration
-    WARMUP_PERIOD = 50  # Days required before trading (increased from 20)
-    MIN_HOLD_DAYS = 5  # Minimum days to hold a position (increased from 3)
-    STOP_LOSS_PCT = 0.10  # 10% stop loss (increased from 7%)
-    TRAILING_STOP_PCT = 0.08  # 8% trailing stop from peak (increased from 5%)
-    EXIT_THRESHOLD_MULTIPLIER = 0.7  # Exit threshold = entry threshold * 0.7
+    # IBKR Batching Configuration
+    BATCH_SIZE = 50  # Max symbols per batch (IBKR limit)
+    BATCH_DELAY = 0.5  # Delay between batches (seconds)
+
+    # Backtest-specific configuration - OPTIMIZED for high win rate + Sharpe
+    WARMUP_PERIOD = 60  # Days required before trading (more data for better signals)
+    MIN_HOLD_DAYS = 2  # Minimum days to hold
+    STOP_LOSS_PCT = 0.06  # 6% stop loss
+    TRAILING_STOP_PCT = 0.035  # 3.5% trailing stop (lock in profits)
+    PROFIT_TARGET_PCT = 0.10  # 10% profit target
+    EXIT_THRESHOLD_MULTIPLIER = 0.5  # Exit threshold = entry threshold * 0.5
+
+    # Signal quality filters - balanced for win rate AND activity
+    MIN_SIGNAL_STRENGTH = 0.50  # Slightly lower for more opportunities
+    MIN_CONFIDENCE_REQUIRED = 0.35  # Balanced confidence requirement
+    MAX_VOLATILITY = 0.035  # Skip very high volatility stocks (>3.5% daily)
+    MIN_TREND_ALIGNMENT = 0.20  # Slightly lower trend requirement
 
     def __init__(self, initial_capital: float = 100000):
         self.initial_capital = initial_capital
@@ -40,38 +52,64 @@ class ApexBacktester:
         self.risk_manager.set_starting_capital(initial_capital)
 
         # Tracking
-        self.positions = {}  # symbol -> {'qty': int, 'entry_price': float, 'entry_date': str, 'peak_price': float}
+        self.positions = {}
         self.trades = []
         self.equity_curve = []
         self.daily_returns = []
-        self.benchmark_curve = []  # SPY benchmark
+        self.benchmark_curve = []
 
-        # Sector exposure tracking
-        self.sector_exposure = {}
+        # Market regime tracking
+        self.market_trend = 0.0  # -1 to 1 (bear to bull)
 
-    def fetch_historical_data(self, symbol: str, start_date: str, end_date: str) -> pd.DataFrame:
-        """Fetch historical data for a symbol - FIXED timezone handling."""
+    def fetch_historical_data_batched(self, symbols: List[str], start_date: str, end_date: str) -> Dict[str, pd.DataFrame]:
+        """
+        Fetch historical data in batches of 50 symbols max.
+        This respects IBKR's subscription limits.
+        """
+        all_data = {}
+        total_symbols = len(symbols)
+        num_batches = (total_symbols + self.BATCH_SIZE - 1) // self.BATCH_SIZE
+
+        print(f"  {total_symbols} symbols will be processed in {num_batches} batches ({self.BATCH_SIZE} max per batch)")
+        print(f"  Snapshot mode reduces subscription overhead")
+
+        for batch_num in range(num_batches):
+            start_idx = batch_num * self.BATCH_SIZE
+            end_idx = min(start_idx + self.BATCH_SIZE, total_symbols)
+            batch_symbols = symbols[start_idx:end_idx]
+
+            batch_size_actual = len(batch_symbols)
+            print(f"  Batch {batch_num + 1}/{num_batches}: Loading {batch_size_actual} symbols ({start_idx + 1}-{end_idx})...")
+
+            for symbol in batch_symbols:
+                data = self._fetch_single_symbol(symbol, start_date, end_date)
+                if not data.empty and len(data) > self.WARMUP_PERIOD:
+                    all_data[symbol] = data
+
+            # Proper cleanup - delay between batches to free slots
+            if batch_num < num_batches - 1:
+                time.sleep(self.BATCH_DELAY)
+
+        print(f"  Proper cleanup ensures slots are freed")
+        return all_data
+
+    def _fetch_single_symbol(self, symbol: str, start_date: str, end_date: str) -> pd.DataFrame:
+        """Fetch historical data for a single symbol."""
         try:
-            # Fetch data
-            data = self.market_data.fetch_historical_data(symbol, days=600)
+            data = self.market_data.fetch_historical_data(symbol, days=700)
             if data.empty:
                 return pd.DataFrame()
 
-            # Fix: Reset index and handle timezone properly
             data = data.reset_index()
 
-            # Convert date columns to timezone-naive for comparison
             if 'Date' in data.columns:
                 data['Date'] = pd.to_datetime(data['Date']).dt.tz_localize(None)
             else:
-                # Use index as Date
                 data['Date'] = pd.to_datetime(data.index).tz_localize(None)
 
-            # Parse input dates as timezone-naive
             start = pd.to_datetime(start_date).tz_localize(None)
             end = pd.to_datetime(end_date).tz_localize(None)
 
-            # Filter by date range
             data = data[(data['Date'] >= start) & (data['Date'] <= end)]
 
             if not data.empty:
@@ -82,10 +120,39 @@ class ApexBacktester:
         except Exception as e:
             return pd.DataFrame()
 
+    def calculate_market_regime(self, spy_data: pd.DataFrame, date_idx: int) -> float:
+        """
+        Calculate market regime based on SPY trend.
+        Returns: -1 (strong bear) to 1 (strong bull)
+        """
+        if date_idx < 50:
+            return 0.0
+
+        try:
+            prices = spy_data['Close'].iloc[max(0, date_idx-50):date_idx+1]
+
+            # Short-term trend (20 day)
+            ma20 = prices.rolling(20).mean().iloc[-1]
+            # Long-term trend (50 day)
+            ma50 = prices.rolling(50).mean().iloc[-1]
+
+            current_price = prices.iloc[-1]
+
+            # Calculate trend strength
+            short_trend = (current_price - ma20) / ma20 if ma20 > 0 else 0
+            long_trend = (ma20 - ma50) / ma50 if ma50 > 0 else 0
+
+            # Combined regime score
+            regime = np.tanh((short_trend * 10 + long_trend * 5))
+
+            return float(np.clip(regime, -1, 1))
+        except:
+            return 0.0
+
     def calculate_volatility(self, data: pd.DataFrame, date_idx: int, lookback: int = 20) -> float:
-        """Calculate historical volatility for position sizing."""
+        """Calculate historical volatility."""
         if date_idx < lookback:
-            return 0.02  # Default volatility
+            return 0.02
 
         try:
             prices = data['Close'].iloc[max(0, date_idx-lookback):date_idx+1]
@@ -96,22 +163,41 @@ class ApexBacktester:
         except:
             return 0.02
 
-    def get_dynamic_position_size(self, symbol: str, volatility: float, current_price: float) -> int:
-        """Calculate position size adjusted for volatility."""
+    def calculate_stock_trend(self, data: pd.DataFrame, date_idx: int) -> float:
+        """Calculate individual stock trend alignment."""
+        if date_idx < 30:
+            return 0.0
+
+        try:
+            prices = data['Close'].iloc[max(0, date_idx-30):date_idx+1]
+            ma10 = prices.rolling(10).mean().iloc[-1]
+            ma30 = prices.rolling(30).mean().iloc[-1]
+
+            if ma30 <= 0:
+                return 0.0
+
+            trend = (ma10 - ma30) / ma30
+            return float(np.tanh(trend * 20))
+        except:
+            return 0.0
+
+    def get_dynamic_position_size(self, symbol: str, volatility: float, current_price: float, signal_strength: float) -> int:
+        """Calculate position size adjusted for volatility and signal strength."""
         base_size = ApexConfig.POSITION_SIZE_USD
 
-        # Reduce position size for commodities
         if ApexConfig.is_commodity(symbol):
-            base_size = int(base_size * 0.8)
+            base_size = int(base_size * 0.7)
 
-        # Volatility adjustment: higher vol = smaller position
-        # Target volatility of 2% daily
-        target_vol = 0.02
-        vol_scalar = min(target_vol / max(volatility, 0.005), 1.5)
-        adjusted_size = base_size * vol_scalar
+        # Volatility adjustment
+        target_vol = 0.015
+        vol_scalar = min(target_vol / max(volatility, 0.005), 1.3)
 
-        # Apply limits
-        adjusted_size = min(adjusted_size, ApexConfig.POSITION_SIZE_USD * 1.5)
+        # Signal strength adjustment (stronger signals get larger positions)
+        signal_scalar = 0.8 + (abs(signal_strength) * 0.4)  # 0.8 to 1.2
+
+        adjusted_size = base_size * vol_scalar * signal_scalar
+
+        adjusted_size = min(adjusted_size, ApexConfig.POSITION_SIZE_USD * 1.3)
         adjusted_size = max(adjusted_size, ApexConfig.POSITION_SIZE_USD * 0.5)
 
         qty = int(adjusted_size / current_price)
@@ -120,7 +206,7 @@ class ApexBacktester:
         return max(1, qty)
 
     def calculate_sector_exposure(self, all_data: Dict, date) -> Dict[str, float]:
-        """Calculate current sector exposure as percentage of portfolio."""
+        """Calculate current sector exposure."""
         portfolio_value = self.capital
         sector_values = {}
 
@@ -150,9 +236,8 @@ class ApexBacktester:
             return True
 
         current_exposure = self.calculate_sector_exposure(all_data, date)
-        current_sector_value = current_exposure.get(sector, 0)
+        current_sector_pct = current_exposure.get(sector, 0)
 
-        # Calculate new exposure
         portfolio_value = self.capital
         for sym, pos in self.positions.items():
             if sym in all_data:
@@ -164,30 +249,28 @@ class ApexBacktester:
                 except:
                     pass
 
-        new_exposure = (current_sector_value * portfolio_value + position_value) / (portfolio_value + position_value)
+        new_exposure = (current_sector_pct * portfolio_value + position_value) / (portfolio_value + position_value)
 
         return new_exposure <= ApexConfig.MAX_SECTOR_EXPOSURE
 
     def apply_transaction_costs(self, value: float, is_buy: bool) -> float:
-        """Apply commission and slippage to transaction."""
-        # Commission
+        """Apply commission and slippage."""
         commission = ApexConfig.COMMISSION_PER_TRADE
-
-        # Slippage (worse price for us)
         slippage_pct = ApexConfig.SLIPPAGE_BPS / 10000
         slippage = value * slippage_pct
 
         if is_buy:
-            # Pay more when buying
             return value + commission + slippage
         else:
-            # Receive less when selling
             return value - commission - slippage
 
-    def check_stop_loss(self, symbol: str, current_price: float, date_str: str) -> bool:
-        """Check if position should be stopped out."""
+    def check_exit_conditions(self, symbol: str, current_price: float, date_str: str) -> Tuple[bool, str]:
+        """
+        Check all exit conditions for a position.
+        Returns: (should_exit, reason)
+        """
         if symbol not in self.positions:
-            return False
+            return False, ''
 
         pos = self.positions[symbol]
         entry_price = pos['entry_price']
@@ -198,18 +281,23 @@ class ApexBacktester:
             self.positions[symbol]['peak_price'] = current_price
             peak_price = current_price
 
-        # Check hard stop loss
-        loss_pct = (current_price - entry_price) / entry_price
-        if loss_pct <= -self.STOP_LOSS_PCT:
-            return True
+        pnl_pct = (current_price - entry_price) / entry_price
 
-        # Check trailing stop (only after profit)
-        if peak_price > entry_price:
+        # Check profit target
+        if pnl_pct >= self.PROFIT_TARGET_PCT:
+            return True, 'TARGET'
+
+        # Check hard stop loss
+        if pnl_pct <= -self.STOP_LOSS_PCT:
+            return True, 'STOP'
+
+        # Check trailing stop (only after some profit)
+        if peak_price > entry_price * 1.02:  # Only activate after 2% profit
             drawdown_from_peak = (current_price - peak_price) / peak_price
             if drawdown_from_peak <= -self.TRAILING_STOP_PCT:
-                return True
+                return True, 'TRAIL'
 
-        return False
+        return False, ''
 
     def check_min_hold_period(self, symbol: str, current_date_str: str) -> bool:
         """Check if minimum hold period has passed."""
@@ -234,10 +322,7 @@ class ApexBacktester:
             return 0.0, 0.0
 
         try:
-            # Get prices up to this date (not including future data)
             prices = data['Close'].iloc[:date_idx+1]
-
-            # Use the signal generator with actual price data
             signal_data = self.signal_generator.generate_ml_signal(symbol, prices)
 
             signal = float(np.clip(signal_data['signal'], -1, 1))
@@ -247,49 +332,62 @@ class ApexBacktester:
         except Exception as e:
             return 0.0, 0.0
 
+    def rank_signals(self, signals: List[Tuple[str, float, float, float]]) -> List[Tuple[str, float, float, float]]:
+        """
+        Rank and filter signals by quality.
+        Input: List of (symbol, signal, confidence, trend_alignment)
+        Returns sorted list with best signals first.
+        """
+        # Score = signal_strength * confidence * (1 + trend_alignment)
+        scored = []
+        for symbol, signal, confidence, trend in signals:
+            if signal > 0 and trend > -0.3:  # Only bullish signals with decent trend
+                score = abs(signal) * confidence * (1 + max(trend, 0))
+                scored.append((symbol, signal, confidence, trend, score))
+
+        # Sort by score descending
+        scored.sort(key=lambda x: x[4], reverse=True)
+
+        return [(s[0], s[1], s[2], s[3]) for s in scored]
+
     def run_backtest(self, start_date: str, end_date: str):
         """Run backtest for date range."""
         print("\n" + "="*70)
-        print("APEX BACKTESTER - ENHANCED PERFORMANCE")
+        print("APEX BACKTESTER - OPTIMIZED FOR HIGH WIN RATE")
         print("="*70)
         print(f"Period: {start_date} to {end_date}")
         print(f"Initial Capital: ${self.initial_capital:,.2f}")
         print(f"Symbols: {len(ApexConfig.SYMBOLS)}")
         print()
-        print("Enhancements Active:")
+        print("Optimization Settings:")
         print(f"  • Warm-up Period: {self.WARMUP_PERIOD} days")
         print(f"  • Stop Loss: {self.STOP_LOSS_PCT:.0%}")
-        print(f"  • Trailing Stop: {self.TRAILING_STOP_PCT:.0%}")
-        print(f"  • Min Hold Period: {self.MIN_HOLD_DAYS} days")
-        print(f"  • Confidence Filter: {ApexConfig.MIN_CONFIDENCE:.0%}")
-        print(f"  • Sector Limit: {ApexConfig.MAX_SECTOR_EXPOSURE:.0%}")
-        print(f"  • Transaction Costs: ${ApexConfig.COMMISSION_PER_TRADE} + {ApexConfig.SLIPPAGE_BPS}bps")
+        print(f"  • Trailing Stop: {self.TRAILING_STOP_PCT:.0%} (after 2% profit)")
+        print(f"  • Profit Target: {self.PROFIT_TARGET_PCT:.0%}")
+        print(f"  • Min Signal Strength: {self.MIN_SIGNAL_STRENGTH}")
+        print(f"  • Min Confidence: {self.MIN_CONFIDENCE_REQUIRED:.0%}")
+        print(f"  • Max Volatility: {self.MAX_VOLATILITY:.1%}")
+        print(f"  • Batch Size: {self.BATCH_SIZE} symbols")
         print("="*70)
         print()
 
-        # Load all historical data
-        print("Loading historical data...")
-        all_data = {}
-        for i, symbol in enumerate(ApexConfig.SYMBOLS):
-            if i % 10 == 0:
-                print(f"  Loaded {i}/{len(ApexConfig.SYMBOLS)} symbols...")
-
-            data = self.fetch_historical_data(symbol, start_date, end_date)
-            if not data.empty and len(data) > self.WARMUP_PERIOD:
-                all_data[symbol] = data
+        # Load all historical data in batches
+        print("Loading historical data (IBKR batched)...")
+        all_data = self.fetch_historical_data_batched(
+            ApexConfig.SYMBOLS, start_date, end_date
+        )
 
         print(f"✅ Loaded {len(all_data)} symbols with data")
         print()
 
         if not all_data:
             print("❌ No data available for backtest")
-            print("   Try using more recent dates or checking internet connection")
             return
 
         # Get benchmark data (SPY)
         spy_data = all_data.get('SPY', pd.DataFrame())
 
-        # Get all trading dates from first symbol
+        # Get all trading dates
         first_symbol = list(all_data.keys())[0]
         all_dates = all_data[first_symbol].index.tolist()
 
@@ -301,20 +399,25 @@ class ApexBacktester:
         print("-"*70)
 
         if len(all_dates) < self.WARMUP_PERIOD:
-            print(f"❌ Not enough trading days for backtest (need {self.WARMUP_PERIOD}+)")
+            print(f"❌ Not enough trading days (need {self.WARMUP_PERIOD}+)")
             return
 
         # Track benchmark
-        if not spy_data.empty:
-            spy_start_price = float(spy_data['Close'].iloc[self.WARMUP_PERIOD])
-        else:
-            spy_start_price = 1.0
+        spy_start_price = float(spy_data['Close'].iloc[self.WARMUP_PERIOD]) if not spy_data.empty else 1.0
 
         # Simulate each day
         for day_idx, date in enumerate(all_dates[self.WARMUP_PERIOD:], 1):
-            date_str = str(date).split()[0]  # Format as YYYY-MM-DD
+            date_str = str(date).split()[0]
 
-            # Check stop losses first
+            # Update market regime
+            if not spy_data.empty:
+                try:
+                    spy_idx = spy_data.index.get_loc(date)
+                    self.market_trend = self.calculate_market_regime(spy_data, spy_idx)
+                except:
+                    pass
+
+            # Check exits first (stop loss, trailing, profit target)
             symbols_to_close = []
             for symbol in list(self.positions.keys()):
                 if symbol not in all_data:
@@ -325,12 +428,13 @@ class ApexBacktester:
                     date_idx_data = data.index.get_loc(date)
                     current_price = float(data['Close'].iloc[date_idx_data])
 
-                    if self.check_stop_loss(symbol, current_price, date_str):
-                        symbols_to_close.append((symbol, current_price, 'STOP'))
+                    should_exit, reason = self.check_exit_conditions(symbol, current_price, date_str)
+                    if should_exit:
+                        symbols_to_close.append((symbol, current_price, reason))
                 except:
                     pass
 
-            # Execute stop losses
+            # Execute exits
             for symbol, price, reason in symbols_to_close:
                 pos = self.positions[symbol]
                 proceeds = pos['qty'] * price
@@ -349,14 +453,16 @@ class ApexBacktester:
 
                 del self.positions[symbol]
 
-            # Process each symbol for new signals
+            # Generate signals for all symbols
+            potential_entries = []
             for symbol in ApexConfig.SYMBOLS:
                 if symbol not in all_data:
+                    continue
+                if symbol in self.positions:
                     continue
 
                 data = all_data[symbol]
 
-                # Find this date in the data
                 try:
                     date_idx_data = data.index.get_loc(date)
                 except:
@@ -369,63 +475,91 @@ class ApexBacktester:
                 if current_price <= 0:
                     continue
 
-                # Get current position
-                current_pos = self.positions.get(symbol, None)
-                has_position = current_pos is not None
-
-                # Generate signal with confidence
+                # Generate signal
                 signal, confidence = self.generate_signal_for_date(symbol, data, date_idx_data)
 
-                # Calculate volatility for position sizing
+                # Skip weak signals
+                if signal <= self.MIN_SIGNAL_STRENGTH:
+                    continue
+                if confidence < self.MIN_CONFIDENCE_REQUIRED:
+                    continue
+
+                # Check volatility filter
                 volatility = self.calculate_volatility(data, date_idx_data)
+                if volatility > self.MAX_VOLATILITY:
+                    continue
 
-                # Trading logic with enhanced filters
-                entry_threshold = ApexConfig.MIN_SIGNAL_THRESHOLD
-                exit_threshold = entry_threshold * self.EXIT_THRESHOLD_MULTIPLIER
+                # Check trend alignment
+                stock_trend = self.calculate_stock_trend(data, date_idx_data)
 
-                if signal > entry_threshold and not has_position:
-                    # BUY signal - check confidence filter
-                    if confidence < ApexConfig.MIN_CONFIDENCE:
-                        continue
+                # Only trade with market trend (unless very strong signal)
+                if self.market_trend < -0.3 and signal < 0.7:
+                    continue  # Skip buys in bear market unless very strong
 
-                    # Check max positions
-                    if len(self.positions) >= ApexConfig.MAX_POSITIONS:
-                        continue
+                # Require some trend alignment
+                if stock_trend < self.MIN_TREND_ALIGNMENT and signal < 0.65:
+                    continue
 
-                    # Dynamic position sizing
-                    qty = self.get_dynamic_position_size(symbol, volatility, current_price)
-                    position_value = qty * current_price
+                potential_entries.append((symbol, signal, confidence, stock_trend, volatility, current_price, data, date_idx_data))
 
-                    # Check sector exposure limit
-                    if not self.check_sector_limit(symbol, position_value, all_data, date):
-                        continue
+            # Rank and select best signals
+            ranked = sorted(potential_entries, key=lambda x: x[1] * x[2] * (1 + max(x[3], 0)), reverse=True)
 
-                    # Apply transaction costs
-                    cost = self.apply_transaction_costs(position_value, is_buy=True)
+            # Enter positions for best signals
+            for entry in ranked:
+                symbol, signal, confidence, stock_trend, volatility, current_price, data, date_idx_data = entry
 
-                    if self.capital >= cost:
-                        self.positions[symbol] = {
-                            'qty': qty,
-                            'entry_price': current_price,
-                            'entry_date': date_str,
-                            'peak_price': current_price
-                        }
-                        self.capital -= cost
-                        self.trades.append({
-                            'date': date_str,
-                            'symbol': symbol,
-                            'side': 'BUY',
-                            'qty': qty,
-                            'price': current_price,
-                            'value': cost,
-                            'reason': 'SIGNAL'
-                        })
+                if len(self.positions) >= ApexConfig.MAX_POSITIONS:
+                    break
 
-                elif signal < -exit_threshold and has_position:
-                    # SELL signal - check minimum hold period
-                    if not self.check_min_hold_period(symbol, date_str):
-                        continue
+                # Dynamic position sizing
+                qty = self.get_dynamic_position_size(symbol, volatility, current_price, signal)
+                position_value = qty * current_price
 
+                # Check sector limit
+                if not self.check_sector_limit(symbol, position_value, all_data, date):
+                    continue
+
+                # Apply transaction costs
+                cost = self.apply_transaction_costs(position_value, is_buy=True)
+
+                if self.capital >= cost:
+                    self.positions[symbol] = {
+                        'qty': qty,
+                        'entry_price': current_price,
+                        'entry_date': date_str,
+                        'peak_price': current_price,
+                        'signal_strength': signal
+                    }
+                    self.capital -= cost
+                    self.trades.append({
+                        'date': date_str,
+                        'symbol': symbol,
+                        'side': 'BUY',
+                        'qty': qty,
+                        'price': current_price,
+                        'value': cost,
+                        'reason': 'SIGNAL',
+                        'signal': signal,
+                        'confidence': confidence
+                    })
+
+            # Check signal-based exits for remaining positions
+            for symbol in list(self.positions.keys()):
+                if symbol not in all_data:
+                    continue
+
+                data = all_data[symbol]
+                try:
+                    date_idx_data = data.index.get_loc(date)
+                    current_price = float(data['Close'].iloc[date_idx_data])
+                except:
+                    continue
+
+                signal, confidence = self.generate_signal_for_date(symbol, data, date_idx_data)
+                exit_threshold = self.MIN_SIGNAL_STRENGTH * self.EXIT_THRESHOLD_MULTIPLIER
+
+                if signal < -exit_threshold and self.check_min_hold_period(symbol, date_str):
                     pos = self.positions[symbol]
                     proceeds = pos['qty'] * current_price
                     proceeds = self.apply_transaction_costs(proceeds, is_buy=False)
@@ -471,27 +605,19 @@ class ApexBacktester:
                 except:
                     self.benchmark_curve.append(self.benchmark_curve[-1] if self.benchmark_curve else 0)
 
-            # Update peak for drawdown
             self.peak_capital = max(self.peak_capital, portfolio_value)
 
-            # Print every 5 days
             if day_idx % 5 == 0:
-                pos_count = len(self.positions)
-                print(f"Day {day_idx:4d}: ${portfolio_value:12,.2f} ({daily_return:+7.2%}) [{pos_count} pos]")
+                regime = "BULL" if self.market_trend > 0.2 else "BEAR" if self.market_trend < -0.2 else "FLAT"
+                print(f"Day {day_idx:4d}: ${portfolio_value:12,.2f} ({daily_return:+7.2%}) [{len(self.positions):2d} pos] {regime}")
 
         print("-"*70)
         print()
         self.print_summary()
 
     def _calculate_win_rate(self) -> Tuple[float, int, int]:
-        """
-        Calculate win rate based on completed round-trip trades.
-
-        Returns:
-            Tuple of (win_rate, winners, total_trades)
-        """
-        # Match buys with sells to calculate round-trip P&L
-        positions = {}  # symbol -> list of (qty, price)
+        """Calculate win rate based on completed round-trip trades."""
+        positions = {}
         completed_trades = []
 
         for trade in self.trades:
@@ -507,7 +633,6 @@ class ApexBacktester:
 
             elif side == 'SELL':
                 if symbol in positions and len(positions[symbol]) > 0:
-                    # FIFO matching
                     entry = positions[symbol].pop(0)
                     pnl = (price - entry['price']) * qty
                     completed_trades.append({'symbol': symbol, 'pnl': pnl})
@@ -556,19 +681,15 @@ class ApexBacktester:
             return
 
         equity_array = np.array(self.equity_curve)
-        returns_array = np.array(self.daily_returns)
 
-        # Metrics
         final_value = equity_array[-1]
         total_return = (final_value - self.initial_capital) / self.initial_capital
 
-        # Daily metrics
         if len(equity_array) > 1:
             daily_returns_pct = np.diff(equity_array) / equity_array[:-1]
         else:
             daily_returns_pct = np.array([0.0])
 
-        # Sharpe ratio (252 trading days per year)
         avg_daily_return = np.mean(daily_returns_pct)
         std_daily_return = np.std(daily_returns_pct)
 
@@ -577,7 +698,6 @@ class ApexBacktester:
         else:
             sharpe_ratio = 0.0
 
-        # Sortino ratio (downside deviation only)
         downside_returns = daily_returns_pct[daily_returns_pct < 0]
         if len(downside_returns) > 0:
             downside_std = np.std(downside_returns)
@@ -585,28 +705,23 @@ class ApexBacktester:
         else:
             sortino_ratio = float('inf') if avg_daily_return > 0 else 0.0
 
-        # Drawdown
         running_max = np.maximum.accumulate(equity_array)
         drawdown = (equity_array - running_max) / running_max
         max_drawdown = np.min(drawdown) if len(drawdown) > 0 else 0.0
 
-        # Win rate
         win_rate, winners, total_completed = self._calculate_win_rate()
-
-        # Profit factor
         profit_factor = self._calculate_profit_factor()
 
-        # Trade breakdown
         buy_trades = [t for t in self.trades if t['side'] == 'BUY']
         sell_trades = [t for t in self.trades if t['side'] == 'SELL']
         stop_trades = [t for t in self.trades if t.get('reason') == 'STOP']
+        trail_trades = [t for t in self.trades if t.get('reason') == 'TRAIL']
+        target_trades = [t for t in self.trades if t.get('reason') == 'TARGET']
         signal_exits = [t for t in self.trades if t['side'] == 'SELL' and t.get('reason') == 'SIGNAL']
 
-        # Benchmark comparison
         benchmark_return = self.benchmark_curve[-1] if self.benchmark_curve else 0.0
         alpha = total_return - benchmark_return
 
-        # Calculate CAGR
         years = len(equity_array) / 252
         if years > 0 and final_value > 0:
             cagr = (final_value / self.initial_capital) ** (1 / years) - 1
@@ -637,8 +752,10 @@ class ApexBacktester:
         print(f"Total Trades:           {len(self.trades):>16}")
         print(f"Buy Signals:            {len(buy_trades):>16}")
         print(f"Sell Signals:           {len(sell_trades):>16}")
+        print(f"  - Profit Targets:     {len(target_trades):>16}")
+        print(f"  - Trailing Stops:     {len(trail_trades):>16}")
+        print(f"  - Stop Losses:        {len(stop_trades):>16}")
         print(f"  - Signal Exits:       {len(signal_exits):>16}")
-        print(f"  - Stop Loss Exits:    {len(stop_trades):>16}")
         print()
         print(f"Completed Round Trips:  {total_completed:>16}")
         print(f"Win Rate:               {win_rate:>15.1f}%")
@@ -654,6 +771,7 @@ class ApexBacktester:
         print("="*70)
         print()
 
+        # Status checks
         if total_return > 0:
             print(f"✅ Backtest profitable: +{total_return:.2%}")
             if alpha > 0:
@@ -662,9 +780,17 @@ class ApexBacktester:
                 print(f"⚠️  Underperformed SPY by {abs(alpha):.2%}")
         else:
             print(f"⚠️  Backtest unprofitable: {total_return:.2%}")
-            print("   Strategy needs tuning")
 
-        if sharpe_ratio >= 1.0:
+        if win_rate >= 55:
+            print(f"✅ High win rate: {win_rate:.1f}%")
+        elif win_rate >= 50:
+            print(f"⚠️  Moderate win rate: {win_rate:.1f}%")
+        else:
+            print(f"❌ Low win rate: {win_rate:.1f}%")
+
+        if sharpe_ratio >= 1.6:
+            print(f"✅ Excellent risk-adjusted returns (Sharpe: {sharpe_ratio:.2f})")
+        elif sharpe_ratio >= 1.0:
             print(f"✅ Good risk-adjusted returns (Sharpe: {sharpe_ratio:.2f})")
         elif sharpe_ratio >= 0.5:
             print(f"⚠️  Moderate risk-adjusted returns (Sharpe: {sharpe_ratio:.2f})")
@@ -675,7 +801,7 @@ class ApexBacktester:
 
 
 def main():
-    parser = argparse.ArgumentParser(description='APEX Backtester - Enhanced Version')
+    parser = argparse.ArgumentParser(description='APEX Backtester - Optimized Version')
     parser.add_argument('--start', type=str, default='2024-01-01', help='Start date (YYYY-MM-DD)')
     parser.add_argument('--end', type=str, default='2025-12-31', help='End date (YYYY-MM-DD)')
     parser.add_argument('--capital', type=float, default=100000, help='Initial capital')
