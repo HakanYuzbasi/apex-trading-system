@@ -102,6 +102,11 @@ class AdvancedSignalGenerator:
         if len(prices) < self.lookback:
             return np.array([])
 
+        # Ensure prices is a 1D Series (handle multi-index columns)
+        if isinstance(prices, pd.DataFrame):
+            prices = prices.iloc[:, 0]
+        prices = prices.squeeze()
+
         features = []
         self.feature_names = []
         returns = prices.pct_change().dropna()
@@ -222,7 +227,10 @@ class AdvancedSignalGenerator:
         gain = (delta.where(delta > 0, 0)).rolling(window=period).mean()
         loss = (-delta.where(delta < 0, 0)).rolling(window=period).mean()
 
-        rs = gain.iloc[-1] / loss.iloc[-1] if loss.iloc[-1] != 0 else 100
+        gain_val = float(gain.iloc[-1]) if not pd.isna(gain.iloc[-1]) else 0
+        loss_val = float(loss.iloc[-1]) if not pd.isna(loss.iloc[-1]) else 0
+
+        rs = gain_val / loss_val if loss_val != 0 else 100
         rsi = 100 - (100 / (1 + rs))
 
         return float(rsi)
@@ -250,11 +258,15 @@ class AdvancedSignalGenerator:
     def _calculate_bollinger_bands_full(self, prices: pd.Series, period: int = 20) -> Tuple[float, float, float]:
         """Calculate Bollinger Bands."""
         if len(prices) < period:
-            p = prices.iloc[-1]
+            p = float(prices.iloc[-1])
             return p, p, p
 
-        ma = prices.rolling(period).mean().iloc[-1]
-        std = prices.rolling(period).std().iloc[-1]
+        ma = float(prices.rolling(period).mean().iloc[-1])
+        std = float(prices.rolling(period).std().iloc[-1])
+
+        if pd.isna(ma) or pd.isna(std):
+            p = float(prices.iloc[-1])
+            return p, p, p
 
         return float(ma + 2 * std), float(ma), float(ma - 2 * std)
 
@@ -267,8 +279,11 @@ class AdvancedSignalGenerator:
         if len(returns) < period:
             return 0.0
 
-        pos_moves = returns.where(returns > 0, 0).rolling(period).mean().iloc[-1]
-        neg_moves = (-returns.where(returns < 0, 0)).rolling(period).mean().iloc[-1]
+        pos_moves = float(returns.where(returns > 0, 0).rolling(period).mean().iloc[-1])
+        neg_moves = float((-returns.where(returns < 0, 0)).rolling(period).mean().iloc[-1])
+
+        if pd.isna(pos_moves) or pd.isna(neg_moves):
+            return 0.0
 
         total_move = pos_moves + neg_moves
         if total_move == 0:
@@ -381,6 +396,11 @@ class AdvancedSignalGenerator:
 
     def generate_ml_signal(self, symbol: str, prices: pd.Series) -> Dict:
         """Generate ML-powered signal with ensemble prediction."""
+        # Ensure prices is a 1D Series
+        if isinstance(prices, pd.DataFrame):
+            prices = prices.iloc[:, 0]
+        prices = prices.squeeze()
+
         if len(prices) < self.lookback:
             return self._empty_signal()
 
@@ -491,54 +511,72 @@ class AdvancedSignalGenerator:
         if len(prices) < 60:
             return 0.0
 
-        mom_5 = prices.iloc[-1] / prices.iloc[-5] - 1
-        mom_20 = prices.iloc[-1] / prices.iloc[-20] - 1
-        mom_60 = prices.iloc[-1] / prices.iloc[-60] - 1
+        try:
+            p_now = float(prices.iloc[-1])
+            mom_5 = p_now / float(prices.iloc[-5]) - 1
+            mom_20 = p_now / float(prices.iloc[-20]) - 1
+            mom_60 = p_now / float(prices.iloc[-60]) - 1
 
-        signal = mom_5 * 0.5 + mom_20 * 0.3 + mom_60 * 0.2
-        return float(np.tanh(signal * 15))
+            signal = mom_5 * 0.5 + mom_20 * 0.3 + mom_60 * 0.2
+            return float(np.tanh(signal * 15))
+        except:
+            return 0.0
 
     def _mean_reversion_signal(self, prices: pd.Series) -> float:
         """Mean reversion signal."""
         if len(prices) < 50:
             return 0.0
 
-        z_20 = (prices.iloc[-1] - prices.iloc[-20:].mean()) / prices.iloc[-20:].std() \
-               if prices.iloc[-20:].std() > 0 else 0
-        z_50 = (prices.iloc[-1] - prices.iloc[-50:].mean()) / prices.iloc[-50:].std() \
-               if prices.iloc[-50:].std() > 0 else 0
+        try:
+            p_now = float(prices.iloc[-1])
+            mean_20 = float(prices.iloc[-20:].mean())
+            std_20 = float(prices.iloc[-20:].std())
+            mean_50 = float(prices.iloc[-50:].mean())
+            std_50 = float(prices.iloc[-50:].std())
 
-        signal = -(z_20 * 0.6 + z_50 * 0.4)
-        return float(np.tanh(signal / 2))
+            z_20 = (p_now - mean_20) / std_20 if std_20 > 0 else 0
+            z_50 = (p_now - mean_50) / std_50 if std_50 > 0 else 0
+
+            signal = -(z_20 * 0.6 + z_50 * 0.4)
+            return float(np.tanh(signal / 2))
+        except:
+            return 0.0
 
     def _trend_signal(self, prices: pd.Series) -> float:
         """Trend-following signal."""
         if len(prices) < 50:
             return 0.0
 
-        ma_10 = prices.rolling(10).mean().iloc[-1]
-        ma_20 = prices.rolling(20).mean().iloc[-1]
-        ma_50 = prices.rolling(50).mean().iloc[-1]
+        try:
+            ma_10 = float(prices.rolling(10).mean().iloc[-1])
+            ma_20 = float(prices.rolling(20).mean().iloc[-1])
+            ma_50 = float(prices.rolling(50).mean().iloc[-1])
+            p_now = float(prices.iloc[-1])
 
-        score = 0
-        if ma_10 > ma_20: score += 1
-        if ma_20 > ma_50: score += 1
-        if prices.iloc[-1] > ma_50: score += 1
+            score = 0
+            if ma_10 > ma_20: score += 1
+            if ma_20 > ma_50: score += 1
+            if p_now > ma_50: score += 1
 
-        return float((score - 1.5) / 1.5)
+            return float((score - 1.5) / 1.5)
+        except:
+            return 0.0
 
     def _volatility_signal(self, prices: pd.Series) -> float:
         """Volatility-based signal."""
         if len(prices) < 60:
             return 0.0
 
-        returns = prices.pct_change().dropna()
+        try:
+            returns = prices.pct_change().dropna()
 
-        vol_20 = returns.iloc[-20:].std()
-        vol_60 = returns.iloc[-60:].std()
+            vol_20 = float(returns.iloc[-20:].std())
+            vol_60 = float(returns.iloc[-60:].std())
 
-        if vol_60 == 0:
+            if vol_60 == 0 or pd.isna(vol_60) or pd.isna(vol_20):
+                return 0.0
+
+            vol_ratio = vol_20 / vol_60
+            return float(-np.tanh((vol_ratio - 1) * 3))
+        except:
             return 0.0
-
-        vol_ratio = vol_20 / vol_60
-        return float(-np.tanh((vol_ratio - 1) * 3))
