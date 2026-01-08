@@ -165,13 +165,25 @@ class ApexTradingSystem:
             
             # Load existing positions from IBKR
             self.positions = await self.ibkr.get_all_positions()
-            
+
             if self.positions:
                 logger.info(f"📊 Loaded {self.position_count} existing positions:")
                 for symbol, qty in self.positions.items():
                     if qty != 0:
                         pos_type = "LONG" if qty > 0 else "SHORT"
-                        logger.info(f"   {symbol}: {abs(qty)} shares ({pos_type})")
+                        # Get current price as entry price for loaded positions
+                        try:
+                            price = await self.ibkr.get_market_price(symbol)
+                            if price and price > 0:
+                                self.position_entry_prices[symbol] = price
+                                self.position_entry_times[symbol] = datetime.now()
+                                self.position_peak_prices[symbol] = price
+                                self.price_cache[symbol] = price
+                                logger.info(f"   {symbol}: {abs(qty)} shares ({pos_type}) @ ${price:.2f}")
+                            else:
+                                logger.info(f"   {symbol}: {abs(qty)} shares ({pos_type})")
+                        except:
+                            logger.info(f"   {symbol}: {abs(qty)} shares ({pos_type})")
             
             # Load pending orders
             await self.refresh_pending_orders()
@@ -344,12 +356,17 @@ class ApexTradingSystem:
                 price = float(self.historical_data[symbol]['Close'].iloc[-1])
                 self.price_cache[symbol] = price
             
-            # Generate signal - pass full DataFrame (not just Close)
-            price_data = self.historical_data[symbol]
-            signal_data = self.signal_generator.generate_ml_signal(symbol, price_data)
-            
+            # Generate signal
+            prices = self.historical_data[symbol]['Close']
+            signal_data = self.signal_generator.generate_ml_signal(symbol, prices)
             signal = signal_data['signal']
             confidence = signal_data['confidence']
+
+            # LOG SIGNAL STRENGTH (Quant transparency)
+            if abs(signal) >= 0.30:
+                direction = "BULLISH" if signal > 0 else "BEARISH"
+                strength = "STRONG" if abs(signal) > 0.50 else "MODERATE"
+                logger.info(f"📊 {symbol}: {strength} {direction} signal={signal:+.3f} conf={confidence:.2f}")
             
             # ═══════════════════════════════════════════════════════════════
             # EXIT LOGIC - Works for BOTH long and short
@@ -382,13 +399,22 @@ class ApexTradingSystem:
                     should_exit = True
                     exit_reason = f"Take profit ({pnl_pct:+.1f}%)"
                 
-                elif current_pos > 0 and signal < -0.30:  # LONG + bearish signal
+                elif current_pos > 0 and signal < -0.40 and confidence > 0.50:  # LONG + strong bearish
                     should_exit = True
-                    exit_reason = f"Bearish signal ({signal:.3f})"
-                
-                elif current_pos < 0 and signal > 0.30:  # SHORT + bullish signal
+                    exit_reason = f"Strong bearish signal ({signal:.3f}, conf={confidence:.2f})"
+
+                elif current_pos < 0 and signal > 0.40 and confidence > 0.50:  # SHORT + strong bullish
                     should_exit = True
-                    exit_reason = f"Bullish signal ({signal:.3f})"
+                    exit_reason = f"Strong bullish signal ({signal:.3f}, conf={confidence:.2f})"
+
+                # Time-based decay: lower threshold for longer holds
+                elif holding_days > 10 and current_pos > 0 and signal < -0.25:
+                    should_exit = True
+                    exit_reason = f"Bearish after {holding_days}d ({signal:.3f})"
+
+                elif holding_days > 10 and current_pos < 0 and signal > 0.25:
+                    should_exit = True
+                    exit_reason = f"Bullish after {holding_days}d ({signal:.3f})"
                 
                 elif holding_days > 30:
                     should_exit = True
