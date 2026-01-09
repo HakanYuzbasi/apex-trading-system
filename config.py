@@ -103,6 +103,14 @@ class ApexConfig:
     # ═══════════════════════════════════════════════════════════════
     TRADING_HOURS_START = 9.5  # 9:30 AM EST (market open)
     TRADING_HOURS_END = 16.0   # 4:00 PM EST (market close)
+
+    # Extended/Pre-market hours for ETFs (some commodity ETFs)
+    EXTENDED_HOURS_START = 4.0   # 4:00 AM EST (pre-market)
+    EXTENDED_HOURS_END = 20.0    # 8:00 PM EST (after-hours)
+
+    # Commodity ETFs trading hours (same as stocks, but some have extended)
+    # GLD, SLV, USO, UNG, PALL - trade regular + extended hours on some brokers
+    COMMODITY_ETF_USE_EXTENDED = False  # Set True to trade commodities in extended hours
     
     # ═══════════════════════════════════════════════════════════════
     # TIMING & EXECUTION

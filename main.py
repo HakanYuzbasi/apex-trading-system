@@ -175,6 +175,27 @@ class ApexTradingSystem:
                 est_hour += 24
             return est_hour
 
+    def is_trading_hours(self, symbol: str, est_hour: float) -> bool:
+        """
+        Check if it's valid trading hours for a given symbol.
+
+        Commodity ETFs (GLD, SLV, PALL, USO, UNG) can trade extended hours
+        if COMMODITY_ETF_USE_EXTENDED is enabled.
+
+        Args:
+            symbol: Stock ticker
+            est_hour: Current hour in EST
+
+        Returns:
+            True if within trading hours for this asset type
+        """
+        # Check if commodity/ETF with extended hours enabled
+        if ApexConfig.is_commodity(symbol) and ApexConfig.COMMODITY_ETF_USE_EXTENDED:
+            return ApexConfig.EXTENDED_HOURS_START <= est_hour <= ApexConfig.EXTENDED_HOURS_END
+
+        # Regular stock hours
+        return ApexConfig.TRADING_HOURS_START <= est_hour <= ApexConfig.TRADING_HOURS_END
+
     def print_banner(self):
         print("""
 ╔═══════════════════════════════════════════════════════════════╗
@@ -896,11 +917,11 @@ class ApexTradingSystem:
                 for symbol, qty in self.positions.items():
                     if qty != 0:
                         position_list.append((symbol, qty))
-                
+
                 sorted_positions = sorted(position_list, key=lambda x: abs(x[1]), reverse=True)
-                
-                logger.info(f"📊 Active Positions:")
-                for symbol, qty in sorted_positions[:5]:
+
+                logger.info(f"📊 Active Positions ({len(sorted_positions)}):")
+                for symbol, qty in sorted_positions:  # Show ALL positions, not just top 5
                     try:
                         pos_type = "LONG" if qty > 0 else "SHORT"
                         price = self.price_cache.get(symbol, 0)
