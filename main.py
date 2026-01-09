@@ -32,6 +32,21 @@ from monitoring.performance_tracker import PerformanceTracker
 from monitoring.live_monitor import LiveMonitor
 from config import ApexConfig
 
+# Institutional-grade components
+from models.institutional_signal_generator import (
+    InstitutionalSignalGenerator,
+    SignalOutput
+)
+from risk.institutional_risk_manager import (
+    InstitutionalRiskManager,
+    RiskConfig,
+    SizingResult
+)
+from monitoring.institutional_metrics import (
+    InstitutionalMetrics,
+    print_performance_report
+)
+
 logging.basicConfig(
     level=getattr(logging, ApexConfig.LOG_LEVEL),
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
@@ -89,6 +104,28 @@ class ApexTradingSystem:
         self.market_data = MarketDataFetcher()
         self.performance_tracker = PerformanceTracker()
         self.live_monitor = LiveMonitor()
+
+        # Institutional-grade components
+        self.inst_signal_generator = InstitutionalSignalGenerator(
+            lookback=60,
+            n_cv_splits=5,
+            purge_gap=5,
+            embargo_gap=2,
+            random_seed=42
+        )
+        self.inst_risk_manager = InstitutionalRiskManager(
+            config=RiskConfig(
+                max_position_pct=0.05,
+                max_sector_pct=0.30,
+                target_portfolio_vol=0.12,
+                max_daily_loss_pct=ApexConfig.MAX_DAILY_LOSS,
+                max_drawdown_pct=ApexConfig.MAX_DRAWDOWN
+            )
+        )
+        self.inst_metrics = InstitutionalMetrics(risk_free_rate=0.02)
+
+        # Feature flag for institutional mode
+        self.use_institutional = True  # Toggle to enable/disable institutional components
         
         # State
         self.capital = ApexConfig.INITIAL_CAPITAL
@@ -137,6 +174,27 @@ class ApexTradingSystem:
             if est_hour < 0:
                 est_hour += 24
             return est_hour
+
+    def is_trading_hours(self, symbol: str, est_hour: float) -> bool:
+        """
+        Check if it's valid trading hours for a given symbol.
+
+        Commodity ETFs (GLD, SLV, PALL, USO, UNG) can trade extended hours
+        if COMMODITY_ETF_USE_EXTENDED is enabled.
+
+        Args:
+            symbol: Stock ticker
+            est_hour: Current hour in EST
+
+        Returns:
+            True if within trading hours for this asset type
+        """
+        # Check if commodity/ETF with extended hours enabled
+        if ApexConfig.is_commodity(symbol) and ApexConfig.COMMODITY_ETF_USE_EXTENDED:
+            return ApexConfig.EXTENDED_HOURS_START <= est_hour <= ApexConfig.EXTENDED_HOURS_END
+
+        # Regular stock hours
+        return ApexConfig.TRADING_HOURS_START <= est_hour <= ApexConfig.TRADING_HOURS_END
 
     def print_banner(self):
         print("""
@@ -214,6 +272,32 @@ class ApexTradingSystem:
         except Exception as e:
             logger.warning(f"⚠️  ML training failed: {e}")
             logger.warning("   Falling back to technical analysis only")
+
+        # Train institutional signal generator
+        if self.use_institutional:
+            logger.info("")
+            logger.info("🏛️  Training INSTITUTIONAL ML models...")
+            logger.info("   Purged time-series cross-validation enabled")
+            try:
+                training_results = self.inst_signal_generator.train(
+                    self.historical_data,
+                    target_horizon=5,
+                    min_samples=500
+                )
+                if training_results:
+                    logger.info("✅ Institutional ML models trained!")
+                    for name, metrics in training_results.items():
+                        logger.info(f"   {name}: val_mse={metrics.val_mse:.6f}, dir_acc={metrics.directional_accuracy:.1%}")
+                else:
+                    logger.warning("⚠️  Institutional training returned no results")
+                    self.use_institutional = False
+            except Exception as e:
+                logger.warning(f"⚠️  Institutional training failed: {e}")
+                logger.warning("   Falling back to standard signal generator")
+                self.use_institutional = False
+
+            # Initialize institutional risk manager with capital
+            self.inst_risk_manager.initialize(self.capital)
         
         # Initialize dashboard
         self._export_initial_state()
@@ -356,17 +440,40 @@ class ApexTradingSystem:
                 price = float(self.historical_data[symbol]['Close'].iloc[-1])
                 self.price_cache[symbol] = price
             
-            # Generate signal
+            # Generate signal (use institutional or standard)
             prices = self.historical_data[symbol]['Close']
+<<<<<<< HEAD
             signal_data = self.signal_generator.generate_ml_signal(symbol, prices)
             signal = signal_data['signal']
             confidence = signal_data['confidence']
+=======
 
-            # LOG SIGNAL STRENGTH (Quant transparency)
-            if abs(signal) >= 0.30:
-                direction = "BULLISH" if signal > 0 else "BEARISH"
-                strength = "STRONG" if abs(signal) > 0.50 else "MODERATE"
-                logger.info(f"📊 {symbol}: {strength} {direction} signal={signal:+.3f} conf={confidence:.2f}")
+            if self.use_institutional:
+                # Institutional signal generator with full metadata
+                inst_signal: SignalOutput = self.inst_signal_generator.generate_signal(symbol, prices)
+                signal = inst_signal.signal
+                confidence = inst_signal.confidence
+>>>>>>> origin/claude/institutional-upgrade-dfb8x
+
+                # Log component breakdown for quant transparency
+                if abs(signal) >= 0.30:
+                    direction = "BULLISH" if signal > 0 else "BEARISH"
+                    strength = "STRONG" if abs(signal) > 0.50 else "MODERATE"
+                    logger.info(f"📊 {symbol}: {strength} {direction} signal={signal:+.3f} conf={confidence:.2f}")
+                    logger.debug(f"   Components: mom={inst_signal.momentum_signal:.2f} rev={inst_signal.mean_reversion_signal:.2f} "
+                                f"trend={inst_signal.trend_signal:.2f} vol={inst_signal.volatility_signal:.2f}")
+                    logger.debug(f"   ML: pred={inst_signal.ml_prediction:.4f} std={inst_signal.ml_std:.4f}")
+            else:
+                # Fallback to standard signal generator
+                signal_data = self.signal_generator.generate_ml_signal(symbol, prices)
+                signal = signal_data['signal']
+                confidence = signal_data['confidence']
+
+                # LOG SIGNAL STRENGTH (Quant transparency)
+                if abs(signal) >= 0.30:
+                    direction = "BULLISH" if signal > 0 else "BEARISH"
+                    strength = "STRONG" if abs(signal) > 0.50 else "MODERATE"
+                    logger.info(f"📊 {symbol}: {strength} {direction} signal={signal:+.3f} conf={confidence:.2f}")
             
             # ═══════════════════════════════════════════════════════════════
             # EXIT LOGIC - Works for BOTH long and short
@@ -539,20 +646,49 @@ class ApexTradingSystem:
             # ✅ Check sector limits
             if not await self.check_sector_limit(symbol):
                 return
-            
-            # ✅ Calculate position size with limits
-            shares = int(ApexConfig.POSITION_SIZE_USD / price)
-            shares = min(shares, ApexConfig.MAX_SHARES_PER_POSITION)  # ✅ Cap max shares
-            
-            if shares < 1:
-                logger.debug(f"⚠️ {symbol}: Price too high (${price:.2f})")
-                return
-            
+
+            # ✅ Calculate position size with institutional risk manager
+            if self.use_institutional:
+                sector = ApexConfig.get_sector(symbol)
+                sizing: SizingResult = self.inst_risk_manager.calculate_position_size(
+                    symbol=symbol,
+                    price=price,
+                    signal_strength=signal,
+                    signal_confidence=confidence,
+                    current_positions=self.positions,
+                    price_cache=self.price_cache,
+                    sector=sector,
+                    historical_prices=prices
+                )
+
+                shares = sizing.target_shares
+                shares = min(shares, ApexConfig.MAX_SHARES_PER_POSITION)  # Cap max shares
+
+                if sizing.constraints:
+                    logger.debug(f"   Size constraints: {', '.join(sizing.constraints)}")
+
+                if shares < 1:
+                    if sizing.constraints:
+                        logger.debug(f"⚠️ {symbol}: Position blocked by {sizing.constraints}")
+                    else:
+                        logger.debug(f"⚠️ {symbol}: Price too high (${price:.2f})")
+                    return
+            else:
+                # Fallback: standard position sizing
+                shares = int(ApexConfig.POSITION_SIZE_USD / price)
+                shares = min(shares, ApexConfig.MAX_SHARES_PER_POSITION)
+
+                if shares < 1:
+                    logger.debug(f"⚠️ {symbol}: Price too high (${price:.2f})")
+                    return
+
             # Determine side (long or short)
             side = 'BUY' if signal > 0 else 'SELL'
-            
+
             logger.info(f"📈 {side} {shares} {symbol} @ ${price:.2f} (${shares*price:,.0f})")
             logger.info(f"   Signal: {signal:+.3f} | Confidence: {confidence:.3f}")
+            if self.use_institutional:
+                logger.debug(f"   Vol-adjusted: ${sizing.vol_adjusted_size:,.0f} | Corr penalty: {sizing.correlation_penalty:.2f}")
             
             if self.ibkr:
                 self.pending_orders.add(symbol)
@@ -750,26 +886,38 @@ class ApexTradingSystem:
                             current_value += float(qty) * float(price)
                         else:  # Short (qty is negative)
                             current_value += float(qty) * float(price)
-            
+
             loss_check = self.risk_manager.check_daily_loss(current_value)
             dd_check = self.risk_manager.check_drawdown(current_value)
             self.performance_tracker.record_equity(current_value)
-            
+
+            # Update institutional components
+            if self.use_institutional:
+                self.inst_risk_manager.update_capital(current_value)
+                self.inst_metrics.record_equity(datetime.now(), current_value)
+
+                # Calculate portfolio risk with institutional risk manager
+                portfolio_risk = self.inst_risk_manager.calculate_portfolio_risk(
+                    self.positions,
+                    self.price_cache,
+                    self.historical_data
+                )
+
             try:
                 sharpe = self.performance_tracker.get_sharpe_ratio()
             except:
                 sharpe = 0.0
-            
+
             try:
                 win_rate = self.performance_tracker.get_win_rate()
             except:
                 win_rate = 0.0
-            
+
             total_trades = len(self.performance_tracker.trades)
-            
+
             # Calculate sector exposure
             sector_exp = self.calculate_sector_exposure()
-            
+
             logger.info("")
             logger.info("═" * 80)
             logger.info(f"💼 Portfolio: ${current_value:,.2f}")
@@ -779,7 +927,15 @@ class ApexTradingSystem:
             logger.info(f"⏳ Pending: {len(self.pending_orders)}")
             logger.info(f"💸 Total Commissions: ${self.total_commissions:,.2f}")
             logger.info(f"📈 Sharpe: {sharpe:.2f} | Win Rate: {win_rate*100:.1f}% | Trades: {total_trades}")
-            
+
+            # Institutional risk metrics
+            if self.use_institutional:
+                logger.info(f"🏛️  INSTITUTIONAL RISK:")
+                logger.info(f"   Portfolio Vol: {portfolio_risk.portfolio_volatility:.1%} | VaR(95%): ${portfolio_risk.var_95:,.0f}")
+                logger.info(f"   Risk Level: {portfolio_risk.risk_level.value.upper()} | Risk Mult: {portfolio_risk.risk_multiplier:.2f}")
+                logger.info(f"   Gross Exp: ${portfolio_risk.gross_exposure:,.0f} | Net Exp: ${portfolio_risk.net_exposure:,.0f}")
+                logger.info(f"   Concentration (HHI): {portfolio_risk.herfindahl_index:.3f}")
+
             if sector_exp:
                 logger.info(f"🏢 Sector Exposure:")
                 for sector, pct in sorted(sector_exp.items(), key=lambda x: x[1], reverse=True):
@@ -790,11 +946,11 @@ class ApexTradingSystem:
                 for symbol, qty in self.positions.items():
                     if qty != 0:
                         position_list.append((symbol, qty))
-                
+
                 sorted_positions = sorted(position_list, key=lambda x: abs(x[1]), reverse=True)
-                
-                logger.info(f"📊 Active Positions:")
-                for symbol, qty in sorted_positions[:5]:
+
+                logger.info(f"📊 Active Positions ({len(sorted_positions)}):")
+                for symbol, qty in sorted_positions:  # Show ALL positions, not just top 5
                     try:
                         pos_type = "LONG" if qty > 0 else "SHORT"
                         price = self.price_cache.get(symbol, 0)
@@ -1166,6 +1322,15 @@ class ApexTradingSystem:
             if self.ibkr:
                 self.ibkr.disconnect()
             self.performance_tracker.print_summary()
+
+            # Print institutional performance report
+            if self.use_institutional:
+                try:
+                    report = self.inst_metrics.generate_report()
+                    print_performance_report(report)
+                except Exception as e:
+                    logger.warning(f"⚠️  Could not generate institutional report: {e}")
+
             logger.info("=" * 80)
             logger.info("✅ APEX System stopped")
             logger.info(f"💸 Total Commissions Paid: ${self.total_commissions:,.2f}")
