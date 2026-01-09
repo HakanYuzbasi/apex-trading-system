@@ -442,18 +442,12 @@ class ApexTradingSystem:
             
             # Generate signal (use institutional or standard)
             prices = self.historical_data[symbol]['Close']
-<<<<<<< HEAD
-            signal_data = self.signal_generator.generate_ml_signal(symbol, prices)
-            signal = signal_data['signal']
-            confidence = signal_data['confidence']
-=======
 
             if self.use_institutional:
                 # Institutional signal generator with full metadata
                 inst_signal: SignalOutput = self.inst_signal_generator.generate_signal(symbol, prices)
                 signal = inst_signal.signal
                 confidence = inst_signal.confidence
->>>>>>> origin/claude/institutional-upgrade-dfb8x
 
                 # Log component breakdown for quant transparency
                 if abs(signal) >= 0.30:

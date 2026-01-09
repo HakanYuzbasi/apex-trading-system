@@ -110,7 +110,7 @@ class ApexConfig:
 
     # Commodity ETFs trading hours (same as stocks, but some have extended)
     # GLD, SLV, USO, UNG, PALL - trade regular + extended hours on some brokers
-    COMMODITY_ETF_USE_EXTENDED = False  # Set True to trade commodities in extended hours
+    COMMODITY_ETF_USE_EXTENDED = True  # Trade commodities in extended hours (4AM-8PM EST)
     
     # ═══════════════════════════════════════════════════════════════
     # TIMING & EXECUTION
