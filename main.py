@@ -145,6 +145,11 @@ class ApexTradingSystem:
         self.last_trade_time: Dict[str, datetime] = {}  # 60-second cooldown
         self.sector_exposure: Dict[str, float] = {}  # Track sector concentration
         self.total_commissions: float = 0.0  # Track transaction costs
+
+        # ✅ CRITICAL: Semaphore to prevent race condition in parallel processing
+        # This ensures only a limited number of entry trades can execute concurrently
+        self._entry_semaphore = asyncio.Semaphore(3)  # Max 3 concurrent entries
+        self._position_lock = asyncio.Lock()  # Lock for position count checks
         
         logger.info(f"💰 Capital: ${self.capital:,.2f}")
         logger.info(f"📈 Universe: {ApexConfig.UNIVERSE_MODE} ({len(ApexConfig.SYMBOLS)} symbols)")
@@ -630,104 +635,129 @@ class ApexTradingSystem:
             # ═══════════════════════════════════════════════════════════════
             # ENTRY LOGIC - Only if no position
             # ═══════════════════════════════════════════════════════════════
-            
+
             if abs(signal) < ApexConfig.MIN_SIGNAL_THRESHOLD:
                 return
-            
-            if self.position_count >= ApexConfig.MAX_POSITIONS:
-                return
-            
-            # ✅ Check sector limits
-            if not await self.check_sector_limit(symbol):
-                return
 
-            # ✅ Calculate position size with institutional risk manager
-            if self.use_institutional:
-                sector = ApexConfig.get_sector(symbol)
-                sizing: SizingResult = self.inst_risk_manager.calculate_position_size(
-                    symbol=symbol,
-                    price=price,
-                    signal_strength=signal,
-                    signal_confidence=confidence,
-                    current_positions=self.positions,
-                    price_cache=self.price_cache,
-                    sector=sector,
-                    historical_prices=prices
-                )
+            # ✅ CRITICAL: Use lock to check position count atomically
+            # This prevents race condition where multiple parallel tasks pass the check
+            async with self._position_lock:
+                if self.position_count >= ApexConfig.MAX_POSITIONS:
+                    logger.debug(f"⚠️ {symbol}: Max positions reached ({self.position_count}/{ApexConfig.MAX_POSITIONS})")
+                    return
 
-                shares = sizing.target_shares
-                shares = min(shares, ApexConfig.MAX_SHARES_PER_POSITION)  # Cap max shares
+                # ✅ Check sector limits (inside lock)
+                if not await self.check_sector_limit(symbol):
+                    return
 
-                if sizing.constraints:
-                    logger.debug(f"   Size constraints: {', '.join(sizing.constraints)}")
+                # Reserve the position slot (prevents race condition)
+                # We'll update with actual quantity after trade or remove if failed
+                self.positions[symbol] = 1 if signal > 0 else -1  # Placeholder
 
-                if shares < 1:
-                    if sizing.constraints:
-                        logger.debug(f"⚠️ {symbol}: Position blocked by {sizing.constraints}")
+            # ✅ Use semaphore to limit concurrent entry attempts
+            trade_success = False
+            async with self._entry_semaphore:
+                try:
+                    # ✅ Calculate position size with institutional risk manager
+                    if self.use_institutional:
+                        sector = ApexConfig.get_sector(symbol)
+                        sizing: SizingResult = self.inst_risk_manager.calculate_position_size(
+                            symbol=symbol,
+                            price=price,
+                            signal_strength=signal,
+                            signal_confidence=confidence,
+                            current_positions=self.positions,
+                            price_cache=self.price_cache,
+                            sector=sector,
+                            historical_prices=prices
+                        )
+
+                        shares = sizing.target_shares
+
+                        # ✅ Apply POSITION_SIZE_USD as additional cap
+                        max_shares_by_value = int(ApexConfig.POSITION_SIZE_USD / price)
+                        shares = min(shares, max_shares_by_value)
+                        shares = min(shares, ApexConfig.MAX_SHARES_PER_POSITION)  # Cap max shares
+
+                        if sizing.constraints:
+                            logger.debug(f"   Size constraints: {', '.join(sizing.constraints)}")
+
+                        if shares < 1:
+                            if sizing.constraints:
+                                logger.debug(f"⚠️ {symbol}: Position blocked by {sizing.constraints}")
+                            else:
+                                logger.debug(f"⚠️ {symbol}: Price too high (${price:.2f})")
+                            return
                     else:
-                        logger.debug(f"⚠️ {symbol}: Price too high (${price:.2f})")
-                    return
-            else:
-                # Fallback: standard position sizing
-                shares = int(ApexConfig.POSITION_SIZE_USD / price)
-                shares = min(shares, ApexConfig.MAX_SHARES_PER_POSITION)
+                        # Fallback: standard position sizing
+                        shares = int(ApexConfig.POSITION_SIZE_USD / price)
+                        shares = min(shares, ApexConfig.MAX_SHARES_PER_POSITION)
 
-                if shares < 1:
-                    logger.debug(f"⚠️ {symbol}: Price too high (${price:.2f})")
-                    return
+                        if shares < 1:
+                            logger.debug(f"⚠️ {symbol}: Price too high (${price:.2f})")
+                            return
 
-            # Determine side (long or short)
-            side = 'BUY' if signal > 0 else 'SELL'
+                    # Determine side (long or short)
+                    side = 'BUY' if signal > 0 else 'SELL'
 
-            logger.info(f"📈 {side} {shares} {symbol} @ ${price:.2f} (${shares*price:,.0f})")
-            logger.info(f"   Signal: {signal:+.3f} | Confidence: {confidence:.3f}")
-            if self.use_institutional:
-                logger.debug(f"   Vol-adjusted: ${sizing.vol_adjusted_size:,.0f} | Corr penalty: {sizing.correlation_penalty:.2f}")
-            
-            if self.ibkr:
-                self.pending_orders.add(symbol)
-                
-                trade = await self.ibkr.execute_order(
-                    symbol=symbol,
-                    side=side,
-                    quantity=shares,
-                    confidence=confidence
-                )
-                
-                if trade:
-                    # ✅ CRITICAL: Force sync after trade
-                    await self.sync_positions_with_ibkr()
-                    
-                    # Track commission
-                    commission = ApexConfig.COMMISSION_PER_TRADE
-                    self.total_commissions += commission
-                    
-                    self.position_entry_prices[symbol] = price
-                    self.position_entry_times[symbol] = datetime.now()
-                    self.position_peak_prices[symbol] = price
-                    
-                    logger.info(f"   ✅ Order placed (commission: ${commission:.2f})")
-                    
-                    self.live_monitor.log_trade(symbol, side, shares, price, -commission)
-                    self.performance_tracker.record_trade(symbol, side, shares, price, commission)
-                    
-                    # ✅ Update cooldown
-                    self.last_trade_time[symbol] = datetime.now()
-                    
-                    self.pending_orders.discard(symbol)
-                else:
-                    self.pending_orders.discard(symbol)
-            else:
-                # Simulation mode - open new position
-                qty = shares if side == 'BUY' else -shares
-                self.positions[symbol] = qty
-                self.position_entry_prices[symbol] = price
-                self.position_entry_times[symbol] = datetime.now()
-                self.position_peak_prices[symbol] = price
+                    logger.info(f"📈 {side} {shares} {symbol} @ ${price:.2f} (${shares*price:,.0f})")
+                    logger.info(f"   Signal: {signal:+.3f} | Confidence: {confidence:.3f}")
+                    if self.use_institutional:
+                        logger.debug(f"   Vol-adjusted: ${sizing.vol_adjusted_size:,.0f} | Corr penalty: {sizing.correlation_penalty:.2f}")
 
-                self.live_monitor.log_trade(symbol, side, shares, price, 0)
-                self.performance_tracker.record_trade(symbol, side, shares, price, 0)
-                self.last_trade_time[symbol] = datetime.now()
+                    if self.ibkr:
+                        self.pending_orders.add(symbol)
+
+                        trade = await self.ibkr.execute_order(
+                            symbol=symbol,
+                            side=side,
+                            quantity=shares,
+                            confidence=confidence
+                        )
+
+                        if trade:
+                            trade_success = True
+                            # ✅ CRITICAL: Force sync after trade
+                            await self.sync_positions_with_ibkr()
+
+                            # Track commission
+                            commission = ApexConfig.COMMISSION_PER_TRADE
+                            self.total_commissions += commission
+
+                            self.position_entry_prices[symbol] = price
+                            self.position_entry_times[symbol] = datetime.now()
+                            self.position_peak_prices[symbol] = price
+
+                            logger.info(f"   ✅ Order placed (commission: ${commission:.2f})")
+
+                            self.live_monitor.log_trade(symbol, side, shares, price, -commission)
+                            self.performance_tracker.record_trade(symbol, side, shares, price, commission)
+
+                            # ✅ Update cooldown
+                            self.last_trade_time[symbol] = datetime.now()
+
+                            self.pending_orders.discard(symbol)
+                        else:
+                            self.pending_orders.discard(symbol)
+                    else:
+                        # Simulation mode - open new position
+                        trade_success = True
+                        qty = shares if side == 'BUY' else -shares
+                        self.positions[symbol] = qty
+                        self.position_entry_prices[symbol] = price
+                        self.position_entry_times[symbol] = datetime.now()
+                        self.position_peak_prices[symbol] = price
+
+                        self.live_monitor.log_trade(symbol, side, shares, price, 0)
+                        self.performance_tracker.record_trade(symbol, side, shares, price, 0)
+                        self.last_trade_time[symbol] = datetime.now()
+
+                finally:
+                    # ✅ CRITICAL: Clean up placeholder if trade failed
+                    if not trade_success and symbol in self.positions:
+                        if self.positions.get(symbol) in [1, -1]:  # Was a placeholder
+                            del self.positions[symbol]
+                            logger.debug(f"   ⚠️ {symbol}: Removed position placeholder (trade failed)")
         
         except Exception as e:
             logger.error(f"❌ Error processing {symbol}: {e}")

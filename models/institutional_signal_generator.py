@@ -827,7 +827,9 @@ class InstitutionalSignalGenerator:
             combined_signal = rule_signal
 
         # Clip to [-1, 1]
-        signal = float(np.clip(combined_signal * 5, -1, 1))  # Scale up for sensitivity
+        # Note: Reduced multiplier from 5 to 2 to prevent signals from hitting bounds too often
+        # This gives better signal differentiation (not all signals at +1.0/-1.0)
+        signal = float(np.clip(combined_signal * 2, -1, 1))
 
         # Calculate confidence
         confidence = self._calc_confidence(
@@ -868,7 +870,8 @@ class InstitutionalSignalGenerator:
             ret_60 = prices.iloc[-1] / prices.iloc[-60] - 1
 
             signal = ret_5 * 0.5 + ret_20 * 0.3 + ret_60 * 0.2
-            return float(np.clip(signal * 10, -1, 1))
+            # Reduced from *10 to *5 to prevent constant saturation
+            return float(np.clip(signal * 5, -1, 1))
         except:
             return 0.0
 
