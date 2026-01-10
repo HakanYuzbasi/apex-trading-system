@@ -811,20 +811,28 @@ class IBKRConnector:
             logger.error(f"❌ Error cancelling orders: {e}")
     
     def has_pending_order(self, symbol: str) -> bool:
-        """Check if symbol has pending or active orders."""
+        """
+        Check if symbol has pending or active orders.
+
+        Args:
+            symbol: Stock ticker to check
+
+        Returns:
+            True if there's a pending order for this symbol
+        """
         try:
-            # Get all open orders
-            open_orders = self.ib.openOrders()
-            
-            # Check if any order exists for this symbol
-            for trade in open_orders:
+            # Get all open trades (Trade objects have both order and status)
+            open_trades = self.ib.openTrades()
+
+            # Check if any trade exists for this symbol
+            for trade in open_trades:
                 if trade.contract.symbol == symbol:
                     status = trade.orderStatus.status
                     # Consider PreSubmitted, Submitted, Filled statuses
                     if status in ['PreSubmitted', 'Submitted', 'PendingSubmit', 'ApiPending']:
                         logger.debug(f"⏳ Skipping {symbol}: pending order exists (status={status})")
                         return True
-            
+
             return False
         except Exception as e:
             logger.error(f"Error checking pending orders for {symbol}: {e}")
