@@ -97,9 +97,46 @@ class CorrelationManager:
         avg_correlation = np.mean(correlations)
         
         logger.info(f"📊 Portfolio avg correlation: {avg_correlation:.3f}")
-        
+
         return float(avg_correlation)
-    
+
+    def get_average_correlation(self, symbol: str, existing_symbols: List[str]) -> float:
+        """
+        Calculate average correlation of a new symbol with existing portfolio.
+
+        Args:
+            symbol: New symbol to check
+            existing_symbols: List of existing portfolio symbols
+
+        Returns:
+            Average correlation (0 to 1)
+        """
+        if not existing_symbols or symbol not in self.returns_history:
+            return 0.0
+
+        # Filter to symbols we have data for
+        valid_symbols = [s for s in existing_symbols if s in self.returns_history]
+        if not valid_symbols:
+            return 0.0
+
+        # Get correlation matrix including the new symbol
+        all_symbols = valid_symbols + [symbol]
+        corr_matrix = self.calculate_correlation_matrix(all_symbols)
+
+        if corr_matrix.empty or symbol not in corr_matrix.columns:
+            return 0.0
+
+        # Get correlations of new symbol with existing positions
+        correlations = [abs(corr_matrix.loc[symbol, s]) for s in valid_symbols if s in corr_matrix.columns]
+
+        if not correlations:
+            return 0.0
+
+        avg_correlation = np.mean(correlations)
+        logger.debug(f"📊 {symbol} avg correlation with portfolio: {avg_correlation:.3f}")
+
+        return float(avg_correlation)
+
     def find_hedges(
         self,
         long_positions: List[str],

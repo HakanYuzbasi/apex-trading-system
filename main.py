@@ -46,6 +46,10 @@ from monitoring.institutional_metrics import (
     InstitutionalMetrics,
     print_performance_report
 )
+from risk.god_level_risk_manager import GodLevelRiskManager
+from portfolio.correlation_manager import CorrelationManager
+from execution.advanced_order_executor import AdvancedOrderExecutor
+from models.god_level_signal_generator import GodLevelSignalGenerator, MarketRegime
 
 logging.basicConfig(
     level=getattr(logging, ApexConfig.LOG_LEVEL),
@@ -90,6 +94,10 @@ class ApexTradingSystem:
                 port=ApexConfig.IBKR_PORT,
                 client_id=ApexConfig.IBKR_CLIENT_ID
             )
+            # ✅ Phase 2.1: Initialize advanced executor for TWAP/VWAP
+            if ApexConfig.USE_ADVANCED_EXECUTION:
+                self.advanced_executor = AdvancedOrderExecutor(self.ibkr)
+                logger.info("📊 Advanced execution (TWAP/VWAP) enabled")
         else:
             logger.info("📊 Mode: SIMULATION")
             self.ibkr = None
@@ -124,6 +132,27 @@ class ApexTradingSystem:
         )
         self.inst_metrics = InstitutionalMetrics(risk_free_rate=0.02)
 
+        # God-level risk manager for ATR-based stops and Kelly sizing
+        self.god_risk_manager = GodLevelRiskManager(
+            initial_capital=ApexConfig.INITIAL_CAPITAL,
+            max_position_pct=0.05,
+            max_portfolio_risk=0.02,
+            max_correlation=ApexConfig.MAX_CORRELATION,
+            max_sector_exposure=ApexConfig.MAX_SECTOR_EXPOSURE,
+            max_drawdown_limit=ApexConfig.MAX_DRAWDOWN
+        )
+        self.god_risk_manager.set_sector_map(ApexConfig.SECTOR_MAP)
+
+        # Correlation manager for diversification monitoring
+        self.correlation_manager = CorrelationManager()
+
+        # Advanced order executor for TWAP/VWAP on large orders
+        self.advanced_executor: Optional[AdvancedOrderExecutor] = None  # Initialized after IBKR connection
+
+        # ✅ Phase 3.2: GodLevel signal generator for regime detection
+        self.god_signal_generator = GodLevelSignalGenerator()
+        self._current_regime: str = 'neutral'  # Cache current market regime
+
         # Feature flag for institutional mode
         self.use_institutional = True  # Toggle to enable/disable institutional components
         
@@ -139,6 +168,9 @@ class ApexTradingSystem:
         self.position_entry_prices: Dict[str, float] = {}
         self.position_entry_times: Dict[str, datetime] = {}
         self.position_peak_prices: Dict[str, float] = {}  # For trailing stops
+
+        # ATR-based dynamic stop levels per position
+        self.position_stops: Dict[str, Dict] = {}  # symbol -> {stop_loss, take_profit, trailing_stop_pct, atr}
         
         # ✅ NEW: Protection mechanisms
         self.pending_orders: set = set()
@@ -150,6 +182,9 @@ class ApexTradingSystem:
         # This ensures only a limited number of entry trades can execute concurrently
         self._entry_semaphore = asyncio.Semaphore(3)  # Max 3 concurrent entries
         self._position_lock = asyncio.Lock()  # Lock for position count checks
+
+        # ✅ Phase 1.4: Graduated circuit breaker risk multiplier
+        self._risk_multiplier: float = 1.0  # 1.0 = full size, 0.5 = half size during WARNING
         
         logger.info(f"💰 Capital: ${self.capital:,.2f}")
         logger.info(f"📈 Universe: {ApexConfig.UNIVERSE_MODE} ({len(ApexConfig.SYMBOLS)} symbols)")
@@ -303,7 +338,19 @@ class ApexTradingSystem:
 
             # Initialize institutional risk manager with capital
             self.inst_risk_manager.initialize(self.capital)
-        
+
+        # ✅ Phase 1.3: Initialize correlation manager with returns data
+        if ApexConfig.USE_CORRELATION_MANAGER:
+            logger.info("📊 Initializing correlation manager...")
+            for symbol, data in self.historical_data.items():
+                if 'Close' in data.columns and len(data) >= 60:
+                    returns = data['Close'].pct_change().dropna()
+                    self.correlation_manager.update_returns(symbol, returns)
+            logger.info(f"✅ Correlation manager initialized with {len(self.correlation_manager.returns_history)} symbols")
+
+            # Update god-level risk manager correlation matrix
+            self.god_risk_manager.update_correlation_matrix(self.historical_data)
+
         # Initialize dashboard
         self._export_initial_state()
         logger.info("")
@@ -401,11 +448,21 @@ class ApexTradingSystem:
     async def process_symbol(self, symbol: str):
         """Process symbol with all protections including circuit breaker."""
 
-        # Check 0: Circuit breaker check
-        can_trade, reason = self.risk_manager.can_trade()
-        if not can_trade:
-            logger.debug(f"🛑 {symbol}: Trading halted - {reason}")
-            return
+        # Check 0: Circuit breaker check (use institutional for graduated response)
+        if self.use_institutional:
+            can_trade, reason, risk_mult = self.inst_risk_manager.can_trade()
+            self._risk_multiplier = risk_mult  # Store for position sizing
+            if not can_trade:
+                logger.debug(f"🛑 {symbol}: Trading halted - {reason}")
+                return
+            if risk_mult < 1.0:
+                logger.debug(f"⚠️ {symbol}: Reduced risk mode ({risk_mult:.0%} position size)")
+        else:
+            can_trade, reason = self.risk_manager.can_trade()
+            self._risk_multiplier = 1.0
+            if not can_trade:
+                logger.debug(f"🛑 {symbol}: Trading halted - {reason}")
+                return
 
         # Check 1: Cooldown protection
         last_trade = self.last_trade_time.get(symbol, datetime(2000, 1, 1))
@@ -495,57 +552,83 @@ class ApexTradingSystem:
                 
                 should_exit = False
                 exit_reason = ""
-                
-                # Exit conditions (work for both long/short)
-                if pnl_pct < -5:
-                    should_exit = True
-                    exit_reason = f"Stop loss ({pnl_pct:+.1f}%)"
-                
-                elif pnl_pct > 15:
-                    should_exit = True
-                    exit_reason = f"Take profit ({pnl_pct:+.1f}%)"
-                
-                elif current_pos > 0 and signal < -0.40 and confidence > 0.50:  # LONG + strong bearish
-                    should_exit = True
-                    exit_reason = f"Strong bearish signal ({signal:.3f}, conf={confidence:.2f})"
 
-                elif current_pos < 0 and signal > 0.40 and confidence > 0.50:  # SHORT + strong bullish
-                    should_exit = True
-                    exit_reason = f"Strong bullish signal ({signal:.3f}, conf={confidence:.2f})"
+                # Get dynamic stop levels (ATR-based) or fall back to defaults
+                pos_stops = self.position_stops.get(symbol, {})
+                stop_loss_price = pos_stops.get('stop_loss', entry_price * 0.95)  # Default 5%
+                take_profit_price = pos_stops.get('take_profit', entry_price * 1.15)  # Default 15%
+                trailing_stop_pct = pos_stops.get('trailing_stop_pct', 0.03)  # Default 3%
 
-                # Time-based decay: lower threshold for longer holds
-                elif holding_days > 10 and current_pos > 0 and signal < -0.25:
-                    should_exit = True
-                    exit_reason = f"Bearish after {holding_days}d ({signal:.3f})"
+                # Exit conditions using ATR-based dynamic stops
+                if current_pos > 0:  # LONG position
+                    if price <= stop_loss_price:
+                        should_exit = True
+                        exit_reason = f"ATR Stop loss (${stop_loss_price:.2f}, {pnl_pct:+.1f}%)"
+                    elif price >= take_profit_price:
+                        should_exit = True
+                        exit_reason = f"ATR Take profit (${take_profit_price:.2f}, {pnl_pct:+.1f}%)"
+                else:  # SHORT position
+                    if price >= stop_loss_price:
+                        should_exit = True
+                        exit_reason = f"ATR Stop loss (${stop_loss_price:.2f}, {pnl_pct:+.1f}%)"
+                    elif price <= take_profit_price:
+                        should_exit = True
+                        exit_reason = f"ATR Take profit (${take_profit_price:.2f}, {pnl_pct:+.1f}%)"
 
-                elif holding_days > 10 and current_pos < 0 and signal > 0.25:
-                    should_exit = True
-                    exit_reason = f"Bullish after {holding_days}d ({signal:.3f})"
-                
-                elif holding_days > 30:
-                    should_exit = True
-                    exit_reason = f"Max holding ({holding_days}d)"
-                
-                elif pnl_pct > 5:  # ✅ Trailing stop
+                # Signal-based exits
+                if not should_exit:
+                    if current_pos > 0 and signal < -0.40 and confidence > 0.50:  # LONG + strong bearish
+                        should_exit = True
+                        exit_reason = f"Strong bearish signal ({signal:.3f}, conf={confidence:.2f})"
+
+                    elif current_pos < 0 and signal > 0.40 and confidence > 0.50:  # SHORT + strong bullish
+                        should_exit = True
+                        exit_reason = f"Strong bullish signal ({signal:.3f}, conf={confidence:.2f})"
+
+                    # Time-based decay: lower threshold for longer holds
+                    elif holding_days > 10 and current_pos > 0 and signal < -0.25:
+                        should_exit = True
+                        exit_reason = f"Bearish after {holding_days}d ({signal:.3f})"
+
+                    elif holding_days > 10 and current_pos < 0 and signal > 0.25:
+                        should_exit = True
+                        exit_reason = f"Bullish after {holding_days}d ({signal:.3f})"
+
+                    elif holding_days > 30:
+                        should_exit = True
+                        exit_reason = f"Max holding ({holding_days}d)"
+
+                # ATR-based trailing stop (dynamic percentage)
+                if not should_exit and pnl_pct > 3:  # Activate trailing after 3% gain
                     peak_price = self.position_peak_prices.get(symbol, price)
-                    
+
                     if current_pos > 0:  # LONG
                         if price > peak_price:
                             self.position_peak_prices[symbol] = price
+                            # Update trailing stop price
+                            new_stop = price * (1 - trailing_stop_pct)
+                            if new_stop > stop_loss_price:
+                                self.position_stops[symbol]['stop_loss'] = new_stop
+                                logger.debug(f"   📈 {symbol}: Trailing stop raised to ${new_stop:.2f}")
                         else:
                             drawdown = (price / peak_price - 1) * 100
-                            if drawdown < -3:
+                            if drawdown < -trailing_stop_pct * 100:
                                 should_exit = True
-                                exit_reason = f"Trailing stop ({drawdown:.1f}% from peak)"
-                    
+                                exit_reason = f"ATR Trailing stop ({drawdown:.1f}% from peak)"
+
                     else:  # SHORT
                         if price < peak_price:
                             self.position_peak_prices[symbol] = price
+                            # Update trailing stop price
+                            new_stop = price * (1 + trailing_stop_pct)
+                            if new_stop < stop_loss_price:
+                                self.position_stops[symbol]['stop_loss'] = new_stop
+                                logger.debug(f"   📈 {symbol}: Trailing stop lowered to ${new_stop:.2f}")
                         else:
                             drawdown = (peak_price / price - 1) * 100
-                            if drawdown < -3:
+                            if drawdown < -trailing_stop_pct * 100:
                                 should_exit = True
-                                exit_reason = f"Trailing stop ({drawdown:.1f}% from peak)"
+                                exit_reason = f"ATR Trailing stop ({drawdown:.1f}% from peak)"
                 
                 if should_exit:
                     pos_type = "LONG" if current_pos > 0 else "SHORT"
@@ -583,7 +666,9 @@ class ApexTradingSystem:
                                 del self.position_entry_times[symbol]
                             if symbol in self.position_peak_prices:
                                 del self.position_peak_prices[symbol]
-                            
+                            if symbol in self.position_stops:
+                                del self.position_stops[symbol]
+
                             logger.info(f"   ✅ Position closed (commission: ${commission:.2f})")
 
                             self.live_monitor.log_trade(symbol, order_side, abs(current_pos), price, pnl - commission)
@@ -609,6 +694,8 @@ class ApexTradingSystem:
                             del self.position_entry_times[symbol]
                         if symbol in self.position_peak_prices:
                             del self.position_peak_prices[symbol]
+                        if symbol in self.position_stops:
+                            del self.position_stops[symbol]
 
                         self.live_monitor.log_trade(symbol, order_side, abs(current_pos), price, pnl)
                         self.performance_tracker.record_trade(symbol, order_side, abs(current_pos), price, 0)
@@ -617,7 +704,7 @@ class ApexTradingSystem:
                         self.risk_manager.record_trade_result(pnl)
 
                         self.last_trade_time[symbol] = datetime.now()
-                    
+
                     return
                 
                 else:
@@ -636,8 +723,41 @@ class ApexTradingSystem:
             # ENTRY LOGIC - Only if no position
             # ═══════════════════════════════════════════════════════════════
 
-            if abs(signal) < ApexConfig.MIN_SIGNAL_THRESHOLD:
+            # ✅ Phase 3.2: Detect market regime and use regime-adjusted thresholds
+            try:
+                regime_enum = self.god_signal_generator.detect_market_regime(prices)
+                self._current_regime = regime_enum.value  # Convert enum to string
+            except Exception:
+                self._current_regime = 'neutral'
+
+            # ✅ Phase 3.1: Get regime-adjusted signal threshold
+            signal_threshold = ApexConfig.SIGNAL_THRESHOLDS_BY_REGIME.get(
+                self._current_regime, ApexConfig.MIN_SIGNAL_THRESHOLD
+            )
+
+            if abs(signal) < signal_threshold:
+                logger.debug(f"⏭️ {symbol}: Signal {signal:.3f} below regime threshold {signal_threshold} ({self._current_regime})")
                 return
+
+            # ✅ Phase 1.2: Check VaR limit before new entries
+            if self.use_institutional and len(self.positions) > 0:
+                portfolio_risk = self.inst_risk_manager.calculate_portfolio_risk(
+                    self.positions,
+                    self.price_cache,
+                    self.historical_data
+                )
+                max_var = self.capital * ApexConfig.MAX_PORTFOLIO_VAR
+                if portfolio_risk.var_95 > max_var:
+                    logger.warning(f"⚠️ {symbol}: VaR limit exceeded (${portfolio_risk.var_95:,.0f} > ${max_var:,.0f}) - blocking entry")
+                    return
+
+            # ✅ Phase 1.3: Check portfolio correlation before new entries
+            if ApexConfig.USE_CORRELATION_MANAGER and len(self.positions) > 1:
+                existing_symbols = [s for s, qty in self.positions.items() if qty != 0]
+                avg_corr = self.correlation_manager.get_average_correlation(symbol, existing_symbols)
+                if avg_corr > ApexConfig.MAX_PORTFOLIO_CORRELATION:
+                    logger.warning(f"⚠️ {symbol}: Correlation too high ({avg_corr:.2f} > {ApexConfig.MAX_PORTFOLIO_CORRELATION}) - blocking entry")
+                    return
 
             # ✅ CRITICAL: Use lock to check position count atomically
             # This prevents race condition where multiple parallel tasks pass the check
@@ -679,6 +799,11 @@ class ApexTradingSystem:
                         shares = min(shares, max_shares_by_value)
                         shares = min(shares, ApexConfig.MAX_SHARES_PER_POSITION)  # Cap max shares
 
+                        # ✅ Phase 1.4: Apply graduated circuit breaker risk multiplier
+                        if self._risk_multiplier < 1.0:
+                            shares = int(shares * self._risk_multiplier)
+                            logger.info(f"   ⚠️ Risk reduced: {self._risk_multiplier:.0%} → {shares} shares")
+
                         if sizing.constraints:
                             logger.debug(f"   Size constraints: {', '.join(sizing.constraints)}")
 
@@ -708,12 +833,31 @@ class ApexTradingSystem:
                     if self.ibkr:
                         self.pending_orders.add(symbol)
 
-                        trade = await self.ibkr.execute_order(
-                            symbol=symbol,
-                            side=side,
-                            quantity=shares,
-                            confidence=confidence
+                        # ✅ Phase 2.1: Use TWAP/VWAP for large orders
+                        order_value = shares * price
+                        use_advanced = (
+                            ApexConfig.USE_ADVANCED_EXECUTION and
+                            self.advanced_executor is not None and
+                            order_value >= ApexConfig.LARGE_ORDER_THRESHOLD
                         )
+
+                        if use_advanced:
+                            # Use TWAP for large orders to reduce market impact
+                            logger.info(f"   📊 Using TWAP execution (order value: ${order_value:,.0f})")
+                            trade = await self.advanced_executor.execute_twap_order(
+                                symbol=symbol,
+                                side=side,
+                                total_quantity=shares,
+                                time_horizon_minutes=30,  # Execute over 30 minutes
+                                slice_interval_seconds=60  # Execute every minute
+                            )
+                        else:
+                            trade = await self.ibkr.execute_order(
+                                symbol=symbol,
+                                side=side,
+                                quantity=shares,
+                                confidence=confidence
+                            )
 
                         if trade:
                             trade_success = True
@@ -727,6 +871,32 @@ class ApexTradingSystem:
                             self.position_entry_prices[symbol] = price
                             self.position_entry_times[symbol] = datetime.now()
                             self.position_peak_prices[symbol] = price
+
+                            # ✅ Calculate ATR-based dynamic stops using GodLevelRiskManager
+                            if ApexConfig.USE_ATR_STOPS:
+                                god_sizing = self.god_risk_manager.calculate_position_size(
+                                    symbol=symbol,
+                                    entry_price=price,
+                                    signal_strength=signal,
+                                    confidence=confidence,
+                                    prices=prices,
+                                    regime=self._current_regime  # ✅ Phase 3.2: Use detected regime
+                                )
+                                self.position_stops[symbol] = {
+                                    'stop_loss': god_sizing['stop_loss'],
+                                    'take_profit': god_sizing['take_profit'],
+                                    'trailing_stop_pct': god_sizing['trailing_stop_pct'],
+                                    'atr': god_sizing['atr']
+                                }
+                                logger.info(f"   🎯 ATR Stops: SL=${god_sizing['stop_loss']:.2f} TP=${god_sizing['take_profit']:.2f} Trail={god_sizing['trailing_stop_pct']*100:.1f}%")
+                            else:
+                                # Fallback to fixed percentage stops
+                                self.position_stops[symbol] = {
+                                    'stop_loss': price * 0.95 if signal > 0 else price * 1.05,
+                                    'take_profit': price * 1.15 if signal > 0 else price * 0.85,
+                                    'trailing_stop_pct': 0.03,
+                                    'atr': 0
+                                }
 
                             logger.info(f"   ✅ Order placed (commission: ${commission:.2f})")
 
@@ -747,6 +917,31 @@ class ApexTradingSystem:
                         self.position_entry_prices[symbol] = price
                         self.position_entry_times[symbol] = datetime.now()
                         self.position_peak_prices[symbol] = price
+
+                        # ✅ Calculate ATR-based dynamic stops using GodLevelRiskManager
+                        if ApexConfig.USE_ATR_STOPS:
+                            god_sizing = self.god_risk_manager.calculate_position_size(
+                                symbol=symbol,
+                                entry_price=price,
+                                signal_strength=signal,
+                                confidence=confidence,
+                                prices=prices,
+                                regime=self._current_regime  # ✅ Phase 3.2: Use detected regime
+                            )
+                            self.position_stops[symbol] = {
+                                'stop_loss': god_sizing['stop_loss'],
+                                'take_profit': god_sizing['take_profit'],
+                                'trailing_stop_pct': god_sizing['trailing_stop_pct'],
+                                'atr': god_sizing['atr']
+                            }
+                            logger.info(f"   🎯 ATR Stops: SL=${god_sizing['stop_loss']:.2f} TP=${god_sizing['take_profit']:.2f} Trail={god_sizing['trailing_stop_pct']*100:.1f}%")
+                        else:
+                            self.position_stops[symbol] = {
+                                'stop_loss': price * 0.95 if signal > 0 else price * 1.05,
+                                'take_profit': price * 1.15 if signal > 0 else price * 0.85,
+                                'trailing_stop_pct': 0.03,
+                                'atr': 0
+                            }
 
                         self.live_monitor.log_trade(symbol, side, shares, price, 0)
                         self.performance_tracker.record_trade(symbol, side, shares, price, 0)

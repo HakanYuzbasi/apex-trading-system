@@ -217,13 +217,18 @@ class IBKRConnector:
         try:
             await self.ib.connectAsync(self.host, self.port, clientId=self.client_id)
             
-            # ✅ FIX: Enable delayed/frozen market data (FREE for paper trading)
+            # ✅ Phase 2.2: Configurable market data type
             # Type 1 = Live (requires paid subscription)
             # Type 2 = Frozen (last available)
             # Type 3 = Delayed (15-20 min delayed, FREE)
             # Type 4 = Delayed-Frozen
-            self.ib.reqMarketDataType(3)
-            logger.info("📊 Delayed market data enabled (free)")
+            from config import ApexConfig
+            if ApexConfig.USE_LIVE_MARKET_DATA:
+                self.ib.reqMarketDataType(1)
+                logger.info("📊 LIVE market data enabled (requires subscription)")
+            else:
+                self.ib.reqMarketDataType(3)
+                logger.info("📊 Delayed market data enabled (free)")
             
             # Get account info
             await asyncio.sleep(1)  # Wait for account sync

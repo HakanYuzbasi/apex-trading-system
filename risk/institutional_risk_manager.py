@@ -431,18 +431,24 @@ class InstitutionalRiskManager:
     # CIRCUIT BREAKER
     # ═══════════════════════════════════════════════════════════════
 
-    def can_trade(self) -> Tuple[bool, str]:
-        """Check if trading is allowed."""
+    def can_trade(self) -> Tuple[bool, str, float]:
+        """
+        Check if trading is allowed with graduated response.
+
+        Returns:
+            Tuple of (can_trade, reason, risk_multiplier)
+            - risk_multiplier: 1.0 = full size, 0.5 = half size, 0.0 = no trading
+        """
         # Check circuit breaker state
         if self.cb_state == CircuitBreakerState.TRIPPED:
-            return False, "Circuit breaker tripped"
+            return False, "Circuit breaker tripped", 0.0
 
         if self.cb_state == CircuitBreakerState.COOLDOWN:
             if self.cb_trip_time:
                 cooldown_end = self.cb_trip_time + timedelta(hours=self.config.cb_cooldown_hours)
                 if datetime.now() < cooldown_end:
                     remaining = cooldown_end - datetime.now()
-                    return False, f"Cooldown: {remaining.seconds // 60} minutes remaining"
+                    return False, f"Cooldown: {remaining.seconds // 60} minutes remaining", 0.0
                 else:
                     self.cb_state = CircuitBreakerState.OPEN
                     logger.info("Circuit breaker cooldown complete - trading resumed")
@@ -453,7 +459,7 @@ class InstitutionalRiskManager:
 
             if daily_return <= -self.config.cb_daily_loss_trigger:
                 self._trip_circuit_breaker("Daily loss limit")
-                return False, f"Daily loss: {daily_return:.2%}"
+                return False, f"Daily loss: {daily_return:.2%}", 0.0
 
         # Check drawdown
         if self.peak_capital > 0:
@@ -461,18 +467,18 @@ class InstitutionalRiskManager:
 
             if drawdown >= self.config.cb_drawdown_trigger:
                 self._trip_circuit_breaker("Drawdown limit")
-                return False, f"Drawdown: {drawdown:.2%}"
+                return False, f"Drawdown: {drawdown:.2%}", 0.0
 
         # Check consecutive losses
         if self.consecutive_losses >= self.config.cb_consecutive_losses:
             self._trip_circuit_breaker("Consecutive losses")
-            return False, f"Consecutive losses: {self.consecutive_losses}"
+            return False, f"Consecutive losses: {self.consecutive_losses}", 0.0
 
-        # Warning state
+        # Warning state - graduated response: reduce position sizes by 50%
         if self.cb_state == CircuitBreakerState.WARNING:
-            return True, "Warning: Elevated risk"
+            return True, "Warning: Elevated risk - 50% position size", 0.5
 
-        return True, "OK"
+        return True, "OK", 1.0
 
     def _check_circuit_breaker(self):
         """Check and update circuit breaker state."""

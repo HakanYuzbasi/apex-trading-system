@@ -311,41 +311,77 @@ class TransactionCostOptimizer:
         side: str,
         quantity: int,
         bid_ask_spread: float,
-        volatility: float
+        volatility: float,
+        market_regime: str = 'neutral'
     ) -> Dict:
         """
-        Estimate expected slippage.
-        
-        Slippage = Spread/2 + Market Impact
-        
+        Estimate expected slippage with volatility and regime adjustments.
+
+        Slippage = Spread/2 + Market Impact + Volatility Adjustment
+
         Args:
             symbol: Trading symbol
             side: 'BUY' or 'SELL'
             quantity: Order size
             bid_ask_spread: Current bid-ask spread
-            volatility: Volatility
-        
+            volatility: Annualized volatility
+            market_regime: Market regime ('bull', 'bear', 'neutral', 'high_volatility')
+
         Returns:
-            Slippage estimate
+            Slippage estimate with regime adjustments
         """
         # Spread cost (half spread for limit orders)
         spread_cost_bps = (bid_ask_spread / 2) * 10000
-        
-        # Impact cost (simplified)
+
+        # Impact cost (Almgren-Chriss simplified)
         impact_cost_bps = volatility * np.sqrt(quantity / 1000) * 10
-        
-        # Total slippage
-        total_slippage_bps = spread_cost_bps + impact_cost_bps
-        
+
+        # ✅ Phase 2.3: Volatility regime adjustment
+        # High volatility markets have higher slippage
+        vol_multiplier = {
+            'strong_bull': 0.8,   # Lower slippage in trending markets
+            'bull': 0.9,
+            'neutral': 1.0,
+            'bear': 1.2,          # Higher slippage in falling markets
+            'strong_bear': 1.5,
+            'high_volatility': 2.0  # Double slippage in volatile markets
+        }.get(market_regime, 1.0)
+
+        # Adjust impact for volatility regime
+        adjusted_impact_bps = impact_cost_bps * vol_multiplier
+
+        # Time-of-day adjustment (higher slippage at open/close)
+        from datetime import datetime
+        import pytz
+        est = pytz.timezone('US/Eastern')
+        now = datetime.now(est)
+        hour = now.hour + now.minute / 60
+
+        if 9.5 <= hour <= 10.5:  # First hour of trading
+            time_multiplier = 1.5
+        elif 15.5 <= hour <= 16.0:  # Last 30 minutes
+            time_multiplier = 1.3
+        elif 12.0 <= hour <= 14.0:  # Lunch hour (lower liquidity)
+            time_multiplier = 1.2
+        else:
+            time_multiplier = 1.0
+
+        # Total slippage with all adjustments
+        total_slippage_bps = (spread_cost_bps + adjusted_impact_bps) * time_multiplier
+
         result = {
             'spread_cost_bps': spread_cost_bps,
             'impact_cost_bps': impact_cost_bps,
+            'adjusted_impact_bps': adjusted_impact_bps,
+            'vol_multiplier': vol_multiplier,
+            'time_multiplier': time_multiplier,
             'total_slippage_bps': total_slippage_bps,
-            'total_slippage_pct': total_slippage_bps / 10000
+            'total_slippage_pct': total_slippage_bps / 10000,
+            'market_regime': market_regime
         }
-        
-        logger.debug(f"📊 {symbol} Slippage Estimate: {total_slippage_bps:.1f} bps")
-        
+
+        logger.debug(f"📊 {symbol} Slippage: {total_slippage_bps:.1f} bps (vol_mult={vol_multiplier}, time_mult={time_multiplier:.1f})")
+
         return result
     
     def calculate_total_transaction_cost(

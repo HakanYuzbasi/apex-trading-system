@@ -54,7 +54,7 @@ class ApexConfig:
     # ═══════════════════════════════════════════════════════════════
     # RISK LIMITS
     # ═══════════════════════════════════════════════════════════════
-    MAX_DAILY_LOSS = 0.02  # 2% max daily loss
+    MAX_DAILY_LOSS = 0.03  # 3% max daily loss (Moderate risk profile)
     MAX_DRAWDOWN = 0.10  # 10% max drawdown
     MAX_SECTOR_EXPOSURE = 0.40  # 40% max per sector
 
@@ -62,7 +62,8 @@ class ApexConfig:
     # CIRCUIT BREAKER (Automatic Trading Halt)
     # ═══════════════════════════════════════════════════════════════
     CIRCUIT_BREAKER_ENABLED = True  # Enable automatic trading halt
-    CIRCUIT_BREAKER_DAILY_LOSS = 0.02  # Halt if daily loss exceeds 2%
+    CIRCUIT_BREAKER_DAILY_LOSS = 0.03  # Halt if daily loss exceeds 3% (Moderate)
+    CIRCUIT_BREAKER_WARNING = 0.015  # Warning at 1.5% - reduce position sizes by 50%
     CIRCUIT_BREAKER_DRAWDOWN = 0.08  # Halt if drawdown exceeds 8%
     CIRCUIT_BREAKER_CONSECUTIVE_LOSSES = 5  # Halt after 5 consecutive losing trades
     CIRCUIT_BREAKER_COOLDOWN_HOURS = 24  # Hours before trading resumes after halt
@@ -86,18 +87,34 @@ class ApexConfig:
     # ═══════════════════════════════════════════════════════════════
     # SIGNAL THRESHOLDS
     # ═══════════════════════════════════════════════════════════════
-    MIN_SIGNAL_THRESHOLD = 0.40  # Minimum signal strength (god-level optimized)
+    MIN_SIGNAL_THRESHOLD = 0.40  # Default minimum signal strength
     MIN_CONFIDENCE = 0.35  # Minimum confidence for trade execution
 
+    # ✅ Phase 3.1: Regime-based entry thresholds
+    # Lower threshold in trending markets, higher in choppy/volatile markets
+    SIGNAL_THRESHOLDS_BY_REGIME = {
+        'strong_bull': 0.30,    # Easier to enter in strong trends
+        'bull': 0.35,
+        'neutral': 0.45,        # Stricter in sideways markets
+        'bear': 0.40,
+        'strong_bear': 0.35,
+        'high_volatility': 0.55  # Much stricter in volatile markets
+    }
+
     # ═══════════════════════════════════════════════════════════════
-    # GOD LEVEL PARAMETERS
+    # GOD LEVEL PARAMETERS (Moderate Risk Profile)
     # ═══════════════════════════════════════════════════════════════
     # Position Sizing (ATR-based)
-    ATR_MULTIPLIER_STOP = 2.0  # Stop loss = ATR * this multiplier
-    ATR_MULTIPLIER_PROFIT = 3.0  # Take profit = ATR * this multiplier
-    TRAILING_STOP_ATR = 1.5  # Trailing stop = ATR * this multiplier
+    ATR_MULTIPLIER_STOP = 2.5  # Stop loss = ATR * this multiplier (Moderate)
+    ATR_MULTIPLIER_PROFIT = 3.5  # Take profit = ATR * this multiplier (Moderate)
+    TRAILING_STOP_ATR = 2.0  # Trailing stop = ATR * this multiplier (Moderate)
     USE_KELLY_SIZING = True  # Use Kelly criterion for position sizing
-    KELLY_FRACTION = 0.5  # Use half-Kelly for safety
+    KELLY_FRACTION = 0.6  # Kelly fraction (Moderate - 60%)
+
+    # Enable advanced risk features
+    USE_ATR_STOPS = True  # Use dynamic ATR-based stops instead of fixed percentages
+    USE_ADVANCED_EXECUTION = True  # Use TWAP/VWAP for large orders
+    USE_CORRELATION_MANAGER = True  # Enable correlation monitoring
 
     # Market Regime
     REGIME_LOOKBACK_DAYS = 60  # Days to analyze for regime detection
@@ -107,7 +124,12 @@ class ApexConfig:
 
     # Correlation Management
     MAX_CORRELATION = 0.70  # Max correlation between positions
+    MAX_PORTFOLIO_CORRELATION = 0.50  # Max average portfolio correlation
     CORRELATION_LOOKBACK = 60  # Days for correlation calculation
+
+    # Execution
+    LARGE_ORDER_THRESHOLD = 50000  # Dollar value threshold for TWAP/VWAP execution
+    USE_LIVE_MARKET_DATA = False  # Set True for live trading with data subscription
 
     # Advanced Risk
     VAR_CONFIDENCE = 0.95  # VaR confidence level
