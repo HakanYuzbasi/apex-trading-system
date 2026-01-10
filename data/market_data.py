@@ -43,7 +43,8 @@ class MarketDataFetcher:
         """
         self.cache_ttl = cache_ttl_seconds
         self._price_cache: Dict[str, tuple] = {}  # symbol -> (price, timestamp)
-        self._historical_cache: Dict[str, pd.DataFrame] = {}
+        self._historical_cache: Dict[str, pd.DataFrame] = {}  # symbol_days -> DataFrame
+        self._historical_cache_times: Dict[str, datetime] = {}  # cache_key -> timestamp
         self._lock = threading.Lock()
         self._last_request_time = 0
         self._min_request_interval = 0.1  # 100ms between requests
