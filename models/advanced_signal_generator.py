@@ -519,7 +519,7 @@ class AdvancedSignalGenerator:
 
             signal = mom_5 * 0.5 + mom_20 * 0.3 + mom_60 * 0.2
             return float(np.tanh(signal * 15))
-        except:
+        except (IndexError, ValueError, ZeroDivisionError):
             return 0.0
 
     def _mean_reversion_signal(self, prices: pd.Series) -> float:
@@ -539,7 +539,7 @@ class AdvancedSignalGenerator:
 
             signal = -(z_20 * 0.6 + z_50 * 0.4)
             return float(np.tanh(signal / 2))
-        except:
+        except (IndexError, ValueError, ZeroDivisionError):
             return 0.0
 
     def _trend_signal(self, prices: pd.Series) -> float:
@@ -559,7 +559,7 @@ class AdvancedSignalGenerator:
             if p_now > ma_50: score += 1
 
             return float((score - 1.5) / 1.5)
-        except:
+        except (IndexError, ValueError, ZeroDivisionError):
             return 0.0
 
     def _volatility_signal(self, prices: pd.Series) -> float:
@@ -578,5 +578,5 @@ class AdvancedSignalGenerator:
 
             vol_ratio = vol_20 / vol_60
             return float(-np.tanh((vol_ratio - 1) * 3))
-        except:
+        except (IndexError, ValueError, ZeroDivisionError):
             return 0.0

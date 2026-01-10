@@ -1,11 +1,23 @@
 """
-risk/risk_manager.py
-Enhanced risk management with circuit breaker and better tracking
+risk/risk_manager.py - Enhanced Risk Management
+
+Provides comprehensive risk controls including:
+- Daily loss limits with automatic enforcement
+- Drawdown monitoring and alerts
+- Circuit breaker for automatic trading halts
+- Position sizing with configurable limits
+
+The circuit breaker trips when:
+- Daily loss exceeds threshold
+- Drawdown exceeds threshold
+- Consecutive losing trades exceed limit
+
+After tripping, trading halts for a configurable cooldown period.
 """
 
 import logging
 from datetime import datetime, timedelta
-from typing import Dict, Tuple, List
+from typing import Dict, Tuple, List, Optional
 
 from config import ApexConfig
 

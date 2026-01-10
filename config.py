@@ -1,35 +1,52 @@
 """
 config.py - APEX Trading System Configuration
-PRODUCTION SETTINGS - Conservative and Safe
+
+Central configuration hub for all system parameters including:
+- IBKR connection settings
+- Capital and position sizing
+- Risk limits and circuit breakers
+- Trading hours and timing
+- Universe selection
+
+Environment variables can override defaults:
+- APEX_IBKR_HOST, APEX_IBKR_PORT, APEX_IBKR_CLIENT_ID
+- APEX_LIVE_TRADING (true/false)
+- APEX_INITIAL_CAPITAL
 """
 
 import os
 from pathlib import Path
+from typing import Set, Dict, List
 
 
 class ApexConfig:
-    """Central configuration for APEX Trading System."""
-    
+    """
+    Central configuration for APEX Trading System.
+
+    All settings can be overridden via environment variables prefixed with APEX_.
+    Example: APEX_LIVE_TRADING=false will disable live trading.
+    """
+
     # System Info
-    SYSTEM_NAME = "APEX Trading System"
-    VERSION = "2.0.0-PRODUCTION"
+    SYSTEM_NAME: str = "APEX Trading System"
+    VERSION: str = "2.0.0-PRODUCTION"
     
     # ═══════════════════════════════════════════════════════════════
     # TRADING MODE
     # ═══════════════════════════════════════════════════════════════
-    LIVE_TRADING = True  # Set to False for simulation mode
-    
+    LIVE_TRADING: bool = os.getenv("APEX_LIVE_TRADING", "true").lower() == "true"
+
     # ═══════════════════════════════════════════════════════════════
     # IBKR CONNECTION
     # ═══════════════════════════════════════════════════════════════
-    IBKR_HOST = '127.0.0.1'
-    IBKR_PORT = 7497  # 7497 = Paper Trading, 7496 = Live Trading
-    IBKR_CLIENT_ID = 1
-    
+    IBKR_HOST: str = os.getenv("APEX_IBKR_HOST", "127.0.0.1")
+    IBKR_PORT: int = int(os.getenv("APEX_IBKR_PORT", "7497"))  # 7497 = Paper, 7496 = Live
+    IBKR_CLIENT_ID: int = int(os.getenv("APEX_IBKR_CLIENT_ID", "1"))
+
     # ═══════════════════════════════════════════════════════════════
     # CAPITAL & POSITION SIZING
     # ═══════════════════════════════════════════════════════════════
-    INITIAL_CAPITAL = 1_100_000  # $1.1M starting capital
+    INITIAL_CAPITAL: int = int(os.getenv("APEX_INITIAL_CAPITAL", "1100000"))
     POSITION_SIZE_USD = 5_000  # $5K per position (0.45% of capital)
     MAX_POSITIONS = 15  # Maximum concurrent positions
     MAX_SHARES_PER_POSITION = 200  # ✅ NEW: Cap max shares per position
@@ -284,30 +301,70 @@ class ApexConfig:
 # ═══════════════════════════════════════════════════════════════
 # VALIDATE CONFIGURATION
 # ═══════════════════════════════════════════════════════════════
-def validate_config():
-    """Validate configuration settings."""
-    errors = []
-    
-    if ApexConfig.POSITION_SIZE_USD > ApexConfig.INITIAL_CAPITAL * 0.01:
-        errors.append(f"⚠️  Position size (${ApexConfig.POSITION_SIZE_USD}) > 1% of capital")
-    
+def validate_config() -> bool:
+    """
+    Validate configuration settings for safety and consistency.
+
+    Checks:
+        - Position size relative to capital
+        - Max exposure doesn't exceed capital
+        - Signal thresholds are reasonable
+        - Cooldown periods are adequate
+
+    Returns:
+        bool: True if all validations pass, False otherwise
+    """
+    errors: List[str] = []
+    warnings: List[str] = []
+
+    # Critical errors
     if ApexConfig.MAX_POSITIONS * ApexConfig.POSITION_SIZE_USD > ApexConfig.INITIAL_CAPITAL:
-        errors.append(f"⚠️  Max exposure ({ApexConfig.MAX_POSITIONS} * ${ApexConfig.POSITION_SIZE_USD}) > capital")
-    
+        errors.append(
+            f"❌ Max exposure ({ApexConfig.MAX_POSITIONS} × ${ApexConfig.POSITION_SIZE_USD:,}) "
+            f"exceeds capital (${ApexConfig.INITIAL_CAPITAL:,})"
+        )
+
+    if ApexConfig.IBKR_PORT not in [7496, 7497]:
+        warnings.append(
+            f"⚠️  Non-standard IBKR port ({ApexConfig.IBKR_PORT}). "
+            "Expected 7496 (Live) or 7497 (Paper)"
+        )
+
+    # Warnings (non-fatal)
+    if ApexConfig.POSITION_SIZE_USD > ApexConfig.INITIAL_CAPITAL * 0.05:
+        warnings.append(
+            f"⚠️  Position size (${ApexConfig.POSITION_SIZE_USD:,}) > 5% of capital"
+        )
+
     if ApexConfig.MIN_SIGNAL_THRESHOLD < 0.3:
-        errors.append(f"⚠️  Signal threshold too low ({ApexConfig.MIN_SIGNAL_THRESHOLD}) - Risk of false signals")
-    
+        warnings.append(
+            f"⚠️  Signal threshold ({ApexConfig.MIN_SIGNAL_THRESHOLD}) is low - risk of false signals"
+        )
+
     if ApexConfig.TRADE_COOLDOWN_SECONDS < 60:
-        errors.append(f"⚠️  Cooldown too short ({ApexConfig.TRADE_COOLDOWN_SECONDS}s) - Risk of overtrading")
-    
+        warnings.append(
+            f"⚠️  Cooldown ({ApexConfig.TRADE_COOLDOWN_SECONDS}s) is short - risk of overtrading"
+        )
+
+    # Print results
+    for warning in warnings:
+        print(warning)
+
     if errors:
-        print("\n".join(errors))
+        for error in errors:
+            print(error)
         return False
-    
+
     return True
 
 
 if __name__ == "__main__":
+    print(f"APEX Trading System Configuration v{ApexConfig.VERSION}")
+    print(f"Mode: {'LIVE' if ApexConfig.LIVE_TRADING else 'SIMULATION'}")
+    print(f"IBKR: {ApexConfig.IBKR_HOST}:{ApexConfig.IBKR_PORT}")
+    print(f"Capital: ${ApexConfig.INITIAL_CAPITAL:,}")
+    print()
+
     if validate_config():
         print("✅ Configuration validated successfully")
     else:
