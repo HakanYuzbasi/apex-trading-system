@@ -34,7 +34,7 @@ from config import ApexConfig
 
 # Institutional-grade components
 from models.institutional_signal_generator import (
-    InstitutionalSignalGenerator,
+    UltimateSignalGenerator as InstitutionalSignalGenerator,
     SignalOutput
 )
 from risk.institutional_risk_manager import (

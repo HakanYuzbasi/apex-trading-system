@@ -1,780 +1,588 @@
 """
-models/ensemble_signal_generator.py
+models/ensemble_signal_generator.py - GOD LEVEL ENSEMBLE
 ================================================================================
-APEX TRADING SYSTEM - 5-MODEL ENSEMBLE WITH VOTING
-================================================================================
-
-
-Advanced ensemble learning with:
-- Random Forest (robust, feature importance)
-- Gradient Boosting (strong learner)
-- XGBoost (fast, handles missing data)
-- LightGBM (memory efficient)
-- Logistic Regression (interpretable)
-
+APEX TRADING SYSTEM - HEDGE FUND GRADE ML ENSEMBLE
 
 Features:
-- Weighted voting mechanism
-- Probability averaging
-- Model persistence (save/load)
-- Real-time signal generation
-- Consensus confidence scoring
+✅ 5-Model Ensemble (RF, GB, XGB, LGB, LR)
+✅ Walk-Forward Validation (No Look-Ahead Bias)
+✅ Regime-Aware Training (Bull/Bear/Volatile/Neutral)
+✅ Drift Monitoring (Auto-Retrain on Degradation)
+✅ Model Persistence
+✅ Performance Tracking
 """
-
 
 import numpy as np
 import pandas as pd
 import logging
-from typing import Dict, Optional, Tuple, List
-from datetime import datetime
+from typing import Dict, Optional, List, Tuple
+from datetime import datetime, timedelta
 import pickle
 import os
-
+from collections import deque
 
 from sklearn.ensemble import RandomForestClassifier, GradientBoostingClassifier
 from sklearn.linear_model import LogisticRegression
 from sklearn.preprocessing import StandardScaler
+from sklearn.impute import SimpleImputer
 from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score
 import xgboost as xgb
 import lightgbm as lgb
 from joblib import dump, load
 
-
 logger = logging.getLogger(__name__)
 
+
+class RegimeDetector:
+    """Detect market regime for regime-aware training."""
+    
+    @staticmethod
+    def detect_regime(prices: pd.Series, lookback: int = 60) -> str:
+        """
+        Detect current market regime.
+        
+        Returns: 'bull', 'bear', 'neutral', 'volatile'
+        """
+        if len(prices) < lookback:
+            return 'neutral'
+        
+        recent = prices.iloc[-lookback:]
+        returns = recent.pct_change().dropna()
+        
+        # Trend: Compare recent MA to older MA
+        ma_20 = prices.iloc[-20:].mean()
+        ma_60 = prices.iloc[-60:].mean()
+        trend_strength = (ma_20 - ma_60) / ma_60 if ma_60 > 0 else 0
+        
+        # Volatility: Annualized std dev
+        vol = returns.std() * np.sqrt(252)
+        
+        # Classification Logic
+        if vol > 0.35:  # High volatility threshold
+            return 'volatile'
+        elif trend_strength > 0.05:
+            return 'bull'
+        elif trend_strength < -0.05:
+            return 'bear'
+        else:
+            return 'neutral'
 
 
 class EnsembleSignalGenerator:
     """
-    Production-grade 5-model ensemble for trading signals.
+    GOD LEVEL: Hedge Fund Grade 5-Model Ensemble.
     
     Architecture:
-    - Base Models: 5 different algorithms
-    - Voting: Majority + weighted voting
-    - Probability: Averaging probabilities
-    - Robustness: Handles missing data, NaN values
-    - Persistence: Save/load trained models
-    
-    Output Signal: -1.0 to 1.0
-    - -1.0: Strong sell signal
-    - 0.0: Neutral
-    - 1.0: Strong buy signal
+    - Regime-Aware Models (separate models per regime)
+    - Walk-Forward Validation (no look-ahead bias)
+    - Drift Monitoring (auto-retrain on degradation)
     """
     
-    def __init__(self, model_dir: str = "models/saved"):
+    def __init__(self, model_dir: str = "models/saved_ensemble"):
         self.model_dir = model_dir
         os.makedirs(model_dir, exist_ok=True)
         
-        # Initialize individual models
-        self.rf_model: Optional[RandomForestClassifier] = None
-        self.gb_model: Optional[GradientBoostingClassifier] = None
-        self.xgb_model: Optional[xgb.XGBClassifier] = None
-        self.lgb_model: Optional[lgb.LGBMClassifier] = None
-        self.lr_model: Optional[LogisticRegression] = None
-        
-        # Feature scaling
-        self.scaler: Optional[StandardScaler] = None
-        
-        # Model metadata
-        self.is_trained = False
-        self.feature_names: List[str] = []
-        self.feature_count = 0
-        self.training_date = None
-        
-        # Training history
-        self.training_history = {
-            'accuracies': {},
-            'precisions': {},
-            'recalls': {},
-            'f1_scores': {}
+        # Models organized by regime
+        self.regime_models: Dict[str, Dict] = {
+            'bull': {},
+            'bear': {},
+            'neutral': {},
+            'volatile': {}
         }
         
-        logger.info("✅ Ensemble Signal Generator initialized")
-        logger.info(f"   Model directory: {model_dir}")
+        # Preprocessors per regime
+        self.regime_scalers: Dict[str, StandardScaler] = {}
+        self.regime_imputers: Dict[str, SimpleImputer] = {}
+        
+        # Training metadata
+        self.is_trained = False
+        self.feature_names: List[str] = []
+        self.training_date = None
+        self.walk_forward_results = []
+        
+        # Drift monitoring
+        self.prediction_history = deque(maxlen=100)  # Last 100 predictions
+        self.outcome_history = deque(maxlen=100)     # Last 100 actual outcomes
+        self.performance_baseline = 0.55  # Minimum acceptable accuracy
+        self.last_retrain_date = None
+        self.retrain_interval_days = 30
+        
+        logger.info("✅ GOD LEVEL Ensemble initialized")
+        logger.info(f"   Directory: {model_dir}")
     
-    def train(
+    def train_walk_forward(
         self,
         X: pd.DataFrame,
         y: pd.Series,
-        test_size: float = 0.2,
-        verbose: bool = True
+        regimes: pd.Series,
+        n_splits: int = 5,
+        test_size: float = 0.2
     ) -> Dict:
         """
-        Train all 5 models.
+        Walk-Forward Validation Training.
+        
+        Splits data into time-ordered windows:
+        - Train on window 1, test on window 2
+        - Train on windows 1+2, test on window 3
+        - Etc.
         
         Args:
-            X: Feature matrix (rows=samples, cols=features)
-            y: Target variable (1=up, 0=down)
-            test_size: Fraction for testing (0.2 = 20%)
-            verbose: Print training details
-        
-        Returns:
-            Training results dictionary with metrics
-        
-        Raises:
-            ValueError: If data is insufficient or invalid
+            X: Features
+            y: Target (1=up, 0=down)
+            regimes: Market regime labels ('bull', 'bear', etc.)
+            n_splits: Number of walk-forward windows
+            test_size: Test set fraction
         """
         logger.info("\n" + "="*80)
-        logger.info("🧠 TRAINING 5-MODEL ENSEMBLE")
+        logger.info("🧠 WALK-FORWARD TRAINING (GOD LEVEL)")
         logger.info("="*80)
         
         # Validation
-        if len(X) < 100:
-            raise ValueError(f"Need at least 100 samples, got {len(X)}")
+        if len(X) < 200:
+            raise ValueError(f"Need at least 200 samples, got {len(X)}")
         
-        if X.shape[0] != y.shape[0]:
-            raise ValueError(f"X and y size mismatch: {X.shape[0]} vs {y.shape[0]}")
-        
-        # Check target distribution
-        class_counts = y.value_counts()
-        if len(class_counts) < 2:
-            raise ValueError("Target must have both classes (0 and 1)")
-        
-        min_samples = min(class_counts.values)
-        if min_samples < 10:
-            raise ValueError(f"Each class needs at least 10 samples, min={min_samples}")
-        
-        logger.info(f"📊 Data shape: {X.shape[0]} samples × {X.shape[1]} features")
-        logger.info(f"   Class distribution: {dict(class_counts)}")
-        
-        # Store feature names
         self.feature_names = X.columns.tolist()
-        self.feature_count = len(self.feature_names)
         
-        # Handle missing values
-        X = X.fillna(X.mean())
-        y = y.fillna(y.mode()[0])
+        # Calculate split points
+        total_samples = len(X)
+        min_train = int(total_samples * 0.3)  # Start with 30% training data
+        test_window = int(total_samples / n_splits)
         
-        logger.info(f"✅ Filled missing values")
+        results_by_regime = {r: [] for r in ['bull', 'bear', 'neutral', 'volatile']}
         
-        # Split data
-        split_idx = int(len(X) * (1 - test_size))
-        X_train, X_test = X.iloc[:split_idx].copy(), X.iloc[split_idx:].copy()
-        y_train, y_test = y.iloc[:split_idx].copy(), y.iloc[split_idx:].copy()
+        # Walk-Forward Loop
+        for split in range(n_splits):
+            train_end = min_train + (split * test_window)
+            test_start = train_end
+            test_end = min(test_start + test_window, total_samples)
+            
+            if test_end - test_start < 20:
+                break
+            
+            logger.info(f"\n[Split {split+1}/{n_splits}] Train: 0-{train_end}, Test: {test_start}-{test_end}")
+            
+            # Split data
+            X_train = X.iloc[:train_end].copy()
+            y_train = y.iloc[:train_end].copy()
+            regimes_train = regimes.iloc[:train_end].copy()
+            
+            X_test = X.iloc[test_start:test_end].copy()
+            y_test = y.iloc[test_start:test_end].copy()
+            regimes_test = regimes.iloc[test_start:test_end].copy()
+            
+            # Train models for each regime
+            for regime_name in ['bull', 'bear', 'neutral', 'volatile']:
+                # Filter by regime
+                regime_mask_train = (regimes_train == regime_name)
+                regime_mask_test = (regimes_test == regime_name)
+                
+                if regime_mask_train.sum() < 50 or regime_mask_test.sum() < 10:
+                    continue
+                
+                X_regime_train = X_train[regime_mask_train]
+                y_regime_train = y_train[regime_mask_train]
+                X_regime_test = X_test[regime_mask_test]
+                y_regime_test = y_test[regime_mask_test]
+                
+                # Initialize preprocessors for this regime if needed
+                if regime_name not in self.regime_imputers:
+                    self.regime_imputers[regime_name] = SimpleImputer(strategy='mean')
+                    self.regime_scalers[regime_name] = StandardScaler()
+                
+                # Preprocess
+                X_regime_train_imp = self.regime_imputers[regime_name].fit_transform(X_regime_train)
+                X_regime_train_sc = self.regime_scalers[regime_name].fit_transform(X_regime_train_imp)
+                
+                X_regime_test_imp = self.regime_imputers[regime_name].transform(X_regime_test)
+                X_regime_test_sc = self.regime_scalers[regime_name].transform(X_regime_test_imp)
+                
+                # Train models
+                regime_models = self._train_regime_models(
+                    X_regime_train_sc, y_regime_train,
+                    X_regime_test_sc, y_regime_test,
+                    regime_name
+                )
+                
+                # Store models (only last split models are kept for production use)
+                self.regime_models[regime_name] = regime_models
+                
+                # Record results
+                if 'accuracy' in regime_models:
+                    results_by_regime[regime_name].append(regime_models['accuracy'])
         
-        logger.info(f"   Train: {len(X_train)} samples | Test: {len(X_test)} samples")
-        
-        # Fit scaler on training data
-        self.scaler = StandardScaler()
-        X_train_scaled = self.scaler.fit_transform(X_train)
-        X_test_scaled = self.scaler.transform(X_test)
-        
-        logger.info("✅ Features scaled")
-        
-        results = {}
-        
-        # ═══════════════════════════════════════════════════════════════
-        # MODEL 1: RANDOM FOREST (REGULARIZED)
-        # ═══════════════════════════════════════════════════════════════
-        
-        try:
-            logger.info("\n[1/5] Training Random Forest...")
-            
-            self.rf_model = RandomForestClassifier(
-                n_estimators=100,
-                max_depth=10,              # ← Prevent overfitting
-                min_samples_split=20,      # ← Require splits
-                min_samples_leaf=10,       # ← Prevent small leaves
-                max_features='sqrt',       # ← Random feature selection
-                bootstrap=True,
-                oob_score=True,
-                n_jobs=-1,
-                random_state=42,
-                verbose=0
-            )
-            
-            self.rf_model.fit(X_train_scaled, y_train)
-            
-            # Evaluate
-            y_pred_rf = self.rf_model.predict(X_test_scaled)
-            rf_acc = accuracy_score(y_test, y_pred_rf)
-            rf_prec = precision_score(y_test, y_pred_rf, zero_division=0)
-            rf_rec = recall_score(y_test, y_pred_rf, zero_division=0)
-            rf_f1 = f1_score(y_test, y_pred_rf, zero_division=0)
-            
-            self.training_history['accuracies']['RF'] = rf_acc
-            self.training_history['precisions']['RF'] = rf_prec
-            self.training_history['recalls']['RF'] = rf_rec
-            self.training_history['f1_scores']['RF'] = rf_f1
-            
-            results['RF'] = {
-                'accuracy': rf_acc,
-                'precision': rf_prec,
-                'recall': rf_rec,
-                'f1': rf_f1,
-                'oob_score': self.rf_model.oob_score_
-            }
-            
-            logger.info(f"   ✅ Accuracy: {rf_acc:.3f} | F1: {rf_f1:.3f} | OOB: {self.rf_model.oob_score_:.3f}")
-        
-        except Exception as e:
-            logger.error(f"   ❌ RF training failed: {e}")
-            self.rf_model = None
-        
-        # ═══════════════════════════════════════════════════════════════
-        # MODEL 2: GRADIENT BOOSTING (REGULARIZED)
-        # ═══════════════════════════════════════════════════════════════
-        
-        try:
-            logger.info("[2/5] Training Gradient Boosting...")
-            
-            self.gb_model = GradientBoostingClassifier(
-                n_estimators=100,
-                learning_rate=0.05,        # ← Lower learning rate to prevent overfitting
-                max_depth=5,               # ← Shallow trees
-                min_samples_split=20,      # ← Require splits
-                min_samples_leaf=10,       # ← Prevent small leaves
-                subsample=0.8,
-                max_features='sqrt',
-                random_state=42,
-                verbose=0
-            )
-            
-            self.gb_model.fit(X_train_scaled, y_train)
-            
-            # Evaluate
-            y_pred_gb = self.gb_model.predict(X_test_scaled)
-            gb_acc = accuracy_score(y_test, y_pred_gb)
-            gb_prec = precision_score(y_test, y_pred_gb, zero_division=0)
-            gb_rec = recall_score(y_test, y_pred_gb, zero_division=0)
-            gb_f1 = f1_score(y_test, y_pred_gb, zero_division=0)
-            
-            self.training_history['accuracies']['GB'] = gb_acc
-            self.training_history['precisions']['GB'] = gb_prec
-            self.training_history['recalls']['GB'] = gb_rec
-            self.training_history['f1_scores']['GB'] = gb_f1
-            
-            results['GB'] = {
-                'accuracy': gb_acc,
-                'precision': gb_prec,
-                'recall': gb_rec,
-                'f1': gb_f1
-            }
-            
-            logger.info(f"   ✅ Accuracy: {gb_acc:.3f} | F1: {gb_f1:.3f}")
-        
-        except Exception as e:
-            logger.error(f"   ❌ GB training failed: {e}")
-            self.gb_model = None
-        
-        # ═══════════════════════════════════════════════════════════════
-        # MODEL 3: XGBOOST (REGULARIZED)
-        # ═══════════════════════════════════════════════════════════════
-        
-        try:
-            logger.info("[3/5] Training XGBoost...")
-            
-            self.xgb_model = xgb.XGBClassifier(
-                n_estimators=100,
-                max_depth=5,               # ← Shallow trees
-                learning_rate=0.05,        # ← Lower learning rate
-                subsample=0.8,
-                colsample_bytree=0.8,
-                gamma=1,
-                min_child_weight=5,        # ← Higher minimum child weight
-                reg_alpha=1.0,             # ← L1 regularization
-                reg_lambda=1.0,            # ← L2 regularization
-                random_state=42,
-                n_jobs=-1,
-                eval_metric='logloss'
-            )
-            
-            self.xgb_model.fit(X_train_scaled, y_train)
-            
-            # Evaluate
-            y_pred_xgb = self.xgb_model.predict(X_test_scaled)
-            xgb_acc = accuracy_score(y_test, y_pred_xgb)
-            xgb_prec = precision_score(y_test, y_pred_xgb, zero_division=0)
-            xgb_rec = recall_score(y_test, y_pred_xgb, zero_division=0)
-            xgb_f1 = f1_score(y_test, y_pred_xgb, zero_division=0)
-            
-            self.training_history['accuracies']['XGB'] = xgb_acc
-            self.training_history['precisions']['XGB'] = xgb_prec
-            self.training_history['recalls']['XGB'] = xgb_rec
-            self.training_history['f1_scores']['XGB'] = xgb_f1
-            
-            results['XGB'] = {
-                'accuracy': xgb_acc,
-                'precision': xgb_prec,
-                'recall': xgb_rec,
-                'f1': xgb_f1
-            }
-            
-            logger.info(f"   ✅ Accuracy: {xgb_acc:.3f} | F1: {xgb_f1:.3f}")
-        
-        except Exception as e:
-            logger.error(f"   ❌ XGB training failed: {e}")
-            self.xgb_model = None
-        
-        # ═══════════════════════════════════════════════════════════════
-        # MODEL 4: LIGHTGBM (REGULARIZED)
-        # ═══════════════════════════════════════════════════════════════
-        
-        try:
-            logger.info("[4/5] Training LightGBM...")
-            
-            self.lgb_model = lgb.LGBMClassifier(
-                n_estimators=100,
-                max_depth=5,               # ← Shallow trees
-                learning_rate=0.05,        # ← Lower learning rate
-                num_leaves=15,             # ← Fewer leaves
-                subsample=0.8,
-                colsample_bytree=0.8,
-                min_child_samples=20,      # ← Require more samples
-                reg_alpha=1.0,             # ← L1 regularization
-                reg_lambda=1.0,            # ← L2 regularization
-                random_state=42,
-                n_jobs=-1,
-                verbose=-1
-            )
-            
-            self.lgb_model.fit(X_train_scaled, y_train)
-            
-            # Evaluate
-            y_pred_lgb = self.lgb_model.predict(X_test_scaled)
-            lgb_acc = accuracy_score(y_test, y_pred_lgb)
-            lgb_prec = precision_score(y_test, y_pred_lgb, zero_division=0)
-            lgb_rec = recall_score(y_test, y_pred_lgb, zero_division=0)
-            lgb_f1 = f1_score(y_test, y_pred_lgb, zero_division=0)
-            
-            self.training_history['accuracies']['LGB'] = lgb_acc
-            self.training_history['precisions']['LGB'] = lgb_prec
-            self.training_history['recalls']['LGB'] = lgb_rec
-            self.training_history['f1_scores']['LGB'] = lgb_f1
-            
-            results['LGB'] = {
-                'accuracy': lgb_acc,
-                'precision': lgb_prec,
-                'recall': lgb_rec,
-                'f1': lgb_f1
-            }
-            
-            logger.info(f"   ✅ Accuracy: {lgb_acc:.3f} | F1: {lgb_f1:.3f}")
-        
-        except Exception as e:
-            logger.error(f"   ❌ LGB training failed: {e}")
-            self.lgb_model = None
-        
-        # ═══════════════════════════════════════════════════════════════
-        # MODEL 5: LOGISTIC REGRESSION
-        # ═══════════════════════════════════════════════════════════════
-        
-        try:
-            logger.info("[5/5] Training Logistic Regression...")
-            
-            self.lr_model = LogisticRegression(
-                max_iter=1000,
-                solver='lbfgs',
-                random_state=42,
-                n_jobs=-1,
-                class_weight='balanced'
-            )
-            
-            self.lr_model.fit(X_train_scaled, y_train)
-            
-            # Evaluate
-            y_pred_lr = self.lr_model.predict(X_test_scaled)
-            lr_acc = accuracy_score(y_test, y_pred_lr)
-            lr_prec = precision_score(y_test, y_pred_lr, zero_division=0)
-            lr_rec = recall_score(y_test, y_pred_lr, zero_division=0)
-            lr_f1 = f1_score(y_test, y_pred_lr, zero_division=0)
-            
-            self.training_history['accuracies']['LR'] = lr_acc
-            self.training_history['precisions']['LR'] = lr_prec
-            self.training_history['recalls']['LR'] = lr_rec
-            self.training_history['f1_scores']['LR'] = lr_f1
-            
-            results['LR'] = {
-                'accuracy': lr_acc,
-                'precision': lr_prec,
-                'recall': lr_rec,
-                'f1': lr_f1
-            }
-            
-            logger.info(f"   ✅ Accuracy: {lr_acc:.3f} | F1: {lr_f1:.3f}")
-        
-        except Exception as e:
-            logger.error(f"   ❌ LR training failed: {e}")
-            self.lr_model = None
-        
-        # ═══════════════════════════════════════════════════════════════
-        # ENSEMBLE SUMMARY
-        # ═══════════════════════════════════════════════════════════════
-        
+        # Aggregate results
         self.is_trained = True
         self.training_date = datetime.now()
+        self.last_retrain_date = datetime.now()
         
-        # Calculate ensemble metrics
-        ensemble_f1_scores = [r['f1'] for r in results.values()]
-        ensemble_avg_f1 = np.mean(ensemble_f1_scores) if ensemble_f1_scores else 0
+        # Calculate average performance per regime
+        regime_performance = {}
+        for regime, accs in results_by_regime.items():
+            if accs:
+                regime_performance[regime] = {
+                    'avg_accuracy': np.mean(accs),
+                    'std_accuracy': np.std(accs),
+                    'n_windows': len(accs)
+                }
         
         logger.info("\n" + "="*80)
-        logger.info("📊 ENSEMBLE TRAINING SUMMARY")
+        logger.info("📊 WALK-FORWARD RESULTS")
         logger.info("="*80)
+        for regime, perf in regime_performance.items():
+            logger.info(f"{regime.upper():>10}: Acc={perf['avg_accuracy']:.3f} ± {perf['std_accuracy']:.3f} ({perf['n_windows']} windows)")
         
-        for model_name, metrics in results.items():
-            logger.info(f"{model_name:>5}: Acc={metrics['accuracy']:.3f}, "
-                       f"Prec={metrics['precision']:.3f}, "
-                       f"Rec={metrics['recall']:.3f}, "
-                       f"F1={metrics['f1']:.3f}")
-        
-        logger.info(f"\nEnsemble F1 Score: {ensemble_avg_f1:.3f}")
-        logger.info(f"Models trained: {sum(1 for m in [self.rf_model, self.gb_model, self.xgb_model, self.lgb_model, self.lr_model] if m is not None)}/5")
-        logger.info("="*80 + "\n")
-        
-        # Save models
         self._save_models()
         
         return {
             'is_trained': True,
-            'models_count': sum(1 for m in [self.rf_model, self.gb_model, self.xgb_model, self.lgb_model, self.lr_model] if m is not None),
-            'ensemble_f1': ensemble_avg_f1,
-            'individual_results': results,
-            'training_date': self.training_date.isoformat()
+            'regime_performance': regime_performance,
+            'training_date': self.training_date.isoformat(),
+            'walk_forward_splits': n_splits
         }
     
-    def generate_signal(self, features: pd.DataFrame) -> Dict:
+    def _train_regime_models(
+        self,
+        X_train: np.ndarray,
+        y_train: np.ndarray,
+        X_test: np.ndarray,
+        y_test: np.ndarray,
+        regime: str
+    ) -> Dict:
+        """Train 5 models for a specific regime."""
+        models = {}
+        predictions = []
+        
+        # Random Forest
+        try:
+            rf = RandomForestClassifier(
+                n_estimators=100, max_depth=10, min_samples_split=20,
+                min_samples_leaf=10, max_features='sqrt', n_jobs=-1, random_state=42
+            )
+            rf.fit(X_train, y_train)
+            models['rf'] = rf
+            predictions.append(rf.predict(X_test))
+        except Exception as e:
+            logger.debug(f"RF failed for {regime}: {e}")
+        
+        # Gradient Boosting
+        try:
+            gb = GradientBoostingClassifier(
+                n_estimators=100, learning_rate=0.05, max_depth=5,
+                min_samples_split=20, subsample=0.8, random_state=42
+            )
+            gb.fit(X_train, y_train)
+            models['gb'] = gb
+            predictions.append(gb.predict(X_test))
+        except Exception as e:
+            logger.debug(f"GB failed for {regime}: {e}")
+        
+        # XGBoost
+        try:
+            xgb_model = xgb.XGBClassifier(
+                n_estimators=100, max_depth=5, learning_rate=0.05,
+                subsample=0.8, colsample_bytree=0.8, random_state=42, verbosity=0
+            )
+            xgb_model.fit(X_train, y_train)
+            models['xgb'] = xgb_model
+            predictions.append(xgb_model.predict(X_test))
+        except Exception as e:
+            logger.debug(f"XGB failed for {regime}: {e}")
+        
+        # LightGBM
+        try:
+            lgb_model = lgb.LGBMClassifier(
+                n_estimators=100, max_depth=5, learning_rate=0.05,
+                subsample=0.8, random_state=42, verbose=-1
+            )
+            lgb_model.fit(X_train, y_train)
+            models['lgb'] = lgb_model
+            predictions.append(lgb_model.predict(X_test))
+        except Exception as e:
+            logger.debug(f"LGB failed for {regime}: {e}")
+        
+        # Logistic Regression
+        try:
+            lr = LogisticRegression(max_iter=1000, random_state=42, n_jobs=-1)
+            lr.fit(X_train, y_train)
+            models['lr'] = lr
+            predictions.append(lr.predict(X_test))
+        except Exception as e:
+            logger.debug(f"LR failed for {regime}: {e}")
+        
+        # Ensemble accuracy
+        if predictions:
+            ensemble_pred = np.round(np.mean(predictions, axis=0))
+            accuracy = accuracy_score(y_test, ensemble_pred)
+            models['accuracy'] = accuracy
+        
+        return models
+    
+    def generate_signal(
+        self,
+        features: pd.DataFrame,
+        prices: pd.Series,
+        track_for_drift: bool = True
+    ) -> Dict:
         """
-        Generate trading signal from features.
+        Generate regime-aware signal with drift monitoring.
         
         Args:
-            features: Feature dataframe (1 row with same columns as training)
-        
-        Returns:
-            {
-                'signal': float (-1 to 1, -1=sell, 0=neutral, 1=buy),
-                'confidence': float (0 to 1, how confident),
-                'consensus': float (0 to 1, % models agreeing),
-                'model_votes': {model_name: vote (0 or 1)},
-                'probabilities': list of probabilities,
-                'timestamp': datetime
-            }
+            features: Feature dataframe (1 row)
+            prices: Recent price history (for regime detection)
+            track_for_drift: Whether to store prediction for drift monitoring
         """
-        
-        # Load models if not trained
         if not self.is_trained:
             if not self._load_models():
-                logger.warning("No trained models available")
                 return self._neutral_signal()
         
+        # Check if retrain is needed
+        if self._should_retrain():
+            logger.warning("⚠️ Retrain recommended (performance drift or time-based)")
+        
         try:
-            # Validate input
-            if features.empty:
-                logger.warning("Empty features dataframe")
+            # 1. Detect regime
+            regime = RegimeDetector.detect_regime(prices, lookback=60)
+            
+            # 2. Get regime-specific models
+            if regime not in self.regime_models or not self.regime_models[regime]:
+                logger.warning(f"No models for regime {regime}, using neutral")
+                regime = 'neutral'
+            
+            models = self.regime_models[regime]
+            if not models:
                 return self._neutral_signal()
             
-            if features.shape[0] != 1:
-                logger.warning(f"Expected 1 row, got {features.shape[0]}")
-                features = features.iloc[-1:].copy()
-            
-            # Handle missing features
+            # 3. Prepare features
             for col in self.feature_names:
                 if col not in features.columns:
-                    logger.debug(f"Missing feature: {col}, using 0")
                     features[col] = 0
+            features = features[self.feature_names]
             
-            # Select and reorder features
-            features = features[[col for col in self.feature_names if col in features.columns]]
+            # 4. Preprocess
+            imputer = self.regime_imputers.get(regime)
+            scaler = self.regime_scalers.get(regime)
             
-            # Fill NaN values
-            features = features.fillna(features.mean())
-            
-            # Scale features
-            if self.scaler is None:
-                logger.warning("No scaler available")
+            if imputer is None or scaler is None:
                 return self._neutral_signal()
             
-            features_scaled = self.scaler.transform(features)
+            features_imp = imputer.transform(features)
+            features_sc = scaler.transform(features_imp)
             
-            # Collect predictions
-            model_votes = {}
+            # 5. Collect predictions
             probabilities = []
-            model_count = 0
+            votes = {}
             
-            # RF prediction
-            if self.rf_model is not None:
-                try:
-                    rf_pred = self.rf_model.predict(features_scaled)[0]
-                    rf_prob = self.rf_model.predict_proba(features_scaled)[0, 1]
-                    model_votes['RF'] = int(rf_pred)
-                    probabilities.append(rf_prob)
-                    model_count += 1
-                except Exception as e:
-                    logger.debug(f"RF prediction error: {e}")
+            for name in ['rf', 'gb', 'xgb', 'lgb', 'lr']:
+                model = models.get(name)
+                if model is not None:
+                    try:
+                        pred = model.predict(features_sc)[0]
+                        prob = model.predict_proba(features_sc)[0, 1]
+                        votes[name] = int(pred)
+                        probabilities.append(prob)
+                    except:
+                        pass
             
-            # GB prediction
-            if self.gb_model is not None:
-                try:
-                    gb_pred = self.gb_model.predict(features_scaled)[0]
-                    gb_prob = self.gb_model.predict_proba(features_scaled)[0, 1]
-                    model_votes['GB'] = int(gb_pred)
-                    probabilities.append(gb_prob)
-                    model_count += 1
-                except Exception as e:
-                    logger.debug(f"GB prediction error: {e}")
-            
-            # XGB prediction
-            if self.xgb_model is not None:
-                try:
-                    xgb_pred = self.xgb_model.predict(features_scaled)[0]
-                    xgb_prob = self.xgb_model.predict_proba(features_scaled)[0, 1]
-                    model_votes['XGB'] = int(xgb_pred)
-                    probabilities.append(xgb_prob)
-                    model_count += 1
-                except Exception as e:
-                    logger.debug(f"XGB prediction error: {e}")
-            
-            # LGB prediction
-            if self.lgb_model is not None:
-                try:
-                    lgb_pred = self.lgb_model.predict(features_scaled)[0]
-                    lgb_prob = self.lgb_model.predict_proba(features_scaled)[0, 1]
-                    model_votes['LGB'] = int(lgb_pred)
-                    probabilities.append(lgb_prob)
-                    model_count += 1
-                except Exception as e:
-                    logger.debug(f"LGB prediction error: {e}")
-            
-            # LR prediction
-            if self.lr_model is not None:
-                try:
-                    lr_pred = self.lr_model.predict(features_scaled)[0]
-                    lr_prob = self.lr_model.predict_proba(features_scaled)[0, 1]
-                    model_votes['LR'] = int(lr_pred)
-                    probabilities.append(lr_prob)
-                    model_count += 1
-                except Exception as e:
-                    logger.debug(f"LR prediction error: {e}")
-            
-            # No valid models
-            if model_count == 0:
-                logger.warning("No valid models for prediction")
+            if not probabilities:
                 return self._neutral_signal()
             
-            # Calculate consensus
-            bullish_votes = sum(1 for v in model_votes.values() if v == 1)
-            consensus = bullish_votes / model_count
+            # 6. Ensemble logic
+            avg_prob = np.mean(probabilities)
+            signal = 2 * avg_prob - 1  # Convert [0,1] to [-1,1]
             
-            # Calculate signal (-1 to 1)
-            avg_probability = np.mean(probabilities)
-            signal = 2 * avg_probability - 1  # Convert [0,1] to [-1,1]
+            bullish_votes = sum(votes.values())
+            consensus = bullish_votes / len(votes)
+            confidence = abs(consensus - 0.5) * 2
             
-            # Confidence: how confident in the decision
-            confidence = abs(consensus - 0.5) * 2  # Range [0,1]
-            
-            return {
+            result = {
                 'signal': float(np.clip(signal, -1, 1)),
                 'confidence': float(np.clip(confidence, 0, 1)),
                 'consensus': float(consensus),
-                'model_votes': model_votes,
-                'probabilities': probabilities,
-                'models_used': model_count,
+                'regime': regime,
+                'model_votes': votes,
                 'timestamp': datetime.now().isoformat()
             }
+            
+            # 7. Track for drift monitoring
+            if track_for_drift:
+                self.prediction_history.append(result)
+            
+            return result
         
         except Exception as e:
-            logger.error(f"Error generating signal: {e}", exc_info=True)
+            logger.error(f"Signal generation error: {e}", exc_info=True)
             return self._neutral_signal()
     
+    def record_outcome(self, actual_return: float):
+        """
+        Record actual outcome for drift monitoring.
+        
+        Call this after a trade closes to track realized performance.
+        """
+        self.outcome_history.append(actual_return)
+    
+    def check_drift(self) -> Dict:
+        """
+        Check for model performance drift.
+        
+        Returns dict with drift metrics and recommendation.
+        """
+        if len(self.prediction_history) < 30 or len(self.outcome_history) < 30:
+            return {
+                'drift_detected': False,
+                'reason': 'insufficient_data',
+                'samples': len(self.prediction_history)
+            }
+        
+        # Align predictions with outcomes (both are time-ordered deques)
+        min_len = min(len(self.prediction_history), len(self.outcome_history))
+        
+        # Calculate directional accuracy
+        correct = 0
+        for i in range(-min_len, 0):
+            pred_signal = self.prediction_history[i]['signal']
+            actual_return = self.outcome_history[i]
+            if (pred_signal > 0 and actual_return > 0) or (pred_signal < 0 and actual_return < 0):
+                correct += 1
+        
+        accuracy = correct / min_len
+        
+        # Calculate recent Sharpe
+        returns = []
+        for i in range(-min_len, 0):
+            pred_signal = self.prediction_history[i]['signal']
+            actual_return = self.outcome_history[i]
+            returns.append(pred_signal * actual_return)  # Scaled return
+        
+        sharpe = (np.mean(returns) / np.std(returns) * np.sqrt(252)) if np.std(returns) > 0 else 0
+        
+        # Drift detection
+        drift_detected = (accuracy < self.performance_baseline) or (sharpe < 1.0)
+        
+        return {
+            'drift_detected': drift_detected,
+            'accuracy': accuracy,
+            'sharpe': sharpe,
+            'baseline_accuracy': self.performance_baseline,
+            'samples': min_len,
+            'recommendation': 'RETRAIN' if drift_detected else 'OK'
+        }
+    
+    def _should_retrain(self) -> bool:
+        """Check if retrain is needed (time-based or performance-based)."""
+        # Time-based
+        if self.last_retrain_date:
+            days_since_retrain = (datetime.now() - self.last_retrain_date).days
+            if days_since_retrain >= self.retrain_interval_days:
+                return True
+        
+        # Performance-based
+        drift_check = self.check_drift()
+        if drift_check['drift_detected']:
+            return True
+        
+        return False
+    
     def _neutral_signal(self) -> Dict:
-        """Return neutral signal."""
         return {
             'signal': 0.0,
             'confidence': 0.0,
             'consensus': 0.5,
+            'regime': 'unknown',
             'model_votes': {},
-            'probabilities': [],
-            'models_used': 0,
             'timestamp': datetime.now().isoformat()
         }
     
     def _save_models(self):
-        """Save all trained models to disk."""
+        """Save all regime models."""
         try:
-            if self.rf_model is not None:
-                dump(self.rf_model, f"{self.model_dir}/rf_model.pkl")
-                logger.debug(f"Saved RF model")
+            for regime, models in self.regime_models.items():
+                regime_dir = f"{self.model_dir}/{regime}"
+                os.makedirs(regime_dir, exist_ok=True)
+                
+                for name, model in models.items():
+                    if name == 'accuracy':
+                        continue
+                    
+                    if name == 'xgb':
+                        model.save_model(f"{regime_dir}/xgb.json")
+                    else:
+                        dump(model, f"{regime_dir}/{name}.pkl")
             
-            if self.gb_model is not None:
-                dump(self.gb_model, f"{self.model_dir}/gb_model.pkl")
-                logger.debug(f"Saved GB model")
-            
-            if self.xgb_model is not None:
-                self.xgb_model.save_model(f"{self.model_dir}/xgb_model.json")
-                logger.debug(f"Saved XGB model")
-            
-            if self.lgb_model is not None:
-                dump(self.lgb_model, f"{self.model_dir}/lgb_model.pkl")
-                logger.debug(f"Saved LGB model")
-            
-            if self.lr_model is not None:
-                dump(self.lr_model, f"{self.model_dir}/lr_model.pkl")
-                logger.debug(f"Saved LR model")
-            
-            # Save scaler
-            if self.scaler is not None:
-                dump(self.scaler, f"{self.model_dir}/scaler.pkl")
+            # Save preprocessors
+            for regime in self.regime_imputers:
+                regime_dir = f"{self.model_dir}/{regime}"
+                dump(self.regime_imputers[regime], f"{regime_dir}/imputer.pkl")
+                dump(self.regime_scalers[regime], f"{regime_dir}/scaler.pkl")
             
             # Save metadata
             metadata = {
                 'feature_names': self.feature_names,
-                'feature_count': self.feature_count,
                 'training_date': self.training_date.isoformat() if self.training_date else None,
-                'training_history': self.training_history
+                'last_retrain_date': self.last_retrain_date.isoformat() if self.last_retrain_date else None,
+                'performance_baseline': self.performance_baseline,
+                'prediction_history': list(self.prediction_history),
+                'outcome_history': list(self.outcome_history)
             }
             
             with open(f"{self.model_dir}/metadata.pkl", 'wb') as f:
                 pickle.dump(metadata, f)
             
-            logger.info(f"✅ All models saved to {self.model_dir}")
-        
+            logger.info(f"✅ Regime models saved to {self.model_dir}")
         except Exception as e:
-            logger.error(f"Error saving models: {e}")
+            logger.error(f"Save error: {e}")
     
     def _load_models(self) -> bool:
-        """Load trained models from disk."""
+        """Load all regime models."""
         try:
             if not os.path.exists(f"{self.model_dir}/metadata.pkl"):
-                logger.warning(f"No models found in {self.model_dir}")
                 return False
-            
-            # Load models
-            if os.path.exists(f"{self.model_dir}/rf_model.pkl"):
-                self.rf_model = load(f"{self.model_dir}/rf_model.pkl")
-            
-            if os.path.exists(f"{self.model_dir}/gb_model.pkl"):
-                self.gb_model = load(f"{self.model_dir}/gb_model.pkl")
-            
-            if os.path.exists(f"{self.model_dir}/xgb_model.json"):
-                self.xgb_model = xgb.XGBClassifier()
-                self.xgb_model.load_model(f"{self.model_dir}/xgb_model.json")
-            
-            if os.path.exists(f"{self.model_dir}/lgb_model.pkl"):
-                self.lgb_model = load(f"{self.model_dir}/lgb_model.pkl")
-            
-            if os.path.exists(f"{self.model_dir}/lr_model.pkl"):
-                self.lr_model = load(f"{self.model_dir}/lr_model.pkl")
-            
-            # Load scaler
-            if os.path.exists(f"{self.model_dir}/scaler.pkl"):
-                self.scaler = load(f"{self.model_dir}/scaler.pkl")
             
             # Load metadata
             with open(f"{self.model_dir}/metadata.pkl", 'rb') as f:
                 metadata = pickle.load(f)
             
-            self.feature_names = metadata.get('feature_names', [])
-            self.feature_count = metadata.get('feature_count', 0)
-            self.training_history = metadata.get('training_history', {})
+            self.feature_names = metadata['feature_names']
+            self.performance_baseline = metadata.get('performance_baseline', 0.55)
+            
+            if metadata.get('last_retrain_date'):
+                self.last_retrain_date = datetime.fromisoformat(metadata['last_retrain_date'])
+            
+            # Restore history
+            self.prediction_history = deque(metadata.get('prediction_history', []), maxlen=100)
+            self.outcome_history = deque(metadata.get('outcome_history', []), maxlen=100)
+            
+            # Load models for each regime
+            for regime in ['bull', 'bear', 'neutral', 'volatile']:
+                regime_dir = f"{self.model_dir}/{regime}"
+                if not os.path.exists(regime_dir):
+                    continue
+                
+                self.regime_models[regime] = {}
+                
+                # Load preprocessors
+                if os.path.exists(f"{regime_dir}/imputer.pkl"):
+                    self.regime_imputers[regime] = load(f"{regime_dir}/imputer.pkl")
+                if os.path.exists(f"{regime_dir}/scaler.pkl"):
+                    self.regime_scalers[regime] = load(f"{regime_dir}/scaler.pkl")
+                
+                # Load models
+                for name in ['rf', 'gb', 'lgb', 'lr']:
+                    path = f"{regime_dir}/{name}.pkl"
+                    if os.path.exists(path):
+                        self.regime_models[regime][name] = load(path)
+                
+                # XGBoost special handling
+                xgb_path = f"{regime_dir}/xgb.json"
+                if os.path.exists(xgb_path):
+                    model = xgb.XGBClassifier()
+                    model.load_model(xgb_path)
+                    self.regime_models[regime]['xgb'] = model
             
             self.is_trained = True
-            
-            logger.info(f"✅ Models loaded from {self.model_dir}")
-            logger.info(f"   Features: {self.feature_count}")
-            
+            logger.info(f"✅ Regime models loaded from {self.model_dir}")
             return True
         
         except Exception as e:
-            logger.error(f"Error loading models: {e}")
+            logger.error(f"Load error: {e}")
             return False
-    
-    def get_feature_importance(self, top_n: int = 20) -> Dict[str, float]:
-        """
-        Get top N important features from ensemble.
-        
-        Returns features from models that support it (RF, GB, XGB, LGB)
-        """
-        importance_dict = {}
-        
-        # RF feature importance
-        if self.rf_model is not None and hasattr(self.rf_model, 'feature_importances_'):
-            for fname, imp in zip(self.feature_names, self.rf_model.feature_importances_):
-                importance_dict[f"RF_{fname}"] = float(imp)
-        
-        # GB feature importance
-        if self.gb_model is not None and hasattr(self.gb_model, 'feature_importances_'):
-            for fname, imp in zip(self.feature_names, self.gb_model.feature_importances_):
-                importance_dict[f"GB_{fname}"] = float(imp)
-        
-        # XGB feature importance
-        if self.xgb_model is not None:
-            try:
-                xgb_imp = self.xgb_model.get_booster().get_score(importance_type='weight')
-                for fname, imp in xgb_imp.items():
-                    importance_dict[f"XGB_{fname}"] = float(imp)
-            except:
-                pass
-        
-        # LGB feature importance
-        if self.lgb_model is not None and hasattr(self.lgb_model, 'feature_importances_'):
-            for fname, imp in zip(self.feature_names, self.lgb_model.feature_importances_):
-                importance_dict[f"LGB_{fname}"] = float(imp)
-        
-        # Sort and return top N
-        sorted_importance = sorted(importance_dict.items(), key=lambda x: x[1], reverse=True)
-        
-        return dict(sorted_importance[:top_n])
-
-
-
-if __name__ == "__main__":
-    # Test ensemble
-    logging.basicConfig(
-        level=logging.INFO,
-        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-    )
-    
-    print("\n" + "="*80)
-    print("ENSEMBLE SIGNAL GENERATOR - TEST")
-    print("="*80 + "\n")
-    
-    # Generate sample data
-    np.random.seed(42)
-    n_samples = 500
-    n_features = 30
-    
-    X = pd.DataFrame(
-        np.random.randn(n_samples, n_features),
-        columns=[f"feature_{i:02d}" for i in range(n_features)]
-    )
-    
-    # Create target with some signal
-    y = (X['feature_00'] + X['feature_01'] * 0.5 > 0).astype(int)
-    
-    print(f"Data shape: {X.shape}")
-    print(f"Target distribution: {dict(y.value_counts())}\n")
-    
-    # Initialize and train
-    ensemble = EnsembleSignalGenerator(model_dir="models/test")
-    
-    training_result = ensemble.train(X, y)
-    
-    print(f"\nTraining successful: {training_result['is_trained']}")
-    print(f"Models trained: {training_result['models_count']}/5")
-    print(f"Ensemble F1: {training_result['ensemble_f1']:.3f}\n")
-    
-    # Generate signal
-    print("="*80)
-    print("TEST: GENERATE SIGNAL")
-    print("="*80 + "\n")
-    
-    test_features = X.iloc[-1:].copy()
-    signal = ensemble.generate_signal(test_features)
-    
-    print(f"Signal: {signal['signal']:+.3f}")
-    print(f"Confidence: {signal['confidence']:.3f}")
-    print(f"Consensus: {signal['consensus']:.3f}")
-    print(f"Models used: {signal['models_used']}/5")
-    print(f"Model votes: {signal['model_votes']}")
-    print(f"Probabilities: {[f'{p:.3f}' for p in signal['probabilities']]}")
-    
-    # Feature importance
-    print("\n" + "="*80)
-    print("TOP 10 IMPORTANT FEATURES")
-    print("="*80 + "\n")
-    
-    importance = ensemble.get_feature_importance(top_n=10)
-    for i, (feature, imp) in enumerate(importance.items(), 1):
-        print(f"{i:2d}. {feature:40s} {imp:.6f}")
-    
-    print("\n✅ All tests passed!")

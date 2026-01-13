@@ -105,11 +105,11 @@ class ApexConfig:
     # GOD LEVEL PARAMETERS (Moderate Risk Profile)
     # ═══════════════════════════════════════════════════════════════
     # Position Sizing (ATR-based)
-    ATR_MULTIPLIER_STOP = 2.5  # Stop loss = ATR * this multiplier (Moderate)
-    ATR_MULTIPLIER_PROFIT = 3.5  # Take profit = ATR * this multiplier (Moderate)
+    ATR_MULTIPLIER_STOP = 2.0  # Stop loss = ATR * this multiplier (Moderate)
+    ATR_MULTIPLIER_PROFIT = 3.0  # Take profit = ATR * this multiplier (Moderate)
     TRAILING_STOP_ATR = 2.0  # Trailing stop = ATR * this multiplier (Moderate)
     USE_KELLY_SIZING = True  # Use Kelly criterion for position sizing
-    KELLY_FRACTION = 0.6  # Kelly fraction (Moderate - 60%)
+    KELLY_FRACTION = 0.4  # Kelly fraction (Moderate - 60%)
 
     # Enable advanced risk features
     USE_ATR_STOPS = True  # Use dynamic ATR-based stops instead of fixed percentages
@@ -154,8 +154,8 @@ class ApexConfig:
     # ═══════════════════════════════════════════════════════════════
     # TIMING & EXECUTION
     # ═══════════════════════════════════════════════════════════════
-    CHECK_INTERVAL_SECONDS = 60  # Check symbols every 60 seconds
-    TRADE_COOLDOWN_SECONDS = 300  # ✅ NEW: 5 minutes between trades per symbol
+    CHECK_INTERVAL_SECONDS = 30  # Check symbols every 30 seconds
+    TRADE_COOLDOWN_SECONDS = 240  # ✅ NEW: 4 minutes between trades per symbol
     
     # ═══════════════════════════════════════════════════════════════
     # TRANSACTION COSTS
