@@ -1,0 +1,53 @@
+# APEX Trading System - Systemd Service File
+#
+# Installation:
+#   1. Copy this file to /etc/systemd/system/apex-watchdog.service
+#   2. Edit the paths below to match your installation
+#   3. Run: sudo systemctl daemon-reload
+#   4. Run: sudo systemctl enable apex-watchdog
+#   5. Run: sudo systemctl start apex-watchdog
+#
+# Management:
+#   - Status: sudo systemctl status apex-watchdog
+#   - Logs:   sudo journalctl -u apex-watchdog -f
+#   - Stop:   sudo systemctl stop apex-watchdog
+#   - Start:  sudo systemctl start apex-watchdog
+
+[Unit]
+Description=APEX Trading System Watchdog
+Documentation=https://github.com/your-repo/apex-trading-system
+After=network.target network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=YOUR_USERNAME
+Group=YOUR_USERNAME
+WorkingDirectory=/home/YOUR_USERNAME/apex-trading-system
+
+# Environment variables (edit these)
+Environment="APEX_LIVE_TRADING=true"
+Environment="APEX_IBKR_PORT=7497"
+# Environment="APEX_SLACK_WEBHOOK=https://hooks.slack.com/services/xxx"
+# Environment="APEX_ALERT_EMAIL=your-email@example.com"
+
+# Run the watchdog (which manages the trading system)
+ExecStart=/usr/bin/python3 -m automation.watchdog
+
+# Restart policy
+Restart=always
+RestartSec=30
+
+# Graceful shutdown timeout
+TimeoutStopSec=60
+
+# Logging
+StandardOutput=append:/home/YOUR_USERNAME/apex-trading-system/logs/watchdog_stdout.log
+StandardError=append:/home/YOUR_USERNAME/apex-trading-system/logs/watchdog_stderr.log
+
+# Security hardening
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

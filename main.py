@@ -201,6 +201,27 @@ class ApexTradingSystem:
         # Regular stock hours
         return ApexConfig.TRADING_HOURS_START <= est_hour <= ApexConfig.TRADING_HOURS_END
 
+    def _write_heartbeat(self):
+        """
+        Write heartbeat file for watchdog monitoring.
+
+        The watchdog process monitors this file to detect if the
+        trading system is hung or crashed.
+        """
+        try:
+            heartbeat_file = ApexConfig.DATA_DIR / 'heartbeat.json'
+            data = {
+                'timestamp': datetime.now().isoformat(),
+                'position_count': self.position_count,
+                'capital': self.capital,
+                'is_trading': True,
+                'cycle_count': getattr(self, '_cycle_count', 0)
+            }
+            with open(heartbeat_file, 'w') as f:
+                json.dump(data, f)
+        except Exception as e:
+            logger.debug(f"Error writing heartbeat: {e}")
+
     def print_banner(self):
         print("""
 ╔═══════════════════════════════════════════════════════════════╗
@@ -1281,7 +1302,11 @@ class ApexTradingSystem:
             while self.is_running:
                 try:
                     cycle += 1
+                    self._cycle_count = cycle
                     now = datetime.now()
+
+                    # Write heartbeat for watchdog monitoring
+                    self._write_heartbeat()
 
                     # Get EST hour using proper timezone handling
                     est_hour = self._get_est_hour()
