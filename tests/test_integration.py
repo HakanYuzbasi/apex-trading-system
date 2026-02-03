@@ -36,6 +36,24 @@ def mock_market_state():
     }
 
 
+@pytest.fixture
+def sample_price_data():
+    """Generate sample price data for testing."""
+    np.random.seed(42)
+    n_days = 252
+
+    dates = pd.date_range(end=datetime.now(), periods=n_days, freq='D')
+    close = 100 * np.exp(np.cumsum(np.random.normal(0.0002, 0.02, n_days)))
+
+    return pd.DataFrame({
+        'Open': close * (1 + np.random.uniform(-0.01, 0.01, n_days)),
+        'High': close * (1 + np.random.uniform(0, 0.02, n_days)),
+        'Low': close * (1 - np.random.uniform(0, 0.02, n_days)),
+        'Close': close,
+        'Volume': np.random.randint(1_000_000, 50_000_000, n_days)
+    }, index=dates)
+
+
 class TestFullTradingCycle:
     """Test complete trading cycle."""
 
@@ -235,8 +253,8 @@ class TestErrorRecovery:
     @pytest.mark.asyncio
     async def test_connection_recovery(self, mock_trading_system):
         """Test recovery from connection loss."""
-        # Simulate connection loss
-        mock_trading_system.ibkr.is_connected.return_value = False
+        # Simulate connection loss - use explicit MagicMock for sync methods
+        mock_trading_system.ibkr.is_connected = MagicMock(return_value=False)
 
         is_connected = mock_trading_system.ibkr.is_connected()
         assert not is_connected
@@ -249,6 +267,7 @@ class TestErrorRecovery:
 
         mock_trading_system.ibkr.is_connected.return_value = True
         assert mock_trading_system.ibkr.is_connected()
+
 
     @pytest.mark.asyncio
     async def test_order_rejection_handling(self, mock_trading_system):

@@ -23,6 +23,13 @@ from dataclasses import dataclass
 from enum import Enum
 import math
 
+# Allow nested event loops for ib_insync compatibility
+try:
+    import nest_asyncio
+    nest_asyncio.apply()
+except ImportError:
+    pass
+
 logger = logging.getLogger(__name__)
 
 # Check for scipy (for Black-Scholes)

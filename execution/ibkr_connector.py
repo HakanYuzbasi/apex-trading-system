@@ -16,7 +16,7 @@ import random
 from datetime import datetime
 from typing import Dict, Optional, Callable, TypeVar, Any
 from functools import wraps
-from ib_insync import IB, Stock, MarketOrder, LimitOrder, util
+from ib_insync import IB, Stock, Option, MarketOrder, LimitOrder, util
 import pandas as pd
 
 from config import ApexConfig
@@ -215,7 +215,29 @@ class IBKRConnector:
         logger.info(f"🔌 Connecting to IBKR at {self.host}:{self.port}...")
         
         try:
-            await self.ib.connectAsync(self.host, self.port, clientId=self.client_id)
+            # Try connecting with the specified client ID first
+            # If it fails with "clientId already in use", we'll retry with a random one
+            max_id_retries = 3
+            current_client_id = self.client_id
+            
+            for id_attempt in range(max_id_retries):
+                try:
+                    await self.ib.connectAsync(self.host, self.port, clientId=current_client_id)
+                    break
+                except (Exception, asyncio.TimeoutError) as conn_err:
+                    # ib_insync often raises TimeoutError when the clientId is in use
+                    # because the peer closes the connection immediately.
+                    is_collision = "clientId" in str(conn_err) and "already in use" in str(conn_err)
+                    is_timeout = isinstance(conn_err, asyncio.TimeoutError) or "TimeoutError" in str(conn_err)
+                    
+                    if (is_collision or is_timeout) and id_attempt < max_id_retries - 1:
+                        old_id = current_client_id
+                        current_client_id = random.randint(100, 999)
+                        logger.warning(f"⚠️  Connection failed with clientId {old_id} (possible collision), retrying with {current_client_id}...")
+                        # Wait a bit before retrying with a new ID
+                        await asyncio.sleep(1)
+                        continue
+                    raise
             
             # ✅ Phase 2.2: Configurable market data type
             # Type 1 = Live (requires paid subscription)
@@ -236,7 +258,7 @@ class IBKRConnector:
             if accounts:
                 self.account = accounts[0]
             
-            logger.info("✅ Connected to Interactive Brokers!")
+            logger.info(f"✅ Connected to Interactive Brokers (clientId={current_client_id})!")
             logger.info(f"📋 Account: {self.account}")
             
         except Exception as e:
@@ -299,8 +321,8 @@ class IBKRConnector:
             # Request market data snapshot
             ticker = self.ib.reqMktData(contract, '', False, False)
             
-            # Wait for price update (max 2 seconds)
-            for _ in range(20):
+            # Wait for price update (max 5 seconds for delayed data)
+            for _ in range(50):
                 await asyncio.sleep(0.1)
                 
                 # Try different price fields
@@ -319,18 +341,22 @@ class IBKRConnector:
             
             # Fallback: try to get last close from historical data
             self.ib.cancelMktData(contract)
-            bars = await self.ib.reqHistoricalDataAsync(
-                contract,
-                endDateTime='',
-                durationStr='1 D',
-                barSizeSetting='1 day',
-                whatToShow='TRADES',
-                useRTH=True
-            )
-            
-            if bars:
-                return float(bars[-1].close)
-            
+            try:
+                bars = await self.ib.reqHistoricalDataAsync(
+                    contract,
+                    endDateTime='',
+                    durationStr='2 D',
+                    barSizeSetting='1 day',
+                    whatToShow='TRADES',
+                    useRTH=True
+                )
+
+                if bars:
+                    logger.debug(f"📊 {symbol}: Using historical close ${bars[-1].close:.2f}")
+                    return float(bars[-1].close)
+            except Exception as hist_err:
+                logger.debug(f"Historical data fallback failed for {symbol}: {hist_err}")
+
             logger.warning(f"⚠️  No price available for {symbol}")
             return 0.0
             
@@ -568,9 +594,9 @@ class IBKRConnector:
             # Place order
             trade = self.ib.placeOrder(contract, order)
 
-            # Wait for order to fill (max 10 seconds)
-            for _ in range(100):
-                await asyncio.sleep(0.1)
+            # Wait for order to fill (max 30 seconds for less liquid stocks)
+            for _ in range(300):
+                self.ib.sleep(0.1)  # Process ib_insync events to update order status
 
                 if trade.orderStatus.status == 'Filled':
                     fill_price = trade.orderStatus.avgFillPrice
@@ -843,6 +869,346 @@ class IBKRConnector:
             logger.error(f"Error checking pending orders for {symbol}: {e}")
             return False
     
+    # ========== OPTIONS TRADING METHODS ==========
+
+    async def get_option_contract(
+        self,
+        symbol: str,
+        expiry: str,  # Format: YYYYMMDD
+        strike: float,
+        right: str  # 'C' for call, 'P' for put
+    ) -> Optional[Option]:
+        """
+        Get or create an options contract.
+
+        Args:
+            symbol: Underlying symbol (e.g., 'AAPL')
+            expiry: Expiration date in YYYYMMDD format
+            strike: Strike price
+            right: 'C' for call, 'P' for put
+
+        Returns:
+            Option contract or None if not found
+        """
+        cache_key = f"{symbol}_{expiry}_{strike}_{right}"
+
+        if cache_key in self.contracts:
+            return self.contracts[cache_key]
+
+        try:
+            # Create option contract
+            contract = Option(
+                symbol=symbol,
+                lastTradeDateOrContractMonth=expiry,
+                strike=strike,
+                right=right,
+                exchange='SMART',
+                currency='USD'
+            )
+
+            # Qualify contract
+            qualified = await self.ib.qualifyContractsAsync(contract)
+
+            if qualified:
+                self.contracts[cache_key] = qualified[0]
+                logger.debug(f"✅ Qualified option: {symbol} {expiry} {strike} {right}")
+                return qualified[0]
+            else:
+                logger.warning(f"⚠️ Could not qualify option contract: {symbol} {expiry} {strike} {right}")
+                return None
+
+        except Exception as e:
+            logger.error(f"❌ Error getting option contract: {e}")
+            return None
+
+    async def get_option_chain(
+        self,
+        symbol: str
+    ) -> Optional[list]:
+        """
+        Get available option chain parameters for a symbol.
+
+        Args:
+            symbol: Underlying symbol
+
+        Returns:
+            List of chain definitions or None
+        """
+        try:
+            contract = await self.get_contract(symbol)
+            if not contract:
+                return None
+
+            # Request option chain parameters
+            chains = self.ib.reqSecDefOptParams(
+                contract.symbol,
+                '',
+                contract.secType,
+                contract.conId
+            )
+
+            await asyncio.sleep(1)  # Wait for response
+
+            if chains:
+                logger.info(f"📊 Retrieved option chain for {symbol}: {len(chains)} exchanges")
+                return chains
+            else:
+                logger.warning(f"⚠️ No option chains for {symbol}")
+                return None
+
+        except Exception as e:
+            logger.error(f"❌ Error getting option chain for {symbol}: {e}")
+            return None
+
+    async def get_option_price(
+        self,
+        symbol: str,
+        expiry: str,
+        strike: float,
+        right: str
+    ) -> dict:
+        """
+        Get current option price and Greeks.
+
+        Args:
+            symbol: Underlying symbol
+            expiry: Expiration date (YYYYMMDD)
+            strike: Strike price
+            right: 'C' or 'P'
+
+        Returns:
+            Dict with bid, ask, last, delta, gamma, theta, vega, iv
+        """
+        try:
+            contract = await self.get_option_contract(symbol, expiry, strike, right)
+            if not contract:
+                return {}
+
+            # Request market data
+            ticker = self.ib.reqMktData(contract, '', False, False)
+
+            # Wait for data (max 3 seconds)
+            for _ in range(30):
+                await asyncio.sleep(0.1)
+                if ticker.bid and ticker.ask:
+                    break
+
+            self.ib.cancelMktData(contract)
+
+            # Get model Greeks if available
+            delta = getattr(ticker.modelGreeks, 'delta', 0) if ticker.modelGreeks else 0
+            gamma = getattr(ticker.modelGreeks, 'gamma', 0) if ticker.modelGreeks else 0
+            theta = getattr(ticker.modelGreeks, 'theta', 0) if ticker.modelGreeks else 0
+            vega = getattr(ticker.modelGreeks, 'vega', 0) if ticker.modelGreeks else 0
+            iv = getattr(ticker.modelGreeks, 'impliedVol', 0) if ticker.modelGreeks else 0
+
+            return {
+                'bid': ticker.bid or 0,
+                'ask': ticker.ask or 0,
+                'last': ticker.last or 0,
+                'mid': (ticker.bid + ticker.ask) / 2 if ticker.bid and ticker.ask else 0,
+                'delta': delta,
+                'gamma': gamma,
+                'theta': theta,
+                'vega': vega,
+                'implied_vol': iv
+            }
+
+        except Exception as e:
+            logger.error(f"❌ Error getting option price: {e}")
+            return {}
+
+    async def execute_option_order(
+        self,
+        symbol: str,
+        expiry: str,
+        strike: float,
+        right: str,
+        side: str,
+        quantity: int,
+        order_type: str = 'MKT',
+        limit_price: float = None
+    ) -> Optional[dict]:
+        """
+        Execute an options order.
+
+        Args:
+            symbol: Underlying symbol
+            expiry: Expiration date (YYYYMMDD)
+            strike: Strike price
+            right: 'C' for call, 'P' for put
+            side: 'BUY' or 'SELL'
+            quantity: Number of contracts
+            order_type: 'MKT' for market, 'LMT' for limit
+            limit_price: Required for limit orders
+
+        Returns:
+            Trade result or None
+        """
+        try:
+            # Validate inputs
+            if side not in ['BUY', 'SELL']:
+                logger.error(f"❌ Invalid side: {side}")
+                return None
+
+            if quantity <= 0:
+                logger.error(f"❌ Invalid quantity: {quantity}")
+                return None
+
+            if order_type == 'LMT' and limit_price is None:
+                logger.error("❌ Limit price required for limit orders")
+                return None
+
+            # Get option contract
+            contract = await self.get_option_contract(symbol, expiry, strike, right)
+            if not contract:
+                return None
+
+            # Get current price for reference
+            price_data = await self.get_option_price(symbol, expiry, strike, right)
+            expected_price = price_data.get('mid', 0)
+
+            # Create order
+            action = 'BUY' if side.upper() == 'BUY' else 'SELL'
+
+            if order_type == 'MKT':
+                order = MarketOrder(action, quantity)
+                logger.info(f"📈 Option Market Order: {action} {quantity} {symbol} {expiry} {strike}{right}")
+            else:
+                order = LimitOrder(action, quantity, limit_price)
+                logger.info(f"💰 Option Limit Order: {action} {quantity} {symbol} {expiry} {strike}{right} @ ${limit_price:.2f}")
+
+            # Place order
+            trade = self.ib.placeOrder(contract, order)
+
+            # Wait for fill (max 15 seconds for options)
+            for _ in range(150):
+                await asyncio.sleep(0.1)
+
+                if trade.orderStatus.status == 'Filled':
+                    fill_price = trade.orderStatus.avgFillPrice
+                    commission = ApexConfig.COMMISSION_PER_TRADE * 0.65  # Options typically cheaper
+
+                    logger.info(f"✅ Option {action} {quantity} {symbol} {expiry} {strike}{right} @ ${fill_price:.2f}")
+
+                    return {
+                        'symbol': symbol,
+                        'expiry': expiry,
+                        'strike': strike,
+                        'right': right,
+                        'side': side,
+                        'quantity': quantity,
+                        'price': fill_price,
+                        'expected_price': expected_price,
+                        'commission': commission,
+                        'status': 'FILLED',
+                        'order_id': trade.order.orderId
+                    }
+
+                elif trade.orderStatus.status in ['Cancelled', 'ApiCancelled', 'Inactive']:
+                    logger.error(f"❌ Option order cancelled: {symbol} {expiry} {strike}{right}")
+                    return None
+
+            # Timeout
+            logger.warning(f"⚠️ Option order timeout: {symbol} {expiry} {strike}{right}")
+            try:
+                self.ib.cancelOrder(trade.order)
+            except:
+                pass
+            return None
+
+        except Exception as e:
+            logger.error(f"❌ Option order error: {e}")
+            return None
+
+    async def get_option_positions(self) -> Dict[str, dict]:
+        """
+        Get all current option positions.
+
+        Returns:
+            Dict of {contract_key: position_info}
+        """
+        try:
+            positions = self.ib.positions()
+
+            result = {}
+            for pos in positions:
+                if pos.contract.secType == 'OPT':
+                    contract = pos.contract
+                    key = f"{contract.symbol}_{contract.lastTradeDateOrContractMonth}_{contract.strike}_{contract.right}"
+
+                    result[key] = {
+                        'symbol': contract.symbol,
+                        'expiry': contract.lastTradeDateOrContractMonth,
+                        'strike': contract.strike,
+                        'right': contract.right,
+                        'quantity': int(pos.position),
+                        'avg_cost': pos.avgCost
+                    }
+
+                    pos_type = "LONG" if pos.position > 0 else "SHORT"
+                    opt_type = "CALL" if contract.right == 'C' else "PUT"
+                    logger.debug(f"   {contract.symbol} {contract.lastTradeDateOrContractMonth} ${contract.strike} {opt_type}: {abs(int(pos.position))} ({pos_type})")
+
+            if result:
+                logger.info(f"📊 Loaded {len(result)} option positions")
+
+            return result
+
+        except Exception as e:
+            logger.error(f"❌ Error getting option positions: {e}")
+            return {}
+
+    async def close_option_position(
+        self,
+        symbol: str,
+        expiry: str,
+        strike: float,
+        right: str,
+        quantity: int
+    ) -> Optional[dict]:
+        """
+        Close an existing option position.
+
+        Args:
+            symbol: Underlying symbol
+            expiry: Expiration date
+            strike: Strike price
+            right: 'C' or 'P'
+            quantity: Number of contracts to close (always positive)
+
+        Returns:
+            Trade result or None
+        """
+        # Get current position
+        positions = await self.get_option_positions()
+        key = f"{symbol}_{expiry}_{strike}_{right}"
+
+        if key not in positions:
+            logger.warning(f"⚠️ No option position found: {key}")
+            return None
+
+        current_qty = positions[key]['quantity']
+
+        # Determine closing action
+        if current_qty > 0:
+            side = 'SELL'  # Close long
+        else:
+            side = 'BUY'  # Close short
+
+        close_qty = min(abs(quantity), abs(current_qty))
+
+        logger.info(f"🚪 Closing option position: {side} {close_qty} {symbol} {expiry} {strike}{right}")
+
+        return await self.execute_option_order(
+            symbol=symbol,
+            expiry=expiry,
+            strike=strike,
+            right=right,
+            side=side,
+            quantity=close_qty
+        )
+
     def __del__(self):
         """Cleanup on deletion."""
         self.disconnect()

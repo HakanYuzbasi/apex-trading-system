@@ -216,6 +216,81 @@ class GodLevelRiskManager:
 
         return float(atr) if not np.isnan(atr) else prices.iloc[-1] * 0.02
 
+    def calculate_stops_for_existing_position(
+        self,
+        symbol: str,
+        entry_price: float,
+        current_price: float,
+        position_qty: int,
+        prices: pd.Series,
+        regime: str = "neutral"
+    ) -> Dict:
+        """
+        Calculate stop loss and take profit for an existing position.
+        Used for positions loaded from IBKR that don't have stops set.
+
+        Args:
+            symbol: Stock symbol
+            entry_price: Original entry price (or current if unknown)
+            current_price: Current market price
+            position_qty: Position quantity (positive=LONG, negative=SHORT)
+            prices: Historical price series for ATR calculation
+            regime: Current market regime
+
+        Returns:
+            Dict with stop_loss, take_profit, trailing_stop_pct
+        """
+        is_long = position_qty > 0
+
+        # Calculate ATR
+        atr = self._calculate_atr(prices, 14)
+        atr_pct = atr / entry_price if entry_price > 0 else 0.02
+
+        # Use conservative ATR multiplier for existing positions (we don't know original signal)
+        atr_multiplier = self._get_atr_multiplier(regime, 0.5)  # Assume moderate signal
+        stop_distance_pct = min(atr_pct * atr_multiplier, 0.08)  # Max 8% stop
+
+        # Calculate stop loss based on position direction
+        if is_long:
+            # For LONG: stop below entry, but if price has moved up, trail from current
+            base_stop = entry_price * (1 - stop_distance_pct)
+            # If we're in profit, use trailing stop from current price
+            if current_price > entry_price:
+                trailing_stop = current_price * (1 - stop_distance_pct)
+                stop_loss = max(base_stop, trailing_stop)
+            else:
+                stop_loss = base_stop
+        else:
+            # For SHORT: stop above entry, but if price has moved down, trail from current
+            base_stop = entry_price * (1 + stop_distance_pct)
+            if current_price < entry_price:
+                trailing_stop = current_price * (1 + stop_distance_pct)
+                stop_loss = min(base_stop, trailing_stop)
+            else:
+                stop_loss = base_stop
+
+        # Calculate take profit (1.5x risk-reward for existing positions)
+        risk_reward_ratio = 1.5
+        profit_distance_pct = stop_distance_pct * risk_reward_ratio
+
+        if is_long:
+            take_profit = entry_price * (1 + profit_distance_pct)
+        else:
+            take_profit = entry_price * (1 - profit_distance_pct)
+
+        # Trailing stop percentage
+        trailing_stop_pct = stop_distance_pct * 0.75  # Tighter trailing
+
+        logger.info(f"   📊 {symbol}: Set ATR-based stops - SL: ${stop_loss:.2f}, TP: ${take_profit:.2f}, Trail: {trailing_stop_pct*100:.1f}%")
+
+        return {
+            'stop_loss': round(stop_loss, 2),
+            'take_profit': round(take_profit, 2),
+            'trailing_stop_pct': round(trailing_stop_pct, 4),
+            'atr': round(atr, 2),
+            'atr_pct': round(atr_pct, 4)
+        }
+
     def _get_atr_multiplier(self, regime: str, signal_strength: float) -> float:
         """Get ATR multiplier for stop loss based on regime and signal."""
         base_multiplier = {

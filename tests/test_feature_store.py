@@ -116,7 +116,7 @@ class TestRedisCacheBackend:
     def test_redis_store(self, mock_redis, sample_features):
         """Test storing in Redis."""
         key = "AAPL:features"
-        value = json.dumps(sample_features.to_dict())
+        value = json.dumps(sample_features.to_dict(orient='list'))
 
         mock_redis.set(key, value, ex=3600)
 
@@ -125,7 +125,7 @@ class TestRedisCacheBackend:
     def test_redis_retrieve(self, mock_redis, sample_features):
         """Test retrieving from Redis."""
         key = "AAPL:features"
-        stored_value = json.dumps(sample_features.to_dict())
+        stored_value = json.dumps(sample_features.to_dict(orient='list'))
         mock_redis.get = MagicMock(return_value=stored_value.encode())
 
         result = mock_redis.get(key)
@@ -193,12 +193,12 @@ class TestSQLiteCache:
         conn, cursor = mock_sqlite_connection
 
         key = "AAPL:features"
-        value = json.dumps(sample_features.to_dict())
+        value = json.dumps(sample_features.to_dict(orient='list'))
         expires_at = datetime.now() + timedelta(hours=1)
 
         cursor.execute(
             "INSERT OR REPLACE INTO feature_cache VALUES (?, ?, ?)",
-            (key, value, expires_at)
+            (key, value, expires_at.isoformat())
         )
 
         cursor.execute.assert_called_once()
@@ -207,7 +207,7 @@ class TestSQLiteCache:
         """Test querying SQLite cache."""
         conn, cursor = mock_sqlite_connection
 
-        stored_value = json.dumps(sample_features.to_dict())
+        stored_value = json.dumps(sample_features.to_dict(orient='list'))
         cursor.fetchone = MagicMock(return_value=(stored_value,))
 
         cursor.execute("SELECT value FROM feature_cache WHERE key = ?", ("AAPL:features",))

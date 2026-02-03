@@ -568,26 +568,34 @@ class InstitutionalRiskManager:
         # Herfindahl index (concentration)
         hhi = sum(w ** 2 for w in weights.values()) if weights else 0.0
 
-        # Portfolio volatility (simplified)
+        # Portfolio volatility and returns for VaR/CVaR
         portfolio_vol = 0.0
-        if historical_data:
-            returns_list = []
+        portfolio_returns = None
+        
+        if historical_data and weights:
+            returns_dict = {}
             for symbol, weight in weights.items():
                 if symbol in historical_data:
-                    prices = historical_data[symbol]['Close']
-                    if len(prices) >= 20:
-                        ret = prices.pct_change().dropna().iloc[-20:]
-                        returns_list.append(ret * weight)
+                    df = historical_data[symbol]
+                    if 'Close' in df.columns and len(df) >= 60:
+                        returns_dict[symbol] = df['Close'].pct_change().dropna()
 
-            if returns_list:
-                portfolio_returns = pd.concat(returns_list, axis=1).sum(axis=1)
-                portfolio_vol = float(portfolio_returns.std() * np.sqrt(252))
+            if returns_dict:
+                # Align returns to common dates
+                returns_df = pd.DataFrame(returns_dict)
+                returns_df = returns_df.dropna()
+                
+                if len(returns_df) >= 20:
+                    # Calculate weighted portfolio returns
+                    weight_array = np.array([weights.get(s, 0) for s in returns_df.columns])
+                    portfolio_returns = (returns_df.values @ weight_array)
+                    portfolio_vol = float(np.std(portfolio_returns) * np.sqrt(252))
 
-        # VaR (95%, 1-day) - parametric
-        var_95 = total_value * portfolio_vol * 1.65 / np.sqrt(252) if portfolio_vol > 0 else 0
-
-        # Expected Shortfall (simplified as 1.25x VaR)
-        es = var_95 * 1.25
+        # VaR (95%, 1-day) - Historical simulation
+        var_95 = self._calculate_var_historical(portfolio_returns, total_value, 0.95)
+        
+        # Expected Shortfall (CVaR) - Average of losses beyond VaR
+        es = self._calculate_cvar_historical(portfolio_returns, total_value, 0.95)
 
         # Drawdown
         max_dd = 0.0
@@ -620,6 +628,197 @@ class InstitutionalRiskManager:
             risk_level=risk_level,
             risk_multiplier=risk_mult
         )
+
+    def _calculate_var_historical(
+        self,
+        returns: Optional[np.ndarray],
+        portfolio_value: float,
+        confidence: float = 0.95
+    ) -> float:
+        """
+        Calculate Value at Risk using historical simulation.
+
+        Args:
+            returns: Array of historical portfolio returns
+            portfolio_value: Current portfolio value
+            confidence: Confidence level (e.g., 0.95 for 95%)
+
+        Returns:
+            VaR dollar amount (positive = potential loss)
+        """
+        if returns is None or len(returns) < 20:
+            # Fallback to parametric VaR with assumed 20% volatility
+            return portfolio_value * 0.20 * 1.65 / np.sqrt(252)
+
+        # Historical VaR: percentile of losses
+        percentile = (1 - confidence) * 100
+        var_return = np.percentile(returns, percentile)
+        var_dollar = abs(var_return) * portfolio_value
+
+        return float(var_dollar)
+
+    def _calculate_cvar_historical(
+        self,
+        returns: Optional[np.ndarray],
+        portfolio_value: float,
+        confidence: float = 0.95
+    ) -> float:
+        """
+        Calculate Conditional Value at Risk (Expected Shortfall).
+
+        CVaR is the average loss in the worst (1-confidence)% of cases.
+        More stable than VaR and captures tail risk better.
+
+        Args:
+            returns: Array of historical portfolio returns
+            portfolio_value: Current portfolio value
+            confidence: Confidence level
+
+        Returns:
+            CVaR dollar amount (positive = potential loss)
+        """
+        if returns is None or len(returns) < 20:
+            # Fallback: CVaR ≈ 1.25x VaR for normal distribution
+            return portfolio_value * 0.20 * 2.06 / np.sqrt(252)
+
+        # Find VaR threshold
+        percentile = (1 - confidence) * 100
+        var_threshold = np.percentile(returns, percentile)
+
+        # CVaR = average of returns worse than VaR
+        tail_returns = returns[returns <= var_threshold]
+
+        if len(tail_returns) == 0:
+            return self._calculate_var_historical(returns, portfolio_value, confidence) * 1.25
+
+        cvar_return = np.mean(tail_returns)
+        cvar_dollar = abs(cvar_return) * portfolio_value
+
+        return float(cvar_dollar)
+
+    def calculate_factor_exposures(
+        self,
+        positions: Dict[str, int],
+        price_cache: Dict[str, float],
+        historical_data: Dict[str, pd.DataFrame],
+        market_returns: Optional[pd.Series] = None
+    ) -> Dict[str, float]:
+        """
+        Calculate portfolio factor exposures.
+
+        Factors:
+        - Market Beta: Sensitivity to market movements
+        - Size: Exposure to small vs large cap
+        - Value: Exposure to high vs low book-to-market
+        - Momentum: Exposure to past winners vs losers
+
+        Args:
+            positions: Current positions
+            price_cache: Current prices
+            historical_data: Historical price data
+            market_returns: Market benchmark returns (e.g., SPY)
+
+        Returns:
+            Dict of factor exposures
+        """
+        exposures = {
+            'market_beta': 0.0,
+            'size_factor': 0.0,
+            'momentum_factor': 0.0,
+            'volatility_factor': 0.0
+        }
+
+        if not positions or not historical_data:
+            return exposures
+
+        # Calculate weights
+        total_value = sum(
+            abs(qty * price_cache.get(sym, 0))
+            for sym, qty in positions.items() if qty != 0
+        )
+
+        if total_value == 0:
+            return exposures
+
+        weighted_beta = 0.0
+        weighted_momentum = 0.0
+        weighted_vol = 0.0
+
+        for symbol, qty in positions.items():
+            if qty == 0:
+                continue
+
+            price = price_cache.get(symbol, 0)
+            weight = abs(qty * price) / total_value
+            sign = 1 if qty > 0 else -1  # Long/short direction
+
+            if symbol in historical_data:
+                df = historical_data[symbol]
+                if 'Close' in df.columns and len(df) >= 60:
+                    prices = df['Close']
+                    returns = prices.pct_change().dropna()
+
+                    # Beta calculation (vs market if available)
+                    if market_returns is not None and len(market_returns) >= 60:
+                        aligned = pd.concat([returns, market_returns], axis=1).dropna()
+                        if len(aligned) >= 20:
+                            cov = np.cov(aligned.iloc[:, 0], aligned.iloc[:, 1])
+                            beta = cov[0, 1] / cov[1, 1] if cov[1, 1] != 0 else 1.0
+                            weighted_beta += weight * beta * sign
+                    else:
+                        weighted_beta += weight * 1.0 * sign  # Assume beta=1
+
+                    # Momentum: 12-1 month return
+                    if len(prices) >= 252:
+                        mom_12m = (prices.iloc[-21] / prices.iloc[-252]) - 1
+                        weighted_momentum += weight * mom_12m * sign
+                    elif len(prices) >= 60:
+                        mom_60d = (prices.iloc[-1] / prices.iloc[-60]) - 1
+                        weighted_momentum += weight * mom_60d * sign
+
+                    # Volatility exposure
+                    vol = returns.std() * np.sqrt(252)
+                    weighted_vol += weight * vol
+
+        exposures['market_beta'] = float(weighted_beta)
+        exposures['momentum_factor'] = float(weighted_momentum)
+        exposures['volatility_factor'] = float(weighted_vol)
+
+        return exposures
+
+    def check_factor_limits(
+        self,
+        factor_exposures: Dict[str, float],
+        limits: Optional[Dict[str, Tuple[float, float]]] = None
+    ) -> Tuple[bool, List[str]]:
+        """
+        Check if factor exposures are within limits.
+
+        Args:
+            factor_exposures: Current factor exposures
+            limits: Dict of factor -> (min, max) limits
+
+        Returns:
+            Tuple of (within_limits, list of violations)
+        """
+        if limits is None:
+            limits = {
+                'market_beta': (0.5, 1.5),      # Net beta between 0.5 and 1.5
+                'momentum_factor': (-0.5, 0.5),  # Limit momentum tilt
+                'volatility_factor': (0.1, 0.3)  # Target vol range
+            }
+
+        violations = []
+
+        for factor, exposure in factor_exposures.items():
+            if factor in limits:
+                min_limit, max_limit = limits[factor]
+                if exposure < min_limit:
+                    violations.append(f"{factor}: {exposure:.2f} < {min_limit:.2f}")
+                elif exposure > max_limit:
+                    violations.append(f"{factor}: {exposure:.2f} > {max_limit:.2f}")
+
+        return len(violations) == 0, violations
 
     def _determine_risk_level(self, drawdown: float, volatility: float) -> RiskLevel:
         """Determine current risk level."""

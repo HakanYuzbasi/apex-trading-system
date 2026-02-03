@@ -519,7 +519,8 @@ class GodLevelSignalGenerator:
         momentum = prices.iloc[-1] / prices.iloc[-20] - 1
 
         # Classify regime
-        if vol_20 > 0.35:  # High volatility (>35% annualized)
+        # Note: 50% threshold for individual stocks (35% was too low - typical stock vol is 25-45%)
+        if vol_20 > 0.50:  # High volatility (>50% annualized for individual stocks)
             return MarketRegime.HIGH_VOLATILITY
         elif trend > 0.05 and momentum > 0.05:
             return MarketRegime.STRONG_BULL

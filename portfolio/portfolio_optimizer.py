@@ -106,7 +106,7 @@ class PortfolioOptimizer:
         Args:
             symbols: List of symbols to include
             returns_data: Optional historical returns for each symbol
-            method: Optimization method ('equal', 'risk_parity', 'min_variance')
+            method: Optimization method ('equal', 'risk_parity', 'hrp', 'min_variance')
 
         Returns:
             Dict of {symbol: target_weight}
@@ -118,6 +118,10 @@ class PortfolioOptimizer:
         if method == 'equal':
             # Equal weight allocation
             weights = {symbol: 1.0 / n for symbol in symbols}
+
+        elif method == 'hrp' and returns_data:
+            # Hierarchical Risk Parity (Lopez de Prado)
+            weights = self._optimize_hrp(symbols, returns_data)
 
         elif method == 'risk_parity' and returns_data:
             # Risk parity: weight inversely proportional to volatility
@@ -143,6 +147,177 @@ class PortfolioOptimizer:
         logger.debug(f"📊 Optimized weights ({method}): {len(weights)} positions")
 
         return weights
+
+    def _optimize_hrp(
+        self,
+        symbols: List[str],
+        returns_data: Dict[str, pd.Series]
+    ) -> Dict[str, float]:
+        """
+        Hierarchical Risk Parity optimization (Lopez de Prado).
+
+        Steps:
+        1. Build correlation matrix
+        2. Hierarchical clustering
+        3. Quasi-diagonalization
+        4. Recursive bisection for weights
+
+        Args:
+            symbols: List of symbols
+            returns_data: Historical returns for each symbol
+
+        Returns:
+            Dict of {symbol: weight}
+        """
+        try:
+            from scipy.cluster.hierarchy import linkage, leaves_list
+            from scipy.spatial.distance import squareform
+        except ImportError:
+            logger.warning("scipy not available, falling back to equal weight")
+            return {s: 1.0 / len(symbols) for s in symbols}
+
+        # Build returns matrix
+        valid_symbols = [s for s in symbols if s in returns_data and len(returns_data[s]) > 20]
+        if len(valid_symbols) < 2:
+            return {s: 1.0 / len(symbols) for s in symbols}
+
+        # Align returns to common dates
+        returns_df = pd.DataFrame({s: returns_data[s] for s in valid_symbols})
+        returns_df = returns_df.dropna()
+
+        if len(returns_df) < 20:
+            logger.warning("Insufficient data for HRP, using equal weight")
+            return {s: 1.0 / len(symbols) for s in symbols}
+
+        # Step 1: Correlation matrix
+        corr_matrix = returns_df.corr()
+
+        # Step 2: Distance matrix and hierarchical clustering
+        # Distance = sqrt(0.5 * (1 - correlation))
+        dist_matrix = np.sqrt(0.5 * (1 - corr_matrix))
+        
+        # Convert to condensed form for linkage
+        dist_condensed = squareform(dist_matrix.values, checks=False)
+        
+        # Hierarchical clustering using Ward's method
+        link = linkage(dist_condensed, method='ward')
+
+        # Step 3: Quasi-diagonalization - get optimal leaf ordering
+        sorted_indices = leaves_list(link)
+        sorted_symbols = [valid_symbols[i] for i in sorted_indices]
+
+        # Step 4: Recursive bisection
+        cov_matrix = returns_df.cov() * 252  # Annualized
+        weights = self._hrp_recursive_bisection(sorted_symbols, cov_matrix)
+
+        # Add back any symbols that were excluded (with zero weight)
+        for s in symbols:
+            if s not in weights:
+                weights[s] = 0.0
+
+        # Normalize to ensure weights sum to 1
+        total = sum(weights.values())
+        if total > 0:
+            weights = {s: w / total for s, w in weights.items()}
+
+        logger.info(f"📊 HRP optimization complete: {len([w for w in weights.values() if w > 0])} non-zero weights")
+        return weights
+
+    def _hrp_recursive_bisection(
+        self,
+        sorted_symbols: List[str],
+        cov_matrix: pd.DataFrame
+    ) -> Dict[str, float]:
+        """
+        Recursive bisection step of HRP.
+
+        Recursively splits the sorted symbol list and allocates weights
+        based on inverse variance of each cluster.
+
+        Args:
+            sorted_symbols: Symbols in quasi-diagonal order
+            cov_matrix: Covariance matrix
+
+        Returns:
+            Dict of {symbol: weight}
+        """
+        weights = {s: 1.0 for s in sorted_symbols}
+
+        clusters = [sorted_symbols]
+
+        while len(clusters) > 0:
+            # Split each cluster in two
+            new_clusters = []
+            for cluster in clusters:
+                if len(cluster) > 1:
+                    # Split at midpoint
+                    mid = len(cluster) // 2
+                    left = cluster[:mid]
+                    right = cluster[mid:]
+
+                    # Calculate cluster variances
+                    left_var = self._get_cluster_variance(left, cov_matrix)
+                    right_var = self._get_cluster_variance(right, cov_matrix)
+
+                    # Allocate based on inverse variance
+                    total_var = left_var + right_var
+                    if total_var > 0:
+                        left_weight = 1 - left_var / total_var
+                        right_weight = 1 - right_var / total_var
+                    else:
+                        left_weight = right_weight = 0.5
+
+                    # Apply weights to symbols in cluster
+                    for s in left:
+                        weights[s] *= left_weight
+                    for s in right:
+                        weights[s] *= right_weight
+
+                    # Add sub-clusters for next iteration
+                    if len(left) > 1:
+                        new_clusters.append(left)
+                    if len(right) > 1:
+                        new_clusters.append(right)
+
+            clusters = new_clusters
+
+        return weights
+
+    def _get_cluster_variance(
+        self,
+        symbols: List[str],
+        cov_matrix: pd.DataFrame
+    ) -> float:
+        """
+        Calculate variance of a cluster using inverse-variance weighting.
+
+        Args:
+            symbols: Symbols in the cluster
+            cov_matrix: Full covariance matrix
+
+        Returns:
+            Cluster variance
+        """
+        if len(symbols) == 1:
+            symbol = symbols[0]
+            if symbol in cov_matrix.index:
+                return cov_matrix.loc[symbol, symbol]
+            return 0.01  # Default variance
+
+        # Get sub-covariance matrix
+        try:
+            sub_cov = cov_matrix.loc[symbols, symbols]
+        except KeyError:
+            return 0.01
+
+        # Inverse variance weights within cluster
+        variances = np.diag(sub_cov.values)
+        inv_var = 1.0 / np.maximum(variances, 1e-10)
+        weights = inv_var / inv_var.sum()
+
+        # Cluster variance = w' * Cov * w
+        cluster_var = float(weights @ sub_cov.values @ weights)
+        return max(cluster_var, 1e-10)
 
     def calculate_drift(
         self,

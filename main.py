@@ -19,6 +19,7 @@ try:
     PYTZ_AVAILABLE = True
 except ImportError:
     PYTZ_AVAILABLE = False
+import numpy as np
 import pandas as pd
 from pathlib import Path
 import json
@@ -50,6 +51,19 @@ from risk.god_level_risk_manager import GodLevelRiskManager
 from portfolio.correlation_manager import CorrelationManager
 from execution.advanced_order_executor import AdvancedOrderExecutor
 from models.god_level_signal_generator import GodLevelSignalGenerator, MarketRegime
+from models.enhanced_signal_filter import EnhancedSignalFilter, create_enhanced_filter
+from execution.options_trader import OptionsTrader, OptionType, OptionStrategy
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# SOTA IMPROVEMENTS - Phase 2 & 3 Modules
+# ═══════════════════════════════════════════════════════════════════════════════
+from risk.vix_regime_manager import VIXRegimeManager, VIXRegime
+from models.cross_sectional_momentum import CrossSectionalMomentum
+from data.sentiment_analyzer import SentimentAnalyzer, VolumePriceSentiment
+from execution.arrival_price_benchmark import ArrivalPriceBenchmark
+from monitoring.health_dashboard import HealthDashboard, HealthStatus
+from monitoring.data_quality import DataQualityMonitor
+from risk.dynamic_exit_manager import DynamicExitManager, get_exit_manager, ExitUrgency
 
 logging.basicConfig(
     level=getattr(logging, ApexConfig.LOG_LEVEL),
@@ -149,9 +163,53 @@ class ApexTradingSystem:
         # Advanced order executor for TWAP/VWAP on large orders
         self.advanced_executor: Optional[AdvancedOrderExecutor] = None  # Initialized after IBKR connection
 
+        # ✅ Options trader for hedging and income generation
+        self.options_trader: Optional[OptionsTrader] = None  # Initialized after IBKR connection
+        self.options_positions: Dict[str, dict] = {}  # Track options positions
+
         # ✅ Phase 3.2: GodLevel signal generator for regime detection
         self.god_signal_generator = GodLevelSignalGenerator()
         self._current_regime: str = 'neutral'  # Cache current market regime
+
+        # ✅ ENHANCED: Signal quality filter for higher-quality trades
+        self.signal_filter = create_enhanced_filter()
+        self._current_vix: Optional[float] = None  # Cache VIX for signal filtering
+
+        # ✅ DYNAMIC: Exit manager for adaptive exit thresholds
+        self.exit_manager = get_exit_manager()
+        self.position_entry_signals: Dict[str, float] = {}  # Track entry signal strength
+
+        # ═══════════════════════════════════════════════════════════════════════
+        # SOTA IMPROVEMENTS - Phase 2 & 3 Components
+        # ═══════════════════════════════════════════════════════════════════════
+        
+        # VIX-based adaptive risk management
+        self.vix_manager = VIXRegimeManager(cache_minutes=5)
+        self._vix_risk_multiplier: float = 1.0
+        
+        # Cross-sectional momentum for universe ranking
+        self.cs_momentum = CrossSectionalMomentum(
+            lookback_months=12,
+            skip_months=1,
+            volatility_adjust=True
+        )
+        
+        # News sentiment analyzer (free Yahoo Finance)
+        self.sentiment_analyzer = SentimentAnalyzer(cache_minutes=30)
+        
+        # Arrival price benchmarking for execution quality
+        self.arrival_benchmark = ArrivalPriceBenchmark(max_history=1000)
+        
+        # Health monitoring dashboard
+        self.health_dashboard = HealthDashboard(data_dir=str(ApexConfig.DATA_DIR))
+        
+        # Data quality monitoring
+        self.data_quality_monitor = DataQualityMonitor(
+            stale_threshold_minutes=30,
+            min_history_days=60
+        )
+        
+        logger.info("✅ SOTA modules initialized (VIX, Momentum, Sentiment, Health)")
 
         # Feature flag for institutional mode
         self.use_institutional = True  # Toggle to enable/disable institutional components
@@ -177,6 +235,9 @@ class ApexTradingSystem:
         self.last_trade_time: Dict[str, datetime] = {}  # 60-second cooldown
         self.sector_exposure: Dict[str, float] = {}  # Track sector concentration
         self.total_commissions: float = 0.0  # Track transaction costs
+
+        # ✅ Failed exit retry tracking
+        self.failed_exits: Dict[str, Dict] = {}  # symbol -> {reason, attempts, last_attempt}
 
         # ✅ CRITICAL: Semaphore to prevent race condition in parallel processing
         # This ensures only a limited number of entry trades can execute concurrently
@@ -297,6 +358,7 @@ class ApexTradingSystem:
                                 self.position_entry_prices[symbol] = price
                                 self.position_entry_times[symbol] = datetime.now()
                                 self.position_peak_prices[symbol] = price
+                                self.position_entry_signals[symbol] = 0.5 if qty > 0 else -0.5  # Assume moderate signal for synced positions
                                 self.price_cache[symbol] = price
                                 logger.info(f"   {symbol}: {abs(qty)} shares ({pos_type}) @ ${price:.2f}")
                             else:
@@ -306,7 +368,20 @@ class ApexTradingSystem:
             
             # Load pending orders
             await self.refresh_pending_orders()
-        
+
+            # Initialize options trader
+            if ApexConfig.OPTIONS_ENABLED:
+                self.options_trader = OptionsTrader(
+                    ibkr_connector=self.ibkr,
+                    risk_free_rate=ApexConfig.OPTIONS_RISK_FREE_RATE,
+                    default_vol=0.25
+                )
+                # Load existing options positions
+                self.options_positions = await self.ibkr.get_option_positions()
+                if self.options_positions:
+                    logger.info(f"🎯 Loaded {len(self.options_positions)} existing option positions")
+                logger.info("✅ Options trading enabled")
+
         # Pre-load historical data
         logger.info("📥 Loading historical data for ML training...")
         loaded = 0
@@ -314,7 +389,7 @@ class ApexTradingSystem:
             if i % 10 == 0:
                 logger.info(f"   Loaded {i}/{len(ApexConfig.SYMBOLS)} symbols...")
             try:
-                data = self.market_data.fetch_historical_data(symbol, days=252)
+                data = self.market_data.fetch_historical_data(symbol, days=400)
                 if not data.empty:
                     self.historical_data[symbol] = data
                     loaded += 1
@@ -322,7 +397,40 @@ class ApexTradingSystem:
                 logger.debug(f"   Failed to load {symbol}: {e}")
         
         logger.info(f"✅ Loaded data for {loaded} symbols")
-        
+
+        # Initialize ATR-based stops for existing positions (now that we have historical data)
+        if self.positions and self.ibkr:
+            logger.info("")
+            logger.info("🎯 Initializing ATR-based stops for existing positions...")
+            for symbol, qty in self.positions.items():
+                if qty != 0 and symbol in self.historical_data:
+                    try:
+                        prices = self.historical_data[symbol]['Close']
+                        entry_price = self.position_entry_prices.get(symbol, prices.iloc[-1])
+                        current_price = prices.iloc[-1]
+
+                        # Calculate stops using the god-level risk manager
+                        stops = self.god_risk_manager.calculate_stops_for_existing_position(
+                            symbol=symbol,
+                            entry_price=entry_price,
+                            current_price=current_price,
+                            position_qty=qty,
+                            prices=prices,
+                            regime=self._current_regime or 'neutral'
+                        )
+
+                        self.position_stops[symbol] = stops
+
+                        # Update peak price if current price is better than entry
+                        if qty > 0 and current_price > entry_price:
+                            self.position_peak_prices[symbol] = current_price
+                        elif qty < 0 and current_price < entry_price:
+                            self.position_peak_prices[symbol] = current_price
+
+                    except Exception as e:
+                        logger.warning(f"   ⚠️ Could not set stops for {symbol}: {e}")
+            logger.info("✅ Position stops initialized")
+
         # Train ML models
         logger.info("")
         logger.info("🧠 Training advanced ML models...")
@@ -343,12 +451,15 @@ class ApexTradingSystem:
                 training_results = self.inst_signal_generator.train(
                     self.historical_data,
                     target_horizon=5,
-                    min_samples=500
+                    min_samples_per_regime=200
                 )
                 if training_results:
                     logger.info("✅ Institutional ML models trained!")
-                    for name, metrics in training_results.items():
-                        logger.info(f"   {name}: val_mse={metrics.val_mse:.6f}, dir_acc={metrics.directional_accuracy:.1%}")
+                    for regime_name, metrics_list in training_results.items():
+                        if metrics_list:
+                            avg_mse = np.mean([m.val_mse for m in metrics_list])
+                            avg_acc = np.mean([m.directional_accuracy for m in metrics_list])
+                            logger.info(f"   {regime_name}: avg_val_mse={avg_mse:.6f}, avg_dir_acc={avg_acc:.1%}")
                 else:
                     logger.warning("⚠️  Institutional training returned no results")
                     self.use_institutional = False
@@ -526,40 +637,123 @@ class ApexTradingSystem:
             # Generate signal (use institutional or standard)
             prices = self.historical_data[symbol]['Close']
 
+            # SOTA: Get Cross-Sectional Momentum
+            cs_data = self.cs_momentum.get_signal(symbol, self.historical_data)
+            cs_signal = cs_data.get('signal', 0)
+            
+            # SOTA: Get News Sentiment
+            sent_result = self.sentiment_analyzer.analyze(symbol)
+            sent_signal = sent_result.sentiment_score
+            sent_conf = sent_result.confidence
+
             if self.use_institutional:
                 # Institutional signal generator with full metadata
                 inst_signal: SignalOutput = self.inst_signal_generator.generate_signal(symbol, prices)
                 signal = inst_signal.signal
                 confidence = inst_signal.confidence
+                
+                # Blend in SOTA signals
+                # Momentum weight: 0.2, Sentiment weight: 0.1
+                combined_signal = signal * 0.7 + cs_signal * 0.2 + sent_signal * 0.1
+                
+                # Confidence adjustment based on component agreement
+                if np.sign(signal) == np.sign(cs_signal) == np.sign(sent_signal):
+                    confidence = min(1.0, confidence * 1.2)
+                
+                signal = combined_signal
 
                 # Log component breakdown for quant transparency
                 if abs(signal) >= 0.30:
                     direction = "BULLISH" if signal > 0 else "BEARISH"
                     strength = "STRONG" if abs(signal) > 0.50 else "MODERATE"
                     logger.info(f"📊 {symbol}: {strength} {direction} signal={signal:+.3f} conf={confidence:.2f}")
+                    logger.debug(f"   Breakdown: Tech={inst_signal.signal:.2f} Mom={cs_signal:.2f}({cs_data['rank_percentile']:.0%}) Sent={sent_signal:.2f}")
                     logger.debug(f"   Components: mom={inst_signal.momentum_signal:.2f} rev={inst_signal.mean_reversion_signal:.2f} "
                                 f"trend={inst_signal.trend_signal:.2f} vol={inst_signal.volatility_signal:.2f}")
-                    logger.debug(f"   ML: pred={inst_signal.ml_prediction:.4f} std={inst_signal.ml_std:.4f}")
             else:
                 # Fallback to standard signal generator
                 signal_data = self.signal_generator.generate_ml_signal(symbol, prices)
                 signal = signal_data['signal']
                 confidence = signal_data['confidence']
 
+                # Blend SOTA signals
+                signal = signal * 0.7 + cs_signal * 0.2 + sent_signal * 0.1
+
                 # LOG SIGNAL STRENGTH (Quant transparency)
                 if abs(signal) >= 0.30:
                     direction = "BULLISH" if signal > 0 else "BEARISH"
                     strength = "STRONG" if abs(signal) > 0.50 else "MODERATE"
                     logger.info(f"📊 {symbol}: {strength} {direction} signal={signal:+.3f} conf={confidence:.2f}")
+                    logger.debug(f"   Breakdown: ML={signal_data['signal']:.2f} Mom={cs_signal:.2f} Sent={sent_signal:.2f}")
+
+            # ═══════════════════════════════════════════════════════════════
+            # ENHANCED SIGNAL FILTERING - Quality gate before entry
+            # ═══════════════════════════════════════════════════════════════
+            if current_pos == 0 and abs(signal) >= 0.30:  # Only filter potential entries
+                # Get volume data if available
+                volume = self.historical_data[symbol].get('Volume') if symbol in self.historical_data else None
+
+                # Get cross-sectional rank
+                cs_rank = cs_data.get('rank_percentile', 0.5)
+
+                # Build component signals dict for agreement calculation
+                if self.use_institutional:
+                    component_signals = {
+                        'momentum': inst_signal.momentum_signal,
+                        'mean_reversion': inst_signal.mean_reversion_signal,
+                        'trend': inst_signal.trend_signal,
+                        'volatility': inst_signal.volatility_signal,
+                        'ml': inst_signal.ml_prediction,
+                        'cs_momentum': cs_signal,
+                        'sentiment': sent_signal
+                    }
+                else:
+                    component_signals = {
+                        'ml': signal_data['signal'],
+                        'cs_momentum': cs_signal,
+                        'sentiment': sent_signal
+                    }
+
+                # Apply enhanced signal filter
+                filter_result = self.signal_filter.filter_signal(
+                    symbol=symbol,
+                    raw_signal=signal,
+                    confidence=confidence,
+                    component_signals=component_signals,
+                    prices=prices,
+                    volume=volume,
+                    vix_level=self._current_vix,
+                    cross_sectional_rank=cs_rank
+                )
+
+                # Update signal and confidence based on filter
+                if not filter_result['passed']:
+                    logger.info(f"🚫 {symbol}: Signal filtered out - {', '.join(filter_result['rejection_reasons'][:2])}")
+                    return
+
+                # Use filtered values
+                signal = filter_result['filtered_signal']
+                confidence = filter_result['filtered_confidence']
+
+                # Log adjustments if any
+                if filter_result['adjustments']:
+                    logger.debug(f"   Filter adjustments: {', '.join(filter_result['adjustments'][:3])}")
             
             # ═══════════════════════════════════════════════════════════════
-            # EXIT LOGIC - Works for BOTH long and short
+            # DYNAMIC EXIT LOGIC - Adapts to market conditions
             # ═══════════════════════════════════════════════════════════════
-            
+
             if current_pos != 0:  # ✅ Handles both long (pos) and short (neg)
+                # ✅ FIX: Skip if already failed too many times - let retry_failed_exits handle exclusively
+                if symbol in self.failed_exits and self.failed_exits[symbol].get('attempts', 0) >= 5:
+                    logger.debug(f"⏭️ {symbol}: Skipping exit in process_symbol - max attempts reached, requires manual intervention")
+                    return
+
                 entry_price = self.position_entry_prices.get(symbol, price)
                 entry_time = self.position_entry_times.get(symbol, datetime.now())
-                
+                entry_signal = self.position_entry_signals.get(symbol, signal)  # Signal at entry
+                side = 'LONG' if current_pos > 0 else 'SHORT'
+
                 # Calculate P&L (works for both long/short)
                 if current_pos > 0:  # LONG
                     pnl = (price - entry_price) * current_pos
@@ -567,89 +761,50 @@ class ApexTradingSystem:
                 else:  # SHORT
                     pnl = (entry_price - price) * abs(current_pos)
                     pnl_pct = (entry_price / price - 1) * 100
-                
+
                 holding_days = (datetime.now() - entry_time).days
-                holding_hours = (datetime.now() - entry_time).total_seconds() / 3600
-                
-                should_exit = False
-                exit_reason = ""
 
-                # Get dynamic stop levels (ATR-based) or fall back to defaults
+                # Get ATR from position stops if available
                 pos_stops = self.position_stops.get(symbol, {})
-                stop_loss_price = pos_stops.get('stop_loss', entry_price * 0.95)  # Default 5%
-                take_profit_price = pos_stops.get('take_profit', entry_price * 1.15)  # Default 15%
-                trailing_stop_pct = pos_stops.get('trailing_stop_pct', 0.03)  # Default 3%
+                atr = pos_stops.get('atr', None)
 
-                # Exit conditions using ATR-based dynamic stops
-                if current_pos > 0:  # LONG position
-                    if price <= stop_loss_price:
-                        should_exit = True
-                        exit_reason = f"ATR Stop loss (${stop_loss_price:.2f}, {pnl_pct:+.1f}%)"
-                    elif price >= take_profit_price:
-                        should_exit = True
-                        exit_reason = f"ATR Take profit (${take_profit_price:.2f}, {pnl_pct:+.1f}%)"
-                else:  # SHORT position
-                    if price >= stop_loss_price:
-                        should_exit = True
-                        exit_reason = f"ATR Stop loss (${stop_loss_price:.2f}, {pnl_pct:+.1f}%)"
-                    elif price <= take_profit_price:
-                        should_exit = True
-                        exit_reason = f"ATR Take profit (${take_profit_price:.2f}, {pnl_pct:+.1f}%)"
+                # Get peak price for trailing stop
+                peak_price = self.position_peak_prices.get(symbol, price)
 
-                # Signal-based exits
-                if not should_exit:
-                    if current_pos > 0 and signal < -0.40 and confidence > 0.50:  # LONG + strong bearish
-                        should_exit = True
-                        exit_reason = f"Strong bearish signal ({signal:.3f}, conf={confidence:.2f})"
+                # Update peak price tracking
+                if current_pos > 0 and price > peak_price:
+                    self.position_peak_prices[symbol] = price
+                    peak_price = price
+                elif current_pos < 0 and price < peak_price:
+                    self.position_peak_prices[symbol] = price
+                    peak_price = price
 
-                    elif current_pos < 0 and signal > 0.40 and confidence > 0.50:  # SHORT + strong bullish
-                        should_exit = True
-                        exit_reason = f"Strong bullish signal ({signal:.3f}, conf={confidence:.2f})"
+                # ✅ DYNAMIC EXIT DECISION using exit manager
+                should_exit, exit_reason, urgency = self.exit_manager.should_exit(
+                    symbol=symbol,
+                    entry_price=entry_price,
+                    current_price=price,
+                    side=side,
+                    entry_signal=entry_signal,
+                    current_signal=signal,
+                    confidence=confidence,
+                    regime=self._current_regime,
+                    vix_level=self._current_vix,
+                    atr=atr,
+                    entry_time=entry_time,
+                    peak_price=peak_price
+                )
 
-                    # Time-based decay: lower threshold for longer holds
-                    elif holding_days > 10 and current_pos > 0 and signal < -0.25:
-                        should_exit = True
-                        exit_reason = f"Bearish after {holding_days}d ({signal:.3f})"
-
-                    elif holding_days > 10 and current_pos < 0 and signal > 0.25:
-                        should_exit = True
-                        exit_reason = f"Bullish after {holding_days}d ({signal:.3f})"
-
-                    elif holding_days > 30:
-                        should_exit = True
-                        exit_reason = f"Max holding ({holding_days}d)"
-
-                # ATR-based trailing stop (dynamic percentage)
-                if not should_exit and pnl_pct > 3:  # Activate trailing after 3% gain
-                    peak_price = self.position_peak_prices.get(symbol, price)
-
-                    if current_pos > 0:  # LONG
-                        if price > peak_price:
-                            self.position_peak_prices[symbol] = price
-                            # Update trailing stop price
-                            new_stop = price * (1 - trailing_stop_pct)
-                            if new_stop > stop_loss_price:
-                                self.position_stops[symbol]['stop_loss'] = new_stop
-                                logger.debug(f"   📈 {symbol}: Trailing stop raised to ${new_stop:.2f}")
-                        else:
-                            drawdown = (price / peak_price - 1) * 100
-                            if drawdown < -trailing_stop_pct * 100:
-                                should_exit = True
-                                exit_reason = f"ATR Trailing stop ({drawdown:.1f}% from peak)"
-
-                    else:  # SHORT
-                        if price < peak_price:
-                            self.position_peak_prices[symbol] = price
-                            # Update trailing stop price
-                            new_stop = price * (1 + trailing_stop_pct)
-                            if new_stop < stop_loss_price:
-                                self.position_stops[symbol]['stop_loss'] = new_stop
-                                logger.debug(f"   📈 {symbol}: Trailing stop lowered to ${new_stop:.2f}")
-                        else:
-                            drawdown = (peak_price / price - 1) * 100
-                            if drawdown < -trailing_stop_pct * 100:
-                                should_exit = True
-                                exit_reason = f"ATR Trailing stop ({drawdown:.1f}% from peak)"
+                # Log position status periodically
+                if holding_days >= 1 and not should_exit:
+                    status = self.exit_manager.get_position_status(
+                        symbol, entry_price, price, side, entry_signal, signal,
+                        confidence, self._current_regime, self._current_vix, atr, entry_time
+                    )
+                    if status['urgency'] in ['moderate', 'high']:
+                        logger.info(f"⚠️ {symbol}: {status['status']} (urgency: {status['urgency']})")
+                        logger.debug(f"   Dynamic levels: SL={status['stop_pct']*100:.1f}%, TP={status['target_pct']*100:.1f}%, "
+                                    f"max_hold={status['max_hold_days']}d, signal_exit={status['signal_exit_threshold']:.2f}")
                 
                 if should_exit:
                     pos_type = "LONG" if current_pos > 0 else "SHORT"
@@ -687,6 +842,8 @@ class ApexTradingSystem:
                                 del self.position_entry_times[symbol]
                             if symbol in self.position_peak_prices:
                                 del self.position_peak_prices[symbol]
+                            if symbol in self.position_entry_signals:
+                                del self.position_entry_signals[symbol]
                             if symbol in self.position_stops:
                                 del self.position_stops[symbol]
 
@@ -700,10 +857,26 @@ class ApexTradingSystem:
 
                             # Update cooldown
                             self.last_trade_time[symbol] = datetime.now()
-                            
+
                             self.pending_orders.discard(symbol)
+                            # Clear from failed exits on success
+                            if symbol in self.failed_exits:
+                                del self.failed_exits[symbol]
                         else:
+                            # ✅ Track failed exit for retry
                             self.pending_orders.discard(symbol)
+                            attempts = self.failed_exits.get(symbol, {}).get('attempts', 0) + 1
+                            self.failed_exits[symbol] = {
+                                'reason': exit_reason,
+                                'attempts': attempts,
+                                'last_attempt': datetime.now(),
+                                'quantity': abs(current_pos),
+                                'side': order_side
+                            }
+                            logger.warning(f"   ⚠️ Exit order failed for {symbol} (attempt {attempts})")
+                            # Don't apply normal cooldown for failed exits - allow faster retry (30s)
+                            if attempts <= 3:
+                                self.last_trade_time[symbol] = datetime.now() - timedelta(seconds=ApexConfig.TRADE_COOLDOWN_SECONDS - 30)
                     else:
                         # Simulation mode - close position
                         order_side = 'SELL' if current_pos > 0 else 'BUY'
@@ -715,6 +888,8 @@ class ApexTradingSystem:
                             del self.position_entry_times[symbol]
                         if symbol in self.position_peak_prices:
                             del self.position_peak_prices[symbol]
+                        if symbol in self.position_entry_signals:
+                            del self.position_entry_signals[symbol]
                         if symbol in self.position_stops:
                             del self.position_stops[symbol]
 
@@ -743,6 +918,7 @@ class ApexTradingSystem:
             # ═══════════════════════════════════════════════════════════════
             # ENTRY LOGIC - Only if no position
             # ═══════════════════════════════════════════════════════════════
+            logger.info(f"🔍 {symbol}: Entry evaluation - signal={signal:+.3f} conf={confidence:.3f}")
 
             # ✅ Phase 3.2: Detect market regime and use regime-adjusted thresholds
             try:
@@ -757,7 +933,7 @@ class ApexTradingSystem:
             )
 
             if abs(signal) < signal_threshold:
-                logger.debug(f"⏭️ {symbol}: Signal {signal:.3f} below regime threshold {signal_threshold} ({self._current_regime})")
+                logger.info(f"⏭️ {symbol}: Signal {signal:.3f} below regime threshold {signal_threshold} ({self._current_regime})")
                 return
 
             # ✅ Phase 1.2: Check VaR limit before new entries
@@ -784,7 +960,7 @@ class ApexTradingSystem:
             # This prevents race condition where multiple parallel tasks pass the check
             async with self._position_lock:
                 if self.position_count >= ApexConfig.MAX_POSITIONS:
-                    logger.debug(f"⚠️ {symbol}: Max positions reached ({self.position_count}/{ApexConfig.MAX_POSITIONS})")
+                    logger.info(f"⚠️ {symbol}: Max positions reached ({self.position_count}/{ApexConfig.MAX_POSITIONS})")
                     return
 
                 # ✅ Check sector limits (inside lock)
@@ -799,6 +975,15 @@ class ApexTradingSystem:
             trade_success = False
             async with self._entry_semaphore:
                 try:
+                    # SOTA: Check data quality before entry
+                    dq_issues = self.data_quality_monitor.run_all_checks(symbol, prices=prices)
+                    if any(i.severity in ['error', 'critical'] for i in dq_issues):
+                        logger.warning(f"🛑 {symbol}: Data quality issues block entry: {[i.message for i in dq_issues]}")
+                        async with self._position_lock:
+                            if symbol in self.positions:
+                                del self.positions[symbol]
+                        return
+
                     # ✅ Calculate position size with institutional risk manager
                     if self.use_institutional:
                         sector = ApexConfig.get_sector(symbol)
@@ -819,28 +1004,43 @@ class ApexTradingSystem:
                         max_shares_by_value = int(ApexConfig.POSITION_SIZE_USD / price)
                         shares = min(shares, max_shares_by_value)
                         shares = min(shares, ApexConfig.MAX_SHARES_PER_POSITION)  # Cap max shares
+                        
+                        # SOTA: Apply VIX-based risk multiplier
+                        shares = int(shares * self._vix_risk_multiplier)
 
                         # ✅ Phase 1.4: Apply graduated circuit breaker risk multiplier
                         if self._risk_multiplier < 1.0:
                             shares = int(shares * self._risk_multiplier)
-                            logger.info(f"   ⚠️ Risk reduced: {self._risk_multiplier:.0%} → {shares} shares")
+                            logger.info(f"   ⚠️ Risk reduced: {self._risk_multiplier:.0%} (VIX: {self._vix_risk_multiplier:.2f}) → {shares} shares")
 
                         if sizing.constraints:
                             logger.debug(f"   Size constraints: {', '.join(sizing.constraints)}")
 
+                        logger.info(f"🔢 {symbol}: Sizing result - shares={shares} (inst={sizing.target_shares}, max_val={max_shares_by_value}, vix_mult={self._vix_risk_multiplier:.2f}, risk_mult={self._risk_multiplier:.2f})")
+                        if sizing.constraints:
+                            logger.info(f"   📋 Constraints: {', '.join(sizing.constraints)}")
+
                         if shares < 1:
                             if sizing.constraints:
-                                logger.debug(f"⚠️ {symbol}: Position blocked by {sizing.constraints}")
+                                logger.info(f"⚠️ {symbol}: Position blocked by {sizing.constraints}")
                             else:
-                                logger.debug(f"⚠️ {symbol}: Price too high (${price:.2f})")
+                                logger.info(f"⚠️ {symbol}: Price too high or risk too high (${price:.2f})")
+                            async with self._position_lock:
+                                if symbol in self.positions:
+                                    del self.positions[symbol]
                             return
                     else:
                         # Fallback: standard position sizing
                         shares = int(ApexConfig.POSITION_SIZE_USD / price)
                         shares = min(shares, ApexConfig.MAX_SHARES_PER_POSITION)
+                        # SOTA: Apply VIX multiplier
+                        shares = int(shares * self._vix_risk_multiplier)
 
                         if shares < 1:
                             logger.debug(f"⚠️ {symbol}: Price too high (${price:.2f})")
+                            async with self._position_lock:
+                                if symbol in self.positions:
+                                    del self.positions[symbol]
                             return
 
                     # Determine side (long or short)
@@ -853,6 +1053,10 @@ class ApexTradingSystem:
 
                     if self.ibkr:
                         self.pending_orders.add(symbol)
+                        
+                        # SOTA: Record arrival price
+                        arrival_price = price
+                        start_time = datetime.now()
 
                         # ✅ Phase 2.1: Use TWAP/VWAP for large orders
                         order_value = shares * price
@@ -879,6 +1083,21 @@ class ApexTradingSystem:
                                 quantity=shares,
                                 confidence=confidence
                             )
+                        
+                        # SOTA: Record execution benchmark if we have a trade
+                        if trade:
+                            fill_price = trade.get('price', 0) if isinstance(trade, dict) else trade.orderStatus.avgFillPrice
+                            if fill_price > 0:
+                                self.arrival_benchmark.record_execution(
+                                    symbol=symbol,
+                                    side=side,
+                                    quantity=shares,
+                                    arrival_price=arrival_price,
+                                    fill_price=fill_price,
+                                    decision_time=start_time
+                                )
+                                shortfall = self.arrival_benchmark.executions[-1].implementation_shortfall_bps
+                                logger.info(f"   📊 Execution Shortfall: {shortfall:.1f} bps")
 
                         if trade:
                             trade_success = True
@@ -892,6 +1111,7 @@ class ApexTradingSystem:
                             self.position_entry_prices[symbol] = price
                             self.position_entry_times[symbol] = datetime.now()
                             self.position_peak_prices[symbol] = price
+                            self.position_entry_signals[symbol] = signal  # Track entry signal for dynamic exits
 
                             # ✅ Calculate ATR-based dynamic stops using GodLevelRiskManager
                             if ApexConfig.USE_ATR_STOPS:
@@ -938,6 +1158,7 @@ class ApexTradingSystem:
                         self.position_entry_prices[symbol] = price
                         self.position_entry_times[symbol] = datetime.now()
                         self.position_peak_prices[symbol] = price
+                        self.position_entry_signals[symbol] = signal  # Track entry signal for dynamic exits
 
                         # ✅ Calculate ATR-based dynamic stops using GodLevelRiskManager
                         if ApexConfig.USE_ATR_STOPS:
@@ -980,6 +1201,74 @@ class ApexTradingSystem:
             import traceback
             logger.debug(traceback.format_exc())
     
+    async def retry_failed_exits(self):
+        """
+        Retry exit orders that previously failed.
+        This ensures positions get closed even if IBKR had temporary issues.
+        """
+        if not self.failed_exits or not self.ibkr:
+            return
+
+        now = datetime.now()
+        symbols_to_retry = []
+
+        for symbol, info in list(self.failed_exits.items()):
+            # Skip if too many attempts (max 5)
+            if info['attempts'] >= 5:
+                logger.error(f"❌ {symbol}: Exit failed after 5 attempts - manual intervention required!")
+                continue
+
+            # Retry after 30 seconds
+            seconds_since_attempt = (now - info['last_attempt']).total_seconds()
+            if seconds_since_attempt >= 30:
+                symbols_to_retry.append((symbol, info))
+
+        for symbol, info in symbols_to_retry:
+            # Check if position still exists
+            current_pos = self.positions.get(symbol, 0)
+            if current_pos == 0:
+                # Position already closed (maybe manually)
+                del self.failed_exits[symbol]
+                logger.info(f"✅ {symbol}: Failed exit cleared - position no longer exists")
+                continue
+
+            logger.info(f"🔄 Retrying exit for {symbol} (attempt {info['attempts'] + 1})")
+
+            try:
+                self.pending_orders.add(symbol)
+                order_side = 'SELL' if current_pos > 0 else 'BUY'
+
+                trade = await self.ibkr.execute_order(
+                    symbol=symbol,
+                    side=order_side,
+                    quantity=abs(current_pos),
+                    confidence=0.9  # High confidence for exits
+                )
+
+                if trade:
+                    await self.sync_positions_with_ibkr()
+                    logger.info(f"   ✅ {symbol}: Exit retry successful!")
+
+                    # Clean up tracking
+                    for tracking_dict in [self.position_entry_prices, self.position_entry_times,
+                                          self.position_peak_prices, self.position_stops, self.failed_exits]:
+                        if symbol in tracking_dict:
+                            del tracking_dict[symbol]
+
+                    self.pending_orders.discard(symbol)
+                else:
+                    # Increment attempt counter
+                    self.failed_exits[symbol]['attempts'] += 1
+                    self.failed_exits[symbol]['last_attempt'] = now
+                    self.pending_orders.discard(symbol)
+                    logger.warning(f"   ⚠️ {symbol}: Exit retry failed (attempt {self.failed_exits[symbol]['attempts']})")
+
+            except Exception as e:
+                logger.error(f"   ❌ {symbol}: Exit retry error: {e}")
+                self.pending_orders.discard(symbol)
+                self.failed_exits[symbol]['attempts'] += 1
+                self.failed_exits[symbol]['last_attempt'] = now
+
     async def process_symbols_parallel(self, symbols: List[str]):
         """
         Process symbols in batches to respect IBKR's 100 market data line limit.
@@ -1111,7 +1400,217 @@ class ApexTradingSystem:
             logger.error(f"❌ Rebalancing error: {e}")
             import traceback
             logger.debug(traceback.format_exc())
-    
+
+    async def manage_options(self):
+        """
+        Manage options positions:
+        - Auto-hedge large stock positions with protective puts
+        - Sell covered calls on eligible long positions
+        - Monitor and roll expiring options
+        """
+        if not self.options_trader or not ApexConfig.OPTIONS_ENABLED:
+            return
+
+        try:
+            logger.debug("🎯 Checking options opportunities...")
+
+            # Get current stock positions value
+            for symbol, qty in self.positions.items():
+                if qty <= 0:  # Only hedge long positions
+                    continue
+
+                price = self.price_cache.get(symbol, 0)
+                if price <= 0:
+                    continue
+
+                position_value = qty * price
+
+                # Auto-hedge large positions with protective puts
+                if ApexConfig.OPTIONS_AUTO_HEDGE and position_value >= ApexConfig.OPTIONS_HEDGE_THRESHOLD:
+                    # Check if already hedged
+                    hedge_key = f"{symbol}_hedge"
+                    if hedge_key not in self.options_positions:
+                        logger.info(f"🛡️ Auto-hedging {symbol}: ${position_value:,.2f} position")
+
+                        result = await self.options_trader.buy_protective_put(
+                            symbol=symbol,
+                            shares=qty,
+                            delta=ApexConfig.OPTIONS_HEDGE_DELTA,
+                            days_to_expiry=ApexConfig.OPTIONS_PREFERRED_DAYS_TO_EXPIRY
+                        )
+
+                        if result:
+                            self.options_positions[hedge_key] = result
+                            logger.info(f"   ✅ Protective put purchased: {result.get('contract', {}).get('strike')} strike")
+
+                # Sell covered calls on eligible positions
+                if ApexConfig.OPTIONS_COVERED_CALLS_ENABLED and qty >= ApexConfig.OPTIONS_MIN_SHARES_FOR_COVERED_CALL:
+                    cc_key = f"{symbol}_cc"
+                    if cc_key not in self.options_positions:
+                        logger.info(f"💰 Selling covered call on {symbol}: {qty} shares")
+
+                        result = await self.options_trader.sell_covered_call(
+                            symbol=symbol,
+                            shares=qty,
+                            delta=ApexConfig.OPTIONS_COVERED_CALL_DELTA,
+                            days_to_expiry=ApexConfig.OPTIONS_PREFERRED_DAYS_TO_EXPIRY
+                        )
+
+                        if result:
+                            self.options_positions[cc_key] = result
+                            logger.info(f"   ✅ Covered call sold: ${result.get('premium', 0):,.2f} premium")
+
+            # Check for expiring options (within 7 days)
+            await self._check_expiring_options()
+
+            # Log portfolio Greeks
+            if self.options_positions:
+                greeks = self.options_trader.get_portfolio_greeks()
+                logger.debug(f"📊 Portfolio Greeks - Delta: {greeks['delta']:.1f}, Theta: ${greeks['theta']:.2f}/day")
+
+        except Exception as e:
+            logger.error(f"❌ Options management error: {e}")
+            import traceback
+            logger.debug(traceback.format_exc())
+
+    async def _check_expiring_options(self):
+        """Check and handle options expiring soon."""
+        if not self.options_trader:
+            return
+
+        try:
+            # Refresh options positions from IBKR
+            if self.ibkr:
+                ibkr_options = await self.ibkr.get_option_positions()
+
+                for pos in ibkr_options.values():
+                    expiry_str = pos.get('expiry', '')
+                    if expiry_str:
+                        try:
+                            expiry_date = datetime.strptime(expiry_str, '%Y%m%d')
+                            days_to_expiry = (expiry_date - datetime.now()).days
+
+                            if days_to_expiry <= 7:
+                                symbol = pos.get('symbol')
+                                strike = pos.get('strike')
+                                right = pos.get('right')
+                                qty = pos.get('quantity', 0)
+
+                                logger.warning(f"⚠️ Option expiring soon: {symbol} {expiry_str} ${strike} {'CALL' if right == 'C' else 'PUT'} ({days_to_expiry} days)")
+
+                                # For protective puts near expiration, consider rolling
+                                if right == 'P' and qty > 0 and days_to_expiry <= 3:
+                                    logger.info(f"   🔄 Consider rolling protective put for {symbol}")
+
+                        except ValueError:
+                            pass
+
+        except Exception as e:
+            logger.debug(f"Error checking expiring options: {e}")
+
+    async def execute_option_trade(
+        self,
+        symbol: str,
+        strategy: OptionStrategy,
+        contracts: int = 1,
+        **kwargs
+    ) -> Optional[dict]:
+        """
+        Execute an options trade based on strategy.
+
+        Args:
+            symbol: Underlying symbol
+            strategy: Options strategy to execute
+            contracts: Number of contracts
+            **kwargs: Strategy-specific parameters
+
+        Returns:
+            Trade result or None
+        """
+        if not self.options_trader:
+            logger.error("Options trader not initialized")
+            return None
+
+        try:
+            if strategy == OptionStrategy.PROTECTIVE_PUT:
+                shares = kwargs.get('shares', contracts * 100)
+                return await self.options_trader.buy_protective_put(
+                    symbol=symbol,
+                    shares=shares,
+                    delta=kwargs.get('delta', ApexConfig.OPTIONS_HEDGE_DELTA),
+                    days_to_expiry=kwargs.get('days', ApexConfig.OPTIONS_PREFERRED_DAYS_TO_EXPIRY)
+                )
+
+            elif strategy == OptionStrategy.COVERED_CALL:
+                shares = kwargs.get('shares', contracts * 100)
+                return await self.options_trader.sell_covered_call(
+                    symbol=symbol,
+                    shares=shares,
+                    delta=kwargs.get('delta', ApexConfig.OPTIONS_COVERED_CALL_DELTA),
+                    days_to_expiry=kwargs.get('days', ApexConfig.OPTIONS_PREFERRED_DAYS_TO_EXPIRY)
+                )
+
+            elif strategy == OptionStrategy.STRADDLE:
+                return await self.options_trader.buy_straddle(
+                    symbol=symbol,
+                    contracts=contracts,
+                    days_to_expiry=kwargs.get('days', ApexConfig.OPTIONS_PREFERRED_DAYS_TO_EXPIRY)
+                )
+
+            elif strategy == OptionStrategy.LONG_CALL:
+                chain = await self.options_trader.get_options_chain(
+                    symbol,
+                    min_days=ApexConfig.OPTIONS_MIN_DAYS_TO_EXPIRY,
+                    max_days=ApexConfig.OPTIONS_MAX_DAYS_TO_EXPIRY
+                )
+                if chain:
+                    call = self.options_trader.select_option_by_delta(
+                        chain,
+                        target_delta=kwargs.get('delta', 0.50),
+                        option_type=OptionType.CALL
+                    )
+                    if call:
+                        expiry_str = call.expiry.strftime('%Y%m%d')
+                        return await self.ibkr.execute_option_order(
+                            symbol=symbol,
+                            expiry=expiry_str,
+                            strike=call.strike,
+                            right='C',
+                            side='BUY',
+                            quantity=contracts
+                        )
+
+            elif strategy == OptionStrategy.LONG_PUT:
+                chain = await self.options_trader.get_options_chain(
+                    symbol,
+                    min_days=ApexConfig.OPTIONS_MIN_DAYS_TO_EXPIRY,
+                    max_days=ApexConfig.OPTIONS_MAX_DAYS_TO_EXPIRY
+                )
+                if chain:
+                    put = self.options_trader.select_option_by_delta(
+                        chain,
+                        target_delta=kwargs.get('delta', -0.50),
+                        option_type=OptionType.PUT
+                    )
+                    if put:
+                        expiry_str = put.expiry.strftime('%Y%m%d')
+                        return await self.ibkr.execute_option_order(
+                            symbol=symbol,
+                            expiry=expiry_str,
+                            strike=put.strike,
+                            right='P',
+                            side='BUY',
+                            quantity=contracts
+                        )
+
+            else:
+                logger.warning(f"Strategy {strategy} not yet implemented")
+                return None
+
+        except Exception as e:
+            logger.error(f"❌ Option trade error: {e}")
+            return None
+
     async def check_risk(self):
         """Check risk limits and update metrics."""
         try:
@@ -1318,10 +1817,13 @@ class ApexTradingSystem:
             
             if self.ibkr:
                 try:
-                    positions = self.ibkr.ib.portfolio()
-                    current_value = sum([p.marketValue for p in positions])
-                    if current_value == 0:
-                        current_value = self.capital
+                    # Get NetLiquidation (total account equity) from IBKR
+                    account_values = self.ibkr.ib.accountValues()
+                    current_value = self.capital  # fallback
+                    for av in account_values:
+                        if av.tag == 'NetLiquidation' and av.currency == 'USD':
+                            current_value = float(av.value)
+                            break
                 except:
                     current_value = self.capital
             else:
@@ -1335,12 +1837,12 @@ class ApexTradingSystem:
                 'starting_capital': float(self.risk_manager.starting_capital),
                 'positions': {},
                 'signals': current_signals,
-                'daily_pnl': 0.0,
+                'daily_pnl': float(current_value - self.risk_manager.day_start_capital) if self.risk_manager.day_start_capital > 0 else 0.0,
                 'total_pnl': float(current_value - self.risk_manager.starting_capital),
                 'total_commissions': float(self.total_commissions),
-                'max_drawdown': 0.0,
-                'sharpe_ratio': 0.0,
-                'win_rate': 0.0,
+                'max_drawdown': float(self.performance_tracker.get_max_drawdown()),
+                'sharpe_ratio': float(self.performance_tracker.get_sharpe_ratio()),
+                'win_rate': float(self.performance_tracker.get_win_rate()),
                 'total_trades': len(self.performance_tracker.trades),
                 'open_positions': self.position_count,
                 'sector_exposure': self.calculate_sector_exposure()
@@ -1520,21 +2022,67 @@ class ApexTradingSystem:
                         await self.refresh_data()
                         last_data_refresh = now
 
-                    # Check trading hours
                     if ApexConfig.TRADING_HOURS_START <= est_hour <= ApexConfig.TRADING_HOURS_END:
                         logger.info(f"⏰ Cycle #{cycle}: {now.strftime('%Y-%m-%d %H:%M:%S')} (EST: {est_hour:.1f}h)")
                         logger.info("─" * 80)
+                        
+                        # ═══════════════════════════════════════════════════════
+                        # SOTA: Update Market State & Health
+                        # ═══════════════════════════════════════════════════════
+                        
+                        # Check VIX Regime
+                        vix_state = self.vix_manager.get_current_state()
+                        self._vix_risk_multiplier = vix_state.risk_multiplier
+                        self._current_vix = vix_state.current_vix  # For signal filtering
+
+                        # Log regime change if significant
+                        if hasattr(self, '_last_regime') and self._last_regime != vix_state.regime:
+                            logger.warning(f"🚨 REGIME CHANGE: {self._last_regime} -> {vix_state.regime.value} (VIX: {vix_state.current_vix:.1f})")
+                        self._last_regime = vix_state.regime
+                        
+                        if vix_state.regime != VIXRegime.NORMAL and cycle % 10 == 0:
+                            logger.info(f"🌪️ Market Regime: {vix_state.regime.value.upper()} (Risk Multiplier: {self._vix_risk_multiplier:.2f})")
+                        
+                        # Feed VIX data to risk managers
+                        if self.use_institutional and hasattr(self.inst_risk_manager, 'set_market_volatility'):
+                            self.inst_risk_manager.set_market_volatility(vix_state.current_vix / 100.0)
+                        
+                        # Update Health Dashboard
+                        health_checks = self.health_dashboard.run_all_checks(
+                            current_capital=self.capital,
+                            peak_capital=ApexConfig.INITIAL_CAPITAL,  # Approximate
+                            positions=self.positions
+                        )
+                        health_status = self.health_dashboard.get_overall_status()
+                        if health_status != HealthStatus.HEALTHY and cycle % 5 == 0:
+                            logger.warning(f"🏥 System Health: {health_status.value.upper()}")
+                        
+                        # ═══════════════════════════════════════════════════════
+
+                        # ✅ Retry any failed exits first (critical for risk management)
+                        await self.retry_failed_exits()
 
                         # Check circuit breaker status
                         can_trade, cb_reason = self.risk_manager.can_trade()
                         if not can_trade:
                             logger.warning(f"🛑 Trading halted: {cb_reason}")
                         else:
+                            # SOTA: Update universe momentum ranking
+                            if cycle % 20 == 0 or cycle == 1:
+                                self.cs_momentum.calculate_universe_momentum(self.historical_data)
+                                tops = self.cs_momentum.get_top_momentum_stocks(self.historical_data, n=5)
+                                if tops and cycle % 60 == 0:
+                                    logger.info(f"🚀 Top Momentum: {', '.join([f'{s}({v:.2f})' for s,v in tops])}")
+
                             # Process symbols in parallel
                             await self.process_symbols_parallel(ApexConfig.SYMBOLS)
 
                             # Check for rebalancing (near market close)
                             await self.check_and_execute_rebalance(est_hour)
+
+                            # Manage options (hedging, covered calls, expiring positions)
+                            if ApexConfig.OPTIONS_ENABLED:
+                                await self.manage_options()
 
                         # Sync positions after processing (captures any trades)
                         if self.ibkr:

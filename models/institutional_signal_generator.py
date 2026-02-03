@@ -240,14 +240,15 @@ class PurgedTimeSeriesSplit:
 # ═══════════════════════════════════════════════════════════════════════
 
 class FeatureEngine:
-    """Institutional-grade feature engineering with 30+ features."""
-    
+    """Institutional-grade feature engineering with 35+ features."""
+
     FEATURE_GROUPS = {
         'momentum': ['ret_1d', 'ret_5d', 'ret_10d', 'ret_20d', 'ret_60d', 'roc_5d', 'roc_10d'],
         'mean_reversion': ['zscore_20d', 'zscore_60d', 'bb_position', 'bb_width', 'rsi_14'],
         'trend': ['ma_cross_5_20', 'ma_cross_20_50', 'ma_dist_20', 'ma_dist_50', 'adx_14', 'trend_strength'],
         'volatility': ['vol_5d', 'vol_20d', 'vol_60d', 'vol_ratio_5_20', 'vol_regime'],
-        'statistical': ['skew_20d', 'kurt_20d', 'pct_rank_252d']
+        'statistical': ['skew_20d', 'kurt_20d', 'pct_rank_252d'],
+        'quality': ['range_position', 'trend_consistency', 'momentum_acceleration']
     }
     
     def __init__(self, lookback: int = 60):
@@ -331,7 +332,29 @@ class FeatureEngine:
             lambda x: (x.iloc[-1] - x.min()) / (x.max() - x.min()) if x.max() != x.min() else 0.5,
             raw=False
         )
-        
+
+        # 6. Quality/Confirmation Features
+        # Range position (where is price in recent range)
+        high_20 = p.rolling(20).max()
+        low_20 = p.rolling(20).min()
+        range_20 = high_20 - low_20
+        df['range_position'] = (p - low_20) / range_20.replace(0, 1)
+
+        # Trend consistency (R-squared of price movement)
+        def calc_r2(x):
+            if len(x) < 5:
+                return 0.5
+            y = np.arange(len(x))
+            corr = np.corrcoef(x, y)[0, 1]
+            return corr ** 2 if not np.isnan(corr) else 0.5
+
+        df['trend_consistency'] = p.rolling(20).apply(calc_r2, raw=True)
+
+        # Momentum acceleration (is momentum increasing or decreasing)
+        roc_5 = p.pct_change(5)
+        roc_10 = p.pct_change(10)
+        df['momentum_acceleration'] = roc_5 - (roc_10 / 2)
+
         return df.fillna(0).replace([np.inf, -np.inf], 0)
     
     def extract_single_sample(self, prices: pd.Series) -> Tuple[np.ndarray, float]:

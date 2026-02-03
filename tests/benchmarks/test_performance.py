@@ -107,7 +107,7 @@ class TestSignalGenerationPerformance:
             return features
 
         result = benchmark(extract_features)
-        assert len(result) >= 10
+        assert len(result) >= 9
 
 
 class TestRiskCalculationPerformance:

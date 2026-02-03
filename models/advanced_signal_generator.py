@@ -53,28 +53,38 @@ except ImportError:
 
 class RegimeDetector:
     """Market regime detection."""
-    
+
     @staticmethod
     def detect_regime(prices: pd.Series, lookback: int = 60) -> str:
-        if len(prices) < lookback:
-            return 'neutral'
-        
-        recent = prices.iloc[-lookback:]
-        returns = recent.pct_change().dropna()
-        
-        ma_20 = prices.iloc[-20:].mean()
-        ma_60 = prices.iloc[-60:].mean()
-        trend = (ma_20 - ma_60) / ma_60 if ma_60 > 0 else 0
-        
-        vol = returns.std() * np.sqrt(252)
-        
-        if vol > 0.35:
-            return 'volatile'
-        elif trend > 0.05:
-            return 'bull'
-        elif trend < -0.05:
-            return 'bear'
-        else:
+        try:
+            if len(prices) < lookback:
+                return 'neutral'
+
+            # Ensure prices is a 1D Series
+            if isinstance(prices, pd.DataFrame):
+                prices = prices.iloc[:, 0]
+            if hasattr(prices, 'squeeze'):
+                prices = prices.squeeze()
+
+            recent = prices.iloc[-lookback:]
+            returns = recent.pct_change().dropna()
+
+            # Calculate scalars explicitly
+            ma_20 = float(prices.iloc[-20:].mean())
+            ma_60 = float(prices.iloc[-60:].mean())
+            trend = (ma_20 - ma_60) / ma_60 if ma_60 > 0 else 0.0
+
+            vol = float(returns.std()) * np.sqrt(252)
+
+            if vol > 0.35:
+                return 'volatile'
+            elif trend > 0.05:
+                return 'bull'
+            elif trend < -0.05:
+                return 'bear'
+            else:
+                return 'neutral'
+        except Exception:
             return 'neutral'
 
 
@@ -116,9 +126,21 @@ class AdvancedSignalGenerator:
     
     def compute_features_vectorized(self, prices: pd.Series) -> pd.DataFrame:
         """Vectorized 30+ feature extraction."""
-        df = pd.DataFrame(index=prices.index)
-        p = prices
+        # Robustly convert to clean 1D numpy-backed Series
+        if isinstance(prices, pd.DataFrame):
+            if 'Close' in prices.columns:
+                prices = prices['Close']
+            elif len(prices.columns) > 0:
+                prices = prices.iloc[:, 0]
+
+        if isinstance(prices, pd.DataFrame):
+            prices = prices.iloc[:, 0]
+
+        # Force to clean 1D Series with simple integer index
+        values = np.asarray(prices).flatten()
+        p = pd.Series(values, index=range(len(values)))
         returns = p.pct_change()
+        df = pd.DataFrame(index=p.index)
         
         # 1. Multi-period returns
         for d in [3, 5, 10, 20, 60]:
@@ -130,9 +152,11 @@ class AdvancedSignalGenerator:
         
         # 3. RSI
         delta = p.diff()
-        gain = delta.where(delta > 0, 0).rolling(14).mean()
-        loss = (-delta.where(delta < 0, 0)).rolling(14).mean()
-        rs = gain / loss
+        gain = np.where(delta > 0, delta, 0)
+        loss = np.where(delta < 0, -delta, 0)
+        avg_gain = pd.Series(gain).rolling(14).mean()
+        avg_loss = pd.Series(loss).rolling(14).mean()
+        rs = avg_gain / avg_loss.replace(0, np.nan)
         df['rsi_14'] = 100 - (100 / (1 + rs))
         df['rsi_norm'] = (df['rsi_14'] - 50) / 50
         
@@ -167,7 +191,99 @@ class AdvancedSignalGenerator:
         ma60 = p.rolling(60).mean()
         std60 = p.rolling(60).std()
         df['zscore_60'] = (p - ma60) / std60
-        
+
+        # 10. Trend strength (linear regression slope)
+        df['trend_strength'] = returns.rolling(20).apply(
+            lambda x: np.polyfit(np.arange(len(x)), x, 1)[0] * 100 if len(x) > 1 else 0,
+            raw=False
+        )
+
+        # 11. Price position in range
+        high_20 = p.rolling(20).max()
+        low_20 = p.rolling(20).min()
+        range_20 = high_20 - low_20
+        df['range_position'] = (p - low_20) / range_20.replace(0, np.nan)
+
+        # 12. Mean reversion potential
+        df['mean_rev_20'] = -df['zscore_60'].clip(-3, 3) / 3  # Normalized mean reversion signal
+
+        # 13. Trend consistency (R-squared of recent price movement)
+        def calc_r2(x):
+            if len(x) < 5:
+                return 0
+            y = np.arange(len(x))
+            correlation = np.corrcoef(x, y)[0, 1]
+            return correlation ** 2 if not np.isnan(correlation) else 0
+
+        df['trend_consistency'] = p.rolling(20).apply(calc_r2, raw=True)
+
+        return df.fillna(0).replace([np.inf, -np.inf], 0)
+
+    def compute_features_with_volume(
+        self,
+        prices: pd.Series,
+        volume: pd.Series
+    ) -> pd.DataFrame:
+        """
+        Compute features including volume-based indicators.
+
+        Volume-price relationships are strong predictors:
+        - Volume confirms price moves
+        - Volume precedes price (accumulation/distribution)
+        - Volume divergence signals reversals
+        """
+        # Get base features
+        df = self.compute_features_vectorized(prices)
+
+        # Robustly convert volume to clean 1D Series
+        if isinstance(volume, pd.DataFrame):
+            volume = volume.iloc[:, 0]
+        vol_values = np.asarray(volume).flatten()
+        v = pd.Series(vol_values, index=range(len(vol_values)))
+
+        # Align length with price data
+        min_len = min(len(df), len(v))
+        v = v.iloc[-min_len:]
+        v.index = range(len(v))
+
+        # Robustly convert prices
+        if isinstance(prices, pd.DataFrame):
+            prices = prices.iloc[:, 0]
+        p_values = np.asarray(prices).flatten()
+        p = pd.Series(p_values[-min_len:], index=range(min_len))
+
+        returns = p.pct_change()
+
+        # Volume features
+        # 1. Volume ratio (current vs average)
+        avg_vol_20 = v.rolling(20).mean()
+        df['vol_ratio'] = (v / avg_vol_20.replace(0, 1)).iloc[-len(df):]
+
+        # 2. Volume trend
+        df['vol_trend'] = (v.rolling(5).mean() / v.rolling(20).mean().replace(0, 1) - 1).iloc[-len(df):]
+
+        # 3. On-Balance Volume (OBV) momentum
+        obv = (np.sign(returns) * v).cumsum()
+        obv_norm = (obv - obv.rolling(20).mean()) / obv.rolling(20).std().replace(0, 1)
+        df['obv_momentum'] = obv_norm.iloc[-len(df):]
+
+        # 4. Volume-Price Trend (Confirmation)
+        # High volume on up days = bullish, high volume on down days = bearish
+        vol_price_trend = (returns * v / avg_vol_20.replace(0, 1)).rolling(10).sum()
+        df['vol_price_trend'] = vol_price_trend.iloc[-len(df):]
+
+        # 5. Accumulation/Distribution indicator
+        # Money flow multiplier: ((close - low) - (high - close)) / (high - low)
+        # Simplified version using returns
+        mf = returns * v
+        df['accumulation'] = (mf.rolling(20).sum() / v.rolling(20).sum().replace(0, 1)).iloc[-len(df):]
+
+        # 6. Volume divergence (price up but volume down = bearish divergence)
+        price_up = (p.diff(5) > 0).astype(int)
+        vol_down = (v.rolling(5).mean() < v.rolling(20).mean()).astype(int)
+        df['vol_divergence'] = ((price_up & vol_down).astype(int) * -1 +
+                                ((1 - price_up) & (1 - vol_down)).astype(int) * 1).iloc[-len(df):]
+
         return df.fillna(0).replace([np.inf, -np.inf], 0)
     
     def train_walk_forward(
@@ -361,12 +477,28 @@ class AdvancedSignalGenerator:
         if not self.is_trained:
             if not self._load_models():
                 return self._empty_signal()
-        
+
         # Check retrain
         if self._should_retrain():
             logger.warning("⚠️ Retrain recommended")
-        
+
         try:
+            # Robustly extract a clean 1D Series from any input
+            if isinstance(prices, pd.DataFrame):
+                # Handle both regular and MultiIndex columns
+                if 'Close' in prices.columns:
+                    prices = prices['Close']
+                elif len(prices.columns) > 0:
+                    prices = prices.iloc[:, 0]
+
+            # Handle any remaining DataFrame or Series issues
+            if isinstance(prices, pd.DataFrame):
+                prices = prices.iloc[:, 0]
+
+            # Force to clean 1D numpy-backed Series with simple integer index
+            values = np.asarray(prices).flatten()
+            prices = pd.Series(values, index=range(len(values)))
+
             # Detect regime
             regime = RegimeDetector.detect_regime(prices, 60)
             
@@ -554,3 +686,7 @@ class AdvancedSignalGenerator:
         except Exception as e:
             logger.error(f"Load error: {e}")
             return False
+
+    def train_models(self, historical_data: Dict[str, pd.DataFrame]):
+        """Alias for train_walk_forward for API compatibility."""
+        self.train_walk_forward(historical_data)

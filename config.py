@@ -41,14 +41,15 @@ class ApexConfig:
     # ═══════════════════════════════════════════════════════════════
     IBKR_HOST: str = os.getenv("APEX_IBKR_HOST", "127.0.0.1")
     IBKR_PORT: int = int(os.getenv("APEX_IBKR_PORT", "7497"))  # 7497 = Paper, 7496 = Live
-    IBKR_CLIENT_ID: int = int(os.getenv("APEX_IBKR_CLIENT_ID", "1"))
+    import random
+    IBKR_CLIENT_ID: int = int(os.getenv("APEX_IBKR_CLIENT_ID", str(random.randint(10, 99))))
 
     # ═══════════════════════════════════════════════════════════════
     # CAPITAL & POSITION SIZING
     # ═══════════════════════════════════════════════════════════════
     INITIAL_CAPITAL: int = int(os.getenv("APEX_INITIAL_CAPITAL", "1100000"))
     POSITION_SIZE_USD = 5_000  # $5K per position (0.45% of capital)
-    MAX_POSITIONS = 15  # Maximum concurrent positions
+    MAX_POSITIONS = 30  # Maximum concurrent positions
     MAX_SHARES_PER_POSITION = 200  # ✅ NEW: Cap max shares per position
     
     # ═══════════════════════════════════════════════════════════════
@@ -85,21 +86,36 @@ class ApexConfig:
     IBKR_CONNECTION_TIMEOUT = 30  # Connection timeout in seconds
     
     # ═══════════════════════════════════════════════════════════════
-    # SIGNAL THRESHOLDS
+    # SIGNAL THRESHOLDS (BALANCED - Quality + Activity)
     # ═══════════════════════════════════════════════════════════════
-    MIN_SIGNAL_THRESHOLD = 0.40  # Default minimum signal strength
-    MIN_CONFIDENCE = 0.35  # Minimum confidence for trade execution
+    MIN_SIGNAL_THRESHOLD = 0.30  # Active - let more signals through
+    MIN_CONFIDENCE = 0.30  # Allow more trades through
 
-    # ✅ Phase 3.1: Regime-based entry thresholds
-    # Lower threshold in trending markets, higher in choppy/volatile markets
+    # Regime-based entry thresholds (balanced for activity)
     SIGNAL_THRESHOLDS_BY_REGIME = {
-        'strong_bull': 0.30,    # Easier to enter in strong trends
-        'bull': 0.35,
-        'neutral': 0.45,        # Stricter in sideways markets
-        'bear': 0.40,
-        'strong_bear': 0.35,
-        'high_volatility': 0.55  # Much stricter in volatile markets
+        'strong_bull': 0.25,    # Easy entry in strong trends - ride the wave
+        'bull': 0.28,
+        'neutral': 0.32,        # Most common regime - keep it active
+        'bear': 0.30,
+        'strong_bear': 0.28,
+        'high_volatility': 0.35  # Tighter but not prohibitive (only truly volatile stocks reach this regime)
     }
+
+    # Signal Quality Filters (relaxed for more activity)
+    MIN_MODEL_AGREEMENT = 0.50      # 50% agreement is enough
+    MIN_EXPECTED_RETURN = 0.003     # 0.3% expected return (lower bar)
+    VOLUME_CONFIRMATION = True      # Keep volume confirmation
+    VOLUME_THRESHOLD_MULTIPLE = 1.0 # Volume just needs to be at average
+
+    # Multi-timeframe confirmation (relaxed)
+    REQUIRE_MTF_CONFIRMATION = True
+    MTF_AGREEMENT_THRESHOLD = 0.50   # 50% of timeframes agree
+
+    # VIX-based signal filtering
+    VIX_FILTER_ENABLED = True
+    VIX_NO_LONGS_ABOVE = 35         # Only block longs in extreme fear
+    VIX_NO_SHORTS_BELOW = 10        # Only block shorts in extreme calm
+    VIX_REDUCE_SIZE_ABOVE = 25      # Only reduce size in elevated VIX
 
     # ═══════════════════════════════════════════════════════════════
     # GOD LEVEL PARAMETERS (Moderate Risk Profile)
@@ -121,6 +137,33 @@ class ApexConfig:
     REGIME_BULL_THRESHOLD = 0.05  # MA crossover threshold for bull regime
     REGIME_BEAR_THRESHOLD = -0.05  # MA crossover threshold for bear regime
     HIGH_VOL_THRESHOLD = 0.35  # Annualized volatility threshold for high-vol regime
+
+    # ═══════════════════════════════════════════════════════════════
+    # OPTIONS TRADING CONFIGURATION
+    # ═══════════════════════════════════════════════════════════════
+    OPTIONS_ENABLED = True  # Enable options trading
+    OPTIONS_RISK_FREE_RATE = 0.05  # Risk-free rate for Black-Scholes pricing
+
+    # Options Strategy Settings
+    OPTIONS_AUTO_HEDGE = True  # Automatically hedge large stock positions with puts
+    OPTIONS_HEDGE_THRESHOLD = 10000  # Hedge positions worth more than $10,000
+    OPTIONS_HEDGE_DELTA = -0.30  # Target delta for protective puts (-0.30 = 30-delta)
+
+    # Covered Calls
+    OPTIONS_COVERED_CALLS_ENABLED = True  # Sell covered calls on long positions
+    OPTIONS_COVERED_CALL_DELTA = 0.30  # Target delta for covered calls (30-delta)
+    OPTIONS_MIN_SHARES_FOR_COVERED_CALL = 100  # Minimum shares to write covered call
+
+    # Options Expiration Preferences
+    OPTIONS_MIN_DAYS_TO_EXPIRY = 14  # Minimum days to expiration
+    OPTIONS_MAX_DAYS_TO_EXPIRY = 45  # Maximum days to expiration
+    OPTIONS_PREFERRED_DAYS_TO_EXPIRY = 30  # Preferred days to expiration
+
+    # Options Risk Limits
+    OPTIONS_MAX_PORTFOLIO_DELTA = 1000  # Maximum portfolio delta exposure
+    OPTIONS_MAX_PORTFOLIO_GAMMA = 500  # Maximum portfolio gamma exposure
+    OPTIONS_MAX_OPTIONS_CAPITAL_PCT = 0.10  # Max 10% of capital in options premiums
+    OPTIONS_MAX_SINGLE_POSITION_PCT = 0.02  # Max 2% of capital per option position
 
     # Correlation Management
     MAX_CORRELATION = 0.70  # Max correlation between positions
