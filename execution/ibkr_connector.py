@@ -13,13 +13,20 @@ Features:
 import asyncio
 import logging
 import random
+import time
 from datetime import datetime
 from typing import Dict, Optional, Callable, TypeVar, Any
 from functools import wraps
-from ib_insync import IB, Stock, Option, MarketOrder, LimitOrder, util
+from ib_insync import IB, Stock, Option, MarketOrder, LimitOrder, util, Contract
+try:
+    from ib_insync import Forex, Crypto
+except Exception:
+    Forex = None
+    Crypto = None
 import pandas as pd
 
 from config import ApexConfig
+from core.symbols import AssetClass, parse_symbol, normalize_symbol, is_market_open
 
 logger = logging.getLogger(__name__)
 
@@ -128,12 +135,19 @@ class IBKRConnector:
         self.client_id = client_id
         self.ib = IB()
         self.account = None
+        self.offline_mode = False
 
         # Cache for contracts
         self.contracts = {}
 
         # Market data request IDs
         self.req_id_counter = 0
+
+        # Pacing protection (IBKR API limits)
+        self._pace_lock = asyncio.Lock()
+        self._last_req_ts = 0.0
+        max_rps = max(1.0, float(getattr(ApexConfig, "IBKR_MAX_REQ_PER_SEC", 6)))
+        self._min_req_interval = 1.0 / max_rps
 
         # Execution metrics tracking
         self.execution_metrics = {
@@ -142,6 +156,127 @@ class IBKRConnector:
             'total_commission': 0.0,
             'slippage_history': [],  # List of (symbol, expected_price, fill_price, slippage_bps)
         }
+        
+        # Event-driven streaming state
+        self.tickers: Dict[str, Any] = {}
+        self.active_streams: int = 0
+        self.MAX_STREAMS = 40  # Safe limit for free account (usually 50-100)
+        
+        # Callback for data updates (used by Data Watchdog)
+        self.data_callback: Optional[Callable[[str], None]] = None
+
+        # Normalized broker pair mapping for paper trading
+        self.ibkr_pair_map = self._build_ibkr_pair_map()
+
+    def _normalize_symbol(self, symbol: str) -> str:
+        return normalize_symbol(symbol)
+
+    def _symbol_from_contract(self, contract: Contract) -> str:
+        sec_type = getattr(contract, "secType", "")
+        symbol = getattr(contract, "symbol", "")
+        currency = getattr(contract, "currency", "")
+
+        if sec_type == "CASH":
+            return f"FX:{symbol}/{currency}"
+        if sec_type == "CRYPTO":
+            return f"CRYPTO:{symbol}/{currency}"
+        return symbol
+
+    def _unit_label(self, asset_class: AssetClass) -> str:
+        return "shares" if asset_class == AssetClass.EQUITY else "units"
+
+    def _build_ibkr_pair_map(self) -> Dict[str, str]:
+        mapping = {}
+        raw_map = getattr(ApexConfig, "IBKR_PAIR_MAP", {}) or {}
+        for key, value in raw_map.items():
+            try:
+                k = parse_symbol(key).normalized
+                v = parse_symbol(value).normalized
+            except ValueError:
+                continue
+            mapping[k] = v
+        return mapping
+
+    async def _throttle_ibkr(self, reason: str):
+        """Throttle IBKR requests to avoid pacing violations."""
+        async with self._pace_lock:
+            now = time.time()
+            elapsed = now - self._last_req_ts
+            if elapsed < self._min_req_interval:
+                await asyncio.sleep(self._min_req_interval - elapsed)
+            self._last_req_ts = time.time()
+            logger.debug("event=ibkr_throttle reason=%s interval=%.3fs", reason, self._min_req_interval)
+
+    def _build_contract(self, parsed):
+        if parsed.asset_class == AssetClass.EQUITY:
+            return Stock(parsed.base, 'SMART', parsed.quote)
+        if parsed.asset_class == AssetClass.FOREX:
+            fx_exchange = getattr(ApexConfig, "IBKR_FX_EXCHANGE", "IDEALPRO")
+            if Forex is not None:
+                contract = Forex(f"{parsed.base}{parsed.quote}")
+                contract.exchange = fx_exchange
+                return contract
+            return Contract(
+                secType="CASH",
+                symbol=parsed.base,
+                currency=parsed.quote,
+                exchange=fx_exchange,
+            )
+        crypto_exchange = getattr(ApexConfig, "IBKR_CRYPTO_EXCHANGE", "PAXOS")
+        if Crypto is not None:
+            # ib_insync Crypto signature: Crypto(symbol, exchange, currency)
+            return Crypto(parsed.base, crypto_exchange, parsed.quote)
+        return Contract(
+            secType="CRYPTO",
+            symbol=parsed.base,
+            currency=parsed.quote,
+            exchange=crypto_exchange,
+        )
+
+    def _fallback_price(self, normalized: str, reason: str) -> float:
+        if not getattr(ApexConfig, "USE_DATA_FALLBACK_FOR_PRICES", False):
+            return 0.0
+        try:
+            from data.market_data import MarketDataFetcher
+            price = MarketDataFetcher().get_current_price(normalized)
+            if price and price > 0:
+                logger.info("event=price_fallback symbol=%s price=%.4f reason=%s", normalized, price, reason)
+                return float(price)
+        except Exception:
+            pass
+        return 0.0
+
+    def _map_for_broker(self, parsed):
+        if not getattr(ApexConfig, "IBKR_USE_PAIR_MAP", True):
+            return parsed
+        # Apply mapping only in paper mode (default: port 7497)
+        if getattr(ApexConfig, "IBKR_PORT", 7497) != 7497:
+            return parsed
+        mapped = self.ibkr_pair_map.get(parsed.normalized)
+        if not mapped:
+            return parsed
+        try:
+            mapped_parsed = parse_symbol(mapped)
+        except ValueError:
+            return parsed
+        logger.info(
+            "event=symbol_mapping input=%s normalized=%s broker=%s",
+            parsed.raw,
+            parsed.normalized,
+            mapped_parsed.normalized,
+        )
+        return mapped_parsed
+
+    def set_data_callback(self, callback: Callable[[str], None]):
+        """Set callback to be called on every data update (for heartbeat monitoring)."""
+        self.data_callback = callback
+        
+    def _on_data_update(self, tickers):
+        """Internal handler for IBKR pendingTickers event."""
+        if self.data_callback:
+            for ticker in tickers:
+                if ticker.contract and ticker.contract.symbol:
+                    self.data_callback(self._symbol_from_contract(ticker.contract))
 
     def record_execution_metrics(
         self,
@@ -209,6 +344,10 @@ class IBKRConnector:
             'recent_slippage': metrics['slippage_history'][-10:]  # Last 10 trades
         }
     
+    def is_connected(self) -> bool:
+        """Check if connected to IBKR."""
+        return self.ib.isConnected() and not self.offline_mode
+
     @with_retry(retryable_exceptions=(ConnectionError, TimeoutError, OSError))
     async def connect(self):
         """Connect to Interactive Brokers with delayed market data."""
@@ -244,7 +383,6 @@ class IBKRConnector:
             # Type 2 = Frozen (last available)
             # Type 3 = Delayed (15-20 min delayed, FREE)
             # Type 4 = Delayed-Frozen
-            from config import ApexConfig
             if ApexConfig.USE_LIVE_MARKET_DATA:
                 self.ib.reqMarketDataType(1)
                 logger.info("📊 LIVE market data enabled (requires subscription)")
@@ -261,8 +399,15 @@ class IBKRConnector:
             logger.info(f"✅ Connected to Interactive Brokers (clientId={current_client_id})!")
             logger.info(f"📋 Account: {self.account}")
             
+            # Hook up data event listener
+            self.ib.pendingTickersEvent += self._on_data_update
+            
         except Exception as e:
             logger.error(f"❌ Failed to connect to IBKR: {e}")
+            if getattr(ApexConfig, "IBKR_ALLOW_OFFLINE", False):
+                self.offline_mode = True
+                logger.warning("event=ibkr_offline mode=enabled reason=connect_failed")
+                return
             raise
     
     def disconnect(self):
@@ -271,9 +416,9 @@ class IBKRConnector:
             self.ib.disconnect()
             logger.info("🔌 Disconnected from IBKR")
     
-    async def get_contract(self, symbol: str) -> Optional[Stock]:
+    async def get_contract(self, symbol: str) -> Optional[Contract]:
         """
-        Get or create stock contract.
+        Get or create contract (equity, forex, or crypto).
         
         Args:
             symbol: Stock ticker (e.g., 'AAPL')
@@ -281,83 +426,176 @@ class IBKRConnector:
         Returns:
             Stock contract or None if not found
         """
-        if symbol in self.contracts:
-            return self.contracts[symbol]
-        
         try:
-            # Create stock contract
-            contract = Stock(symbol, 'SMART', 'USD')
-            
+            parsed = parse_symbol(symbol)
+        except ValueError as e:
+            logger.error(f"❌ Invalid symbol format {symbol}: {e}")
+            return None
+
+        broker_parsed = self._map_for_broker(parsed)
+        if broker_parsed.normalized != parsed.normalized:
+            logger.info(
+                "event=symbol_normalization input=%s normalized=%s broker=%s",
+                parsed.raw,
+                parsed.normalized,
+                broker_parsed.normalized,
+            )
+        else:
+            logger.info(
+                "event=symbol_normalization input=%s normalized=%s broker=%s",
+                parsed.raw,
+                parsed.normalized,
+                parsed.normalized,
+            )
+
+        key = parsed.normalized
+        if key in self.contracts:
+            return self.contracts[key]
+
+        try:
+            contract = self._build_contract(broker_parsed)
+
+            # If offline or not connected, return unqualified contract for logging/tests
+            if self.offline_mode or not self.ib.isConnected():
+                self.contracts[key] = contract
+                logger.info("event=ibkr_offline_contract symbol=%s broker=%s", parsed.normalized, broker_parsed.normalized)
+                return contract
+
             # Qualify contract (get full details from IBKR)
+            await self._throttle_ibkr("qualify_contract")
             qualified = await self.ib.qualifyContractsAsync(contract)
             
             if qualified:
-                self.contracts[symbol] = qualified[0]
+                self.contracts[key] = qualified[0]
                 return qualified[0]
             else:
-                logger.warning(f"⚠️  Could not qualify contract for {symbol}")
+                logger.warning(f"⚠️  Could not qualify contract for {parsed.normalized}")
                 return None
                 
         except Exception as e:
-            logger.error(f"❌ Error getting contract for {symbol}: {e}")
+            logger.error(f"❌ Error getting contract for {parsed.normalized}: {e}")
             return None
     
+    async def stream_quotes(self, symbols: list):
+        """
+        Start streaming quotes for a list of symbols (Free-Tier Safe).
+        
+        Args:
+            symbols: List of symbols to stream
+        """
+        try:
+            if self.offline_mode or not self.ib.isConnected():
+                # Log normalization for non-equities to validate mapping in offline mode
+                for symbol in symbols:
+                    try:
+                        parsed = parse_symbol(symbol)
+                    except ValueError:
+                        continue
+                    if parsed.asset_class != AssetClass.EQUITY:
+                        await self.get_contract(symbol)
+                logger.warning("event=stream_quotes_skipped reason=ibkr_offline symbols=%d", len(symbols))
+                self.tickers.clear()
+                self.active_streams = 0
+                return
+            # Smart management: prioritize positions and top symbols
+            # Stop existing streams if over limit or refreshing
+            for ticker in list(self.tickers.values()):
+                self.ib.cancelMktData(ticker.contract)
+            
+            self.tickers.clear()
+            self.active_streams = 0
+            
+            # Take top N symbols to avoid pacing violations
+            target_symbols = symbols[:self.MAX_STREAMS]
+            skipped = len(symbols) - len(target_symbols)
+            
+            if skipped > 0:
+                logger.warning(f"⚠️  Capping streams at {self.MAX_STREAMS} (skipping {skipped} symbols)")
+            
+            count = 0
+            for symbol in target_symbols:
+                try:
+                    normalized = self._normalize_symbol(symbol)
+                except ValueError:
+                    logger.warning(f"⚠️  Skipping invalid symbol for streaming: {symbol}")
+                    continue
+
+                contract = await self.get_contract(symbol)
+                if contract:
+                    # snapshot=False enables streaming
+                    await self._throttle_ibkr("stream_mkt_data")
+                    ticker = self.ib.reqMktData(contract, '', False, False)
+                    self.tickers[normalized] = ticker
+                    count += 1
+            
+            self.active_streams = count
+            logger.info(f"✅ Started streaming {count} symbols (Delayed Type 3)")
+            
+        except Exception as e:
+            logger.error(f"Error starting streams: {e}")
+
     @with_retry(max_retries=3, retryable_exceptions=(ConnectionError, TimeoutError))
     async def get_market_price(self, symbol: str) -> float:
         """
-        Get current market price for a symbol.
-
-        Args:
-            symbol: Stock ticker
-
-        Returns:
-            Current price or 0 if unavailable
+        Get current market price (Instant from stream, or fallback to snapshot).
         """
         try:
+            try:
+                normalized = self._normalize_symbol(symbol)
+            except ValueError:
+                logger.error(f"❌ Invalid symbol format for price: {symbol}")
+                return 0.0
+
+            # If market closed, prefer data fallback (weekends/holidays)
+            if getattr(ApexConfig, "PRICE_FALLBACK_WHEN_MARKET_CLOSED", False):
+                try:
+                    if not is_market_open(normalized, datetime.utcnow()):
+                        price = self._fallback_price(normalized, reason="market_closed")
+                        if price > 0:
+                            return price
+                except Exception:
+                    pass
+
+            # If IBKR is offline, rely on data provider fallback
+            if self.offline_mode or not self.ib.isConnected():
+                price = self._fallback_price(normalized, reason="ibkr_offline")
+                return float(price) if price > 0 else 0.0
+
+            # 1. Check active stream (Instant)
+            if normalized in self.tickers:
+                ticker = self.tickers[normalized]
+                # marketPrice() handles last, close, bid/ask logic intelligently
+                price = ticker.marketPrice()
+                
+                # If marketPrice is invalid (nan/0), try specific fields
+                if pd.isna(price) or price <= 0:
+                    if ticker.last and ticker.last > 0: price = ticker.last
+                    elif ticker.close and ticker.close > 0: price = ticker.close
+                    
+                if price > 0:
+                    return float(price)
+            
+            # 2. Fallback to snapshot (Slower)
             contract = await self.get_contract(symbol)
             if not contract:
                 return 0.0
             
             # Request market data snapshot
-            ticker = self.ib.reqMktData(contract, '', False, False)
+            await self._throttle_ibkr("snapshot_mkt_data")
+            ticker = self.ib.reqMktData(contract, '', False, True) # True=Snapshot
             
-            # Wait for price update (max 5 seconds for delayed data)
-            for _ in range(50):
+            # Wait for price update (max 2 seconds)
+            for _ in range(20):
                 await asyncio.sleep(0.1)
-                
-                # Try different price fields
-                if ticker.last and ticker.last > 0:
-                    price = ticker.last
-                    self.ib.cancelMktData(contract)
-                    return float(price)
-                elif ticker.close and ticker.close > 0:
-                    price = ticker.close
-                    self.ib.cancelMktData(contract)
-                    return float(price)
-                elif ticker.bid and ticker.ask and ticker.bid > 0 and ticker.ask > 0:
-                    price = (ticker.bid + ticker.ask) / 2
-                    self.ib.cancelMktData(contract)
+                price = ticker.marketPrice()
+                if not pd.isna(price) and price > 0:
                     return float(price)
             
-            # Fallback: try to get last close from historical data
-            self.ib.cancelMktData(contract)
-            try:
-                bars = await self.ib.reqHistoricalDataAsync(
-                    contract,
-                    endDateTime='',
-                    durationStr='2 D',
-                    barSizeSetting='1 day',
-                    whatToShow='TRADES',
-                    useRTH=True
-                )
-
-                if bars:
-                    logger.debug(f"📊 {symbol}: Using historical close ${bars[-1].close:.2f}")
-                    return float(bars[-1].close)
-            except Exception as hist_err:
-                logger.debug(f"Historical data fallback failed for {symbol}: {hist_err}")
-
-            logger.warning(f"⚠️  No price available for {symbol}")
+            logger.warning(f"⚠️  No price available for {normalized}")
+            # Optional fallback to data provider (paper-safe)
+            price = self._fallback_price(normalized, reason="ibkr_no_price")
+            if price > 0:
+                return float(price)
             return 0.0
             
         except Exception as e:
@@ -394,56 +632,87 @@ class IBKRConnector:
             logger.error(f"❌ Error getting portfolio value: {e}")
             return 0.0
     
-    async def get_position(self, symbol: str) -> int:
+    async def get_position(self, symbol: str) -> float:
         """
         Get current position quantity for a symbol.
         
         Args:
-            symbol: Stock ticker
+            symbol: Trading symbol
             
         Returns:
             Position quantity (positive=long, negative=short, 0=no position)
         """
         try:
+            try:
+                parsed = parse_symbol(symbol)
+                normalized = parsed.normalized
+                broker_parsed = self._map_for_broker(parsed)
+            except ValueError:
+                logger.error(f"❌ Invalid symbol format for position lookup: {symbol}")
+                return 0.0
+
             positions = self.ib.positions()
             
             for pos in positions:
-                if pos.contract.symbol == symbol:
-                    return int(pos.position)
+                pos_symbol = self._symbol_from_contract(pos.contract)
+                if pos_symbol == broker_parsed.normalized or pos_symbol == normalized:
+                    return float(pos.position)
             
-            return 0
+            return 0.0
             
         except Exception as e:
             logger.error(f"❌ Error getting position for {symbol}: {e}")
-            return 0
+            return 0.0
     
-    async def get_all_positions(self) -> Dict[str, int]:
+    async def get_all_positions(self) -> Dict[str, float]:
         """
-        ✅ FIXED: Get all current positions (long AND short).
+        Get all current positions (long AND short).
         
         Returns:
-            Dictionary of {symbol: quantity} where qty can be positive (long) or negative (short)
+            Dictionary of {symbol: quantity}
+        """
+        try:
+            positions = self.ib.positions()
+            result = {}
+            for pos in positions:
+                symbol = self._symbol_from_contract(pos.contract)
+                qty = float(pos.position)
+                if qty != 0:
+                    result[symbol] = qty
+            
+            if result:
+                logger.info(f"📊 Loaded {len(result)} existing positions")
+            return result
+        except Exception as e:
+            logger.error(f"❌ Error getting positions: {e}")
+            return {}
+
+    async def get_detailed_positions(self) -> Dict[str, Dict]:
+        """
+        Get all current positions with metadata (avgCost, etc).
+        
+        Returns:
+            Dictionary of {symbol: {'qty': float, 'avg_cost': float}}
         """
         try:
             positions = self.ib.positions()
             
             result = {}
             for pos in positions:
-                symbol = pos.contract.symbol
-                qty = int(pos.position)
+                symbol = self._symbol_from_contract(pos.contract)
+                qty = float(pos.position)
+                avg_cost = float(pos.avgCost)
                 
                 if qty != 0:
-                    result[symbol] = qty
-                    position_type = "LONG" if qty > 0 else "SHORT"
-                    logger.debug(f"   {symbol}: {abs(qty)} shares ({position_type})")
-            
-            if result:
-                logger.info(f"📊 Loaded {len(result)} existing positions")
+                    result[symbol] = {
+                        'qty': qty,
+                        'avg_cost': avg_cost
+                    }
             
             return result
             
         except Exception as e:
-            logger.error(f"❌ Error getting positions: {e}")
+            logger.error(f"❌ Error getting detailed positions: {e}")
             return {}
     
     async def ensure_delayed_data_mode(self):
@@ -455,9 +724,9 @@ class IBKRConnector:
         except Exception as e:
             logger.debug(f"Error setting delayed data mode: {e}")
 
-    def _is_market_open(self) -> bool:
+    def _is_market_open(self, asset_class: AssetClass = AssetClass.EQUITY) -> bool:
         """
-        Check if US stock market is currently open.
+        Check if market is currently open for the given asset class.
 
         Uses UTC time to determine EST market hours (9:30 AM - 4:00 PM EST).
         Handles basic DST approximation.
@@ -484,7 +753,21 @@ class IBKRConnector:
                 minute = now_est.minute
                 weekday = now_est.weekday()
 
-            # Market closed on weekends
+            # Crypto trades 24/7
+            if asset_class == AssetClass.CRYPTO:
+                return True
+
+            # Forex trades 24/5 (Sunday 5pm ET to Friday 5pm ET)
+            if asset_class == AssetClass.FOREX:
+                if weekday == 5:  # Saturday
+                    return False
+                if weekday == 6:  # Sunday
+                    return hour >= 17
+                if weekday == 4:  # Friday
+                    return hour < 17
+                return True
+
+            # Equities: Market closed on weekends
             if weekday >= 5:  # Saturday = 5, Sunday = 6
                 return False
 
@@ -499,15 +782,15 @@ class IBKRConnector:
             # Default to True to allow trading in case of errors
             return True
 
-    async def execute_order(self, symbol: str, side: str, quantity: int, 
+    async def execute_order(self, symbol: str, side: str, quantity: float, 
                         confidence: float = 0.5, force_market: bool = False) -> Optional[dict]:
         """
         ✅ FIXED: Execute order - LONG AND SHORT enabled with safety checks.
         
         Args:
-            symbol: Stock ticker
+            symbol: Trading symbol
             side: 'BUY' or 'SELL'
-            quantity: Number of shares (always positive)
+            quantity: Quantity (always positive)
             confidence: Signal confidence (0-1) - affects limit buffer
             force_market: If True, always use market order
             
@@ -517,40 +800,76 @@ class IBKRConnector:
         from datetime import datetime
         
         try:
+            try:
+                parsed = parse_symbol(symbol)
+                symbol = parsed.normalized
+            except ValueError as e:
+                logger.error(f"❌ Invalid symbol format {symbol}: {e}")
+                return None
+
+            unit_label = self._unit_label(parsed.asset_class)
+
             # ✅ Safety check: Validate side
             if side not in ['BUY', 'SELL']:
                 logger.error(f"❌ Invalid order side '{side}'. Only BUY/SELL allowed")
+                logger.warning("event=order_rejected symbol=%s reason=invalid_side side=%s", symbol, side)
                 return None
             
             # ✅ Safety check: Validate quantity
-            if quantity <= 0:
-                logger.error(f"❌ Invalid quantity {quantity}. Must be positive")
+            try:
+                qty = float(quantity)
+            except Exception:
+                logger.error(f"❌ Invalid quantity {quantity}. Must be numeric")
+                logger.warning("event=order_rejected symbol=%s reason=invalid_quantity", symbol)
                 return None
+
+            if qty <= 0:
+                logger.error(f"❌ Invalid quantity {quantity}. Must be positive")
+                logger.warning("event=order_rejected symbol=%s reason=non_positive_quantity quantity=%s", symbol, quantity)
+                return None
+
+            if parsed.asset_class == AssetClass.EQUITY and not qty.is_integer():
+                logger.error(f"❌ Fractional shares not supported for equity orders: {qty}")
+                logger.warning("event=order_rejected symbol=%s reason=fractional_equity quantity=%s", symbol, qty)
+                return None
+
+            quantity = int(qty) if parsed.asset_class == AssetClass.EQUITY else qty
             
             # ✅ Safety check: Get current position
             current_pos = await self.get_position(symbol)
-            
+
+            # ✅ CRITICAL: Block adding to existing positions (prevents duplicates)
+            if side == 'BUY' and current_pos > 0:
+                logger.error(f"🚫 {symbol}: BLOCKED - Already have LONG position ({current_pos}). Cannot add more.")
+                logger.warning("event=order_rejected symbol=%s reason=existing_long position=%s", symbol, current_pos)
+                return None
+            if side == 'SELL' and current_pos < 0:
+                logger.error(f"🚫 {symbol}: BLOCKED - Already have SHORT position ({current_pos}). Cannot add more.")
+                logger.warning("event=order_rejected symbol=%s reason=existing_short position=%s", symbol, current_pos)
+                return None
+
             # ✅ Warn if creating/increasing short position
             if side == 'SELL':
                 if current_pos == 0:
-                    logger.warning(f"⚠️  {symbol}: Opening SHORT position ({quantity} shares)")
+                    logger.warning(f"⚠️  {symbol}: Opening SHORT position ({quantity} {unit_label})")
                 elif current_pos > 0:
                     if quantity > current_pos:
                         short_qty = quantity - current_pos
-                        logger.warning(f"⚠️  {symbol}: Flipping to SHORT by {short_qty} shares")
+                        logger.warning(f"⚠️  {symbol}: Flipping to SHORT by {short_qty} {unit_label}")
                     else:
                         logger.info(f"✅ {symbol}: Reducing LONG position")
                 elif current_pos < 0:
-                    logger.warning(f"⚠️  {symbol}: Increasing SHORT position (now {abs(current_pos + quantity)} shares short)")
+                    logger.warning(f"⚠️  {symbol}: Increasing SHORT position (now {abs(current_pos + quantity)} {unit_label} short)")
             
             # Get current price
             price = await self.get_market_price(symbol)
             if price == 0:
                 logger.error(f"❌ Cannot execute: no price for {symbol}")
+                logger.warning("event=order_rejected symbol=%s reason=no_price", symbol)
                 return None
             
             # Determine if market is open (US market hours in EST)
-            is_market_hours = self._is_market_open()
+            is_market_hours = self._is_market_open(parsed.asset_class)
             
             # Decision logic
             if force_market or is_market_hours:
@@ -569,19 +888,28 @@ class IBKRConnector:
         self,
         symbol: str,
         side: str,
-        quantity: int,
+        quantity: float,
         expected_price: float = 0.0
     ) -> Optional[dict]:
         """
         Execute market order with slippage tracking.
 
         Args:
-            symbol: Stock ticker
+            symbol: Trading symbol
             side: 'BUY' or 'SELL'
-            quantity: Number of shares
+            quantity: Quantity
             expected_price: Price at signal generation (for slippage calculation)
         """
         try:
+            try:
+                parsed = parse_symbol(symbol)
+                symbol = parsed.normalized
+            except ValueError as e:
+                logger.error(f"❌ Invalid symbol format {symbol}: {e}")
+                return None
+
+            unit_label = self._unit_label(parsed.asset_class)
+
             contract = await self.get_contract(symbol)
             if not contract:
                 logger.error(f"❌ Invalid contract for {symbol}")
@@ -596,11 +924,17 @@ class IBKRConnector:
 
             # Wait for order to fill (max 30 seconds for less liquid stocks)
             for _ in range(300):
-                self.ib.sleep(0.1)  # Process ib_insync events to update order status
+                await asyncio.sleep(0.1)
 
                 if trade.orderStatus.status == 'Filled':
                     fill_price = trade.orderStatus.avgFillPrice
                     commission = ApexConfig.COMMISSION_PER_TRADE
+                    logger.info(
+                        "event=fee_model asset=%s symbol=%s commission=%.4f",
+                        parsed.asset_class.value,
+                        symbol,
+                        commission,
+                    )
 
                     # Record execution metrics (slippage + commission)
                     self.record_execution_metrics(
@@ -610,7 +944,11 @@ class IBKRConnector:
                         commission=commission
                     )
 
-                    logger.info(f"✅ {action} {quantity} {symbol} @ ${fill_price:.2f}")
+                    logger.info(f"✅ {action} {quantity} {unit_label} {symbol} @ ${fill_price:.2f}")
+
+                    # Slippage: positive = adverse (BUY filled higher, SELL filled lower)
+                    sign = 1 if action == 'BUY' else -1
+                    slippage = (sign * (fill_price - expected_price) / expected_price * 10000) if expected_price > 0 else 0
 
                     return {
                         'symbol': symbol,
@@ -618,7 +956,7 @@ class IBKRConnector:
                         'quantity': quantity,
                         'price': fill_price,
                         'expected_price': expected_price,
-                        'slippage_bps': ((fill_price - expected_price) / expected_price * 10000) if expected_price > 0 else 0,
+                        'slippage_bps': slippage,
                         'commission': commission,
                         'status': 'FILLED'
                     }
@@ -627,48 +965,38 @@ class IBKRConnector:
                     logger.error(f"❌ Order {action} {quantity} {symbol} cancelled")
                     return None
 
-            # Timeout - cancel the order using the trade object
-            if trade.orderStatus.status != 'Filled':
-                logger.warning(f"⚠️  Order timeout for {symbol}")
-                try:
-                    self.ib.cancelOrder(trade.order)
-                except Exception as cancel_err:
-                    logger.debug(f"Error cancelling order: {cancel_err}")
-                return None
-
-            fill_price = trade.orderStatus.avgFillPrice
-            commission = ApexConfig.COMMISSION_PER_TRADE
-
-            self.record_execution_metrics(symbol, expected_price, fill_price, commission)
-
-            return {
-                'symbol': symbol,
-                'side': side,
-                'quantity': quantity,
-                'price': fill_price,
-                'expected_price': expected_price,
-                'slippage_bps': ((fill_price - expected_price) / expected_price * 10000) if expected_price > 0 else 0,
-                'commission': commission,
-                'status': 'FILLED'
-            }
+            # Timeout - cancel the order
+            logger.warning(f"⚠️  Order timeout for {symbol}")
+            try:
+                self.ib.cancelOrder(trade.order)
+            except Exception as cancel_err:
+                logger.debug(f"Error cancelling order: {cancel_err}")
+            return None
             
         except Exception as e:
             logger.error(f"❌ Market order error: {e}")
             return None
 
-    async def _execute_limit_order(self, symbol: str, side: str, quantity: int, 
+    async def _execute_limit_order(self, symbol: str, side: str, quantity: float, 
                                 current_price: float, confidence: float) -> Optional[dict]:
         """
         Execute limit order with confidence-based buffer.
         
         Args:
-            symbol: Stock ticker
+            symbol: Trading symbol
             side: 'BUY' or 'SELL'
-            quantity: Number of shares
+            quantity: Quantity
             current_price: Current market price
             confidence: Signal confidence (0-1)
         """
         try:
+            try:
+                parsed = parse_symbol(symbol)
+                symbol = parsed.normalized
+            except ValueError as e:
+                logger.error(f"❌ Invalid symbol format {symbol}: {e}")
+                return None
+
             contract = await self.get_contract(symbol)
             if not contract:
                 logger.error(f"❌ Invalid contract for {symbol}")
@@ -708,6 +1036,12 @@ class IBKRConnector:
             
             if status in ['PreSubmitted', 'Submitted', 'PendingSubmit']:
                 logger.info(f"✅ {action} {quantity} {symbol} limit order placed (status: {status})")
+                logger.info(
+                    "event=fee_model asset=%s symbol=%s commission=%.4f",
+                    parsed.asset_class.value,
+                    symbol,
+                    ApexConfig.COMMISSION_PER_TRADE,
+                )
                 
                 return {
                     'symbol': symbol,
@@ -721,6 +1055,12 @@ class IBKRConnector:
             elif status == 'Filled':
                 fill_price = trade.orderStatus.avgFillPrice
                 logger.info(f"✅ {action} {quantity} {symbol} @ ${fill_price:.2f} (limit filled)")
+                logger.info(
+                    "event=fee_model asset=%s symbol=%s commission=%.4f",
+                    parsed.asset_class.value,
+                    symbol,
+                    ApexConfig.COMMISSION_PER_TRADE,
+                )
                 
                 return {
                     'symbol': symbol,
@@ -777,6 +1117,11 @@ class IBKRConnector:
         except Exception as e:
             logger.error(f"❌ Error getting buying power: {e}")
             return 0.0
+
+# PSEUDO-TESTS (paper trading mapping)
+# ApexConfig.IBKR_PAIR_MAP = {"BTC/USDT": "BTC/USD"}
+# parse_symbol("BTC/USDT").normalized -> "CRYPTO:BTC/USDT"
+# _map_for_broker(parse_symbol("BTC/USDT")).normalized -> "CRYPTO:BTC/USD"
     
     async def get_historical_bars(self, symbol: str, days: int = 100) -> pd.DataFrame:
         """
@@ -907,6 +1252,7 @@ class IBKRConnector:
             )
 
             # Qualify contract
+            await self._throttle_ibkr("qualify_option_contract")
             qualified = await self.ib.qualifyContractsAsync(contract)
 
             if qualified:
@@ -985,6 +1331,7 @@ class IBKRConnector:
                 return {}
 
             # Request market data
+            await self._throttle_ibkr("snapshot_option_data")
             ticker = self.ib.reqMktData(contract, '', False, False)
 
             # Wait for data (max 3 seconds)

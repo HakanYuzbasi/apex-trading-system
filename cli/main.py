@@ -26,6 +26,8 @@ from typing import Optional
 # Add parent to path for imports
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
+from config import ApexConfig
+
 try:
     import click
     from rich.console import Console
@@ -78,7 +80,8 @@ async def status():
     # Try to get health status
     try:
         checker = get_health_checker()
-        health = await checker.check_all()
+        await checker.check_all()
+        health = checker.get_summary()
 
         # Overall status
         status_color = {
@@ -88,7 +91,7 @@ async def status():
         }.get(health['status'], 'white')
 
         console.print(f"\n[bold]Overall Status:[/bold] [{status_color}]{health['status'].upper()}[/{status_color}]")
-        console.print(f"[bold]Timestamp:[/bold] {health['timestamp']}")
+        console.print(f"[bold]Timestamp:[/bold] {health.get('last_check', 'Unknown')}")
 
         # Individual checks
         table = Table(title="Health Checks")
@@ -113,7 +116,7 @@ async def status():
         console.print(f"[red]Error getting status: {e}[/red]")
 
     # Try to read watchdog status
-    watchdog_file = Path("data/watchdog_status.json")
+    watchdog_file = ApexConfig.DATA_DIR / "watchdog_status.json"
     if watchdog_file.exists():
         try:
             with open(watchdog_file) as f:
@@ -135,16 +138,18 @@ async def positions():
     positions_found = False
 
     # Check reconciliation file
-    positions_file = Path("data/positions_snapshot.json")
+    positions_file = ApexConfig.DATA_DIR / "trading_state.json"
     if positions_file.exists():
         try:
             with open(positions_file) as f:
                 data = json.load(f)
 
-            positions = data.get('positions', [])
-            if positions:
+            positions_map = data.get('positions', {})
+            
+            if positions_map:
                 positions_found = True
-                table = Table(title=f"Positions (as of {data.get('timestamp', 'unknown')})")
+                timestamp = data.get('timestamp', 'unknown')
+                table = Table(title=f"Positions (as of {timestamp})")
                 table.add_column("Symbol", style="cyan")
                 table.add_column("Quantity", justify="right")
                 table.add_column("Avg Cost", justify="right")
@@ -155,17 +160,23 @@ async def positions():
                 total_value = 0
                 total_pnl = 0
 
-                for pos in positions:
-                    qty = pos.get('quantity', 0)
-                    avg_cost = pos.get('avg_cost', 0)
+                for symbol, pos in positions_map.items():
+                    qty = pos.get('qty', 0)
+                    avg_cost = pos.get('avg_price', 0)
                     current = pos.get('current_price', avg_cost)
-                    pnl = (current - avg_cost) * qty
-                    pnl_pct = ((current / avg_cost) - 1) * 100 if avg_cost > 0 else 0
+                    pnl = pos.get('pnl', 0)
+                    pnl_pct = pos.get('pnl_pct', 0)
+                    
+                    # Recalculate P&L if missing but we have price data
+                    if pnl == 0 and qty != 0 and current != avg_cost:
+                        pnl = (current - avg_cost) * qty
+                        if avg_cost > 0:
+                            pnl_pct = ((current / avg_cost) - 1) * 100
 
                     pnl_color = 'green' if pnl >= 0 else 'red'
 
                     table.add_row(
-                        pos.get('symbol', ''),
+                        symbol,
                         f"{qty:,}",
                         f"${avg_cost:,.2f}",
                         f"${current:,.2f}",
@@ -173,7 +184,7 @@ async def positions():
                         f"[{pnl_color}]{pnl_pct:+.2f}%[/{pnl_color}]"
                     )
 
-                    total_value += current * qty
+                    total_value += abs(current * qty)
                     total_pnl += pnl
 
                 console.print(table)

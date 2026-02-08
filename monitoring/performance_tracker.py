@@ -7,6 +7,9 @@ import logging
 from datetime import datetime
 from typing import List, Dict, Tuple
 import numpy as np
+import json
+import os
+from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
@@ -18,6 +21,10 @@ class PerformanceTracker:
         self.trades: List[Dict] = []
         self.equity_curve: List[Tuple[str, float]] = []  # ✅ Always store as float
         self.starting_capital: float = 0.0
+        self.data_dir = Path("data")
+        self.history_file = self.data_dir / "performance_history.json"
+        self._load_state()
+
     
     def record_trade(self, symbol: str, side: str, quantity: int, price: float, commission: float = 0.0):
         """Record a trade with commission."""
@@ -32,6 +39,7 @@ class PerformanceTracker:
         }
         
         self.trades.append(trade)
+        self._save_state()  # ✅ Persist immediately
         logger.debug(f"Trade recorded: {side} {quantity} {symbol} @ ${price:.2f}")
     
     def record_equity(self, value: float):
@@ -40,6 +48,7 @@ class PerformanceTracker:
             value = float(value)  # ✅ Force conversion
             timestamp = datetime.now().isoformat()
             self.equity_curve.append((timestamp, value))
+            self._save_state()  # ✅ Persist immediately
             logger.debug(f"Equity recorded: ${value:,.2f}")
         except (ValueError, TypeError) as e:
             logger.error(f"Invalid equity value: {value} ({type(value)}): {e}")
@@ -303,3 +312,35 @@ class PerformanceTracker:
             logger.info(f"   Max Drawdown: {self.get_max_drawdown()*100:.2f}%")
 
         logger.info("=" * 80)
+
+    def _save_state(self):
+        """Save performance history to disk."""
+        try:
+            self.data_dir.mkdir(exist_ok=True)
+            state = {
+                'trades': self.trades,
+                'equity_curve': self.equity_curve,
+                'starting_capital': self.starting_capital,
+                'last_updated': datetime.now().isoformat()
+            }
+            with open(self.history_file, 'w') as f:
+                json.dump(state, f, indent=2)
+        except Exception as e:
+            logger.error(f"Failed to save performance state: {e}")
+
+    def _load_state(self):
+        """Load performance history from disk."""
+        if not self.history_file.exists():
+            return
+        
+        try:
+            with open(self.history_file, 'r') as f:
+                state = json.load(f)
+            
+            self.trades = state.get('trades', [])
+            self.equity_curve = state.get('equity_curve', [])
+            self.starting_capital = state.get('starting_capital', 0.0)
+            
+            logger.info(f"📊 Restored {len(self.trades)} trades and {len(self.equity_curve)} equity points")
+        except Exception as e:
+            logger.error(f"Failed to load performance state: {e}")

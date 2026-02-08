@@ -18,6 +18,9 @@ from typing import Dict, Optional, Tuple, List
 from datetime import datetime
 import logging
 
+from core.symbols import parse_symbol, AssetClass
+from config import ApexConfig
+
 logger = logging.getLogger(__name__)
 
 
@@ -140,6 +143,15 @@ class EnhancedSignalFilter:
             adjustments.append(f"Low expected return: {expected_return:.2%}")
             # Don't penalize - just informational
 
+        # === 5b. HARD NET-EDGE FILTER (block if costs exceed edge) ===
+        est_cost_bps = self._estimate_cost_bps(symbol)
+        est_cost_pct = est_cost_bps / 10000.0
+        if abs(expected_return) < est_cost_pct:
+            rejection_reasons.append(
+                f"Net edge below costs: edge={expected_return:.2%}, cost≈{est_cost_pct:.2%}"
+            )
+            filtered_signal = 0.0
+
         # === 6. CROSS-SECTIONAL MOMENTUM (boost/penalty) ===
         if cross_sectional_rank is not None:
             cs_filter = self._apply_cross_sectional_filter(raw_signal, cross_sectional_rank)
@@ -185,6 +197,20 @@ class EnhancedSignalFilter:
             'expected_return': expected_return,
             'timestamp': datetime.now().isoformat()
         }
+
+    def _estimate_cost_bps(self, symbol: str) -> float:
+        """Estimate round-trip costs in basis points."""
+        try:
+            parsed = parse_symbol(symbol)
+        except ValueError:
+            parsed = None
+
+        if parsed is None or parsed.asset_class == AssetClass.EQUITY:
+            commission_bps = 2 * (ApexConfig.COMMISSION_PER_TRADE / max(ApexConfig.POSITION_SIZE_USD, 1)) * 10000
+            return ApexConfig.SLIPPAGE_BPS * 2 + commission_bps
+        if parsed.asset_class == AssetClass.FOREX:
+            return 2 * (ApexConfig.FX_SPREAD_BPS + ApexConfig.FX_COMMISSION_BPS)
+        return 2 * (ApexConfig.CRYPTO_SPREAD_BPS + ApexConfig.CRYPTO_COMMISSION_BPS)
 
     def _calculate_model_agreement(self, component_signals: Dict[str, float]) -> float:
         """Calculate what fraction of models agree on signal direction."""

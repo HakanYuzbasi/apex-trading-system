@@ -16,6 +16,8 @@ After tripping, trading halts for a configurable cooldown period.
 """
 
 import logging
+import json
+from pathlib import Path
 from datetime import datetime, timedelta
 from typing import Dict, Tuple, List, Optional
 
@@ -149,6 +151,59 @@ class RiskManager:
             logger.info(f"      Drawdown Trigger: {ApexConfig.CIRCUIT_BREAKER_DRAWDOWN*100:.1f}%")
             logger.info(f"      Consecutive Loss Trigger: {ApexConfig.CIRCUIT_BREAKER_CONSECUTIVE_LOSSES}")
 
+    def save_state(self):
+        """Save risk state to disk."""
+        try:
+            state = {
+                'day_start_capital': self.day_start_capital,
+                'peak_capital': self.peak_capital,
+                'starting_capital': self.starting_capital,
+                'current_day': self.current_day,
+                'circuit_breaker': self.circuit_breaker.get_status()
+            }
+            
+            ApexConfig.DATA_DIR.mkdir(exist_ok=True)
+            
+            with open(ApexConfig.DATA_DIR / "risk_state.json", "w") as f:
+                json.dump(state, f, indent=2)
+                
+            logger.debug("💾 Risk state saved")
+        except Exception as e:
+            logger.error(f"Error saving risk state: {e}")
+
+    def load_state(self):
+        """Load risk state from disk."""
+        try:
+            state_file = ApexConfig.DATA_DIR / "risk_state.json"
+            if not state_file.exists():
+                return
+            
+            with open(state_file, "r") as f:
+                state = json.load(f)
+            
+            # Only restore day_start_capital if it's the same day
+            today = datetime.now().strftime('%Y-%m-%d')
+            if state.get('current_day') == today:
+                self.day_start_capital = float(state.get('day_start_capital', 0))
+                self.current_day = today
+                logger.info(f"💾 Restored daily start capital: ${self.day_start_capital:,.2f}")
+            else:
+                logger.info("📅 New day detected, not restoring daily start capital")
+            
+            self.peak_capital = float(state.get('peak_capital', self.peak_capital))
+            self.starting_capital = float(state.get('starting_capital', self.starting_capital))
+            
+            cb_state = state.get('circuit_breaker', {})
+            if cb_state.get('is_tripped'):
+                self.circuit_breaker.is_tripped = True
+                self.circuit_breaker.trip_reason = cb_state.get('reason')
+                self.circuit_breaker.trip_time = datetime.fromisoformat(cb_state['trip_time']) if cb_state.get('trip_time') else None
+                logger.warning(f"🚨 Restored TRIPPED circuit breaker: {self.circuit_breaker.trip_reason}")
+
+            logger.info("💾 Risk state loaded")
+        except Exception as e:
+            logger.error(f"Error loading risk state: {e}")
+
     def can_trade(self) -> Tuple[bool, str]:
         """
         Check if trading is allowed (circuit breaker not tripped).
@@ -170,11 +225,25 @@ class RiskManager:
 
     def set_starting_capital(self, capital: float):
         """Set starting capital and initialize tracking."""
-        self.starting_capital = float(capital)
-        self.peak_capital = float(capital)
-        self.day_start_capital = float(capital)
+        # Only set overall starting capital if not already set (absolute system start)
+        if getattr(self, 'starting_capital', 0) == 0:
+            self.starting_capital = float(capital)
+            logger.info(f"💰 Account starting capital initialized: ${self.starting_capital:,.2f}")
+        
+        # Only initialize peak if not already set
+        if getattr(self, 'peak_capital', 0) == 0:
+            self.peak_capital = float(capital)
+            
+        today = datetime.now().strftime('%Y-%m-%d')
+        # CRITICAL: Only overwrite day_start_capital if it's 0 OR it's a new day
+        if getattr(self, 'day_start_capital', 0) == 0 or self.current_day != today:
+            self.day_start_capital = float(capital)
+            self.current_day = today
+            logger.info(f"💰 Day start capital initialized: ${self.day_start_capital:,.2f}")
+        else:
+            logger.info(f"💰 Using restored day start capital: ${self.day_start_capital:,.2f}")
 
-        logger.info(f"💰 Starting capital set: ${capital:,.2f}")
+        logger.info(f"💰 Active day start capital: ${self.day_start_capital:,.2f}")
 
     def check_daily_loss(self, current_value: float) -> Dict:
         """

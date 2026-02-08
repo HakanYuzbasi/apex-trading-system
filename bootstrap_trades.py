@@ -7,6 +7,7 @@ import json
 
 sys.path.insert(0, str(Path(__file__).parent))
 from monitoring.performance_tracker import PerformanceTracker
+from config import ApexConfig
 
 def bootstrap_existing_positions():
     print("=" * 80)
@@ -34,7 +35,7 @@ def bootstrap_existing_positions():
     print(f"\n💰 Portfolio Value: ${current_value:,.2f}")
     
     print("\n📁 Exporting to data files...")
-    data_dir = Path("data")
+    data_dir = ApexConfig.DATA_DIR
     data_dir.mkdir(exist_ok=True)
     
     # Export trades.csv

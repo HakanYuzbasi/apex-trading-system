@@ -13,6 +13,8 @@ from typing import Dict, List, Tuple
 from scipy.cluster.hierarchy import linkage, fcluster
 from scipy.spatial.distance import squareform
 
+from core.logging_config import setup_logging
+
 logger = logging.getLogger(__name__)
 
 
@@ -419,7 +421,7 @@ class CorrelationManager:
 
 if __name__ == "__main__":
     # Test correlation manager
-    logging.basicConfig(level=logging.INFO)
+    setup_logging(level="INFO", log_file=None, json_format=False, console_output=True)
     
     # Generate sample correlated returns
     np.random.seed(42)

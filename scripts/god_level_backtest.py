@@ -24,7 +24,8 @@ import warnings
 warnings.filterwarnings('ignore')
 
 # Setup logging
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+from core.logging_config import setup_logging
+setup_logging(level="INFO", log_file=None, json_format=False, console_output=True)
 logger = logging.getLogger(__name__)
 
 # Import local modules

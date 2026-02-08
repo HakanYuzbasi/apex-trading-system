@@ -15,6 +15,8 @@ from datetime import datetime
 from pathlib import Path
 import pandas as pd
 
+from core.logging_config import setup_logging
+
 logger = logging.getLogger(__name__)
 
 
@@ -397,7 +399,7 @@ Compliance Violations: {len(date_violations)}
 
 if __name__ == "__main__":
     # Test compliance manager
-    logging.basicConfig(level=logging.INFO)
+    setup_logging(level="INFO", log_file=None, json_format=False, console_output=True)
     
     manager = ComplianceManager()
     

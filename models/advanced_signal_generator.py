@@ -11,15 +11,18 @@ Features:
 ✅ Model Persistence
 """
 
-import numpy as np
 import pandas as pd
-from typing import Dict, List, Tuple, Optional
+import numpy as np
+from typing import Dict, List, Optional, Tuple, Union
 from datetime import datetime, timedelta
 import logging
 import os
 import pickle
 from collections import deque
 from joblib import dump, load
+
+from core.symbols import parse_symbol, AssetClass
+from config import ApexConfig
 
 logger = logging.getLogger(__name__)
 
@@ -106,10 +109,29 @@ class AdvancedSignalGenerator:
             'neutral': {},
             'volatile': {}
         }
+
+        # Asset-class-specific regime models (equity/forex/crypto)
+        self.asset_class_models: Dict[str, Dict[str, Dict]] = {
+            AssetClass.EQUITY.value: {'bull': {}, 'bear': {}, 'neutral': {}, 'volatile': {}},
+            AssetClass.FOREX.value: {'bull': {}, 'bear': {}, 'neutral': {}, 'volatile': {}},
+            AssetClass.CRYPTO.value: {'bull': {}, 'bear': {}, 'neutral': {}, 'volatile': {}},
+        }
         
         # Preprocessors per regime
         self.regime_scalers: Dict[str, RobustScaler] = {}
         self.regime_imputers: Dict[str, SimpleImputer] = {}
+
+        # Preprocessors per asset class + regime
+        self.asset_class_scalers: Dict[str, Dict[str, RobustScaler]] = {
+            AssetClass.EQUITY.value: {},
+            AssetClass.FOREX.value: {},
+            AssetClass.CRYPTO.value: {},
+        }
+        self.asset_class_imputers: Dict[str, Dict[str, SimpleImputer]] = {
+            AssetClass.EQUITY.value: {},
+            AssetClass.FOREX.value: {},
+            AssetClass.CRYPTO.value: {},
+        }
         
         self.feature_names = []
         self.is_trained = False
@@ -121,26 +143,34 @@ class AdvancedSignalGenerator:
         self.outcome_history = deque(maxlen=100)
         self.performance_baseline = 0.52
         self.retrain_interval_days = 30
-        
+        self.signal_ema: Dict[str, float] = {}
+        self.signal_ema_alpha = 0.35  # Smoothing to reduce noise for better Sharpe
+
+        # Try to load existing models
+        self._load_models()
+
         logger.info("✅ GOD LEVEL Advanced Signal Generator initialized")
     
-    def compute_features_vectorized(self, prices: pd.Series) -> pd.DataFrame:
-        """Vectorized 30+ feature extraction."""
-        # Robustly convert to clean 1D numpy-backed Series
-        if isinstance(prices, pd.DataFrame):
-            if 'Close' in prices.columns:
-                prices = prices['Close']
-            elif len(prices.columns) > 0:
-                prices = prices.iloc[:, 0]
+    def compute_features_vectorized(
+        self, 
+        data: Union[pd.Series, pd.DataFrame],
+        sentiment_score: Optional[float] = None,
+        momentum_rank: Optional[float] = None
+    ) -> pd.DataFrame:
+        """Vectorized 40+ feature extraction with OHLCV and Context."""
+        if isinstance(data, pd.Series):
+            p = data
+            df = pd.DataFrame(index=p.index)
+            v, h, l, o = None, None, None, None
+        else:
+            p = data['Close']
+            df = pd.DataFrame(index=p.index)
+            v = data.get('Volume')
+            h = data.get('High')
+            l = data.get('Low')
+            o = data.get('Open')
 
-        if isinstance(prices, pd.DataFrame):
-            prices = prices.iloc[:, 0]
-
-        # Force to clean 1D Series with simple integer index
-        values = np.asarray(prices).flatten()
-        p = pd.Series(values, index=range(len(values)))
         returns = p.pct_change()
-        df = pd.DataFrame(index=p.index)
         
         # 1. Multi-period returns
         for d in [3, 5, 10, 20, 60]:
@@ -152,31 +182,30 @@ class AdvancedSignalGenerator:
         
         # 3. RSI
         delta = p.diff()
-        gain = np.where(delta > 0, delta, 0)
-        loss = np.where(delta < 0, -delta, 0)
-        avg_gain = pd.Series(gain).rolling(14).mean()
-        avg_loss = pd.Series(loss).rolling(14).mean()
-        rs = avg_gain / avg_loss.replace(0, np.nan)
-        df['rsi_14'] = 100 - (100 / (1 + rs))
-        df['rsi_norm'] = (df['rsi_14'] - 50) / 50
+        gain = delta.where(delta > 0, 0).rolling(14).mean()
+        loss = (-delta.where(delta < 0, 0)).rolling(14).mean()
+        rs = gain / loss.replace(0, np.nan)
+        rsi = 100 - (100 / (1 + rs.fillna(0)))
+        df['rsi_14'] = rsi
+        df['rsi_norm'] = (rsi - 50) / 50
         
         # 4. MACD
         ema12 = p.ewm(span=12).mean()
         ema26 = p.ewm(span=26).mean()
-        df['macd'] = (ema12 - ema26) / p
+        df['macd'] = (ema12 - ema26) / p.replace(0, np.nan)
         df['macd_signal'] = df['macd'].ewm(span=9).mean()
         df['macd_hist'] = df['macd'] - df['macd_signal']
         
         # 5. Bollinger Bands
         sma20 = p.rolling(20).mean()
         std20 = p.rolling(20).std()
-        df['bb_width'] = (4 * std20) / sma20
-        df['bb_pos'] = (p - (sma20 - 2*std20)) / (4*std20)
+        df['bb_width'] = (4 * std20) / sma20.replace(0, np.nan)
+        df['bb_pos'] = (p - (sma20 - 2*std20)) / (4*std20).replace(0, np.nan)
         
         # 6. Moving Averages
         for d in [10, 20, 50, 200]:
             ma = p.rolling(d).mean()
-            df[f'dist_ma_{d}'] = (p - ma) / ma
+            df[f'dist_ma_{d}'] = (p - ma) / ma.replace(0, np.nan)
         
         # 7. Momentum
         df['roc_5'] = p.pct_change(5)
@@ -188,103 +217,183 @@ class AdvancedSignalGenerator:
         df['kurt_20'] = returns.rolling(20).kurt()
         
         # 9. Z-score
-        ma60 = p.rolling(60).mean()
-        std60 = p.rolling(60).std()
-        df['zscore_60'] = (p - ma60) / std60
+        df['zscore_60'] = (p - p.rolling(60).mean()) / p.rolling(60).std().replace(0, np.nan)
 
-        # 10. Trend strength (linear regression slope)
+        # 10. Trend strength
         df['trend_strength'] = returns.rolling(20).apply(
             lambda x: np.polyfit(np.arange(len(x)), x, 1)[0] * 100 if len(x) > 1 else 0,
             raw=False
         )
 
-        # 11. Price position in range
-        high_20 = p.rolling(20).max()
-        low_20 = p.rolling(20).min()
-        range_20 = high_20 - low_20
-        df['range_position'] = (p - low_20) / range_20.replace(0, np.nan)
+        # 11. Quality Factors
+        df['range_position'] = (p - p.rolling(20).min()) / (p.rolling(20).max() - p.rolling(20).min()).replace(0, np.nan)
+        df['mean_rev_20'] = -df['zscore_60'].clip(-3, 3) / 3
 
-        # 12. Mean reversion potential
-        df['mean_rev_20'] = -df['zscore_60'].clip(-3, 3) / 3  # Normalized mean reversion signal
-
-        # 13. Trend consistency (R-squared of recent price movement)
         def calc_r2(x):
-            if len(x) < 5:
-                return 0
+            if len(x) < 5: return 0
             y = np.arange(len(x))
-            correlation = np.corrcoef(x, y)[0, 1]
-            return correlation ** 2 if not np.isnan(correlation) else 0
+            corr = np.corrcoef(x, y)[0, 1]
+            return corr ** 2 if not np.isnan(corr) else 0
 
         df['trend_consistency'] = p.rolling(20).apply(calc_r2, raw=True)
 
+        # 12. Volume Features (if available)
+        if v is not None:
+            df['volume_surge'] = v / v.rolling(20).mean().replace(0, np.nan)
+            # OBV momentum
+            obv = (np.sign(returns) * v).fillna(0).cumsum()
+            df['obv_momentum'] = (obv - obv.rolling(20).mean()) / obv.rolling(20).std().replace(0, np.nan)
+        else:
+            df['volume_surge'] = 1.0
+            df['obv_momentum'] = 0.0
+
+        # 13. Intraday Features (if available)
+        if h is not None and l is not None:
+            df['intraday_volat'] = (h - l) / p.replace(0, np.nan)
+        else:
+            df['intraday_volat'] = 0.0
+
+        # 14. Contextual Features (direct injection)
+        df['sentiment_feature'] = sentiment_score if sentiment_score is not None else 0.0
+        df['momentum_rank_feature'] = momentum_rank if momentum_rank is not None else 0.5
+
         return df.fillna(0).replace([np.inf, -np.inf], 0)
 
-    def compute_features_with_volume(
+    def _align_features(self, df_feats: pd.DataFrame) -> pd.DataFrame:
+        """Align current feature set to training feature names for compatibility."""
+        if not self.feature_names:
+            return df_feats
+        # Ensure stable column order and fill missing with zeros
+        return df_feats.reindex(columns=self.feature_names, fill_value=0.0)
+
+    def _cross_sectional_normalize(
         self,
-        prices: pd.Series,
-        volume: pd.Series
+        panel: pd.DataFrame,
+        feature_cols: List[str]
     ) -> pd.DataFrame:
-        """
-        Compute features including volume-based indicators.
+        """Z-score features cross-sectionally per timestamp."""
+        if not feature_cols:
+            return panel
+        grouped = panel.groupby(level=0)
+        for col in feature_cols:
+            mean = grouped[col].transform("mean")
+            std = grouped[col].transform("std")
+            # When std is 0 or NaN (≤1 symbol at timestamp), keep demeaned value
+            std = std.replace(0, np.nan).fillna(1.0)
+            panel[col] = (panel[col] - mean) / std
+        return panel
 
-        Volume-price relationships are strong predictors:
-        - Volume confirms price moves
-        - Volume precedes price (accumulation/distribution)
-        - Volume divergence signals reversals
-        """
-        # Get base features
-        df = self.compute_features_vectorized(prices)
+    def _build_training_panel(
+        self,
+        historical_data: Dict[str, pd.DataFrame]
+    ) -> Tuple[pd.DataFrame, List[str]]:
+        """Build time-sorted MultiIndex panel for training."""
+        frames = []
+        feature_names: List[str] = []
 
-        # Robustly convert volume to clean 1D Series
-        if isinstance(volume, pd.DataFrame):
-            volume = volume.iloc[:, 0]
-        vol_values = np.asarray(volume).flatten()
-        v = pd.Series(vol_values, index=range(len(vol_values)))
+        for symbol, data in historical_data.items():
+            if len(data) < self.lookback + 20:
+                continue
 
-        # Align length with price data
-        min_len = min(len(df), len(v))
-        v = v.iloc[-min_len:]
-        v.index = range(len(v))
+            try:
+                parsed = parse_symbol(symbol)
+            except ValueError:
+                continue
 
-        # Robustly convert prices
-        if isinstance(prices, pd.DataFrame):
-            prices = prices.iloc[:, 0]
-        p_values = np.asarray(prices).flatten()
-        p = pd.Series(p_values[-min_len:], index=range(min_len))
+            prices = data['Close']
+            df_feats = self.compute_features_vectorized(data)
 
-        returns = p.pct_change()
+            # Targets: volatility-scaled future return
+            future_ret = prices.pct_change(5).shift(-5)
+            vol = prices.pct_change().rolling(ApexConfig.ADV_LABEL_VOL_LOOKBACK).std()
+            vol = vol.replace(0, np.nan)
+            scaled = (future_ret / vol).clip(
+                -ApexConfig.ADV_LABEL_VOL_CLIP,
+                ApexConfig.ADV_LABEL_VOL_CLIP
+            )
 
-        # Volume features
-        # 1. Volume ratio (current vs average)
-        avg_vol_20 = v.rolling(20).mean()
-        df['vol_ratio'] = (v / avg_vol_20.replace(0, 1)).iloc[-len(df):]
+            # Regimes
+            ma_20 = prices.rolling(20).mean()
+            ma_60 = prices.rolling(60).mean()
+            vol_20 = prices.pct_change().rolling(20).std() * np.sqrt(252)
+            trend = (ma_20 - ma_60) / ma_60
+            regimes_series = pd.Series('neutral', index=prices.index)
+            regimes_series.loc[vol_20 > 0.35] = 'volatile'
+            regimes_series.loc[(vol_20 <= 0.35) & (trend > 0.05)] = 'bull'
+            regimes_series.loc[(vol_20 <= 0.35) & (trend < -0.05)] = 'bear'
 
-        # 2. Volume trend
-        df['vol_trend'] = (v.rolling(5).mean() / v.rolling(20).mean().replace(0, 1) - 1).iloc[-len(df):]
+            valid = ~df_feats.isnull().any(axis=1) & ~scaled.isnull()
+            if valid.sum() == 0:
+                continue
 
-        # 3. On-Balance Volume (OBV) momentum
-        obv = (np.sign(returns) * v).cumsum()
-        obv_norm = (obv - obv.rolling(20).mean()) / obv.rolling(20).std().replace(0, 1)
-        df['obv_momentum'] = obv_norm.iloc[-len(df):]
+            df = df_feats.loc[valid].copy()
+            df["target"] = scaled.loc[valid]
+            df["regime"] = regimes_series.loc[valid]
+            df["asset_class"] = parsed.asset_class.value
+            df["symbol"] = symbol
 
-        # 4. Volume-Price Trend (Confirmation)
-        # High volume on up days = bullish, high volume on down days = bearish
-        vol_price_trend = (returns * v / avg_vol_20.replace(0, 1)).rolling(10).sum()
-        df['vol_price_trend'] = vol_price_trend.iloc[-len(df):]
+            df = df.set_index(pd.MultiIndex.from_arrays(
+                [df.index, df["symbol"]],
+                names=["timestamp", "symbol"]
+            ))
+            df = df.drop(columns=["symbol"])
 
-        # 5. Accumulation/Distribution indicator
-        # Money flow multiplier: ((close - low) - (high - close)) / (high - low)
-        # Simplified version using returns
-        mf = returns * v
-        df['accumulation'] = (mf.rolling(20).sum() / v.rolling(20).sum().replace(0, 1)).iloc[-len(df):]
+            if not feature_names:
+                feature_names = list(df_feats.columns)
 
-        # 6. Volume divergence (price up but volume down = bearish divergence)
-        price_up = (p.diff(5) > 0).astype(int)
-        vol_down = (v.rolling(5).mean() < v.rolling(20).mean()).astype(int)
-        df['vol_divergence'] = ((price_up & vol_down).astype(int) * -1 +
-                                ((1 - price_up) & (1 - vol_down)).astype(int) * 1).iloc[-len(df):]
+            frames.append(df)
 
-        return df.fillna(0).replace([np.inf, -np.inf], 0)
+        if not frames:
+            return pd.DataFrame(), []
+
+        panel = pd.concat(frames).sort_index(level=0)
+
+        if getattr(ApexConfig, "ADV_CROSS_SECTIONAL_NORM", True):
+            panel = self._cross_sectional_normalize(panel, feature_names)
+
+        panel = panel.dropna(subset=feature_names + ["target", "regime", "asset_class"])
+        return panel, feature_names
+
+    def _quality_adjust(self, signal: float, features: pd.Series, regime: str) -> Tuple[float, float]:
+        """Apply risk-aware adjustments to improve Sharpe (reduce noisy trades)."""
+        vol_20 = float(features.get('vol_20d', 0.0))
+        zscore = float(features.get('zscore_60', 0.0))
+        dist_ma_50 = float(features.get('dist_ma_50', 0.0))
+        bb_width = float(features.get('bb_width', 0.0))
+        trend_strength = float(features.get('trend_strength', 0.0))
+
+        # Volatility penalty: reduce size in high vol regimes
+        vol_penalty = np.clip((vol_20 - 0.25) / 0.35, 0.0, 0.6)
+
+        # Mean-reversion penalty if signal fights extreme zscore
+        z_penalty = 0.0
+        if signal > 0 and zscore > 2.0:
+            z_penalty = 0.20
+        elif signal < 0 and zscore < -2.0:
+            z_penalty = 0.20
+
+        # Trend alignment bonus: align with MA slope/trend strength
+        trend_bonus = np.clip(abs(trend_strength) * 8.0, 0.0, 0.15)
+        if signal > 0 and dist_ma_50 < -0.02:
+            trend_bonus *= 0.5
+        if signal < 0 and dist_ma_50 > 0.02:
+            trend_bonus *= 0.5
+
+        # Bandwidth penalty for noisy ranges
+        band_penalty = np.clip((bb_width - 0.10) / 0.30, 0.0, 0.25)
+
+        # Regime bias: reduce counter-trend signals
+        regime_bias = 0.0
+        if regime == 'bull' and signal < 0:
+            regime_bias = 0.15
+        elif regime == 'bear' and signal > 0:
+            regime_bias = 0.15
+
+        quality = 1.0 - vol_penalty - z_penalty - band_penalty - regime_bias + trend_bonus
+        quality = float(np.clip(quality, 0.2, 1.1))
+
+        adjusted_signal = float(np.clip(signal * quality, -1, 1))
+        return adjusted_signal, quality
     
     def train_walk_forward(
         self,
@@ -299,110 +408,99 @@ class AdvancedSignalGenerator:
         logger.info("🧠 GOD LEVEL WALK-FORWARD TRAINING")
         logger.info("="*80)
         
-        # Aggregate all symbols
-        all_X = []
-        all_y = []
-        all_regimes = []
-        
-        for symbol, data in historical_data.items():
-            if len(data) < self.lookback + 20:
-                continue
-            
-            prices = data['Close']
-            
-            # Features
-            df_feats = self.compute_features_vectorized(prices)
-            
-            # Targets (5-day future return)
-            future_ret = prices.pct_change(5).shift(-5)
-            
-            # Regimes
-            regimes_series = pd.Series(index=prices.index, dtype=str)
-            for i in range(len(prices)):
-                if i < 60:
-                    regimes_series.iloc[i] = 'neutral'
-                else:
-                    regimes_series.iloc[i] = RegimeDetector.detect_regime(prices.iloc[:i+1], 60)
-            
-            # Valid mask
-            valid = ~df_feats.isnull().any(axis=1) & ~future_ret.isnull()
-            
-            if valid.sum() > 0:
-                all_X.append(df_feats[valid].values)
-                all_y.append(future_ret[valid].values)
-                all_regimes.append(regimes_series[valid].values)
-        
-        if not all_X:
+        panel, feature_names = self._build_training_panel(historical_data)
+        if panel.empty:
             logger.error("No valid training data")
             return
-        
-        X_full = np.vstack(all_X)
-        y_full = np.concatenate(all_y)
-        regimes_full = np.concatenate(all_regimes)
-        
-        # Clip outliers
-        y_full = np.clip(y_full, -0.20, 0.20)
-        
-        logger.info(f"Total samples: {len(X_full)}")
-        
-        # Store feature names
-        self.feature_names = list(df_feats.columns)
-        
-        # Walk-Forward Split
-        total = len(X_full)
-        min_train = int(total * 0.4)
-        window_size = int(total / n_splits)
-        
+
+        self.feature_names = feature_names
+
+        # Time-sorted panel to prevent leakage
+        times = panel.index.get_level_values(0).unique().sort_values()
+        if len(times) < 50:
+            logger.error("Insufficient time points for walk-forward training")
+            return
+
+        min_train = int(len(times) * 0.5)
+        window_size = max(5, int((len(times) - min_train) / max(1, n_splits)))
+
         regime_results = {r: [] for r in ['bull', 'bear', 'neutral', 'volatile']}
-        
+
+        purge_days = getattr(ApexConfig, "ADV_PURGE_DAYS", 5)
+        embargo_days = getattr(ApexConfig, "ADV_EMBARGO_DAYS", 2)
+
         for split in range(n_splits):
-            train_end = min_train + (split * window_size)
-            test_start = train_end
-            test_end = min(test_start + window_size, total)
-            
-            if test_end - test_start < 50:
+            test_start_idx = min_train + (split * window_size)
+            test_end_idx = min(test_start_idx + window_size, len(times))
+
+            if test_end_idx - test_start_idx < 5:
                 break
-            
-            logger.info(f"\n[Split {split+1}/{n_splits}] Train: 0-{train_end}, Test: {test_start}-{test_end}")
-            
-            X_train = X_full[:train_end]
-            y_train = y_full[:train_end]
-            regimes_train = regimes_full[:train_end]
-            
-            X_test = X_full[test_start:test_end]
-            y_test = y_full[test_start:test_end]
-            regimes_test = regimes_full[test_start:test_end]
-            
-            # Train per regime
-            for regime in ['bull', 'bear', 'neutral', 'volatile']:
-                mask_train = (regimes_train == regime)
-                mask_test = (regimes_test == regime)
-                
-                if mask_train.sum() < 100 or mask_test.sum() < 20:
+
+            test_start_time = times[test_start_idx]
+            test_end_time = times[test_end_idx - 1]
+
+            purge_start = test_start_time - timedelta(days=purge_days)
+            embargo_end = test_end_time + timedelta(days=embargo_days)
+
+            train_mask = (times < purge_start) | (times > embargo_end)
+            train_times = times[train_mask]
+            test_times = times[test_start_idx:test_end_idx]
+
+            logger.info(
+                f"\n[Split {split+1}/{n_splits}] Train: {train_times.min()}-{train_times.max()} "
+                f"Test: {test_start_time}-{test_end_time} (purge={purge_days}d embargo={embargo_days}d)"
+            )
+
+            train_panel = panel.loc[train_times]
+            test_panel = panel.loc[test_times]
+
+            for asset_class in [AssetClass.EQUITY.value, AssetClass.FOREX.value, AssetClass.CRYPTO.value]:
+                train_ac = train_panel[train_panel["asset_class"] == asset_class]
+                test_ac = test_panel[test_panel["asset_class"] == asset_class]
+
+                if train_ac.empty or test_ac.empty:
                     continue
-                
-                X_r_train = X_train[mask_train]
-                y_r_train = y_train[mask_train]
-                X_r_test = X_test[mask_test]
-                y_r_test = y_test[mask_test]
-                
-                # Preprocess
-                if regime not in self.regime_imputers:
-                    self.regime_imputers[regime] = SimpleImputer(strategy='median')
-                    self.regime_scalers[regime] = RobustScaler()
-                
-                X_r_train_imp = self.regime_imputers[regime].fit_transform(X_r_train)
-                X_r_train_sc = self.regime_scalers[regime].fit_transform(X_r_train_imp)
-                
-                X_r_test_imp = self.regime_imputers[regime].transform(X_r_test)
-                X_r_test_sc = self.regime_scalers[regime].transform(X_r_test_imp)
-                
-                # Train models
-                models = self._train_regime_models(X_r_train_sc, y_r_train, X_r_test_sc, y_r_test, regime)
-                self.regime_models[regime] = models
-                
-                if 'r2_score' in models:
-                    regime_results[regime].append(models['r2_score'])
+
+                X_train_all = train_ac[feature_names].values
+                y_train_all = train_ac["target"].values
+                regimes_train = train_ac["regime"].values
+
+                X_test_all = test_ac[feature_names].values
+                y_test_all = test_ac["target"].values
+                regimes_test = test_ac["regime"].values
+
+                for regime in ['bull', 'bear', 'neutral', 'volatile']:
+                    mask_train = (regimes_train == regime)
+                    mask_test = (regimes_test == regime)
+
+                    if mask_train.sum() < 100 or mask_test.sum() < 20:
+                        continue
+
+                    X_r_train = X_train_all[mask_train]
+                    y_r_train = y_train_all[mask_train]
+                    X_r_test = X_test_all[mask_test]
+                    y_r_test = y_test_all[mask_test]
+
+                    if regime not in self.asset_class_imputers[asset_class]:
+                        self.asset_class_imputers[asset_class][regime] = SimpleImputer(strategy='median')
+                        self.asset_class_scalers[asset_class][regime] = RobustScaler()
+
+                    imputer = self.asset_class_imputers[asset_class][regime]
+                    scaler = self.asset_class_scalers[asset_class][regime]
+
+                    X_r_train_imp = imputer.fit_transform(X_r_train)
+                    X_r_train_sc = scaler.fit_transform(X_r_train_imp)
+
+                    X_r_test_imp = imputer.transform(X_r_test)
+                    X_r_test_sc = scaler.transform(X_r_test_imp)
+
+                    models = self._train_regime_models(
+                        X_r_train_sc, y_r_train, X_r_test_sc, y_r_test, regime
+                    )
+                    self.asset_class_models[asset_class][regime] = models
+
+                    if 'r2_score' in models:
+                        regime_results[regime].append(models['r2_score'])
         
         # Finalize
         self.is_trained = True
@@ -472,8 +570,14 @@ class AdvancedSignalGenerator:
         
         return models
     
-    def generate_ml_signal(self, symbol: str, prices: pd.Series, track: bool = True) -> Dict:
-        """Generate regime-aware signal."""
+    def generate_ml_signal(
+        self, 
+        symbol: str, 
+        data: Union[pd.Series, pd.DataFrame], 
+        sentiment_score: float = 0.0,
+        momentum_rank: float = 0.5,
+        track: bool = True
+    ) -> Dict:
         if not self.is_trained:
             if not self._load_models():
                 return self._empty_signal()
@@ -483,6 +587,18 @@ class AdvancedSignalGenerator:
             logger.warning("⚠️ Retrain recommended")
 
         try:
+            try:
+                parsed = parse_symbol(symbol)
+                asset_class = parsed.asset_class.value
+            except ValueError:
+                asset_class = AssetClass.EQUITY.value
+
+            # Extract prices for regime detection
+            if isinstance(data, pd.DataFrame):
+                prices = data['Close']
+            else:
+                prices = data
+                
             # Robustly extract a clean 1D Series from any input
             if isinstance(prices, pd.DataFrame):
                 # Handle both regular and MultiIndex columns
@@ -497,27 +613,33 @@ class AdvancedSignalGenerator:
 
             # Force to clean 1D numpy-backed Series with simple integer index
             values = np.asarray(prices).flatten()
-            prices = pd.Series(values, index=range(len(values)))
+            prices_clean = pd.Series(values, index=range(len(values)))
 
             # Detect regime
-            regime = RegimeDetector.detect_regime(prices, 60)
+            regime = RegimeDetector.detect_regime(prices_clean, 60)
             
             # Get models
-            if regime not in self.regime_models or not self.regime_models[regime]:
+            models_by_class = self.asset_class_models.get(asset_class) or self.regime_models
+            if regime not in models_by_class or not models_by_class[regime]:
                 regime = 'neutral'
-            
-            models = self.regime_models[regime]
+
+            models = models_by_class.get(regime, {})
             if not models:
                 return self._empty_signal()
             
-            # Features
-            window = prices.iloc[-self.lookback:] if len(prices) > self.lookback else prices
-            df_feats = self.compute_features_vectorized(window)
+            # Features (passing full window + context)
+            window = data.iloc[-self.lookback:] if len(data) > self.lookback else data
+            df_feats = self.compute_features_vectorized(
+                window, 
+                sentiment_score=sentiment_score,
+                momentum_rank=momentum_rank
+            )
+            df_feats = self._align_features(df_feats)
             current = df_feats.iloc[-1:].values
             
             # Preprocess
-            imputer = self.regime_imputers.get(regime)
-            scaler = self.regime_scalers.get(regime)
+            imputer = self.asset_class_imputers.get(asset_class, {}).get(regime) or self.regime_imputers.get(regime)
+            scaler = self.asset_class_scalers.get(asset_class, {}).get(regime) or self.regime_scalers.get(regime)
             if not imputer or not scaler:
                 return self._empty_signal()
             
@@ -539,13 +661,24 @@ class AdvancedSignalGenerator:
             if not predictions:
                 return self._empty_signal()
             
-            avg_signal = np.mean(predictions)
-            std_signal = np.std(predictions)
+            avg_signal = float(np.mean(predictions))
+            std_signal = float(np.std(predictions))
             confidence = max(0, 1.0 - (std_signal * 2))
+
+            # Risk-aware adjustment for Sharpe improvement
+            features_last = df_feats.iloc[-1]
+            adjusted_signal, quality = self._quality_adjust(avg_signal, features_last, regime)
+            confidence = float(np.clip(confidence * quality, 0.0, 1.0))
+
+            # Smooth signal to reduce noise and improve stability
+            prev = self.signal_ema.get(symbol, adjusted_signal)
+            smoothed = self.signal_ema_alpha * adjusted_signal + (1 - self.signal_ema_alpha) * prev
+            self.signal_ema[symbol] = smoothed
             
             result = {
-                'signal': float(np.clip(avg_signal, -1, 1)),
+                'signal': float(np.clip(smoothed, -1, 1)),
                 'confidence': float(np.clip(confidence, 0, 1)),
+                'quality': float(np.clip(quality, 0, 1)),
                 'regime': regime,
                 'timestamp': datetime.now().isoformat()
             }
@@ -611,28 +744,55 @@ class AdvancedSignalGenerator:
     def _save_models(self):
         """Save all models."""
         try:
-            for regime, models in self.regime_models.items():
-                regime_dir = f"{self.model_dir}/{regime}"
-                os.makedirs(regime_dir, exist_ok=True)
-                
-                for name, model in models.items():
-                    if name == 'r2_score':
-                        continue
-                    if name == 'xgb':
-                        model.save_model(f"{regime_dir}/xgb.json")
-                    else:
-                        dump(model, f"{regime_dir}/{name}.pkl")
-                
-                if regime in self.regime_imputers:
-                    dump(self.regime_imputers[regime], f"{regime_dir}/imputer.pkl")
-                    dump(self.regime_scalers[regime], f"{regime_dir}/scaler.pkl")
+            has_asset_models = any(
+                any(self.asset_class_models[ac][r] for r in self.asset_class_models[ac])
+                for ac in self.asset_class_models
+            )
+
+            if has_asset_models:
+                for asset_class, regimes in self.asset_class_models.items():
+                    for regime, models in regimes.items():
+                        regime_dir = f"{self.model_dir}/{asset_class}/{regime}"
+                        os.makedirs(regime_dir, exist_ok=True)
+
+                        for name, model in models.items():
+                            if name == 'r2_score':
+                                continue
+                            if name == 'xgb':
+                                model.save_model(f"{regime_dir}/xgb.json")
+                            else:
+                                dump(model, f"{regime_dir}/{name}.pkl")
+
+                        imputer = self.asset_class_imputers.get(asset_class, {}).get(regime)
+                        scaler = self.asset_class_scalers.get(asset_class, {}).get(regime)
+                        if imputer:
+                            dump(imputer, f"{regime_dir}/imputer.pkl")
+                        if scaler:
+                            dump(scaler, f"{regime_dir}/scaler.pkl")
+            else:
+                for regime, models in self.regime_models.items():
+                    regime_dir = f"{self.model_dir}/{regime}"
+                    os.makedirs(regime_dir, exist_ok=True)
+
+                    for name, model in models.items():
+                        if name == 'r2_score':
+                            continue
+                        if name == 'xgb':
+                            model.save_model(f"{regime_dir}/xgb.json")
+                        else:
+                            dump(model, f"{regime_dir}/{name}.pkl")
+
+                    if regime in self.regime_imputers:
+                        dump(self.regime_imputers[regime], f"{regime_dir}/imputer.pkl")
+                        dump(self.regime_scalers[regime], f"{regime_dir}/scaler.pkl")
             
             metadata = {
                 'feature_names': self.feature_names,
                 'training_date': self.training_date.isoformat() if self.training_date else None,
                 'last_retrain_date': self.last_retrain_date.isoformat() if self.last_retrain_date else None,
                 'prediction_history': list(self.prediction_history),
-                'outcome_history': list(self.outcome_history)
+                'outcome_history': list(self.outcome_history),
+                'model_layout': 'asset_class_regime' if has_asset_models else 'legacy'
             }
             
             with open(f"{self.model_dir}/metadata.pkl", 'wb') as f:
@@ -658,27 +818,52 @@ class AdvancedSignalGenerator:
             self.prediction_history = deque(metadata.get('prediction_history', []), maxlen=100)
             self.outcome_history = deque(metadata.get('outcome_history', []), maxlen=100)
             
-            for regime in ['bull', 'bear', 'neutral', 'volatile']:
-                regime_dir = f"{self.model_dir}/{regime}"
-                if not os.path.exists(regime_dir):
-                    continue
-                
-                self.regime_models[regime] = {}
-                
-                if os.path.exists(f"{regime_dir}/imputer.pkl"):
-                    self.regime_imputers[regime] = load(f"{regime_dir}/imputer.pkl")
-                if os.path.exists(f"{regime_dir}/scaler.pkl"):
-                    self.regime_scalers[regime] = load(f"{regime_dir}/scaler.pkl")
-                
-                for name in ['rf', 'gb', 'lgb']:
-                    path = f"{regime_dir}/{name}.pkl"
-                    if os.path.exists(path):
-                        self.regime_models[regime][name] = load(path)
-                
-                if os.path.exists(f"{regime_dir}/xgb.json"):
-                    model = xgb.XGBRegressor()
-                    model.load_model(f"{regime_dir}/xgb.json")
-                    self.regime_models[regime]['xgb'] = model
+            layout = metadata.get('model_layout', 'legacy')
+            if layout == 'asset_class_regime':
+                for asset_class in [AssetClass.EQUITY.value, AssetClass.FOREX.value, AssetClass.CRYPTO.value]:
+                    for regime in ['bull', 'bear', 'neutral', 'volatile']:
+                        regime_dir = f"{self.model_dir}/{asset_class}/{regime}"
+                        if not os.path.exists(regime_dir):
+                            continue
+
+                        self.asset_class_models[asset_class][regime] = {}
+
+                        if os.path.exists(f"{regime_dir}/imputer.pkl"):
+                            self.asset_class_imputers[asset_class][regime] = load(f"{regime_dir}/imputer.pkl")
+                        if os.path.exists(f"{regime_dir}/scaler.pkl"):
+                            self.asset_class_scalers[asset_class][regime] = load(f"{regime_dir}/scaler.pkl")
+
+                        for name in ['rf', 'gb', 'lgb']:
+                            path = f"{regime_dir}/{name}.pkl"
+                            if os.path.exists(path):
+                                self.asset_class_models[asset_class][regime][name] = load(path)
+
+                        if os.path.exists(f"{regime_dir}/xgb.json"):
+                            model = xgb.XGBRegressor()
+                            model.load_model(f"{regime_dir}/xgb.json")
+                            self.asset_class_models[asset_class][regime]['xgb'] = model
+            else:
+                for regime in ['bull', 'bear', 'neutral', 'volatile']:
+                    regime_dir = f"{self.model_dir}/{regime}"
+                    if not os.path.exists(regime_dir):
+                        continue
+                    
+                    self.regime_models[regime] = {}
+                    
+                    if os.path.exists(f"{regime_dir}/imputer.pkl"):
+                        self.regime_imputers[regime] = load(f"{regime_dir}/imputer.pkl")
+                    if os.path.exists(f"{regime_dir}/scaler.pkl"):
+                        self.regime_scalers[regime] = load(f"{regime_dir}/scaler.pkl")
+                    
+                    for name in ['rf', 'gb', 'lgb']:
+                        path = f"{regime_dir}/{name}.pkl"
+                        if os.path.exists(path):
+                            self.regime_models[regime][name] = load(path)
+                    
+                    if os.path.exists(f"{regime_dir}/xgb.json"):
+                        model = xgb.XGBRegressor()
+                        model.load_model(f"{regime_dir}/xgb.json")
+                        self.regime_models[regime]['xgb'] = model
             
             self.is_trained = True
             logger.info("✅ Advanced models loaded")

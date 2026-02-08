@@ -14,6 +14,9 @@ import time
 
 logger = logging.getLogger(__name__)
 
+from core.symbols import AssetClass, parse_symbol, to_yfinance_ticker
+from config import ApexConfig
+
 try:
     import yfinance as yf
     YFINANCE_AVAILABLE = True
@@ -59,12 +62,38 @@ class MarketDataFetcher:
             time.sleep(self._min_request_interval - elapsed)
         self._last_request_time = time.time()
 
+    def _map_for_data(self, parsed):
+        """Map symbols for data providers (e.g., USDT/USDC -> USD)."""
+        data_map = getattr(ApexConfig, "DATA_PAIR_MAP", {}) or {}
+        candidates = [
+            parsed.raw,
+            parsed.normalized,
+            parsed.normalized.replace("CRYPTO:", "").replace("FX:", ""),
+        ]
+        for key in candidates:
+            if key in data_map:
+                try:
+                    return parse_symbol(data_map[key])
+                except ValueError:
+                    return parsed
+        # Fallback: map USDT/USDC to USD for data providers like yfinance
+        try:
+            if (
+                parsed.asset_class == AssetClass.CRYPTO
+                and parsed.quote in {"USDT", "USDC"}
+                and getattr(ApexConfig, "DATA_MAP_STABLECOINS_TO_USD", False)
+            ):
+                return parse_symbol(f"{parsed.base}/USD")
+        except Exception as e:
+            logger.debug("Data map stablecoin fallback failed: %s", e)
+        return parsed
+
     def get_current_price(self, symbol: str) -> float:
         """
         Get current price for a symbol with caching.
 
         Args:
-            symbol: Stock ticker symbol
+            symbol: Trading symbol
 
         Returns:
             Current price or 0.0 if unavailable
@@ -72,34 +101,45 @@ class MarketDataFetcher:
         if not YFINANCE_AVAILABLE:
             return 0.0
 
+        try:
+            parsed = parse_symbol(symbol)
+        except ValueError:
+            logger.warning(f"Invalid symbol format for price fetch: {symbol}")
+            return 0.0
+
+        parsed = self._map_for_data(parsed)
+
+        cache_key = parsed.normalized
+        yf_symbol = to_yfinance_ticker(parsed)
+
         # Check cache first
         with self._lock:
-            if symbol in self._price_cache:
-                cached_price, cached_time = self._price_cache[symbol]
+            if cache_key in self._price_cache:
+                cached_price, cached_time = self._price_cache[cache_key]
                 if (datetime.now() - cached_time).total_seconds() < self.cache_ttl:
                     return cached_price
 
         try:
             self._rate_limit()
 
-            ticker = yf.Ticker(symbol)
+            ticker = yf.Ticker(yf_symbol)
 
             # Try fast_info first (faster)
             try:
                 price = ticker.fast_info.get('lastPrice', 0)
                 if price and price > 0:
                     with self._lock:
-                        self._price_cache[symbol] = (float(price), datetime.now())
+                        self._price_cache[cache_key] = (float(price), datetime.now())
                     return float(price)
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug("Fast info price fetch failed for %s: %s", parsed.normalized, e)
 
             # Fallback to history
             hist = ticker.history(period='1d', interval='1m')
             if not hist.empty:
                 price = float(hist['Close'].iloc[-1])
                 with self._lock:
-                    self._price_cache[symbol] = (price, datetime.now())
+                    self._price_cache[cache_key] = (price, datetime.now())
                 return price
 
             # Second fallback: daily history
@@ -107,14 +147,14 @@ class MarketDataFetcher:
             if not hist.empty:
                 price = float(hist['Close'].iloc[-1])
                 with self._lock:
-                    self._price_cache[symbol] = (price, datetime.now())
+                    self._price_cache[cache_key] = (price, datetime.now())
                 return price
 
-            logger.warning(f"No price data available for {symbol}")
+            logger.warning(f"No price data available for {parsed.normalized}")
             return 0.0
 
         except Exception as e:
-            logger.debug(f"Error fetching price for {symbol}: {e}")
+            logger.debug(f"Error fetching price for {parsed.normalized}: {e}")
             return 0.0
 
     def get_prices_batch(self, symbols: List[str]) -> Dict[str, float]:
@@ -122,7 +162,7 @@ class MarketDataFetcher:
         Get current prices for multiple symbols efficiently.
 
         Args:
-            symbols: List of stock ticker symbols
+            symbols: List of trading symbols
 
         Returns:
             Dictionary of {symbol: price}
@@ -132,12 +172,24 @@ class MarketDataFetcher:
 
         prices = {}
 
+        parsed_map = {}
+        for symbol in symbols:
+            try:
+                parsed_map[symbol] = parse_symbol(symbol)
+            except ValueError:
+                logger.warning(f"Invalid symbol format for price fetch: {symbol}")
+                prices[symbol] = 0.0
+
         # Check cache first
         symbols_to_fetch = []
         for symbol in symbols:
+            if symbol not in parsed_map:
+                continue
+            parsed = parsed_map[symbol]
+            cache_key = parsed.normalized
             with self._lock:
-                if symbol in self._price_cache:
-                    cached_price, cached_time = self._price_cache[symbol]
+                if cache_key in self._price_cache:
+                    cached_price, cached_time = self._price_cache[cache_key]
                     if (datetime.now() - cached_time).total_seconds() < self.cache_ttl:
                         prices[symbol] = cached_price
                         continue
@@ -150,7 +202,8 @@ class MarketDataFetcher:
             self._rate_limit()
 
             # Batch download
-            tickers_str = ' '.join(symbols_to_fetch)
+            yf_map = {s: to_yfinance_ticker(parsed_map[s]) for s in symbols_to_fetch}
+            tickers_str = ' '.join(yf_map.values())
             data = yf.download(
                 tickers_str,
                 period='1d',
@@ -172,18 +225,20 @@ class MarketDataFetcher:
                     price = float(data['Close'].iloc[-1])
                     prices[symbol] = price
                     with self._lock:
-                        self._price_cache[symbol] = (price, datetime.now())
+                        self._price_cache[parsed_map[symbol].normalized] = (price, datetime.now())
             else:
                 for symbol in symbols_to_fetch:
                     try:
-                        if ('Close', symbol) in data.columns:
-                            price = float(data[('Close', symbol)].dropna().iloc[-1])
+                        yf_symbol = yf_map[symbol]
+                        if ('Close', yf_symbol) in data.columns:
+                            price = float(data[('Close', yf_symbol)].dropna().iloc[-1])
                             prices[symbol] = price
                             with self._lock:
-                                self._price_cache[symbol] = (price, datetime.now())
+                                self._price_cache[parsed_map[symbol].normalized] = (price, datetime.now())
                         else:
                             prices[symbol] = self.get_current_price(symbol)
-                    except Exception:
+                    except Exception as e:
+                        logger.debug("Batch price extraction failed for %s: %s", symbol, e)
                         prices[symbol] = 0.0
 
             return prices
@@ -215,7 +270,15 @@ class MarketDataFetcher:
         if not YFINANCE_AVAILABLE:
             return pd.DataFrame()
 
-        cache_key = f"{symbol}_{days}"
+        try:
+            parsed = parse_symbol(symbol)
+        except ValueError:
+            logger.warning(f"Invalid symbol format for history fetch: {symbol}")
+            return pd.DataFrame()
+
+        parsed = self._map_for_data(parsed)
+
+        cache_key = f"{parsed.normalized}_{days}"
 
         # Check cache
         if use_cache and cache_key in self._historical_cache:
@@ -228,7 +291,8 @@ class MarketDataFetcher:
         try:
             self._rate_limit()
 
-            ticker = yf.Ticker(symbol)
+            yf_symbol = to_yfinance_ticker(parsed)
+            ticker = yf.Ticker(yf_symbol)
 
             # Calculate period string
             if days <= 5:
@@ -250,7 +314,7 @@ class MarketDataFetcher:
             df = ticker.history(period=period)
 
             if df.empty:
-                logger.warning(f"No historical data for {symbol}")
+                logger.warning(f"No historical data for {parsed.normalized}")
                 return pd.DataFrame()
 
             # Standardize column names
@@ -277,7 +341,7 @@ class MarketDataFetcher:
             return df
 
         except Exception as e:
-            logger.error(f"Error fetching historical data for {symbol}: {e}")
+            logger.error(f"Error fetching historical data for {parsed.normalized}: {e}")
             return pd.DataFrame()
 
     def fetch_historical_batch(
@@ -299,6 +363,15 @@ class MarketDataFetcher:
             return {s: pd.DataFrame() for s in symbols}
 
         results = {}
+        parsed_map = {}
+        for symbol in symbols:
+            try:
+                parsed_map[symbol] = parse_symbol(symbol)
+            except ValueError:
+                logger.warning(f"Invalid symbol format for history fetch: {symbol}")
+                results[symbol] = pd.DataFrame()
+                continue
+            parsed_map[symbol] = self._map_for_data(parsed_map[symbol])
 
         try:
             self._rate_limit()
@@ -316,7 +389,11 @@ class MarketDataFetcher:
                 period = '2y'
 
             # Batch download
-            tickers_str = ' '.join(symbols)
+            yf_map = {s: to_yfinance_ticker(parsed_map[s]) for s in symbols if s in parsed_map}
+            if not yf_map:
+                return results
+
+            tickers_str = ' '.join(yf_map.values())
             data = yf.download(
                 tickers_str,
                 period=period,
@@ -333,12 +410,15 @@ class MarketDataFetcher:
 
             # Extract data for each symbol
             for symbol in symbols:
+                if symbol not in parsed_map:
+                    continue
                 try:
-                    if len(symbols) == 1:
+                    if len(yf_map) == 1:
                         df = data.copy()
                     else:
-                        if symbol in data.columns.get_level_values(0):
-                            df = data[symbol].copy()
+                        yf_symbol = yf_map[symbol]
+                        if yf_symbol in data.columns.get_level_values(0):
+                            df = data[yf_symbol].copy()
                         else:
                             results[symbol] = self.fetch_historical_data(symbol, days)
                             continue
@@ -371,7 +451,7 @@ class MarketDataFetcher:
         Get market info for a symbol.
 
         Args:
-            symbol: Stock ticker symbol
+            symbol: Trading symbol
 
         Returns:
             Dictionary with market cap, sector, industry, etc.
@@ -380,13 +460,17 @@ class MarketDataFetcher:
             return {}
 
         try:
+            parsed = parse_symbol(symbol)
+            if parsed.asset_class != AssetClass.EQUITY:
+                return {'symbol': parsed.normalized, 'sector': 'Unknown'}
+
             self._rate_limit()
-            ticker = yf.Ticker(symbol)
+            ticker = yf.Ticker(to_yfinance_ticker(parsed))
             info = ticker.info
 
             return {
-                'symbol': symbol,
-                'name': info.get('shortName', symbol),
+                'symbol': parsed.normalized,
+                'name': info.get('shortName', parsed.base),
                 'sector': info.get('sector', 'Unknown'),
                 'industry': info.get('industry', 'Unknown'),
                 'market_cap': info.get('marketCap', 0),

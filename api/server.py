@@ -10,17 +10,54 @@ import asyncio
 import logging
 from typing import Dict, List, Optional
 from pathlib import Path
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, BackgroundTasks
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, BackgroundTasks, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import json
+import math
 from datetime import datetime
 
-logger = logging.getLogger("api")
-logging.basicConfig(level=logging.INFO)
+from config import ApexConfig
+from core.logging_config import setup_logging
 
+logger = logging.getLogger("api")
+from api.auth import authenticate_websocket, require_user
+
+setup_logging(
+    level=ApexConfig.LOG_LEVEL,
+    log_file=ApexConfig.LOG_FILE,
+    json_format=False,
+    console_output=True,
+    max_bytes=ApexConfig.LOG_MAX_BYTES,
+    backup_count=ApexConfig.LOG_BACKUP_COUNT,
+)
+
+
+def _sanitize_floats(obj):
+    """Replace NaN/Inf float values with JSON-safe defaults."""
+    if isinstance(obj, float):
+        if math.isnan(obj) or math.isinf(obj):
+            return 0.0
+        return obj
+    elif isinstance(obj, dict):
+        return {k: _sanitize_floats(v) for k, v in obj.items()}
+    elif isinstance(obj, list):
+        return [_sanitize_floats(v) for v in obj]
+    return obj
 # Path to trading state file
-STATE_FILE = Path(__file__).parent.parent / "data" / "trading_state.json"
+STATE_FILE = ApexConfig.DATA_DIR / "trading_state.json"
+PRICE_CACHE_FILE = ApexConfig.DATA_DIR / "price_cache.json"
+
+
+def read_price_cache() -> Dict[str, float]:
+    """Read current price cache from file."""
+    try:
+        if PRICE_CACHE_FILE.exists():
+            with open(PRICE_CACHE_FILE, 'r') as f:
+                return json.load(f)
+    except Exception as e:
+        logger.debug(f"Error reading price cache: {e}")
+    return {}
 
 app = FastAPI(title="APEX Trading API", version="2.0.0")
 
@@ -47,8 +84,11 @@ class ConnectionManager:
         logger.info("Client connected via WebSocket")
 
     def disconnect(self, websocket: WebSocket):
-        self.active_connections.remove(websocket)
-        logger.info("Client disconnected")
+        if websocket in self.active_connections:
+            self.active_connections.remove(websocket)
+            logger.info("Client disconnected")
+        else:
+            logger.warning("Attempted to disconnect unknown websocket")
 
     async def broadcast(self, message: Dict):
         """Send message to all connected clients."""
@@ -65,17 +105,48 @@ manager = ConnectionManager()
 # --------------------------------------------------------------------------------
 
 def read_trading_state() -> Dict:
-    """Read current trading state from file."""
+    """Read current trading state from file, enriched with live prices from cache."""
     try:
         if STATE_FILE.exists():
             with open(STATE_FILE, 'r') as f:
-                return json.load(f)
+                data = json.load(f)
+
+            # Enrich positions with live prices from price cache
+            price_cache = read_price_cache()
+            positions = data.get("positions", {})
+            total_position_pnl = 0.0
+
+            for symbol, pos in positions.items():
+                live_price = price_cache.get(symbol, 0)
+                avg_price = pos.get("avg_price", 0)
+                qty = pos.get("qty", 0)
+
+                if live_price > 0 and avg_price > 0:
+                    pos["current_price"] = live_price
+                    if qty > 0:  # Long
+                        pnl = (live_price - avg_price) * qty
+                        pnl_pct = (live_price / avg_price - 1) * 100
+                    else:  # Short
+                        pnl = (avg_price - live_price) * abs(qty)
+                        pnl_pct = (avg_price / live_price - 1) * 100 if live_price > 0 else 0
+                    pos["pnl"] = round(pnl, 2)
+                    pos["pnl_pct"] = round(pnl_pct, 2)
+                    total_position_pnl += pnl
+
+            # Update total_pnl if we have position P&L data
+            if total_position_pnl != 0:
+                starting_capital = data.get("starting_capital", data.get("capital", 0))
+                if starting_capital > 0:
+                    data["total_pnl"] = round(total_position_pnl, 2)
+                    data["daily_pnl"] = round(total_position_pnl, 2)  # Approximate as daily
+
+            return _sanitize_floats(data)
     except Exception as e:
         logger.error(f"Error reading state file: {e}")
 
     # Return default state if file doesn't exist
     return {
-        "timestamp": datetime.now().isoformat(),
+        "timestamp": None,
         "capital": 0,
         "positions": {},
         "signals": {},
@@ -83,6 +154,22 @@ def read_trading_state() -> Dict:
         "total_pnl": 0,
         "sector_exposure": {}
     }
+
+def _parse_timestamp(ts: Optional[str]) -> Optional[datetime]:
+    if not ts:
+        return None
+    try:
+        return datetime.fromisoformat(ts.replace("Z", "+00:00"))
+    except Exception:
+        return None
+
+def _state_is_fresh(state: Dict, threshold_seconds: int) -> bool:
+    ts = _parse_timestamp(state.get("timestamp"))
+    if not ts:
+        return False
+    now = datetime.now(ts.tzinfo) if ts.tzinfo else datetime.utcnow()
+    age = (now - ts).total_seconds()
+    return age <= threshold_seconds
 
 # --------------------------------------------------------------------------------
 # Real-time State Streaming
@@ -134,7 +221,7 @@ async def startup_event():
 async def get_status():
     state = read_trading_state()
     return {
-        "status": "online" if state.get("timestamp") else "offline",
+        "status": "online" if _state_is_fresh(state, ApexConfig.HEALTH_STALENESS_SECONDS) else "offline",
         "timestamp": state.get("timestamp"),
         "capital": state.get("capital", 0),
         "starting_capital": state.get("starting_capital", 0),
@@ -169,9 +256,20 @@ async def get_positions():
     return result
 
 @app.get("/state")
-async def get_full_state():
+async def get_full_state(user=Depends(require_user)):
     """Get complete trading state."""
     return read_trading_state()
+
+@app.get("/health")
+async def get_health(user=Depends(require_user)):
+    """Lightweight health check (auth required)."""
+    state = read_trading_state()
+    return {
+        "status": "online" if _state_is_fresh(state, ApexConfig.HEALTH_STALENESS_SECONDS) else "offline",
+        "timestamp": state.get("timestamp"),
+        "stale_after_seconds": ApexConfig.HEALTH_STALENESS_SECONDS,
+        "api": "ok",
+    }
 
 @app.get("/sectors")
 async def get_sector_exposure():
@@ -185,6 +283,10 @@ async def get_sector_exposure():
 
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):
+    user = await authenticate_websocket(websocket)
+    if not user:
+        await websocket.close(code=1008)
+        return
     await manager.connect(websocket)
     try:
         # Send current state immediately on connect

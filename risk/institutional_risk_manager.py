@@ -267,8 +267,10 @@ class InstitutionalRiskManager:
         base_shares = int(base_value / price) if price > 0 else 0
 
         # 2. SIGNAL-ADJUSTED SIZE
-        # Scale by signal strength and confidence
-        signal_factor = abs(signal_strength) * signal_confidence
+        # Scale by signal strength and confidence with a floor
+        # Use sqrt to avoid crushing small signals: signal=0.35,conf=0.40 → 0.62 instead of 0.14
+        signal_factor = np.sqrt(abs(signal_strength) * signal_confidence)
+        signal_factor = max(signal_factor, 0.5)  # Floor at 50% of base size
         signal_adjusted_value = base_value * signal_factor
 
         # 3. VOLATILITY ADJUSTMENT

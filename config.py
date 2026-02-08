@@ -43,21 +43,100 @@ class ApexConfig:
     IBKR_PORT: int = int(os.getenv("APEX_IBKR_PORT", "7497"))  # 7497 = Paper, 7496 = Live
     import random
     IBKR_CLIENT_ID: int = int(os.getenv("APEX_IBKR_CLIENT_ID", str(random.randint(10, 99))))
+    IBKR_FX_EXCHANGE: str = os.getenv("APEX_IBKR_FX_EXCHANGE", "IDEALPRO")
+    IBKR_CRYPTO_EXCHANGE: str = os.getenv("APEX_IBKR_CRYPTO_EXCHANGE", "PAXOS")
+
+    # ═══════════════════════════════════════════════════════════════
+    # FX/CRYPTO PAPER TRADING TUNING (OPTIMIZE FOR OBSERVABILITY)
+    # ═══════════════════════════════════════════════════════════════
+    # Set True for strict live-style checks. Keep False for paper.
+    STRICT_IBKR_LIVE_RULES: bool = os.getenv("APEX_STRICT_IBKR_LIVE_RULES", "false").lower() == "true"
+
+    # Optional mapping to make IBKR paper trading compatible with backtest pairs
+    # (keys/values are slash pairs; prefixes are allowed but not required)
+    IBKR_USE_PAIR_MAP: bool = os.getenv("APEX_IBKR_USE_PAIR_MAP", "true").lower() == "true"
+    IBKR_PAIR_MAP = {
+        "BTC/USDT": "BTC/USD",
+        "ETH/USDC": "ETH/USD",
+    }
+    # Optional data provider mapping (e.g., yfinance lacks USDT/USDC pairs)
+    DATA_PAIR_MAP = {
+        "BTC/USDT": "BTC/USD",
+        "ETH/USDT": "ETH/USD",
+        "BTC/USDC": "BTC/USD",
+        "ETH/USDC": "ETH/USD",
+        "SOL/USDT": "SOL/USD",
+        "DOGE/USDT": "DOGE/USD",
+    }
+    # ✅ NEW: If a crypto pair uses USDT/USDC and no explicit mapping exists,
+    # map it to USD for data providers that lack stablecoin quotes.
+    DATA_MAP_STABLECOINS_TO_USD: bool = os.getenv(
+        "APEX_DATA_MAP_STABLECOINS_TO_USD", "true"
+    ).lower() == "true"
+
+    # Typical minimums (paper: warn only; live: enforce if STRICT_IBKR_LIVE_RULES=True)
+    IBKR_MIN_FX_NOTIONAL = float(os.getenv("APEX_IBKR_MIN_FX_NOTIONAL", "1000"))
+    IBKR_MIN_CRYPTO_NOTIONAL = float(os.getenv("APEX_IBKR_MIN_CRYPTO_NOTIONAL", "10"))
+
+    # Fee model knobs for backtests and estimates (tune for sensitivity analysis)
+    FX_SPREAD_BPS = float(os.getenv("APEX_FX_SPREAD_BPS", "1.5"))  # typical tight spread
+    FX_COMMISSION_BPS = float(os.getenv("APEX_FX_COMMISSION_BPS", "0.2"))
+    CRYPTO_SPREAD_BPS = float(os.getenv("APEX_CRYPTO_SPREAD_BPS", "5.0"))
+    CRYPTO_COMMISSION_BPS = float(os.getenv("APEX_CRYPTO_COMMISSION_BPS", "15.0"))  # 0.15%
+
+    # IBKR pacing (requests per second, for paper-safe throttling)
+    IBKR_MAX_REQ_PER_SEC = float(os.getenv("APEX_IBKR_MAX_REQ_PER_SEC", "6"))
+
+    # Market hours overrides (set for stress tests)
+    MARKET_ALWAYS_OPEN: bool = os.getenv("APEX_MARKET_ALWAYS_OPEN", "false").lower() == "true"
+    FX_ALWAYS_OPEN: bool = os.getenv("APEX_FX_ALWAYS_OPEN", "false").lower() == "true"
+    CRYPTO_ALWAYS_OPEN: bool = os.getenv("APEX_CRYPTO_ALWAYS_OPEN", "false").lower() == "true"
+    CUSTOM_MARKET_SESSIONS = {
+        # Example:
+        # "FOREX": {"timezone": "America/New_York", "open": "17:00", "close": "17:00", "weekdays": [0,1,2,3,4,6]},
+        # "EQUITY": {"timezone": "America/New_York", "open": "09:30", "close": "16:00", "weekdays": [0,1,2,3,4]},
+    }
+    USE_DATA_FALLBACK_FOR_PRICES: bool = os.getenv("APEX_USE_DATA_FALLBACK_FOR_PRICES", "true").lower() == "true"
+    # ✅ NEW (Paper-safe): Allow offline IBKR mode when connection fails
+    IBKR_ALLOW_OFFLINE: bool = os.getenv("APEX_IBKR_ALLOW_OFFLINE", "false").lower() == "true"
+    # ✅ NEW (Observability): Prefer data-provider fallback when market is closed (weekends)
+    PRICE_FALLBACK_WHEN_MARKET_CLOSED: bool = os.getenv("APEX_PRICE_FALLBACK_WHEN_MARKET_CLOSED", "true").lower() == "true"
+    # ✅ NEW (Paper-safe): Toggle Data Watchdog (disable when running offline)
+    DATA_WATCHDOG_ENABLED: bool = os.getenv("APEX_DATA_WATCHDOG_ENABLED", "true").lower() == "true"
+
+    # ═══════════════════════════════════════════════════════════════
+    # ALPACA CONNECTION (Crypto Paper Trading)
+    # ═══════════════════════════════════════════════════════════════
+    ALPACA_API_KEY: str = os.getenv("APEX_ALPACA_API_KEY", "")
+    ALPACA_SECRET_KEY: str = os.getenv("APEX_ALPACA_SECRET_KEY", "")
+    ALPACA_BASE_URL: str = os.getenv(
+        "APEX_ALPACA_BASE_URL", "https://paper-api.alpaca.markets"
+    )
+    ALPACA_ALLOW_OFFLINE: bool = (
+        os.getenv("APEX_ALPACA_ALLOW_OFFLINE", "false").lower() == "true"
+    )
+
+    # Broker selection: "ibkr" | "alpaca" | "both"
+    #   ibkr    = IBKR only
+    #   alpaca  = Alpaca only (crypto paper trading)
+    #   both    = IBKR for equities/forex, Alpaca for crypto (default)
+    BROKER_MODE: str = os.getenv("APEX_BROKER_MODE", "both")
 
     # ═══════════════════════════════════════════════════════════════
     # CAPITAL & POSITION SIZING
     # ═══════════════════════════════════════════════════════════════
     INITIAL_CAPITAL: int = int(os.getenv("APEX_INITIAL_CAPITAL", "1100000"))
-    POSITION_SIZE_USD = 5_000  # $5K per position (0.45% of capital)
-    MAX_POSITIONS = 30  # Maximum concurrent positions
-    MAX_SHARES_PER_POSITION = 200  # ✅ NEW: Cap max shares per position
+    POSITION_SIZE_USD = 20_000  # $20K per position (~1.8% of capital)
+    MAX_POSITIONS = 40  # Increased from 15 for better capital utilization
+    MAX_SHARES_PER_POSITION = 500  # Cap max shares per position
+    MIN_HEDGE_NOTIONAL = 50_000  # Only hedge positions larger than $50k to save on costs
     
     # ═══════════════════════════════════════════════════════════════
     # RISK LIMITS
     # ═══════════════════════════════════════════════════════════════
     MAX_DAILY_LOSS = 0.03  # 3% max daily loss (Moderate risk profile)
     MAX_DRAWDOWN = 0.10  # 10% max drawdown
-    MAX_SECTOR_EXPOSURE = 0.40  # 40% max per sector
+    MAX_SECTOR_EXPOSURE = 0.20  # 20% max per sector for proper diversification (was 0.50)
 
     # ═══════════════════════════════════════════════════════════════
     # CIRCUIT BREAKER (Automatic Trading Halt)
@@ -86,30 +165,42 @@ class ApexConfig:
     IBKR_CONNECTION_TIMEOUT = 30  # Connection timeout in seconds
     
     # ═══════════════════════════════════════════════════════════════
-    # SIGNAL THRESHOLDS (BALANCED - Quality + Activity)
+    # SIGNAL THRESHOLDS (QUALITY FOCUS - Reduced noise)    # ML Configuration
     # ═══════════════════════════════════════════════════════════════
-    MIN_SIGNAL_THRESHOLD = 0.30  # Active - let more signals through
-    MIN_CONFIDENCE = 0.30  # Allow more trades through
+    MIN_SIGNAL_THRESHOLD = 0.25      # Tighter threshold (was 0.15)
+    MIN_CONFIDENCE = 0.35            # Higher confidence required (was 0.20)
+    FORCE_RETRAIN = False            # Set to True to force model retraining on startup
 
-    # Regime-based entry thresholds (balanced for activity)
+    # Regime-based entry thresholds (High filter)
     SIGNAL_THRESHOLDS_BY_REGIME = {
-        'strong_bull': 0.25,    # Easy entry in strong trends - ride the wave
-        'bull': 0.28,
-        'neutral': 0.32,        # Most common regime - keep it active
-        'bear': 0.30,
-        'strong_bear': 0.28,
-        'high_volatility': 0.35  # Tighter but not prohibitive (only truly volatile stocks reach this regime)
+        'strong_bull': 0.20,    # Raised from 0.12
+        'bull': 0.23,          # Raised from 0.15
+        'neutral': 0.28,       # Raised from 0.18
+        'bear': 0.25,          # Raised from 0.15
+        'strong_bear': 0.22,   # Raised from 0.13
+        'volatile': 0.30       # New explicit threshold
+    }
+
+    # Exit signal hysteresis (separate from entry threshold)
+    SIGNAL_EXIT_BASE = 0.15
+
+    # Regime-conditional consensus weights (per generator name)
+    CONSENSUS_REGIME_WEIGHTS = {
+        "bull": {"institutional": 1.1, "god_level": 1.0, "advanced": 0.9},
+        "bear": {"institutional": 1.0, "god_level": 1.1, "advanced": 0.9},
+        "neutral": {"institutional": 1.0, "god_level": 1.0, "advanced": 1.0},
+        "volatile": {"institutional": 0.9, "god_level": 1.1, "advanced": 1.0},
     }
 
     # Signal Quality Filters (relaxed for more activity)
-    MIN_MODEL_AGREEMENT = 0.50      # 50% agreement is enough
-    MIN_EXPECTED_RETURN = 0.003     # 0.3% expected return (lower bar)
+    MIN_MODEL_AGREEMENT = 0.50      # 50% agreement (majority rule)
+    MIN_EXPECTED_RETURN = 0.003     # 0.3% expected return minimum
     VOLUME_CONFIRMATION = True      # Keep volume confirmation
-    VOLUME_THRESHOLD_MULTIPLE = 1.0 # Volume just needs to be at average
+    VOLUME_THRESHOLD_MULTIPLE = 0.6 # Volume at 60% of average
 
-    # Multi-timeframe confirmation (relaxed)
-    REQUIRE_MTF_CONFIRMATION = True
-    MTF_AGREEMENT_THRESHOLD = 0.50   # 50% of timeframes agree
+    # Multi-timeframe confirmation
+    REQUIRE_MTF_CONFIRMATION = False  # Disabled - was killing too many valid signals
+    MTF_AGREEMENT_THRESHOLD = 0.35   # Lower if re-enabled
 
     # VIX-based signal filtering
     VIX_FILTER_ENABLED = True
@@ -121,11 +212,11 @@ class ApexConfig:
     # GOD LEVEL PARAMETERS (Moderate Risk Profile)
     # ═══════════════════════════════════════════════════════════════
     # Position Sizing (ATR-based)
-    ATR_MULTIPLIER_STOP = 2.0  # Stop loss = ATR * this multiplier (Moderate)
-    ATR_MULTIPLIER_PROFIT = 3.0  # Take profit = ATR * this multiplier (Moderate)
-    TRAILING_STOP_ATR = 2.0  # Trailing stop = ATR * this multiplier (Moderate)
+    ATR_MULTIPLIER_STOP = 2.5  # Stop loss = ATR * this multiplier (wider room)
+    ATR_MULTIPLIER_PROFIT = 4.0  # Take profit = ATR * this multiplier (let winners run)
+    TRAILING_STOP_ATR = 2.5  # Trailing stop = ATR * this multiplier (avoid whipsaws)
     USE_KELLY_SIZING = True  # Use Kelly criterion for position sizing
-    KELLY_FRACTION = 0.4  # Kelly fraction (Moderate - 60%)
+    KELLY_FRACTION = 0.5  # Kelly fraction (50% - slightly more aggressive)
 
     # Enable advanced risk features
     USE_ATR_STOPS = True  # Use dynamic ATR-based stops instead of fixed percentages
@@ -137,6 +228,125 @@ class ApexConfig:
     REGIME_BULL_THRESHOLD = 0.05  # MA crossover threshold for bull regime
     REGIME_BEAR_THRESHOLD = -0.05  # MA crossover threshold for bear regime
     HIGH_VOL_THRESHOLD = 0.35  # Annualized volatility threshold for high-vol regime
+
+    # ═══════════════════════════════════════════════════════════════
+    # SIGNAL FORTRESS (Multi-Layer Signal Hardening)
+    # ═══════════════════════════════════════════════════════════════
+
+    # Signal Consensus Engine
+    USE_CONSENSUS_ENGINE = True        # Run multiple generators and require agreement
+    MIN_CONSENSUS_AGREEMENT = 0.60     # Min fraction of generators agreeing on direction
+    MIN_CONVICTION_SCORE = 30          # Min conviction (0-100) to allow trade
+
+    # Adaptive Regime Detection
+    USE_ADAPTIVE_REGIME = True         # Use probability-based regime detector
+    REGIME_SMOOTHING_ALPHA = 0.15      # EMA alpha for smooth regime transitions
+    MIN_REGIME_DURATION_DAYS = 3       # Min days before allowing regime switch
+
+    # Signal Integrity Monitor
+    SIGNAL_INTEGRITY_ENABLED = True    # Monitor signal stream for anomalies
+    STUCK_SIGNAL_THRESHOLD = 10        # Alert after N identical signals
+    KL_DIVERGENCE_THRESHOLD = 0.5      # Distribution shift detection sensitivity
+
+    # Outcome Feedback Loop
+    AUTO_RETRAIN_ENABLED = True        # Auto-retrain on performance degradation
+    RETRAIN_ACCURACY_THRESHOLD = 0.45  # Retrain if accuracy drops below
+    RETRAIN_SHARPE_THRESHOLD = 0.5     # Retrain if Sharpe drops below
+
+    # Adaptive Thresholds
+    ADAPTIVE_THRESHOLDS_ENABLED = True # Per-symbol threshold optimization
+    THRESHOLD_MIN_SIGNALS = 30         # Min signals before symbol optimization
+    THRESHOLD_OPTIMIZATION_INTERVAL_HOURS = 24  # Hours between re-optimization
+
+    # ═══════════════════════════════════════════════════════════════
+    # SIGNAL FORTRESS PHASE 2 (Indestructible Shield)
+    # ═══════════════════════════════════════════════════════════════
+
+    # Black Swan Guard - Real-time crash detection
+    BLACK_SWAN_GUARD_ENABLED = True
+    CRASH_VELOCITY_THRESHOLD_10M = 0.02   # 2% drop in 10 min = ELEVATED
+    CRASH_VELOCITY_THRESHOLD_30M = 0.04   # 4% drop in 30 min = SEVERE
+    VIX_SPIKE_ELEVATED = 0.30             # 30% VIX increase = ELEVATED
+    VIX_SPIKE_SEVERE = 0.50               # 50% VIX increase = SEVERE
+    CORRELATION_CRISIS_THRESHOLD = 0.85   # Avg correlation for crisis
+
+    # Signal Decay Shield - Time-decay & staleness guard
+    SIGNAL_DECAY_ENABLED = True
+    MAX_PRICE_AGE_SECONDS = 120           # 2 minutes max for price data
+    MAX_SENTIMENT_AGE_SECONDS = 1800      # 30 minutes max for sentiment
+    MAX_FEATURE_AGE_SECONDS = 14400       # 4 hours max for features
+
+    # Exit Quality Guard - Exit signal validation
+    EXIT_QUALITY_GUARD_ENABLED = True
+    EXIT_MIN_CONFIDENCE = 0.30            # Min confidence for signal-based exits
+    EXIT_MAX_RETRY_ATTEMPTS = 20          # Never give up (was 5)
+    EXIT_BACKOFF_BASE_SECONDS = 30        # Exponential backoff base
+    EXIT_HARD_STOP_PNL = -0.03            # -3% hard stop bypasses validation
+
+    # Correlation Cascade Breaker - Portfolio correlation shield
+    CORRELATION_CASCADE_ENABLED = True
+    CORRELATION_ELEVATED_THRESHOLD = 0.40
+    CORRELATION_HERDING_THRESHOLD = 0.60
+    CORRELATION_CRISIS_THRESHOLD_PORT = 0.80
+
+    # Drawdown Cascade Breaker - 5-tier drawdown response
+    DRAWDOWN_CASCADE_ENABLED = True
+    DRAWDOWN_TIER_1 = 0.02               # 2% = Caution (75% sizing)
+    DRAWDOWN_TIER_2 = 0.04               # 4% = Defensive (50% sizing)
+    DRAWDOWN_TIER_3 = 0.06               # 6% = Survival (25% sizing)
+    DRAWDOWN_TIER_4 = 0.08               # 8% = Emergency (close all)
+    DRAWDOWN_VELOCITY_JUMP = 0.01        # 1%/day = jump up one tier
+
+    # Execution Shield - Smart execution wrapper
+    EXECUTION_SHIELD_ENABLED = True
+    EXECUTION_TWAP_THRESHOLD = 50000     # $50K+ uses TWAP
+    EXECUTION_VWAP_THRESHOLD = 200000    # $200K+ uses VWAP
+    MAX_ACCEPTABLE_SLIPPAGE_BPS = 15     # Flag symbols with avg slippage > 15bps
+    CRITICAL_SLIPPAGE_BPS = 30           # Reduce size 20% above this
+
+    # ═══════════════════════════════════════════════════════════════
+    # SIGNAL FORTRESS PHASE 4 (Macro & Event Risk)
+    # ═══════════════════════════════════════════════════════════════
+    
+    # Macro Shield - Economic Event Protection
+    MACRO_SHIELD_ENABLED = True
+    MACRO_BLACKOUT_MINUTES_BEFORE = 60    # Stop entries 60 min before event
+    MACRO_BLACKOUT_MINUTES_AFTER = 30     # Resume 30 min after event
+    GAME_OVER_LOSS_THRESHOLD = 0.05       # 5% daily loss = Immediate Shutdown
+
+    # ═══════════════════════════════════════════════════════════════
+    # SIGNAL FORTRESS PHASE 3 (Autonomous Money Machine)
+    # ═══════════════════════════════════════════════════════════════
+
+    # Overnight Risk Guard - Gap protection
+    OVERNIGHT_GUARD_ENABLED = True
+    OVERNIGHT_NO_ENTRY_MINUTES = 30       # No entries in last 30 min
+    OVERNIGHT_REDUCE_MINUTES = 60         # Start reducing exposure in last 60 min
+    OVERNIGHT_MAX_VAR_PCT = 2.0           # Max 2% overnight VaR
+    OVERNIGHT_HIGH_VIX_REDUCTION = 0.20   # 20% additional reduction when VIX > 25
+
+    # Profit Ratchet - Progressive trailing stops
+    PROFIT_RATCHET_ENABLED = True
+    PROFIT_TIER_1 = 0.02                  # 2% gain = lock 50%
+    PROFIT_TIER_2 = 0.05                  # 5% gain = lock 70%
+    PROFIT_TIER_3 = 0.10                  # 10% gain = lock 80%
+    PROFIT_TIER_4 = 0.20                  # 20% gain = lock 85%
+    PROFIT_INITIAL_TRAILING = 0.03        # 3% initial trailing stop
+
+    # Liquidity Guard - Illiquid condition detection
+    LIQUIDITY_GUARD_ENABLED = True
+    LIQUIDITY_THIN_SPREAD = 0.001         # 0.1% spread = THIN
+    LIQUIDITY_STRESSED_SPREAD = 0.003     # 0.3% spread = STRESSED
+    LIQUIDITY_CRISIS_SPREAD = 0.005       # 0.5% spread = CRISIS
+    LIQUIDITY_MIN_DOLLAR_VOLUME = 1000000 # $1M min daily volume
+
+    # Position Aging Manager - Time-based exits
+    AGING_MANAGER_ENABLED = True
+    AGING_MAX_DAYS = 30                   # Force exit after 30 days
+    AGING_STALE_DAYS = 15                 # Position becomes stale
+    AGING_CRITICAL_DAYS = 20              # Position becomes critical
+    AGING_STALE_MIN_PNL = 0.0             # Stale positions must be profitable
+    AGING_CRITICAL_MIN_PNL = 0.02         # Critical positions need 2%+ P&L
 
     # ═══════════════════════════════════════════════════════════════
     # OPTIONS TRADING CONFIGURATION
@@ -205,12 +415,25 @@ class ApexConfig:
     # ═══════════════════════════════════════════════════════════════
     COMMISSION_PER_TRADE = 1.00  # ✅ NEW: $1 per trade (IBKR Pro)
     SLIPPAGE_BPS = 5  # 5 basis points slippage (0.05%)
+
+    # Advanced model training controls
+    ADV_LABEL_VOL_LOOKBACK = int(os.getenv("APEX_ADV_LABEL_VOL_LOOKBACK", "20"))
+    ADV_LABEL_VOL_CLIP = float(os.getenv("APEX_ADV_LABEL_VOL_CLIP", "6.0"))
+    ADV_CROSS_SECTIONAL_NORM = os.getenv("APEX_ADV_CROSS_SECTIONAL_NORM", "true").lower() == "true"
+    ADV_PURGE_DAYS = int(os.getenv("APEX_ADV_PURGE_DAYS", "5"))
+    ADV_EMBARGO_DAYS = int(os.getenv("APEX_ADV_EMBARGO_DAYS", "2"))
     
     # ═══════════════════════════════════════════════════════════════
     # LOGGING
     # ═══════════════════════════════════════════════════════════════
     LOG_LEVEL = "INFO"  # DEBUG, INFO, WARNING, ERROR, CRITICAL
     LOG_FILE = "logs/apex.log"
+    # ✅ NEW: Log rotation controls (bytes)
+    LOG_MAX_BYTES = int(os.getenv("APEX_LOG_MAX_BYTES", str(5 * 1024 * 1024)))  # 5MB
+    LOG_BACKUP_COUNT = int(os.getenv("APEX_LOG_BACKUP_COUNT", "5"))
+
+    # Health check staleness (seconds). Mark backend offline if state is older than this.
+    HEALTH_STALENESS_SECONDS = int(os.getenv("APEX_HEALTH_STALENESS_SECONDS", "30"))
     
     # ═══════════════════════════════════════════════════════════════
     # UNIVERSE SELECTION
@@ -248,8 +471,16 @@ class ApexConfig:
         "AMT", "PLD", "CCI", "EQIX", "PSA", "NEE", "DUK", "SO", "D", "AEP",
 
         # ETFs & Commodities (removed duplicate CRM, AMAT)
-        "SPY", "QQQ", "IWM", "GLD", "SLV", "USO", "UNG", "PALL"
+        "SPY", "QQQ", "IWM", "GLD", "SLV", "USO", "UNG", "PALL",
+
+        # FX Majors (BASE/QUOTE)
+        "EUR/USD", "GBP/USD", "USD/JPY", "GBP/JPY", "AUD/USD", "USD/CHF",
+
+        # Crypto (BASE/QUOTE)
+        "BTC/USDT", "ETH/USDC", "SOL/USDT", "DOGE/USDT"
     ]
+    # Backtesting-only symbols (kept in universe, excluded from IBKR paper execution)
+    BACKTEST_ONLY_SYMBOLS = {"SOL/USDT", "DOGE/USDT"}
 
     # Commodity symbols for special handling
     COMMODITY_SYMBOLS = {'GLD', 'SLV', 'USO', 'UNG', 'PALL'}
@@ -401,9 +632,9 @@ def validate_config() -> bool:
             f"⚠️  Position size (${ApexConfig.POSITION_SIZE_USD:,}) > 5% of capital"
         )
 
-    if ApexConfig.MIN_SIGNAL_THRESHOLD < 0.3:
+    if ApexConfig.MIN_SIGNAL_THRESHOLD < 0.15:
         warnings.append(
-            f"⚠️  Signal threshold ({ApexConfig.MIN_SIGNAL_THRESHOLD}) is low - risk of false signals"
+            f"⚠️  Signal threshold ({ApexConfig.MIN_SIGNAL_THRESHOLD}) is very low - risk of false signals"
         )
 
     if ApexConfig.TRADE_COOLDOWN_SECONDS < 60:

@@ -24,6 +24,8 @@ from dataclasses import dataclass
 from enum import Enum
 import logging
 
+from config import ApexConfig
+
 logger = logging.getLogger(__name__)
 
 
@@ -62,12 +64,12 @@ class DynamicExitManager:
     """
 
     # Base parameters (will be adjusted dynamically)
-    BASE_STOP_LOSS_PCT = 0.04          # 4% base stop - reasonable room
-    BASE_TAKE_PROFIT_PCT = 0.08        # 8% base target - achievable
-    BASE_TRAILING_ACTIVATION = 0.04   # Activate trailing at 4% gain
-    BASE_TRAILING_DISTANCE = 0.025    # 2.5% trailing distance - give room to breathe
-    BASE_MAX_HOLD_DAYS = 21           # 3 weeks base hold - give trades time to work
-    BASE_SIGNAL_EXIT = 0.15           # Low bar - only exit on signal decay if signal truly dies
+    BASE_STOP_LOSS_PCT = 0.03          # 3% stop - cut losers faster
+    BASE_TAKE_PROFIT_PCT = 0.06        # 6% target - lock in profits (2:1 R/R)
+    BASE_TRAILING_ACTIVATION = 0.025  # Activate trailing at 2.5% gain
+    BASE_TRAILING_DISTANCE = 0.02     # 2% trailing distance - tighter protection
+    BASE_MAX_HOLD_DAYS = 14           # 2 weeks max hold - force stale cleanup
+    BASE_SIGNAL_EXIT = 0.15           # More sensitive to signal decay
 
     # Regime multipliers
     REGIME_ADJUSTMENTS = {
@@ -111,6 +113,7 @@ class DynamicExitManager:
 
     def __init__(self):
         self.position_history: Dict[str, list] = {}  # Track P&L trajectory
+        self.base_signal_exit = getattr(ApexConfig, "SIGNAL_EXIT_BASE", self.BASE_SIGNAL_EXIT)
         logger.info("DynamicExitManager initialized")
 
     def calculate_exit_levels(
@@ -152,7 +155,7 @@ class DynamicExitManager:
         trail_activation = self.BASE_TRAILING_ACTIVATION
         trail_distance = self.BASE_TRAILING_DISTANCE
         max_hold = self.BASE_MAX_HOLD_DAYS
-        signal_exit = self.BASE_SIGNAL_EXIT
+        signal_exit = self.base_signal_exit
 
         # Calculate current P&L
         if side == 'LONG':
@@ -225,34 +228,34 @@ class DynamicExitManager:
             max_hold = int(max_hold * 0.8)
 
         # === 5. P&L TRAJECTORY ADJUSTMENTS ===
-        if pnl_pct > 0.10:
-            # Winning 10%+ - protect with tight trailing, but let it run
-            trail_activation = 0.03
+        if pnl_pct > 0.06:
+            # Winning 6%+ - protect with tight trailing
+            trail_activation = 0.02
             trail_distance *= 0.7
             # IMPORTANT: Don't exit winners on signal decay
             signal_exit = 0.0  # Disable signal-based exit for big winners
-        elif pnl_pct > 0.05:
-            # Winning 5%+ - activate trailing but give room
-            trail_activation = 0.03
+        elif pnl_pct > 0.03:
+            # Winning 3%+ - activate trailing but give room
+            trail_activation = 0.02
             trail_distance *= 0.85
             signal_exit *= 0.5  # Much less sensitive to signal decay on winners
-        elif pnl_pct > 0.02:
+        elif pnl_pct > 0.015:
             # Small winner - be patient, let it grow
             signal_exit *= 0.7  # Less sensitive
-        elif pnl_pct < -0.03:
-            # Losing more than 3% - tighten
+        elif pnl_pct < -0.02:
+            # Losing more than 2% - tighten
             signal_exit *= 1.3
-            max_hold = min(max_hold, 10)
+            max_hold = min(max_hold, 7)
 
         # === 6. TIME DECAY ADJUSTMENTS ===
-        # Only apply time decay to LOSING or flat positions
-        if holding_days >= 7 and pnl_pct <= 0.01:
-            # Stale losing/flat position - start tightening
-            decay_factor = max(0.5, 1 - (holding_days - 7) / max_hold * 0.4)
+        # Only apply time decay to LOSING positions
+        if holding_days >= 7 and pnl_pct < -0.01:
+            # Stale losing position - start tightening
+            decay_factor = max(0.6, 1 - (holding_days - 7) / max_hold * 0.3)
             signal_exit *= (1 / decay_factor)
 
-        if holding_days >= 14 and pnl_pct <= 0:
-            # 2 weeks with no profit - lower expectations
+        if holding_days >= 10 and pnl_pct < -0.02:
+            # 10 days with significant loss - lower expectations
             target_pct *= 0.8
 
         if holding_days >= max_hold * 0.9:
@@ -264,8 +267,8 @@ class DynamicExitManager:
         signal_reversed = (entry_signal > 0 and current_signal < -0.3) or \
                          (entry_signal < 0 and current_signal > 0.3)
 
-        if signal_reversed and pnl_pct < 0:
-            signal_exit *= 0.6  # Very sensitive when signal flips AND losing
+        if signal_reversed and pnl_pct < 0.005:  # Trigger earlier than 0%
+            signal_exit *= 0.5  # Much more sensitive when signal flips AND losing or barely winning
 
         # === DETERMINE EXIT URGENCY ===
         urgency = ExitUrgency.HOLD
@@ -389,20 +392,20 @@ class DynamicExitManager:
         if side == 'SHORT' and current_signal > 0.50 and confidence > 0.40 and pnl_pct < 0.03:
             return True, f"Strong bullish reversal: {current_signal:+.2f}", ExitUrgency.HIGH
 
-        # Moderate reversal + losing - cut losses
-        if side == 'LONG' and current_signal < -0.30 and pnl_pct < -0.01:
+        # Moderate reversal + losing - cut losses fast
+        if side == 'LONG' and current_signal < -0.30 and pnl_pct < 0.0:
             return True, f"Bearish on loser: {current_signal:+.2f}, P&L={pnl_pct*100:+.1f}%", ExitUrgency.HIGH
 
-        if side == 'SHORT' and current_signal > 0.30 and pnl_pct < -0.01:
+        if side == 'SHORT' and current_signal > 0.30 and pnl_pct < 0.0:
             return True, f"Bullish on loser: {current_signal:+.2f}, P&L={pnl_pct*100:+.1f}%", ExitUrgency.HIGH
 
-        # Signal decay - ONLY on losing/flat positions after sufficient hold time
-        if holding_days >= 5 and pnl_pct <= 0.01:
+        # Signal decay - ONLY on losing positions after extended hold time
+        if holding_days >= 5 and pnl_pct < -0.01:
             if side == 'LONG' and current_signal < levels.signal_exit_threshold:
-                return True, f"Signal decay on flat/loser: {current_signal:+.2f} after {holding_days}d", ExitUrgency.MODERATE
+                return True, f"Signal decay on loser: {current_signal:+.2f} after {holding_days}d", ExitUrgency.MODERATE
 
             if side == 'SHORT' and current_signal > -levels.signal_exit_threshold:
-                return True, f"Signal decay on flat/loser: {current_signal:+.2f} after {holding_days}d", ExitUrgency.MODERATE
+                return True, f"Signal decay on loser: {current_signal:+.2f} after {holding_days}d", ExitUrgency.MODERATE
 
         # WINNERS: Only exit via trailing stop or take profit (handled above)
         # Don't exit winners on signal decay - let the trailing stop do its job

@@ -21,6 +21,9 @@ from datetime import datetime
 
 logger = logging.getLogger(__name__)
 
+from core.symbols import AssetClass, KNOWN_CRYPTO_ASSETS, parse_symbol
+from config import ApexConfig
+
 
 class ValidationSeverity(Enum):
     """Severity levels for validation issues."""
@@ -145,14 +148,15 @@ class SymbolValidator:
             result.add_error("symbol", "Symbol cannot be empty")
             return result
 
-        # Length check
-        if len(symbol) > 10:
-            result.add_error("symbol", f"Symbol too long: {len(symbol)} chars (max 10)")
+        # Length check (allow prefixes like FX: and CRYPTO:)
+        if len(symbol) > 20:
+            result.add_error("symbol", f"Symbol too long: {len(symbol)} chars (max 20)")
             return result
 
-        # Pattern check
-        pattern = cls.EXTENDED_PATTERN if allow_extended else cls.SYMBOL_PATTERN
-        if not pattern.match(symbol):
+        # Parse multi-asset symbols
+        try:
+            parsed = parse_symbol(symbol)
+        except ValueError:
             result.add_error(
                 "symbol",
                 f"Invalid symbol format: {symbol}",
@@ -160,20 +164,39 @@ class SymbolValidator:
             )
             return result
 
+        result.validated_value = parsed.normalized
+
+        # Pattern check for equities only
+        if parsed.asset_class == AssetClass.EQUITY:
+            pattern = cls.EXTENDED_PATTERN if allow_extended else cls.SYMBOL_PATTERN
+            if not pattern.match(parsed.base):
+                result.add_error(
+                    "symbol",
+                    f"Invalid symbol format: {symbol}",
+                    code="INVALID_FORMAT"
+                )
+                return result
+
         # Check against known invalid symbols
-        if check_known and symbol in INVALID_SYMBOLS:
+        if check_known and parsed.asset_class == AssetClass.EQUITY and parsed.base in INVALID_SYMBOLS:
             result.add_error(
                 "symbol",
-                f"Symbol is invalid or delisted: {symbol}",
+                f"Symbol is invalid or delisted: {parsed.base}",
                 code="DELISTED"
             )
 
         # Warnings for unusual patterns
-        if len(symbol) == 1:
-            result.add_warning("symbol", f"Single-letter symbol: {symbol}")
+        if parsed.asset_class == AssetClass.EQUITY and len(parsed.base) == 1:
+            result.add_warning("symbol", f"Single-letter symbol: {parsed.base}")
 
-        if symbol.startswith('X') and len(symbol) == 3:
-            result.add_warning("symbol", f"Possible sector ETF: {symbol}")
+        if parsed.asset_class == AssetClass.EQUITY and parsed.base.startswith('X') and len(parsed.base) == 3:
+            result.add_warning("symbol", f"Possible sector ETF: {parsed.base}")
+
+        if parsed.asset_class == AssetClass.CRYPTO and parsed.base not in KNOWN_CRYPTO_ASSETS:
+            result.add_warning("symbol", f"Unrecognized crypto asset: {parsed.base}")
+
+        if parsed.asset_class == AssetClass.FOREX and parsed.base == parsed.quote:
+            result.add_warning("symbol", f"Forex pair base and quote are identical: {parsed.base}{parsed.quote}")
 
         return result
 
@@ -277,10 +300,11 @@ class QuantityValidator:
     @classmethod
     def validate(
         cls,
-        quantity: int,
+        quantity: float,
         min_quantity: int = MIN_QUANTITY,
         max_quantity: int = MAX_QUANTITY,
-        lot_size: int = 1
+        lot_size: int = 1,
+        allow_fractional: bool = False
     ) -> ValidationResult:
         """
         Validate an order quantity.
@@ -301,9 +325,20 @@ class QuantityValidator:
             result.add_error("quantity", f"Quantity must be numeric, got {type(quantity).__name__}")
             return result
 
-        # Convert to int
-        quantity = int(quantity)
-        result.validated_value = quantity
+        # Convert or validate fractional quantities
+        if allow_fractional:
+            quantity = float(quantity)
+            result.validated_value = quantity
+        else:
+            if isinstance(quantity, float) and not quantity.is_integer():
+                result.add_error(
+                    "quantity",
+                    f"Fractional quantity not allowed: {quantity}",
+                    code="FRACTIONAL_NOT_ALLOWED"
+                )
+                return result
+            quantity = int(quantity)
+            result.validated_value = quantity
 
         # Positive check
         if quantity <= 0:
@@ -326,7 +361,7 @@ class QuantityValidator:
             )
 
         # Lot size check
-        if lot_size > 1 and quantity % lot_size != 0:
+        if not allow_fractional and lot_size > 1 and quantity % lot_size != 0:
             result.add_warning(
                 "quantity",
                 f"Quantity {quantity} not a multiple of lot size {lot_size}",
@@ -356,7 +391,7 @@ class OrderValidator:
         cls,
         symbol: str,
         side: str,
-        quantity: int,
+        quantity: float,
         price: Optional[float] = None,
         order_type: str = "MARKET",
         time_in_force: str = "DAY",
@@ -410,9 +445,44 @@ class OrderValidator:
                 code="INVALID_TIF"
             )
 
-        # Validate quantity
-        quantity_result = QuantityValidator.validate(quantity)
+        # Validate quantity (allow fractional for FX/Crypto)
+        allow_fractional = False
+        if symbol_result.is_valid:
+            try:
+                parsed = parse_symbol(symbol_result.validated_value)
+                allow_fractional = parsed.asset_class in {AssetClass.FOREX, AssetClass.CRYPTO}
+            except ValueError:
+                allow_fractional = False
+
+        quantity_result = QuantityValidator.validate(quantity, allow_fractional=allow_fractional)
         result.merge(quantity_result)
+
+        # Paper-trading-safe minimums (warn; optionally enforce)
+        if symbol_result.is_valid and quantity_result.is_valid:
+            try:
+                parsed = parse_symbol(symbol_result.validated_value)
+            except ValueError:
+                parsed = None
+
+            if parsed and parsed.asset_class in {AssetClass.FOREX, AssetClass.CRYPTO}:
+                ref_price = reference_price if reference_price is not None else price
+                if ref_price is not None and ref_price > 0:
+                    notional = abs(float(quantity)) * float(ref_price)
+                    min_notional = (
+                        ApexConfig.IBKR_MIN_FX_NOTIONAL
+                        if parsed.asset_class == AssetClass.FOREX
+                        else ApexConfig.IBKR_MIN_CRYPTO_NOTIONAL
+                    )
+                    if notional < min_notional:
+                        message = (
+                            f"Order notional {notional:.2f} below typical IBKR minimum "
+                            f"{min_notional:.2f} for {parsed.asset_class.value}"
+                        )
+                        if ApexConfig.STRICT_IBKR_LIVE_RULES:
+                            result.add_error("quantity", message, code="BELOW_BROKER_MIN")
+                        else:
+                            result.add_warning("quantity", message, code="BELOW_BROKER_MIN")
+                            logger.warning(f"⚠️  {message}")
 
         # Validate price for limit orders
         if order_type_upper in {'LIMIT', 'STOP_LIMIT'}:

@@ -17,7 +17,7 @@ Status: READY FOR DEPLOYMENT
 
 import numpy as np
 import pandas as pd
-from typing import Dict, List, Optional, Tuple, Any
+from typing import Dict, List, Optional, Tuple, Any, Union
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from enum import Enum
@@ -27,6 +27,8 @@ import warnings
 import os
 import pickle
 from collections import deque
+
+from core.logging_config import setup_logging
 
 warnings.filterwarnings('ignore')
 logger = logging.getLogger(__name__)
@@ -262,10 +264,23 @@ class FeatureEngine:
         for group_features in self.FEATURE_GROUPS.values():
             self.feature_names.extend(group_features)
     
-    def extract_features_vectorized(self, prices: pd.Series) -> pd.DataFrame:
-        """🚀 VECTORIZED: Extract all features at once."""
-        df = pd.DataFrame(index=prices.index)
-        p = prices
+    def extract_features_vectorized(self, data: Union[pd.Series, pd.DataFrame]) -> pd.DataFrame:
+        """🚀 VECTORIZED: Extract all features at once including Volume and Intraday factors."""
+        if isinstance(data, pd.Series):
+            p = data
+            df = pd.DataFrame(index=p.index)
+            v = None
+            h = None
+            l = None
+            o = None
+        else:
+            p = data['Close']
+            df = pd.DataFrame(index=p.index)
+            v = data.get('Volume')
+            h = data.get('High')
+            l = data.get('Low')
+            o = data.get('Open')
+
         returns = p.pct_change()
         
         # 1. Momentum
@@ -279,20 +294,20 @@ class FeatureEngine:
         for d in [20, 60]:
             ma = p.rolling(d).mean()
             std = p.rolling(d).std()
-            df[f'zscore_{d}d'] = (p - ma) / std
+            df[f'zscore_{d}d'] = (p - ma) / std.replace(0, np.nan)
         
         # Bollinger Bands
         sma20 = p.rolling(20).mean()
         std20 = p.rolling(20).std()
-        df['bb_position'] = (p - (sma20 - 2*std20)) / (4*std20)
+        df['bb_position'] = (p - (sma20 - 2*std20)) / (4*std20).replace(0, np.nan)
         df['bb_width'] = (4 * std20) / sma20
         
         # RSI
         delta = p.diff()
         gain = delta.where(delta > 0, 0).rolling(14).mean()
         loss = (-delta.where(delta < 0, 0)).rolling(14).mean()
-        rs = gain / loss
-        rsi = 100 - (100 / (1 + rs))
+        rs = gain / loss.replace(0, np.nan)
+        rsi = 100 - (100 / (1 + rs.fillna(0)))
         df['rsi_14'] = (rsi - 50) / 50  # Normalize
         
         # 3. Trend
@@ -308,7 +323,7 @@ class FeatureEngine:
         # ADX approximation
         pos = returns.where(returns > 0, 0).rolling(14).mean()
         neg = (-returns.where(returns < 0, 0)).rolling(14).mean()
-        df['adx_14'] = (pos - neg).abs() / (pos + neg)
+        df['adx_14'] = (pos - neg).abs() / (pos + neg).replace(0, np.nan)
         
         # Trend strength
         df['trend_strength'] = p.rolling(20).apply(
@@ -320,7 +335,7 @@ class FeatureEngine:
         for d in [5, 20, 60]:
             df[f'vol_{d}d'] = returns.rolling(d).std() * np.sqrt(252)
         
-        df['vol_ratio_5_20'] = df['vol_5d'] / df['vol_20d']
+        df['vol_ratio_5_20'] = df['vol_5d'] / df['vol_20d'].replace(0, np.nan)
         df['vol_regime'] = (df['vol_20d'] > 0.30).astype(float) - (df['vol_20d'] < 0.15).astype(float)
         
         # 5. Statistical
@@ -328,43 +343,75 @@ class FeatureEngine:
         df['kurt_20d'] = returns.rolling(20).kurt()
         
         # Percentile rank
-        df['pct_rank_252d'] = p.rolling(252).apply(
+        df['pct_rank_252d'] = p.rolling(min(len(p), 252)).apply(
             lambda x: (x.iloc[-1] - x.min()) / (x.max() - x.min()) if x.max() != x.min() else 0.5,
             raw=False
         )
 
         # 6. Quality/Confirmation Features
-        # Range position (where is price in recent range)
-        high_20 = p.rolling(20).max()
-        low_20 = p.rolling(20).min()
-        range_20 = high_20 - low_20
-        df['range_position'] = (p - low_20) / range_20.replace(0, 1)
+        df['range_position'] = (p - p.rolling(20).min()) / (p.rolling(20).max() - p.rolling(20).min()).replace(0, np.nan)
 
-        # Trend consistency (R-squared of price movement)
         def calc_r2(x):
-            if len(x) < 5:
-                return 0.5
+            if len(x) < 5: return 0.5
             y = np.arange(len(x))
             corr = np.corrcoef(x, y)[0, 1]
             return corr ** 2 if not np.isnan(corr) else 0.5
 
         df['trend_consistency'] = p.rolling(20).apply(calc_r2, raw=True)
+        df['momentum_acceleration'] = p.pct_change(5) - (p.pct_change(10) / 2)
 
-        # Momentum acceleration (is momentum increasing or decreasing)
-        roc_5 = p.pct_change(5)
-        roc_10 = p.pct_change(10)
-        df['momentum_acceleration'] = roc_5 - (roc_10 / 2)
+        # 7. NEW: Volume Factors (if available)
+        if v is not None:
+            df['volume_surge'] = v / v.rolling(20).mean().replace(0, np.nan)
+            # OBV (On-Balance Volume) simplified
+            obv = (np.sign(returns) * v).fillna(0).cumsum()
+            df['obv_zscore'] = (obv - obv.rolling(20).mean()) / obv.rolling(20).std().replace(0, np.nan)
+            
+            # MFI (Money Flow Index) - Simplified
+            if h is not None and l is not None:
+                tp = (h + l + p) / 3
+                mf = tp * v
+                pos_mf = mf.where(tp > tp.shift(1), 0).rolling(14).sum()
+                neg_mf = mf.where(tp < tp.shift(1), 0).rolling(14).sum()
+                mrf = pos_mf / neg_mf.replace(0, np.nan)
+                df['mfi_14'] = (100 - (100 / (1 + mrf)) - 50) / 50
+            else:
+                df['mfi_14'] = 0.0
+        else:
+            df['volume_surge'] = 1.0
+            df['obv_zscore'] = 0.0
+            df['mfi_14'] = 0.0
+
+        # 8. NEW: Intraday Features (if available)
+        if h is not None and l is not None:
+            df['intraday_range'] = (h - l) / p.replace(0, np.nan)
+            if o is not None:
+                df['body_size'] = (p - o) / (h - l).replace(0, np.nan)
+            else:
+                df['body_size'] = 0.0
+        else:
+            df['intraday_range'] = 0.0
+            df['body_size'] = 0.0
 
         return df.fillna(0).replace([np.inf, -np.inf], 0)
     
-    def extract_single_sample(self, prices: pd.Series) -> Tuple[np.ndarray, float]:
+    def extract_single_sample(
+        self, 
+        data: Union[pd.Series, pd.DataFrame],
+        sentiment_score: Optional[float] = None,
+        momentum_rank: Optional[float] = None
+    ) -> Tuple[np.ndarray, float]:
         """Extract features for single prediction (most recent data)."""
-        if len(prices) < self.lookback:
+        if len(data) < self.lookback:
             return np.zeros(len(self.feature_names)), 0.0
         
         # Use vectorized extraction on recent window
-        window = prices.iloc[-300:] if len(prices) > 300 else prices
-        df_features = self.extract_features_vectorized(window)
+        window = data.iloc[-300:] if len(data) > 300 else data
+        df_features = self.extract_features_vectorized(
+            window, 
+            sentiment_score=sentiment_score,
+            momentum_rank=momentum_rank
+        )
         
         # Take last row
         features = df_features.iloc[-1].values
@@ -497,19 +544,8 @@ class UltimateSignalGenerator:
             
             logger.info(f"Regime samples: {len(X_regime)}")
             
-            # Initialize preprocessors
-            if ML_AVAILABLE:
-                self.regime_imputers[regime_name] = SimpleImputer(strategy='median')
-                self.regime_scalers[regime_name] = RobustScaler()
-            
-                # Preprocess
-                X_regime_imp = self.regime_imputers[regime_name].fit_transform(X_regime)
-                X_regime_sc = self.regime_scalers[regime_name].fit_transform(X_regime_imp)
-            else:
-                X_regime_sc = X_regime
-            
-            # Train with Purged CV
-            regime_metrics = self.trainRegimeWithPurgedCV(X_regime_sc, y_regime, regime_name)
+            # Train with Purged CV (preprocessing happens inside CV loop to prevent leakage)
+            regime_metrics = self.trainRegimeWithPurgedCV(X_regime, y_regime, regime_name)
             results_by_regime[regime_name] = regime_metrics
             self.training_metrics.extend(regime_metrics)
         
@@ -606,12 +642,21 @@ class UltimateSignalGenerator:
             
             # Purged cross-validation
             for fold, (train_idx, val_idx) in enumerate(cv.split(X)):
-                X_train, X_val = X[train_idx], X[val_idx]
+                X_train_raw, X_val_raw = X[train_idx], X[val_idx]
                 y_train, y_val = y[train_idx], y[val_idx]
-                
+
+                # Fit preprocessors on training fold only (prevents data leakage)
+                if ML_AVAILABLE:
+                    fold_imputer = SimpleImputer(strategy='median')
+                    fold_scaler = RobustScaler()
+                    X_train = fold_scaler.fit_transform(fold_imputer.fit_transform(X_train_raw))
+                    X_val = fold_scaler.transform(fold_imputer.transform(X_val_raw))
+                else:
+                    X_train, X_val = X_train_raw, X_val_raw
+
                 # Train on fold
                 model.fit(X_train, y_train)
-                
+
                 # Evaluate
                 train_pred = model.predict(X_train)
                 val_pred = model.predict(X_val)
@@ -626,9 +671,17 @@ class UltimateSignalGenerator:
                 val_scores.append(val_mse)
                 dir_accs.append(dir_acc)
             
-            # Final training on all data
-            model.fit(X, y)
-            
+            # Final training on all data with preprocessing fitted on full dataset
+            if ML_AVAILABLE:
+                final_imputer = SimpleImputer(strategy='median')
+                final_scaler = RobustScaler()
+                X_final = final_scaler.fit_transform(final_imputer.fit_transform(X))
+                self.regime_imputers[regime] = final_imputer
+                self.regime_scalers[regime] = final_scaler
+            else:
+                X_final = X
+            model.fit(X_final, y)
+
             # Store model
             self.regime_models[regime][modelname] = model
             
@@ -737,7 +790,9 @@ class UltimateSignalGenerator:
     def generate_signal(
         self,
         symbol: str,
-        prices: pd.Series,
+        data: Union[pd.Series, pd.DataFrame],
+        sentiment_score: float = 0.0,
+        momentum_rank: float = 0.5,
         track_for_drift: bool = True
     ) -> SignalOutput:
         """
@@ -757,6 +812,12 @@ class UltimateSignalGenerator:
             logger.warning("⚠️  Retrain recommended (drift or time-based)")
         
         try:
+            # Extract prices for regime detection
+            if isinstance(data, pd.DataFrame):
+                prices = data['Close']
+            else:
+                prices = data
+
             # Detect regime
             regime = RegimeDetector.detect_regime(prices, 60)
             
@@ -769,8 +830,12 @@ class UltimateSignalGenerator:
             if not models:
                 return self._neutral_signal(symbol, timestamp)
             
-            # Extract features
-            features, data_quality = self.feature_engine.extract_single_sample(prices)
+            # Extract features (passing full data + context)
+            features, data_quality = self.feature_engine.extract_single_sample(
+                data, 
+                sentiment_score=sentiment_score,
+                momentum_rank=momentum_rank
+            )
             
             if data_quality < 0.5:
                 return SignalOutput(
@@ -800,7 +865,7 @@ class UltimateSignalGenerator:
             for name, model in models.items():
                 try:
                     pred_return = model.predict(features_sc)[0]
-                    sig = np.tanh(pred_return * 15)  # Convert to signal [-1, 1]
+                    sig = np.tanh(pred_return * 12)  # Convert to signal [-1, 1], more decisive signals
                     weight = weights.get(name, 1.0 / len(models))
                     predictions.append(sig * weight)
                 except:
@@ -818,9 +883,9 @@ class UltimateSignalGenerator:
             trend = self._calc_trend(prices)
             volatility = self._calc_volatility(prices)
             
-            # Combine: 60% ML, 40% rules
+            # Combine: 75% ML, 25% rules - ML has the trained edge
             rule_signal = momentum * 0.35 + mean_rev * 0.15 + trend * 0.35 + volatility * 0.15
-            combined_signal = ml_prediction * 0.6 + rule_signal * 0.4
+            combined_signal = ml_prediction * 0.75 + rule_signal * 0.25
             signal = float(np.clip(combined_signal, -1, 1))
             
             # Confidence
@@ -1097,10 +1162,10 @@ class UltimateSignalGenerator:
     
     def _calc_confidence(self, ml_std: float, data_quality: float, signal_strength: float) -> float:
         """Calculate confidence score."""
-        conf = data_quality * 0.4
-        agreement = max(0, 1 - ml_std * 10) if ml_std > 0 else 0.3
-        conf += agreement * 0.3
-        conf += signal_strength * 0.3
+        conf = data_quality * 0.3
+        agreement = max(0.2, 1 - ml_std * 5) if ml_std > 0 else 0.4
+        conf += agreement * 0.35
+        conf += min(signal_strength, 0.8) * 0.35  # Cap signal contribution
         return float(np.clip(conf, 0, 1))
 
 
@@ -1138,10 +1203,7 @@ def create_ultimate_generator(**kwargs) -> UltimateSignalGenerator:
 # ═══════════════════════════════════════════════════════════════════════
 
 if __name__ == "__main__":
-    logging.basicConfig(
-        level=logging.INFO,
-        format='%(asctime)s - %(levelname)s - %(message)s'
-    )
+    setup_logging(level="INFO", log_file=None, json_format=False, console_output=True)
     
     print("=" * 80)
     print("ULTIMATE SIGNAL GENERATOR - VALIDATION TEST")

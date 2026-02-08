@@ -289,7 +289,9 @@ def setup_logging(
     log_file: Optional[str] = None,
     json_format: bool = True,
     console_output: bool = True,
-    context: Optional[LogContext] = None
+    context: Optional[LogContext] = None,
+    max_bytes: int = 10 * 1024 * 1024,
+    backup_count: int = 5
 ) -> logging.Logger:
     """
     Set up structured logging for the application.
@@ -331,8 +333,8 @@ def setup_logging(
         # Rotating file handler (10MB max, keep 5 backups)
         file_handler = logging.handlers.RotatingFileHandler(
             log_file,
-            maxBytes=10 * 1024 * 1024,
-            backupCount=5
+            maxBytes=max_bytes,
+            backupCount=backup_count
         )
 
         if json_format:

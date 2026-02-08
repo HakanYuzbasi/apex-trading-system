@@ -87,8 +87,12 @@ function WireframeOverlay() {
 
 export default function VolatilitySurface3D() {
     return (
-        <div style={{ width: '100%', height: '100%', minHeight: 400, position: 'relative' }}>
-            <Canvas style={{ position: 'absolute', top: 0, left: 0, width: '100%', height: '100%' }}>
+        <div style={{ width: '100%', height: '100%', minHeight: 400, position: 'relative' }} className="flex items-center justify-center bg-black/20 rounded-lg overflow-hidden border border-border/50">
+            <Canvas
+                style={{ position: 'absolute', top: 0, left: 0, width: '100%', height: '100%' }}
+                gl={{ powerPreference: 'high-performance', antialias: true, alpha: true }}
+                dpr={[1, 2]}
+            >
                 <PerspectiveCamera makeDefault position={[0, -10, 8]} fov={50} />
                 <OrbitControls enableZoom={false} autoRotate autoRotateSpeed={0.5} />
 

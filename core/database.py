@@ -25,6 +25,8 @@ from pathlib import Path
 from typing import Optional, List, Dict, Any, AsyncIterator
 from enum import Enum
 
+from config import ApexConfig
+
 logger = logging.getLogger(__name__)
 
 
@@ -158,8 +160,8 @@ class DatabaseBackend(ABC):
 class SQLiteBackend(DatabaseBackend):
     """SQLite database backend."""
 
-    def __init__(self, db_path: str = "data/apex_trading.db"):
-        self.db_path = db_path
+    def __init__(self, db_path: str = None):
+        self.db_path = db_path or str(ApexConfig.DATA_DIR / "apex_trading.db")
         self.connection: Optional[aiosqlite.Connection] = None
 
         # Ensure directory exists
@@ -467,7 +469,7 @@ class SQLiteBackend(DatabaseBackend):
         """Create a database backup."""
         if backup_path is None:
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            backup_path = f"data/backups/apex_trading_{timestamp}.db"
+            backup_path = str(ApexConfig.DATA_DIR / "backups" / f"apex_trading_{timestamp}.db")
 
         Path(backup_path).parent.mkdir(parents=True, exist_ok=True)
 
@@ -503,7 +505,7 @@ class Database:
     def __init__(
         self,
         db_type: DatabaseType = DatabaseType.SQLITE,
-        db_path: str = "data/apex_trading.db"
+        db_path: str = None
     ):
         self.db_type = db_type
 
@@ -567,7 +569,7 @@ def get_database() -> Database:
     return _database
 
 
-async def init_database(db_type: DatabaseType = DatabaseType.SQLITE, db_path: str = "data/apex_trading.db"):
+async def init_database(db_type: DatabaseType = DatabaseType.SQLITE, db_path: str = None):
     """Initialize the global database."""
     global _database
     _database = Database(db_type, db_path)

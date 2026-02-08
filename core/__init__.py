@@ -53,17 +53,13 @@ from .contracts import (
 
 # Timeout utilities
 from .timeout import (
-    TimeoutCategory,
     TimeoutConfig,
     TimeoutError,
     with_timeout,
-    with_timeout_retry,
-    timeout_decorator,
-    retry_with_timeout,
+    run_with_timeout,
+    run_with_timeout_and_retry,
     TimeoutContext,
-    broker_timeout,
-    market_data_timeout,
-    cache_timeout,
+    configure_timeouts,
 )
 
 # Bulkhead pattern
@@ -73,10 +69,10 @@ from .bulkhead import (
     BulkheadMetrics,
     Bulkhead,
     BulkheadOpenError,
-    BulkheadRejectedError,
+    BulkheadTimeoutError,
+    BulkheadFullError,
     BulkheadRegistry,
     get_bulkhead_registry,
-    bulkhead_protected,
     create_trading_bulkheads,
 )
 
@@ -85,35 +81,26 @@ from .feature_flags import (
     FeatureFlags,
     FeatureFlagManager,
     get_flag_manager,
+    get_feature_flags,
     is_enabled,
-    set_flag,
-    flag_override,
-    feature_gated,
+    feature_flag,
 )
 
 # Structured logging
 from .logging_config import (
-    LogConfig,
     setup_logging,
-    get_logger,
     LogContext,
-    set_correlation_id,
-    set_trading_cycle,
-    set_symbol,
-    PerformanceLogger,
+    TradingLogger,
+    get_trading_logger,
 )
 
 # Health checking
 from .health_checker import (
     HealthStatus,
-    HealthCheckResult,
     HealthCheck,
     HealthChecker,
     get_health_checker,
     create_health_endpoints,
-    MemoryUsageCheck,
-    DiskSpaceCheck,
-    HeartbeatCheck,
 )
 
 # Distributed tracing
@@ -175,17 +162,13 @@ __all__ = [
     'create_limit_order',
 
     # Timeout utilities
-    'TimeoutCategory',
     'TimeoutConfig',
     'TimeoutError',
     'with_timeout',
-    'with_timeout_retry',
-    'timeout_decorator',
-    'retry_with_timeout',
+    'run_with_timeout',
+    'run_with_timeout_and_retry',
     'TimeoutContext',
-    'broker_timeout',
-    'market_data_timeout',
-    'cache_timeout',
+    'configure_timeouts',
 
     # Bulkhead pattern
     'BulkheadState',
@@ -193,41 +176,32 @@ __all__ = [
     'BulkheadMetrics',
     'Bulkhead',
     'BulkheadOpenError',
-    'BulkheadRejectedError',
+    'BulkheadTimeoutError',
+    'BulkheadFullError',
     'BulkheadRegistry',
     'get_bulkhead_registry',
-    'bulkhead_protected',
     'create_trading_bulkheads',
 
     # Feature flags
     'FeatureFlags',
     'FeatureFlagManager',
     'get_flag_manager',
+    'get_feature_flags',
     'is_enabled',
-    'set_flag',
-    'flag_override',
-    'feature_gated',
+    'feature_flag',
 
     # Structured logging
-    'LogConfig',
     'setup_logging',
-    'get_logger',
     'LogContext',
-    'set_correlation_id',
-    'set_trading_cycle',
-    'set_symbol',
-    'PerformanceLogger',
+    'TradingLogger',
+    'get_trading_logger',
 
     # Health checking
     'HealthStatus',
-    'HealthCheckResult',
     'HealthCheck',
     'HealthChecker',
     'get_health_checker',
     'create_health_endpoints',
-    'MemoryUsageCheck',
-    'DiskSpaceCheck',
-    'HeartbeatCheck',
 
     # Distributed tracing
     'TracingConfig',

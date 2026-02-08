@@ -216,9 +216,9 @@ class ApexDashboard:
     }
     
     def __init__(self):
-        self.data_file = Path("data/trading_state.json")
-        self.trades_file = Path("data/trades.csv")
-        self.equity_file = Path("data/equity_curve.csv")
+        self.data_file = ApexConfig.DATA_DIR / "trading_state.json"
+        self.trades_file = ApexConfig.DATA_DIR / "trades.csv"
+        self.equity_file = ApexConfig.DATA_DIR / "equity_curve.csv"
         self.market_data = MarketDataFetcher()
         
         # Create data directory

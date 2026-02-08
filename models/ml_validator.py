@@ -16,6 +16,8 @@ from sklearn.ensemble import RandomForestClassifier
 import optuna
 from optuna.samplers import TPESampler
 
+from core.logging_config import setup_logging
+
 logger = logging.getLogger(__name__)
 
 
@@ -328,7 +330,7 @@ class MLValidator:
 
 if __name__ == "__main__":
     # Test ML validator
-    logging.basicConfig(level=logging.INFO)
+    setup_logging(level="INFO", log_file=None, json_format=False, console_output=True)
     
     # Generate sample data
     np.random.seed(42)

@@ -25,6 +25,8 @@ import logging
 import sys
 from pathlib import Path
 
+from core.logging_config import setup_logging
+
 # Add parent directory to path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
@@ -809,7 +811,7 @@ def print_backtest_report(result: BacktestResult):
 
 if __name__ == "__main__":
     # Example usage
-    logging.basicConfig(level=logging.INFO)
+    setup_logging(level="INFO", log_file=None, json_format=False, console_output=True)
 
     from data.market_data import MarketDataFetcher
 

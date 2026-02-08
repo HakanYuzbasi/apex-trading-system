@@ -122,7 +122,23 @@ class SentimentAnalyzer:
         headlines = self._fetch_news(symbol)
         
         if not headlines:
-            return self._neutral_result(symbol)
+            # ✅ FALLBACK: Use Price/Volume Action if news fails
+            action_sentiment = VolumePriceSentiment.calculate(self._get_recent_prices(symbol))
+            fallback_score = action_sentiment.get('combined', 0.0)
+            
+            logger.info(f"🌑 Sentiment fallback for {symbol} (News failed): {fallback_score:+.2f}")
+            
+            return SentimentResult(
+                symbol=symbol,
+                sentiment_score=float(fallback_score),
+                confidence=0.25,  # Moderate confidence for action-based
+                news_count=0,
+                positive_count=0,
+                negative_count=0,
+                neutral_count=0,
+                top_headlines=["[News Failed] Price/Volume Fallback"],
+                analyzed_at=datetime.now()
+            )
         
         # Analyze sentiment
         positive = 0
@@ -172,6 +188,19 @@ class SentimentAnalyzer:
         self._cache[symbol] = (result, datetime.now())
         
         return result
+
+    def _get_recent_prices(self, symbol: str) -> pd.Series:
+        """Helper to get recent prices for action-based sentiment fallback."""
+        try:
+            # First try Yahoo Finance since it's already used here
+            ticker = yf.Ticker(symbol)
+            hist = ticker.history(period="1mo")
+            if not hist.empty:
+                return hist['Close']
+            return pd.Series()
+        except Exception as e:
+            logger.debug(f"Error getting recent prices for {symbol}: {e}")
+            return pd.Series()
     
     def _fetch_news(self, symbol: str) -> List[str]:
         """Fetch news headlines from Yahoo Finance."""

@@ -11,6 +11,9 @@ from datetime import datetime
 from enum import Enum
 import logging
 import warnings
+import os
+import pickle
+from pathlib import Path
 
 warnings.filterwarnings('ignore')
 logger = logging.getLogger(__name__)
@@ -59,16 +62,21 @@ class GodLevelSignalGenerator:
     - Feature importance tracking
     """
 
-    def __init__(self):
+    def __init__(self, model_dir: str = "models/saved"):
         self.lookback = 60
         self.feature_scaler = RobustScaler() if ML_LIBS['sklearn'] else None
         self.models = {}
         self.models_trained = False
         self.feature_importance = {}
         self.regime_history = []
+        self.model_dir = Path(model_dir)
+        self.model_dir.mkdir(parents=True, exist_ok=True)
 
         # Initialize models based on available libraries
         self._init_models()
+        
+        # Try to load existing models
+        self.load_models()
 
         logger.info(f"God Level Signal Generator initialized")
         logger.info(f"  ML Libraries: sklearn={ML_LIBS['sklearn']}, xgboost={ML_LIBS['xgboost']}, lightgbm={ML_LIBS['lightgbm']}")
@@ -590,7 +598,48 @@ class GodLevelSignalGenerator:
         self._calculate_feature_importance()
 
         self.models_trained = True
-        logger.info(f"God Level models trained with {len(self.models)} active models")
+        self.save_models()
+        logger.info(f"God Level models trained with {len(self.models)} active models and saved to {self.model_dir}")
+
+    def save_models(self):
+        """Save trained models and scaler to disk."""
+        if not self.models_trained:
+            return
+
+        try:
+            model_data = {
+                'models': self.models,
+                'scaler': self.feature_scaler,
+                'importance': self.feature_importance,
+                'trained_at': datetime.now()
+            }
+            with open(self.model_dir / "god_level_models.pkl", 'wb') as f:
+                pickle.dump(model_data, f)
+            logger.info(f"✅ God Level models saved to {self.model_dir / 'god_level_models.pkl'}")
+        except Exception as e:
+            logger.error(f"❌ Failed to save models: {e}")
+
+    def load_models(self):
+        """Load models and scaler from disk if available."""
+        model_path = self.model_dir / "god_level_models.pkl"
+        if not model_path.exists():
+            return False
+
+        try:
+            with open(model_path, 'rb') as f:
+                model_data = pickle.load(f)
+            
+            self.models = model_data['models']
+            self.feature_scaler = model_data['scaler']
+            self.feature_importance = model_data.get('importance', {})
+            self.models_trained = True
+            
+            trained_at = model_data.get('trained_at', 'unknown')
+            logger.info(f"✅ God Level models loaded from disk (trained at: {trained_at})")
+            return True
+        except Exception as e:
+            logger.error(f"❌ Failed to load models: {e}")
+            return False
 
     def _calculate_feature_importance(self):
         """Calculate and store feature importance."""

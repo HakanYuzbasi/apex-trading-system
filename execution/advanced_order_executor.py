@@ -13,6 +13,8 @@ import logging
 from typing import Dict, Optional
 from datetime import datetime, timedelta
 
+from core.logging_config import setup_logging
+
 logger = logging.getLogger(__name__)
 
 
@@ -471,7 +473,7 @@ class AdvancedOrderExecutor:
 
 if __name__ == "__main__":
     # Test (requires mock IBKR connector)
-    logging.basicConfig(level=logging.INFO)
+    setup_logging(level="INFO", log_file=None, json_format=False, console_output=True)
     
     print("✅ Advanced Order Executor module ready")
     print("   Supported algorithms:")

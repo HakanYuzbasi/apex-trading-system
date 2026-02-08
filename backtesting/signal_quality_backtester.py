@@ -1,0 +1,782 @@
+"""
+backtesting/signal_quality_backtester.py
+
+Enhanced Backtester with Signal Quality Analysis
+
+This module extends the backtesting framework to:
+1. Track forward-looking performance for each signal
+2. Calculate MFE/MAE for every generated signal
+3. Evaluate signal quality independent of trading decisions
+4. Generate performance metrics segmented by signal characteristics
+5. Export labeled data for ML model training
+"""
+
+import pandas as pd
+import numpy as np
+from typing import Dict, List, Optional, Tuple, Any, Callable
+from datetime import datetime, timedelta
+from dataclasses import dataclass, field
+from collections import defaultdict
+import logging
+from pathlib import Path
+import json
+
+from config import ApexConfig
+
+logger = logging.getLogger(__name__)
+
+
+@dataclass
+class SignalRecord:
+    """Complete record of a signal with its forward outcomes."""
+
+    # Signal identification
+    signal_id: str
+    symbol: str
+    timestamp: datetime
+    bar_index: int
+
+    # Signal characteristics
+    signal_value: float
+    confidence: float
+    regime: str
+
+    # Price context
+    price_at_signal: float
+    atr_at_signal: float
+    volatility_at_signal: float
+
+    # Forward prices (filled during backtest)
+    prices_1d: Optional[float] = None
+    prices_5d: Optional[float] = None
+    prices_10d: Optional[float] = None
+    prices_20d: Optional[float] = None
+
+    # Forward returns
+    return_1d: Optional[float] = None
+    return_5d: Optional[float] = None
+    return_10d: Optional[float] = None
+    return_20d: Optional[float] = None
+
+    # MFE/MAE
+    mfe_5d: Optional[float] = None
+    mae_5d: Optional[float] = None
+    mfe_10d: Optional[float] = None
+    mae_10d: Optional[float] = None
+    mfe_20d: Optional[float] = None
+    mae_20d: Optional[float] = None
+
+    # Path statistics
+    path_volatility_5d: Optional[float] = None
+    path_volatility_10d: Optional[float] = None
+    max_consecutive_up_5d: Optional[int] = None
+    max_consecutive_down_5d: Optional[int] = None
+
+    # Time to target
+    time_to_1pct: Optional[int] = None
+    time_to_2pct: Optional[int] = None
+    time_to_5pct: Optional[int] = None
+    time_to_stop: Optional[int] = None  # Time to hit 2% adverse
+
+    # Binary outcome labels
+    direction_correct_1d: Optional[bool] = None
+    direction_correct_5d: Optional[bool] = None
+    direction_correct_10d: Optional[bool] = None
+    hit_2pct_5d: Optional[bool] = None
+    hit_5pct_10d: Optional[bool] = None
+
+    # Quality score
+    quality_score: Optional[float] = None
+
+    # Trade tracking (if signal was acted upon)
+    was_traded: bool = False
+    trade_entry_price: Optional[float] = None
+    trade_exit_price: Optional[float] = None
+    trade_pnl: Optional[float] = None
+    trade_holding_days: Optional[int] = None
+
+
+@dataclass
+class SignalQualityReport:
+    """Comprehensive signal quality analysis report."""
+
+    # Summary stats
+    total_signals: int = 0
+    buy_signals: int = 0
+    sell_signals: int = 0
+    neutral_signals: int = 0
+
+    # Directional accuracy
+    accuracy_1d: float = 0.0
+    accuracy_5d: float = 0.0
+    accuracy_10d: float = 0.0
+    accuracy_20d: float = 0.0
+
+    # Return statistics
+    avg_return_1d: float = 0.0
+    avg_return_5d: float = 0.0
+    avg_return_10d: float = 0.0
+    avg_return_20d: float = 0.0
+    std_return_5d: float = 0.0
+    std_return_10d: float = 0.0
+
+    # MFE/MAE analysis
+    avg_mfe_5d: float = 0.0
+    avg_mae_5d: float = 0.0
+    avg_mfe_10d: float = 0.0
+    avg_mae_10d: float = 0.0
+    mfe_mae_ratio_5d: float = 0.0
+    mfe_mae_ratio_10d: float = 0.0
+
+    # Edge analysis
+    edge_1d: float = 0.0  # avg return if signal correct direction
+    edge_5d: float = 0.0
+    edge_10d: float = 0.0
+
+    # Target achievement
+    hit_rate_2pct_5d: float = 0.0
+    hit_rate_5pct_10d: float = 0.0
+    avg_time_to_2pct: float = 0.0
+    avg_time_to_5pct: float = 0.0
+
+    # Quality distribution
+    pct_high_quality: float = 0.0  # quality > 0.7
+    pct_medium_quality: float = 0.0  # 0.4 < quality <= 0.7
+    pct_low_quality: float = 0.0  # quality <= 0.4
+
+    # By confidence level
+    accuracy_low_conf: float = 0.0  # conf < 0.4
+    accuracy_med_conf: float = 0.0  # 0.4 <= conf < 0.7
+    accuracy_high_conf: float = 0.0  # conf >= 0.7
+
+    # By regime
+    accuracy_by_regime: Dict[str, float] = field(default_factory=dict)
+    return_by_regime: Dict[str, float] = field(default_factory=dict)
+
+    # By signal strength
+    accuracy_weak: float = 0.0  # |signal| < 0.3
+    accuracy_moderate: float = 0.0  # 0.3 <= |signal| < 0.6
+    accuracy_strong: float = 0.0  # |signal| >= 0.6
+
+    # Trading efficiency (for signals that were traded)
+    trade_win_rate: float = 0.0
+    trade_avg_pnl: float = 0.0
+    trade_profit_factor: float = 0.0
+    signal_to_trade_accuracy: float = 0.0  # Did good signals lead to good trades?
+
+
+class SignalQualityBacktester:
+    """
+    Backtester focused on signal quality analysis.
+
+    Evaluates every signal generated by a strategy against its actual
+    forward outcomes, independent of whether the signal was traded.
+    """
+
+    def __init__(
+        self,
+        initial_capital: float = 1_000_000.0,
+        commission_per_trade: float = 1.0,
+        slippage_bps: float = 5.0,
+        lookback_windows: List[int] = None,
+        target_returns: List[float] = None
+    ):
+        """
+        Initialize the signal quality backtester.
+
+        Args:
+            initial_capital: Starting capital
+            commission_per_trade: Fixed commission per trade
+            slippage_bps: Slippage in basis points
+            lookback_windows: Forward windows to analyze (default: [1, 5, 10, 20])
+            target_returns: Return targets to track (default: [0.01, 0.02, 0.05])
+        """
+        self.initial_capital = initial_capital
+        self.commission_per_trade = commission_per_trade
+        self.slippage_pct = slippage_bps / 10000.0
+
+        self.lookback_windows = lookback_windows or [1, 5, 10, 20]
+        self.target_returns = target_returns or [0.01, 0.02, 0.05]
+        self.max_window = max(self.lookback_windows)
+
+        # Data storage
+        self.price_data: Dict[str, pd.DataFrame] = {}
+        self.signal_records: List[SignalRecord] = []
+
+        # Signal generator
+        self.signal_generator: Optional[Callable] = None
+
+        logger.info(f"SignalQualityBacktester initialized")
+        logger.info(f"  Windows: {self.lookback_windows}")
+        logger.info(f"  Targets: {self.target_returns}")
+
+    def load_data(self, data: Dict[str, pd.DataFrame]):
+        """Load historical price data."""
+        self.price_data = {}
+        for symbol, df in data.items():
+            if df is not None and not df.empty:
+                # Ensure datetime index
+                if not isinstance(df.index, pd.DatetimeIndex):
+                    df.index = pd.to_datetime(df.index)
+                df = df.sort_index()
+                self.price_data[symbol] = df
+
+        logger.info(f"Loaded data for {len(self.price_data)} symbols")
+
+    def set_signal_generator(self, generator: Callable):
+        """
+        Set the signal generation function.
+
+        The generator should accept:
+            - symbol: str
+            - prices: pd.Series (close prices)
+            - current_idx: int
+
+        And return:
+            - Dict with 'signal', 'confidence', optionally 'regime'
+        """
+        self.signal_generator = generator
+
+    def run(
+        self,
+        start_date: Optional[datetime] = None,
+        end_date: Optional[datetime] = None,
+        signal_threshold: float = 0.0,
+        record_all_signals: bool = True
+    ) -> SignalQualityReport:
+        """
+        Run the backtest and analyze signal quality.
+
+        Args:
+            start_date: Start of backtest period
+            end_date: End of backtest period
+            signal_threshold: Minimum |signal| to record (0 = all)
+            record_all_signals: If True, record even weak signals
+
+        Returns:
+            SignalQualityReport with comprehensive metrics
+        """
+        if not self.price_data:
+            raise ValueError("No price data loaded")
+        if self.signal_generator is None:
+            raise ValueError("No signal generator set")
+
+        self.signal_records = []
+
+        # Process each symbol
+        for symbol, df in self.price_data.items():
+            self._process_symbol(
+                symbol, df, start_date, end_date,
+                signal_threshold, record_all_signals
+            )
+
+        logger.info(f"Processed {len(self.signal_records)} signals")
+
+        # Calculate forward outcomes for all signals
+        self._calculate_forward_outcomes()
+
+        # Generate quality report
+        report = self._generate_quality_report()
+
+        return report
+
+    def _process_symbol(
+        self,
+        symbol: str,
+        df: pd.DataFrame,
+        start_date: Optional[datetime],
+        end_date: Optional[datetime],
+        signal_threshold: float,
+        record_all: bool
+    ):
+        """Process signals for a single symbol."""
+        prices = df['close'] if 'close' in df.columns else df['Close']
+
+        # Calculate ATR for context
+        if 'high' in df.columns and 'low' in df.columns:
+            high = df['high'] if 'high' in df.columns else df['High']
+            low = df['low'] if 'low' in df.columns else df['Low']
+            tr = pd.concat([
+                high - low,
+                abs(high - prices.shift(1)),
+                abs(low - prices.shift(1))
+            ], axis=1).max(axis=1)
+            atr = tr.rolling(14).mean()
+        else:
+            atr = prices.rolling(14).std()
+
+        # Iterate through bars (leaving room for forward lookback)
+        for i in range(50, len(df) - self.max_window):
+            current_time = df.index[i]
+
+            # Date filtering
+            if start_date and current_time < start_date:
+                continue
+            if end_date and current_time > end_date:
+                continue
+
+            # Generate signal
+            price_history = prices.iloc[:i+1]
+            try:
+                signal_data = self.signal_generator(symbol, price_history, i)
+            except Exception as e:
+                logger.debug(f"Signal generation error for {symbol}: {e}")
+                continue
+
+            if signal_data is None:
+                continue
+
+            signal_value = signal_data.get('signal', 0.0)
+            confidence = signal_data.get('confidence', 0.5)
+            regime = signal_data.get('regime', 'unknown')
+
+            # Filter weak signals if requested
+            if not record_all and abs(signal_value) < signal_threshold:
+                continue
+
+            # Create signal record
+            signal_id = f"{symbol}_{i}_{current_time.strftime('%Y%m%d')}"
+            current_price = prices.iloc[i]
+            current_atr = atr.iloc[i] if not pd.isna(atr.iloc[i]) else 0.0
+            volatility = prices.iloc[i-20:i].std() / current_price if i >= 20 else 0.0
+
+            record = SignalRecord(
+                signal_id=signal_id,
+                symbol=symbol,
+                timestamp=current_time,
+                bar_index=i,
+                signal_value=signal_value,
+                confidence=confidence,
+                regime=regime,
+                price_at_signal=current_price,
+                atr_at_signal=current_atr,
+                volatility_at_signal=volatility
+            )
+
+            self.signal_records.append(record)
+
+    def _calculate_forward_outcomes(self):
+        """Calculate forward-looking outcomes for all recorded signals."""
+        for record in self.signal_records:
+            symbol = record.symbol
+            if symbol not in self.price_data:
+                continue
+
+            df = self.price_data[symbol]
+            prices = df['close'] if 'close' in df.columns else df['Close']
+            idx = record.bar_index
+            entry_price = record.price_at_signal
+            is_buy = record.signal_value > 0
+
+            # Forward prices
+            future_prices = prices.iloc[idx+1:idx+1+self.max_window].values
+            n_future = len(future_prices)
+
+            if n_future == 0:
+                continue
+
+            # Calculate returns at each window
+            for window in self.lookback_windows:
+                if n_future >= window:
+                    future_price = future_prices[window-1]
+                    raw_return = (future_price / entry_price - 1)
+
+                    # Adjust for direction
+                    adjusted_return = raw_return if is_buy else -raw_return
+
+                    if window == 1:
+                        record.prices_1d = future_price
+                        record.return_1d = adjusted_return
+                        record.direction_correct_1d = adjusted_return > 0
+                    elif window == 5:
+                        record.prices_5d = future_price
+                        record.return_5d = adjusted_return
+                        record.direction_correct_5d = adjusted_return > 0
+                    elif window == 10:
+                        record.prices_10d = future_price
+                        record.return_10d = adjusted_return
+                        record.direction_correct_10d = adjusted_return > 0
+                    elif window == 20:
+                        record.prices_20d = future_price
+                        record.return_20d = adjusted_return
+
+            # Calculate MFE/MAE
+            for window in [5, 10, 20]:
+                if n_future >= window:
+                    window_prices = future_prices[:window]
+
+                    if is_buy:
+                        mfe = (max(window_prices) / entry_price - 1)
+                        mae = (min(window_prices) / entry_price - 1)
+                    else:
+                        mfe = (entry_price / min(window_prices) - 1)
+                        mae = -(max(window_prices) / entry_price - 1)
+
+                    if window == 5:
+                        record.mfe_5d = mfe
+                        record.mae_5d = mae
+                    elif window == 10:
+                        record.mfe_10d = mfe
+                        record.mae_10d = mae
+                    elif window == 20:
+                        record.mfe_20d = mfe
+                        record.mae_20d = mae
+
+            # Path statistics (5-day window)
+            if n_future >= 5:
+                window_prices = future_prices[:5]
+                record.path_volatility_5d = np.std(np.diff(window_prices) / window_prices[:-1])
+
+                # Consecutive moves
+                returns = np.diff(window_prices) / window_prices[:-1]
+                if is_buy:
+                    up_moves = returns > 0
+                else:
+                    up_moves = returns < 0
+
+                max_up = 0
+                current_up = 0
+                max_down = 0
+                current_down = 0
+
+                for up in up_moves:
+                    if up:
+                        current_up += 1
+                        current_down = 0
+                        max_up = max(max_up, current_up)
+                    else:
+                        current_down += 1
+                        current_up = 0
+                        max_down = max(max_down, current_down)
+
+                record.max_consecutive_up_5d = max_up
+                record.max_consecutive_down_5d = max_down
+
+            # Time to targets
+            for i, price in enumerate(future_prices):
+                if is_buy:
+                    ret = price / entry_price - 1
+                else:
+                    ret = entry_price / price - 1
+
+                days = i + 1
+
+                if ret >= 0.01 and record.time_to_1pct is None:
+                    record.time_to_1pct = days
+                if ret >= 0.02 and record.time_to_2pct is None:
+                    record.time_to_2pct = days
+                if ret >= 0.05 and record.time_to_5pct is None:
+                    record.time_to_5pct = days
+
+                # Time to stop (2% adverse)
+                if is_buy:
+                    adverse = entry_price / price - 1
+                else:
+                    adverse = price / entry_price - 1
+
+                if adverse >= 0.02 and record.time_to_stop is None:
+                    record.time_to_stop = days
+
+            # Binary labels
+            if n_future >= 5:
+                record.hit_2pct_5d = (record.mfe_5d or 0) >= 0.02
+            if n_future >= 10:
+                record.hit_5pct_10d = (record.mfe_10d or 0) >= 0.05
+
+            # Quality score
+            record.quality_score = self._calculate_quality_score(record)
+
+    def _calculate_quality_score(self, record: SignalRecord) -> float:
+        """Calculate overall quality score for a signal."""
+        score = 0.0
+        weights = 0.0
+
+        # Directional accuracy (40%)
+        if record.direction_correct_5d is not None:
+            score += 0.2 * (1.0 if record.direction_correct_5d else 0.0)
+            weights += 0.2
+        if record.direction_correct_10d is not None:
+            score += 0.2 * (1.0 if record.direction_correct_10d else 0.0)
+            weights += 0.2
+
+        # Return magnitude (30%)
+        if record.return_10d is not None:
+            return_score = min(1.0, max(0.0, record.return_10d / 0.05))
+            score += 0.3 * return_score
+            weights += 0.3
+
+        # MFE/MAE ratio (20%)
+        if record.mfe_10d is not None and record.mae_10d is not None:
+            if abs(record.mae_10d) > 0.001:
+                ratio = record.mfe_10d / abs(record.mae_10d)
+                ratio_score = min(1.0, max(0.0, (ratio - 0.5) / 2.5))
+                score += 0.2 * ratio_score
+                weights += 0.2
+
+        # Time efficiency (10%)
+        if record.time_to_2pct is not None:
+            time_score = max(0.0, 1.0 - (record.time_to_2pct - 1) / 9)
+            score += 0.1 * time_score
+            weights += 0.1
+
+        return score / weights if weights > 0 else 0.5
+
+    def _generate_quality_report(self) -> SignalQualityReport:
+        """Generate comprehensive quality report from signal records."""
+        report = SignalQualityReport()
+
+        if not self.signal_records:
+            return report
+
+        signals = self.signal_records
+        report.total_signals = len(signals)
+        report.buy_signals = sum(1 for s in signals if s.signal_value > 0.1)
+        report.sell_signals = sum(1 for s in signals if s.signal_value < -0.1)
+        report.neutral_signals = report.total_signals - report.buy_signals - report.sell_signals
+
+        # Directional accuracy
+        for attr, window in [
+            ('accuracy_1d', 'direction_correct_1d'),
+            ('accuracy_5d', 'direction_correct_5d'),
+            ('accuracy_10d', 'direction_correct_10d')
+        ]:
+            valid = [s for s in signals if getattr(s, window) is not None]
+            if valid:
+                correct = sum(1 for s in valid if getattr(s, window))
+                setattr(report, attr, correct / len(valid))
+
+        # Return statistics
+        for attr, window in [
+            ('avg_return_1d', 'return_1d'),
+            ('avg_return_5d', 'return_5d'),
+            ('avg_return_10d', 'return_10d'),
+            ('avg_return_20d', 'return_20d')
+        ]:
+            returns = [getattr(s, window) for s in signals if getattr(s, window) is not None]
+            if returns:
+                setattr(report, attr, np.mean(returns))
+
+        # Return std
+        returns_5d = [s.return_5d for s in signals if s.return_5d is not None]
+        returns_10d = [s.return_10d for s in signals if s.return_10d is not None]
+        if returns_5d:
+            report.std_return_5d = np.std(returns_5d)
+        if returns_10d:
+            report.std_return_10d = np.std(returns_10d)
+
+        # MFE/MAE
+        mfe_5d = [s.mfe_5d for s in signals if s.mfe_5d is not None]
+        mae_5d = [s.mae_5d for s in signals if s.mae_5d is not None]
+        mfe_10d = [s.mfe_10d for s in signals if s.mfe_10d is not None]
+        mae_10d = [s.mae_10d for s in signals if s.mae_10d is not None]
+
+        if mfe_5d:
+            report.avg_mfe_5d = np.mean(mfe_5d)
+        if mae_5d:
+            report.avg_mae_5d = np.mean(mae_5d)
+        if mfe_10d:
+            report.avg_mfe_10d = np.mean(mfe_10d)
+        if mae_10d:
+            report.avg_mae_10d = np.mean(mae_10d)
+
+        if report.avg_mae_5d != 0:
+            report.mfe_mae_ratio_5d = abs(report.avg_mfe_5d / report.avg_mae_5d)
+        if report.avg_mae_10d != 0:
+            report.mfe_mae_ratio_10d = abs(report.avg_mfe_10d / report.avg_mae_10d)
+
+        # Edge analysis
+        for window in [1, 5, 10]:
+            correct_attr = f'direction_correct_{window}d'
+            return_attr = f'return_{window}d'
+            edge_attr = f'edge_{window}d'
+
+            correct_signals = [s for s in signals
+                             if getattr(s, correct_attr) == True and getattr(s, return_attr) is not None]
+            if correct_signals:
+                avg_edge = np.mean([getattr(s, return_attr) for s in correct_signals])
+                setattr(report, edge_attr, avg_edge)
+
+        # Target achievement
+        hit_2_5 = [s for s in signals if s.hit_2pct_5d is not None]
+        hit_5_10 = [s for s in signals if s.hit_5pct_10d is not None]
+
+        if hit_2_5:
+            report.hit_rate_2pct_5d = sum(1 for s in hit_2_5 if s.hit_2pct_5d) / len(hit_2_5)
+        if hit_5_10:
+            report.hit_rate_5pct_10d = sum(1 for s in hit_5_10 if s.hit_5pct_10d) / len(hit_5_10)
+
+        time_2pct = [s.time_to_2pct for s in signals if s.time_to_2pct is not None]
+        time_5pct = [s.time_to_5pct for s in signals if s.time_to_5pct is not None]
+
+        if time_2pct:
+            report.avg_time_to_2pct = np.mean(time_2pct)
+        if time_5pct:
+            report.avg_time_to_5pct = np.mean(time_5pct)
+
+        # Quality distribution
+        quality_scores = [s.quality_score for s in signals if s.quality_score is not None]
+        if quality_scores:
+            report.pct_high_quality = sum(1 for q in quality_scores if q > 0.7) / len(quality_scores)
+            report.pct_medium_quality = sum(1 for q in quality_scores if 0.4 < q <= 0.7) / len(quality_scores)
+            report.pct_low_quality = sum(1 for q in quality_scores if q <= 0.4) / len(quality_scores)
+
+        # By confidence level
+        for conf_range, attr in [
+            ((0, 0.4), 'accuracy_low_conf'),
+            ((0.4, 0.7), 'accuracy_med_conf'),
+            ((0.7, 1.1), 'accuracy_high_conf')
+        ]:
+            bucket = [s for s in signals
+                     if conf_range[0] <= s.confidence < conf_range[1] and s.direction_correct_10d is not None]
+            if bucket:
+                correct = sum(1 for s in bucket if s.direction_correct_10d)
+                setattr(report, attr, correct / len(bucket))
+
+        # By regime
+        for regime in ['bull', 'bear', 'neutral', 'volatile', 'unknown']:
+            regime_signals = [s for s in signals
+                           if s.regime == regime and s.direction_correct_10d is not None]
+            if regime_signals:
+                correct = sum(1 for s in regime_signals if s.direction_correct_10d)
+                report.accuracy_by_regime[regime] = correct / len(regime_signals)
+
+                returns = [s.return_10d for s in regime_signals if s.return_10d is not None]
+                if returns:
+                    report.return_by_regime[regime] = np.mean(returns)
+
+        # By signal strength
+        for strength_range, attr in [
+            ((0, 0.3), 'accuracy_weak'),
+            ((0.3, 0.6), 'accuracy_moderate'),
+            ((0.6, 1.1), 'accuracy_strong')
+        ]:
+            bucket = [s for s in signals
+                     if strength_range[0] <= abs(s.signal_value) < strength_range[1]
+                     and s.direction_correct_10d is not None]
+            if bucket:
+                correct = sum(1 for s in bucket if s.direction_correct_10d)
+                setattr(report, attr, correct / len(bucket))
+
+        return report
+
+    def get_signals_dataframe(self) -> pd.DataFrame:
+        """Export all signal records as a DataFrame for analysis."""
+        if not self.signal_records:
+            return pd.DataFrame()
+
+        data = []
+        for s in self.signal_records:
+            row = {
+                'signal_id': s.signal_id,
+                'symbol': s.symbol,
+                'timestamp': s.timestamp,
+                'signal_value': s.signal_value,
+                'confidence': s.confidence,
+                'regime': s.regime,
+                'price': s.price_at_signal,
+                'atr': s.atr_at_signal,
+                'volatility': s.volatility_at_signal,
+
+                # Returns
+                'return_1d': s.return_1d,
+                'return_5d': s.return_5d,
+                'return_10d': s.return_10d,
+                'return_20d': s.return_20d,
+
+                # MFE/MAE
+                'mfe_5d': s.mfe_5d,
+                'mae_5d': s.mae_5d,
+                'mfe_10d': s.mfe_10d,
+                'mae_10d': s.mae_10d,
+
+                # Binary labels
+                'correct_1d': s.direction_correct_1d,
+                'correct_5d': s.direction_correct_5d,
+                'correct_10d': s.direction_correct_10d,
+                'hit_2pct_5d': s.hit_2pct_5d,
+                'hit_5pct_10d': s.hit_5pct_10d,
+
+                # Time metrics
+                'time_to_1pct': s.time_to_1pct,
+                'time_to_2pct': s.time_to_2pct,
+                'time_to_5pct': s.time_to_5pct,
+                'time_to_stop': s.time_to_stop,
+
+                # Quality
+                'quality_score': s.quality_score
+            }
+            data.append(row)
+
+        return pd.DataFrame(data)
+
+    def export_for_ml(self, filepath: str = None) -> str:
+        """Export signals with outcomes for ML training."""
+        if filepath is None:
+            filepath = str(ApexConfig.DATA_DIR / "signal_quality_data.csv")
+
+        df = self.get_signals_dataframe()
+        if not df.empty:
+            df.to_csv(filepath, index=False)
+            logger.info(f"Exported {len(df)} signals to {filepath}")
+
+        return filepath
+
+    def print_report(self, report: SignalQualityReport):
+        """Print a formatted quality report."""
+        logger.info("")
+        logger.info("=" * 80)
+        logger.info("SIGNAL QUALITY ANALYSIS REPORT")
+        logger.info("=" * 80)
+
+        logger.info(f"\nSIGNAL SUMMARY:")
+        logger.info(f"  Total Signals: {report.total_signals}")
+        logger.info(f"    Buy: {report.buy_signals} | Sell: {report.sell_signals} | Neutral: {report.neutral_signals}")
+
+        logger.info(f"\nDIRECTIONAL ACCURACY:")
+        logger.info(f"  1-day:  {report.accuracy_1d*100:.1f}%")
+        logger.info(f"  5-day:  {report.accuracy_5d*100:.1f}%")
+        logger.info(f"  10-day: {report.accuracy_10d*100:.1f}%")
+
+        logger.info(f"\nAVERAGE RETURNS:")
+        logger.info(f"  1-day:  {report.avg_return_1d*100:+.2f}%")
+        logger.info(f"  5-day:  {report.avg_return_5d*100:+.2f}% (std: {report.std_return_5d*100:.2f}%)")
+        logger.info(f"  10-day: {report.avg_return_10d*100:+.2f}% (std: {report.std_return_10d*100:.2f}%)")
+        logger.info(f"  20-day: {report.avg_return_20d*100:+.2f}%")
+
+        logger.info(f"\nMFE/MAE ANALYSIS:")
+        logger.info(f"  5-day:  MFE={report.avg_mfe_5d*100:+.2f}% | MAE={report.avg_mae_5d*100:+.2f}% | Ratio={report.mfe_mae_ratio_5d:.2f}")
+        logger.info(f"  10-day: MFE={report.avg_mfe_10d*100:+.2f}% | MAE={report.avg_mae_10d*100:+.2f}% | Ratio={report.mfe_mae_ratio_10d:.2f}")
+
+        logger.info(f"\nEDGE (Avg return when correct):")
+        logger.info(f"  1-day:  {report.edge_1d*100:+.2f}%")
+        logger.info(f"  5-day:  {report.edge_5d*100:+.2f}%")
+        logger.info(f"  10-day: {report.edge_10d*100:+.2f}%")
+
+        logger.info(f"\nTARGET ACHIEVEMENT:")
+        logger.info(f"  Hit 2% in 5 days:  {report.hit_rate_2pct_5d*100:.1f}%")
+        logger.info(f"  Hit 5% in 10 days: {report.hit_rate_5pct_10d*100:.1f}%")
+        logger.info(f"  Avg time to 2%: {report.avg_time_to_2pct:.1f} days")
+        logger.info(f"  Avg time to 5%: {report.avg_time_to_5pct:.1f} days")
+
+        logger.info(f"\nQUALITY DISTRIBUTION:")
+        logger.info(f"  High (>70%):   {report.pct_high_quality*100:.1f}%")
+        logger.info(f"  Medium:        {report.pct_medium_quality*100:.1f}%")
+        logger.info(f"  Low (<40%):    {report.pct_low_quality*100:.1f}%")
+
+        logger.info(f"\nACCURACY BY CONFIDENCE:")
+        logger.info(f"  Low (<0.4):    {report.accuracy_low_conf*100:.1f}%")
+        logger.info(f"  Medium:        {report.accuracy_med_conf*100:.1f}%")
+        logger.info(f"  High (>=0.7):  {report.accuracy_high_conf*100:.1f}%")
+
+        logger.info(f"\nACCURACY BY SIGNAL STRENGTH:")
+        logger.info(f"  Weak (<0.3):     {report.accuracy_weak*100:.1f}%")
+        logger.info(f"  Moderate:        {report.accuracy_moderate*100:.1f}%")
+        logger.info(f"  Strong (>=0.6):  {report.accuracy_strong*100:.1f}%")
+
+        if report.accuracy_by_regime:
+            logger.info(f"\nACCURACY BY REGIME:")
+            for regime, acc in report.accuracy_by_regime.items():
+                ret = report.return_by_regime.get(regime, 0)
+                logger.info(f"  {regime}: {acc*100:.1f}% (avg ret: {ret*100:+.2f}%)")
+
+        logger.info("=" * 80)

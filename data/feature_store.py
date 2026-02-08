@@ -30,6 +30,8 @@ from pathlib import Path
 import threading
 from abc import ABC, abstractmethod
 
+from config import ApexConfig
+
 logger = logging.getLogger(__name__)
 
 # Check for Redis
@@ -349,7 +351,7 @@ class FeatureStore:
         self,
         redis_url: Optional[str] = None,
         cache_ttl_seconds: int = 3600,
-        data_dir: Path = Path('data/features')
+        data_dir: Path = None
     ):
         """
         Initialize feature store.
@@ -360,7 +362,7 @@ class FeatureStore:
             data_dir: Directory for persistent storage
         """
         self.cache_ttl = cache_ttl_seconds
-        self.data_dir = data_dir
+        self.data_dir = data_dir or (ApexConfig.DATA_DIR / "features")
 
         # Initialize cache backend
         if redis_url and REDIS_AVAILABLE:

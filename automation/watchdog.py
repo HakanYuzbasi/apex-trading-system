@@ -31,15 +31,16 @@ import time
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from config import ApexConfig
+from core.logging_config import setup_logging
 
 # Configure logging
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.FileHandler('logs/watchdog.log'),
-        logging.StreamHandler()
-    ]
+setup_logging(
+    level=ApexConfig.LOG_LEVEL,
+    log_file=str(ApexConfig.LOGS_DIR / "watchdog.log"),
+    json_format=False,
+    console_output=True,
+    max_bytes=ApexConfig.LOG_MAX_BYTES,
+    backup_count=ApexConfig.LOG_BACKUP_COUNT,
 )
 logger = logging.getLogger('watchdog')
 
@@ -243,7 +244,7 @@ class TradingWatchdog:
         # Configuration
         self.max_restarts_per_hour: int = 3
         self.restart_history: list = []
-        self.heartbeat_file = Path('data/heartbeat.json')
+        self.heartbeat_file = ApexConfig.DATA_DIR / 'heartbeat.json'
         self.check_interval: int = 30  # seconds
 
         # Market hours (EST)
@@ -304,7 +305,7 @@ class TradingWatchdog:
 
     def _write_watchdog_status(self):
         """Write watchdog status for external monitoring."""
-        status_file = Path('data/watchdog_status.json')
+        status_file = ApexConfig.DATA_DIR / 'watchdog_status.json'
         try:
             status = {
                 'watchdog_running': self.running,

@@ -48,6 +48,8 @@ import logging
 from typing import Dict, Tuple, Optional
 from sklearn.preprocessing import StandardScaler
 
+from core.logging_config import setup_logging
+
 logger = logging.getLogger(__name__)
 
 
@@ -376,10 +378,7 @@ class FeatureEngineering:
 
 if __name__ == "__main__":
     # Test feature engineering
-    logging.basicConfig(
-        level=logging.INFO,
-        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-    )
+    setup_logging(level="INFO", log_file=None, json_format=False, console_output=True)
     
     print("\n" + "="*80)
     print("FEATURE ENGINEERING - TEST")

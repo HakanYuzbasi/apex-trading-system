@@ -11,6 +11,8 @@ import pandas as pd
 import logging
 from typing import Dict
 
+from core.logging_config import setup_logging
+
 logger = logging.getLogger(__name__)
 
 
@@ -203,7 +205,7 @@ class AdaptivePositionSizer:
 
 if __name__ == "__main__":
     # Test adaptive position sizer
-    logging.basicConfig(level=logging.DEBUG)
+    setup_logging(level="DEBUG", log_file=None, json_format=False, console_output=True)
     
     sizer = AdaptivePositionSizer(base_position_size=5000)
     

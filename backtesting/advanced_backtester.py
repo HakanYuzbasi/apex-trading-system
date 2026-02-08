@@ -14,6 +14,10 @@ from typing import Dict, List, Tuple, Optional
 from datetime import datetime, timedelta
 from collections import defaultdict
 
+from core.symbols import AssetClass, parse_symbol, is_market_open
+from config import ApexConfig
+from core.logging_config import setup_logging
+
 logger = logging.getLogger(__name__)
 
 
@@ -34,11 +38,19 @@ class AdvancedBacktester:
         self,
         initial_capital: float = 1_000_000,
         commission_per_trade: float = 1.0,
-        slippage_bps: float = 5.0
+        slippage_bps: float = 5.0,
+        fx_commission_bps: Optional[float] = None,
+        crypto_commission_bps: Optional[float] = None,
+        fx_spread_bps: Optional[float] = None,
+        crypto_spread_bps: Optional[float] = None
     ):
         self.initial_capital = initial_capital
         self.commission_per_trade = commission_per_trade
         self.slippage_bps = slippage_bps / 10000  # Convert to decimal
+        self.fx_commission_bps = fx_commission_bps if fx_commission_bps is not None else ApexConfig.FX_COMMISSION_BPS
+        self.crypto_commission_bps = crypto_commission_bps if crypto_commission_bps is not None else ApexConfig.CRYPTO_COMMISSION_BPS
+        self.fx_spread_bps = fx_spread_bps if fx_spread_bps is not None else ApexConfig.FX_SPREAD_BPS
+        self.crypto_spread_bps = crypto_spread_bps if crypto_spread_bps is not None else ApexConfig.CRYPTO_SPREAD_BPS
         
         self.reset()
         
@@ -55,6 +67,92 @@ class AdvancedBacktester:
         self.equity_curve = []
         self.daily_returns = []
         self.current_date = None
+        self._data_symbols = []
+
+    def _annualization_factor(self, symbols: List[str]) -> int:
+        classes = set()
+        for symbol in symbols:
+            try:
+                classes.add(parse_symbol(symbol).asset_class)
+            except ValueError:
+                continue
+        if classes == {AssetClass.CRYPTO}:
+            return 365
+        if classes == {AssetClass.FOREX}:
+            return 260
+        return 252
+
+    def _is_market_open(self, symbol: str, date: datetime) -> bool:
+        try:
+            parsed = parse_symbol(symbol)
+        except ValueError:
+            return False
+        return is_market_open(parsed, date, assume_daily=True)
+
+    def _get_slippage_pct(self, asset_class: AssetClass) -> float:
+        if asset_class == AssetClass.FOREX:
+            return self.fx_spread_bps / 10000.0
+        if asset_class == AssetClass.CRYPTO:
+            return self.crypto_spread_bps / 10000.0
+        return self.slippage_bps
+
+    def _get_prev_date(self, data: Dict[str, pd.DataFrame], symbol: str, date: datetime) -> Optional[datetime]:
+        if symbol not in data:
+            return None
+        idx = data[symbol].index
+        if len(idx) == 0:
+            return None
+        if date in idx:
+            pos = idx.get_loc(date)
+            if isinstance(pos, slice):
+                pos = pos.start
+            if pos == 0:
+                return None
+            return idx[pos - 1]
+        prior = idx[idx < date]
+        if len(prior) == 0:
+            return None
+        return prior[-1]
+
+    def _estimate_slippage_pct(
+        self,
+        symbol: str,
+        data: Dict[str, pd.DataFrame],
+        date: datetime,
+        asset_class: AssetClass,
+        quantity: float
+    ) -> float:
+        base = self._get_slippage_pct(asset_class)
+        if symbol not in data or date not in data[symbol].index:
+            return base
+        hist = data[symbol].loc[:date].tail(20)
+        if hist.empty:
+            return base
+        returns = hist['Close'].pct_change().dropna() if 'Close' in hist.columns else pd.Series(dtype=float)
+        vol = returns.std() if len(returns) > 0 else 0.0
+        vol_mult = getattr(ApexConfig, "SLIPPAGE_VOL_MULT", 2.0)
+        adv_mult = getattr(ApexConfig, "SLIPPAGE_ADV_MULT", 5.0)
+        slip = base * (1 + vol * vol_mult)
+        if 'Volume' in hist.columns:
+            adv = hist['Volume'].mean()
+            if adv and adv > 0:
+                ratio = abs(quantity) / adv
+                slip += base * ratio * adv_mult
+        max_bps = getattr(ApexConfig, "BACKTEST_MAX_SLIPPAGE_BPS", 50)
+        slip = min(slip, max_bps / 10000.0)
+        return slip
+
+    def _calculate_commission(self, symbol: str, notional: float) -> float:
+        try:
+            parsed = parse_symbol(symbol)
+        except ValueError:
+            return self.commission_per_trade
+
+        if parsed.asset_class == AssetClass.EQUITY:
+            return self.commission_per_trade
+        if parsed.asset_class == AssetClass.FOREX:
+            return notional * (self.fx_commission_bps / 10000.0)
+        return notional * (self.crypto_commission_bps / 10000.0)
     
     def run_backtest(
         self,
@@ -82,6 +180,7 @@ class AdvancedBacktester:
         logger.info(f"🔄 Running backtest: {start_date} to {end_date}")
         
         self.reset()
+        self._data_symbols = list(data.keys())
         
         # Get date range
         dates = pd.date_range(start_date, end_date, freq='D')
@@ -179,6 +278,13 @@ class AdvancedBacktester:
         for symbol in list(self.positions.keys()):
             if self.positions[symbol] == 0:
                 continue
+
+            if not self._is_market_open(symbol, date):
+                continue
+
+            prev_date = self._get_prev_date(data, symbol, date)
+            if not prev_date:
+                continue
             
             # Get current data
             if symbol not in data or date not in data[symbol].index:
@@ -189,7 +295,7 @@ class AdvancedBacktester:
             
             # Generate signal
             try:
-                prices = data[symbol].loc[:date, 'Close']
+                prices = data[symbol].loc[:prev_date, 'Close']
                 signal_data = signal_generator.generate_ml_signal(symbol, prices)
                 signal = signal_data['signal']
             except:
@@ -238,6 +344,13 @@ class AdvancedBacktester:
         for symbol in data.keys():
             if date not in data[symbol].index:
                 continue
+
+            if not self._is_market_open(symbol, date):
+                continue
+
+            prev_date = self._get_prev_date(data, symbol, date)
+            if not prev_date:
+                continue
             
             # Skip if already have position
             if symbol in self.positions and self.positions[symbol] != 0:
@@ -248,23 +361,52 @@ class AdvancedBacktester:
             
             # Generate signal
             try:
-                prices = data[symbol].loc[:date, 'Close']
+                prices = data[symbol].loc[:prev_date, 'Close']
                 signal_data = signal_generator.generate_ml_signal(symbol, prices)
-                signal = signal_data['signal']
+                signal = signal_data.get('signal', 0.0)
+                confidence = signal_data.get('confidence', 0.5)
+                quality = signal_data.get('quality', confidence)
             except:
                 continue
             
             # Entry logic
-            if abs(signal) > 0.45:  # Signal threshold
+            # Dynamic quality gating for better Sharpe
+            min_conf = 0.35
+            if confidence < min_conf or quality < 0.35:
+                continue
+
+            dynamic_threshold = 0.45 + (0.10 if confidence < 0.55 else 0.0)
+            if abs(signal) > dynamic_threshold:  # Signal threshold
                 # Calculate position size
-                shares = int(position_size_usd / price)
-                shares = min(shares, 200)  # Max shares limit
+                try:
+                    asset_class = parse_symbol(symbol).asset_class
+                except ValueError:
+                    continue
+
+                if asset_class == AssetClass.EQUITY:
+                    shares = int(position_size_usd / price)
+                    shares = min(shares, 200)  # Max shares limit
+                else:
+                    shares = position_size_usd / price
+
+                # Scale by confidence/quality
+                size_mult = 0.5 + 0.5 * float(np.clip(quality, 0.0, 1.0))
+                if asset_class == AssetClass.EQUITY:
+                    shares = max(1, int(shares * size_mult))
+                else:
+                    shares = shares * size_mult
+
+                if asset_class != AssetClass.EQUITY and shares < 0.0001:
+                    continue
                 
-                if shares < 1:
+                if asset_class == AssetClass.EQUITY and shares < 1:
                     continue
                 
                 # Check if we have enough cash
-                cost = shares * price * (1 + self.slippage_bps) + self.commission_per_trade
+                slippage_pct = self._estimate_slippage_pct(symbol, data, date, asset_class, shares)
+                notional = shares * price * (1 + slippage_pct)
+                commission = self._calculate_commission(symbol, notional)
+                cost = notional + commission
                 
                 if cost > self.cash:
                     continue
@@ -289,22 +431,53 @@ class AdvancedBacktester:
         self,
         symbol: str,
         side: str,
-        quantity: int,
+        quantity: float,
         price: float,
         date: datetime,
         reason: str = ""
     ):
         """Execute an order with realistic fills."""
+
+        if not self._is_market_open(symbol, date):
+            logger.debug("event=order_rejected symbol=%s reason=market_closed", symbol)
+            return False
+
+        try:
+            parsed = parse_symbol(symbol)
+            asset_class = parsed.asset_class
+        except ValueError:
+            logger.debug("event=order_rejected symbol=%s reason=invalid_symbol", symbol)
+            return False
+
+        logger.info(
+            "event=symbol_normalization input=%s normalized=%s broker=%s",
+            symbol,
+            parsed.normalized,
+            parsed.normalized,
+        )
+
+        if asset_class == AssetClass.EQUITY and isinstance(quantity, float) and not quantity.is_integer():
+            logger.debug("event=order_rejected symbol=%s reason=fractional_equity quantity=%s", symbol, quantity)
+            return False
         
         # Apply slippage
+        slippage_pct = self._get_slippage_pct(asset_class)
         if side == 'BUY':
-            execution_price = price * (1 + self.slippage_bps)
+            execution_price = price * (1 + slippage_pct)
         else:
-            execution_price = price * (1 - self.slippage_bps)
+            execution_price = price * (1 - slippage_pct)
         
         # Calculate costs
         gross_value = quantity * execution_price
-        commission = self.commission_per_trade
+        commission = self._calculate_commission(symbol, gross_value)
+        logger.info(
+            "event=fee_model asset=%s symbol=%s notional=%.2f commission=%.4f slippage_bps=%.2f",
+            asset_class.value,
+            symbol,
+            gross_value,
+            commission,
+            slippage_pct * 10000,
+        )
         
         if side == 'BUY':
             total_cost = gross_value + commission
@@ -380,13 +553,15 @@ class AdvancedBacktester:
         
         # Annualized return
         days = len(equity_df)
-        years = days / 252
+        symbols_for_annual = self._data_symbols or list(self.positions.keys()) + [t['symbol'] for t in self.trades]
+        ann_factor = self._annualization_factor(symbols_for_annual)
+        years = days / ann_factor
         annual_return = (1 + total_return) ** (1 / years) - 1 if years > 0 else 0
         
         # Volatility and Sharpe
         if len(self.daily_returns) > 1:
             daily_vol = np.std(self.daily_returns)
-            annual_vol = daily_vol * np.sqrt(252)
+            annual_vol = daily_vol * np.sqrt(ann_factor)
             sharpe_ratio = (annual_return - 0.02) / annual_vol if annual_vol > 0 else 0
         else:
             annual_vol = 0
@@ -495,7 +670,7 @@ class AdvancedBacktester:
 
 if __name__ == "__main__":
     # Test backtester
-    logging.basicConfig(level=logging.INFO)
+    setup_logging(level="INFO", log_file=None, json_format=False, console_output=True)
     
     # Generate sample data
     np.random.seed(42)

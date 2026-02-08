@@ -24,6 +24,8 @@ import logging
 from typing import Dict, Optional, Tuple
 from datetime import datetime
 
+from core.logging_config import setup_logging
+
 logger = logging.getLogger(__name__)
 
 
@@ -427,10 +429,7 @@ class MarketRegimeDetector:
 
 if __name__ == "__main__":
     # Test market regime detector
-    logging.basicConfig(
-        level=logging.INFO,
-        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-    )
+    setup_logging(level="INFO", log_file=None, json_format=False, console_output=True)
     
     print("\n" + "="*80)
     print("MARKET REGIME DETECTOR - TEST")

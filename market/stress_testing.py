@@ -13,6 +13,8 @@ from typing import Dict, List
 from datetime import datetime, timedelta
 from scipy import stats
 
+from core.logging_config import setup_logging
+
 logger = logging.getLogger(__name__)
 
 
@@ -390,7 +392,7 @@ class StressTestingEngine:
 
 if __name__ == "__main__":
     # Test stress testing engine
-    logging.basicConfig(level=logging.INFO)
+    setup_logging(level="INFO", log_file=None, json_format=False, console_output=True)
     
     engine = StressTestingEngine()
     

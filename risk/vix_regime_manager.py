@@ -78,7 +78,22 @@ class VIXRegimeManager:
     """
     
     # VIX regime thresholds
-    REGIME_THRESHOLDS = {
+    # Dynamic Z-Score Thresholds (std devs above 60d mean)
+    # Complacency: Z < -1.0
+    # Normal: -1.0 <= Z < 0.5
+    # Elevated: 0.5 <= Z < 1.5
+    # Fear: 1.5 <= Z < 3.0
+    # Panic: Z >= 3.0
+    Z_SCORE_THRESHOLDS = {
+        VIXRegime.COMPLACENCY: (-float('inf'), -1.0),
+        VIXRegime.NORMAL: (-1.0, 0.5),
+        VIXRegime.ELEVATED: (0.5, 1.5),
+        VIXRegime.FEAR: (1.5, 3.0),
+        VIXRegime.PANIC: (3.0, float('inf'))
+    }
+
+    # Fallback static thresholds
+    STATIC_THRESHOLDS = {
         VIXRegime.COMPLACENCY: (0, 12),
         VIXRegime.NORMAL: (12, 20),
         VIXRegime.ELEVATED: (20, 30),
@@ -233,8 +248,31 @@ class VIXRegimeManager:
         return state
     
     def _classify_regime(self, vix: float) -> VIXRegime:
-        """Classify VIX regime."""
-        for regime, (low, high) in self.REGIME_THRESHOLDS.items():
+        """
+        Classify VIX regime using Z-scores (adaptive) or static fallback.
+        """
+        # Try dynamic Z-score classification
+        if self._vix_cache is not None and len(self._vix_cache) > 60:
+            try:
+                # Calculate 60-day rolling stats
+                history = self._vix_cache['Close'].tail(65)
+                rolling_mean = history.rolling(window=60).mean().iloc[-1]
+                rolling_std = history.rolling(window=60).std().iloc[-1]
+                
+                if rolling_std > 0:
+                    z_score = (vix - rolling_mean) / rolling_std
+                    
+                    for regime, (low, high) in self.Z_SCORE_THRESHOLDS.items():
+                        if low <= z_score < high:
+                             # Log occasionally
+                             if np.random.random() < 0.05:
+                                 logger.debug(f"VIX Dynamic: Z={z_score:.2f} (Regime={regime.name})")
+                             return regime
+            except Exception as e:
+                logger.debug(f"Dynamic regime calc failed: {e}")
+
+        # Fallback to static
+        for regime, (low, high) in self.STATIC_THRESHOLDS.items():
             if low <= vix < high:
                 return regime
         return VIXRegime.PANIC
