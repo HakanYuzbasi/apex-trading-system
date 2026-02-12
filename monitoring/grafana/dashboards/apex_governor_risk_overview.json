@@ -1,0 +1,62 @@
+{
+  "title": "APEX Governor & Kill-Switch",
+  "schemaVersion": 39,
+  "version": 1,
+  "refresh": "10s",
+  "panels": [
+    {
+      "type": "timeseries",
+      "title": "Governor Tier Level",
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 0},
+      "targets": [
+        {"expr": "apex_governor_tier_level", "legendFormat": "{{asset_class}} {{regime}}"}
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Blocked Entries Rate (5m)",
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 0},
+      "targets": [
+        {
+          "expr": "sum(rate(apex_governor_blocked_entries_total[5m])) by (asset_class, regime, reason)",
+          "legendFormat": "{{asset_class}} {{regime}} {{reason}}"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Governor Transitions (1h)",
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 8},
+      "targets": [
+        {
+          "expr": "sum(increase(apex_governor_transition_total[1h])) by (asset_class, regime, from_tier, to_tier)",
+          "legendFormat": "{{asset_class}} {{regime}} {{from_tier}}->{{to_tier}}"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Effective Size Multiplier",
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 8},
+      "targets": [
+        {"expr": "apex_governor_size_multiplier", "legendFormat": "{{asset_class}} {{regime}}"}
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Kill-Switch Active",
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 16},
+      "targets": [
+        {"expr": "apex_risk_kill_switch_active", "legendFormat": "kill-switch"}
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Kill-Switch Triggers (24h)",
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 16},
+      "targets": [
+        {"expr": "sum(increase(apex_risk_kill_switch_triggers_total[24h])) by (reason)", "legendFormat": "{{reason}}"}
+      ]
+    }
+  ]
+}

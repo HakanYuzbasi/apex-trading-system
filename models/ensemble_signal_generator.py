@@ -29,43 +29,12 @@ from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_sc
 import xgboost as xgb
 import lightgbm as lgb
 from joblib import dump, load
+from models.regime_common import get_regime
 
 logger = logging.getLogger(__name__)
 
 
-class RegimeDetector:
-    """Detect market regime for regime-aware training."""
-    
-    @staticmethod
-    def detect_regime(prices: pd.Series, lookback: int = 60) -> str:
-        """
-        Detect current market regime.
-        
-        Returns: 'bull', 'bear', 'neutral', 'volatile'
-        """
-        if len(prices) < lookback:
-            return 'neutral'
-        
-        recent = prices.iloc[-lookback:]
-        returns = recent.pct_change().dropna()
-        
-        # Trend: Compare recent MA to older MA
-        ma_20 = prices.iloc[-20:].mean()
-        ma_60 = prices.iloc[-60:].mean()
-        trend_strength = (ma_20 - ma_60) / ma_60 if ma_60 > 0 else 0
-        
-        # Volatility: Annualized std dev
-        vol = returns.std() * np.sqrt(252)
-        
-        # Classification Logic
-        if vol > 0.35:  # High volatility threshold
-            return 'volatile'
-        elif trend_strength > 0.05:
-            return 'bull'
-        elif trend_strength < -0.05:
-            return 'bear'
-        else:
-            return 'neutral'
+# RegimeDetector class removed - using models.regime_common.get_regime
 
 
 class EnsembleSignalGenerator:
@@ -341,7 +310,7 @@ class EnsembleSignalGenerator:
         
         try:
             # 1. Detect regime
-            regime = RegimeDetector.detect_regime(prices, lookback=60)
+            regime = get_regime(prices, lookback=60)
             
             # 2. Get regime-specific models
             if regime not in self.regime_models or not self.regime_models[regime]:

@@ -23,11 +23,14 @@ import hashlib
 import time
 import logging
 from datetime import datetime, timedelta
-from typing import Optional, Dict, List, Callable, Any
+from typing import Optional, Dict, List, Callable, Any, Deque
 from dataclasses import dataclass
 from functools import wraps
-from collections import defaultdict
+from collections import defaultdict, deque
 import asyncio
+import json
+from pathlib import Path
+from config import ApexConfig
 
 from fastapi import HTTPException, Depends, Request, WebSocket
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials, APIKeyHeader
@@ -41,6 +44,35 @@ try:
 except ImportError:
     JWT_AVAILABLE = False
     logger.warning("PyJWT not available. Install with: pip install PyJWT")
+
+# Optional bcrypt support (falls back to SHA-256)
+try:
+    import bcrypt as _bcrypt
+    _BCRYPT_AVAILABLE = True
+except ImportError:
+    _BCRYPT_AVAILABLE = False
+    logger.warning("bcrypt not available — install with: pip install bcrypt")
+
+
+def hash_password(password: str) -> str:
+    """Hash a password using bcrypt (preferred) or SHA-256 fallback."""
+    if _BCRYPT_AVAILABLE:
+        return _bcrypt.hashpw(password.encode(), _bcrypt.gensalt()).decode()
+    return hashlib.sha256(password.encode()).hexdigest()
+
+
+def verify_password(password: str, hashed_password: str) -> bool:
+    """Verify a plaintext password against a stored hash."""
+    if not hashed_password:
+        return False
+    if hashed_password.startswith("$2a$") or hashed_password.startswith("$2b$") or hashed_password.startswith("$2y$"):
+        if not _BCRYPT_AVAILABLE:
+            return False
+        try:
+            return _bcrypt.checkpw(password.encode(), hashed_password.encode())
+        except ValueError:
+            return False
+    return secrets.compare_digest(hashlib.sha256(password.encode()).hexdigest(), hashed_password)
 
 
 # Configuration
@@ -93,6 +125,37 @@ class User:
         """Check if user has a specific permission."""
         return permission in self.permissions or "admin" in self.roles
 
+    def to_dict(self) -> Dict:
+        """Convert user to dictionary for serialization."""
+        return {
+            "user_id": self.user_id,
+            "username": self.username,
+            "email": self.email,
+            "roles": self.roles,
+            "permissions": self.permissions,
+            "api_key": self.api_key,
+            "created_at": self.created_at.isoformat() if self.created_at else None,
+            "tier": self.tier
+        }
+
+    @classmethod
+    def from_dict(cls, data: Dict) -> 'User':
+        """Create user from dictionary."""
+        created_at = data.get("created_at")
+        if created_at:
+            created_at = datetime.fromisoformat(created_at)
+        
+        return cls(
+            user_id=data["user_id"],
+            username=data["username"],
+            email=data.get("email"),
+            roles=data.get("roles", []),
+            permissions=data.get("permissions", []),
+            api_key=data.get("api_key"),
+            created_at=created_at,
+            tier=data.get("tier")
+        )
+
 
 @dataclass
 class TokenData:
@@ -112,6 +175,7 @@ class UserStore:
     def __init__(self):
         self.users: Dict[str, User] = {}
         self.api_keys: Dict[str, str] = {}  # api_key -> user_id
+        self.password_hashes: Dict[str, str] = {}  # user_id -> password hash
 
         # Create default admin user
         self._create_default_admin()
@@ -135,6 +199,9 @@ class UserStore:
         )
         self.users["admin"] = admin
         self.api_keys[admin_key] = "admin"
+        admin_password = os.getenv("APEX_ADMIN_PASSWORD")
+        if admin_password:
+            self.password_hashes["admin"] = hash_password(admin_password)
 
     def get_user(self, user_id: str) -> Optional[User]:
         """Get user by ID."""
@@ -151,7 +218,8 @@ class UserStore:
         self,
         username: str,
         email: Optional[str] = None,
-        roles: List[str] = None
+        roles: List[str] = None,
+        password: Optional[str] = None,
     ) -> User:
         """Create a new user."""
         user_id = secrets.token_hex(8)
@@ -169,21 +237,96 @@ class UserStore:
 
         self.users[user_id] = user
         self.api_keys[api_key] = user_id
+        if password:
+            self.password_hashes[user_id] = hash_password(password)
 
         return user
 
-    def validate_credentials(self, username: str, password_hash: str) -> Optional[User]:
-        """Validate user credentials (simplified)."""
-        # In production, check against database with proper password hashing
+    def validate_credentials(self, username: str, password: str) -> Optional[User]:
+        """Validate legacy in-memory credentials."""
         user = next(
             (u for u in self.users.values() if u.username == username),
             None
         )
+        if not user:
+            return None
+        stored_hash = self.password_hashes.get(user.user_id)
+        if not stored_hash:
+            return None
+        if not verify_password(password, stored_hash):
+            return None
         return user
 
 
 # Global user store
-USER_STORE = UserStore()
+# Persistent User Store
+class JSONFileUserStore(UserStore):
+    """File-based persistent user storage."""
+
+    def __init__(self, file_path: Path):
+        self.file_path = file_path
+        super().__init__()  # This creates default admin in memory
+        self._load()        # This acts as overlay/merge
+
+    def _load(self):
+        """Load users from JSON file."""
+        if not self.file_path.exists():
+            return
+
+        try:
+            with open(self.file_path, "r") as f:
+                data = json.load(f)
+            
+            for user_data in data.get("users", []):
+                user = User.from_dict(user_data)
+                self.users[user.user_id] = user
+                if user.api_key:
+                    self.api_keys[user.api_key] = user.user_id
+                
+                # Restore password hash if available
+                if "password_hash" in user_data:
+                    self.password_hashes[user.user_id] = user_data["password_hash"]
+            
+            logger.info(f"Loaded {len(self.users)} users from {self.file_path}")
+
+        except Exception as e:
+            logger.error(f"Failed to load users from {self.file_path}: {e}")
+
+    def save(self):
+        """Save users to JSON file."""
+        data = {
+            "users": []
+        }
+        
+        for user in self.users.values():
+            user_dict = user.to_dict()
+            # Include password hash in serialization (security note: ensure file is protected)
+            if user.user_id in self.password_hashes:
+                user_dict["password_hash"] = self.password_hashes[user.user_id]
+            data["users"].append(user_dict)
+            
+        try:
+            with open(self.file_path, "w") as f:
+                json.dump(data, f, indent=2)
+        except Exception as e:
+            logger.error(f"Failed to save users to {self.file_path}: {e}")
+
+    def create_user(self, *args, **kwargs) -> User:
+        """Create user and save."""
+        user = super().create_user(*args, **kwargs)
+        self.save()
+        return user
+        
+    def _create_default_admin(self):
+        """Create default admin only if not exists."""
+        # We don't want to overwrite if loaded from file, 
+        # but super().__init__ calls this before _load().
+        # So we let super() create it, and _load() will overwrite if exists.
+        super()._create_default_admin()
+
+
+# Global user store
+USER_STORE = JSONFileUserStore(ApexConfig.DATA_DIR / "users.json")
 
 
 # Token Blacklist (in-memory; production should use Redis)
@@ -254,8 +397,8 @@ def create_refresh_token(user: User) -> str:
     return jwt.encode(payload, AUTH_CONFIG.secret_key, algorithm=AUTH_CONFIG.algorithm)
 
 
-def verify_token(token: str) -> Optional[TokenData]:
-    """Verify and decode a JWT token."""
+def verify_token(token: str, expected_token_type: Optional[str] = None) -> Optional[TokenData]:
+    """Verify and decode a JWT token, optionally enforcing token type."""
     if TOKEN_BLACKLIST.is_revoked(token):
         logger.warning("Rejected revoked token")
         return None
@@ -266,13 +409,16 @@ def verify_token(token: str) -> Optional[TokenData]:
             user_id = token.replace("mock-token-", "")
             user = USER_STORE.get_user(user_id)
             if user:
-                return TokenData(
+                token_data = TokenData(
                     user_id=user.user_id,
                     username=user.username,
                     roles=user.roles,
                     exp=datetime.utcnow() + timedelta(hours=1),
                     iat=datetime.utcnow()
                 )
+                if expected_token_type and token_data.token_type != expected_token_type:
+                    return None
+                return token_data
         if AUTH_CONFIG.enabled:
             logger.error("JWT verification requested but PyJWT is not installed")
         return None
@@ -284,7 +430,7 @@ def verify_token(token: str) -> Optional[TokenData]:
             algorithms=[AUTH_CONFIG.algorithm]
         )
 
-        return TokenData(
+        token_data = TokenData(
             user_id=payload["sub"],
             username=payload.get("username", ""),
             roles=payload.get("roles", []),
@@ -292,6 +438,14 @@ def verify_token(token: str) -> Optional[TokenData]:
             iat=datetime.fromtimestamp(payload["iat"]),
             token_type=payload.get("type", "access")
         )
+        if expected_token_type and token_data.token_type != expected_token_type:
+            logger.warning(
+                "Rejected token with invalid type: expected=%s actual=%s",
+                expected_token_type,
+                token_data.token_type,
+            )
+            return None
+        return token_data
     except jwt.ExpiredSignatureError:
         logger.warning("Token expired")
         return None
@@ -350,7 +504,7 @@ async def get_current_user(
 
     # Try JWT token
     if credentials:
-        token_data = verify_token(credentials.credentials)
+        token_data = verify_token(credentials.credentials, expected_token_type="access")
         if token_data:
             user = USER_STORE.get_user(token_data.user_id)
             if user:
@@ -406,8 +560,24 @@ class RateLimiter:
     """
 
     def __init__(self):
-        self.requests: Dict[str, List[float]] = defaultdict(list)
+        self.requests: Dict[str, Deque[float]] = defaultdict(deque)
+        self._last_seen: Dict[str, float] = {}
         self._lock = asyncio.Lock()
+        self._max_keys = 10_000
+        self._clock = time.monotonic
+
+    @staticmethod
+    def _prune_window(window: Deque[float], window_start: float) -> None:
+        while window and window[0] <= window_start:
+            window.popleft()
+
+    def _prune_stale_keys(self) -> None:
+        if len(self._last_seen) <= self._max_keys:
+            return
+        overflow = len(self._last_seen) - self._max_keys
+        for stale_key, _ in sorted(self._last_seen.items(), key=lambda item: item[1])[:overflow]:
+            self.requests.pop(stale_key, None)
+            self._last_seen.pop(stale_key, None)
 
     async def is_allowed(
         self,
@@ -417,39 +587,47 @@ class RateLimiter:
     ) -> bool:
         """Check if request is allowed."""
         async with self._lock:
-            now = time.time()
+            now = self._clock()
             window_start = now - window_seconds
 
-            # Clean old requests
-            self.requests[key] = [
-                t for t in self.requests[key]
-                if t > window_start
-            ]
+            bucket = self.requests[key]
+            self._prune_window(bucket, window_start)
 
             # Check limit
-            if len(self.requests[key]) >= max_requests:
+            if len(bucket) >= max_requests:
+                self._last_seen[key] = now
                 return False
 
             # Record request
-            self.requests[key].append(now)
+            bucket.append(now)
+            self._last_seen[key] = now
+            self._prune_stale_keys()
             return True
 
     def get_remaining(self, key: str, max_requests: int, window_seconds: int) -> int:
         """Get remaining requests in window."""
-        now = time.time()
+        now = self._clock()
         window_start = now - window_seconds
-
-        recent = [t for t in self.requests.get(key, []) if t > window_start]
-        return max(0, max_requests - len(recent))
+        bucket = self.requests.get(key)
+        if not bucket:
+            return max_requests
+        recent_count = 0
+        for ts in bucket:
+            if ts > window_start:
+                recent_count += 1
+        return max(0, max_requests - recent_count)
 
     def get_reset_time(self, key: str, window_seconds: int) -> float:
         """Get seconds until rate limit resets."""
-        if key not in self.requests or not self.requests[key]:
+        bucket = self.requests.get(key)
+        if not bucket:
             return 0
-
-        oldest = min(self.requests[key])
-        reset_at = oldest + window_seconds
-        return max(0, reset_at - time.time())
+        now = self._clock()
+        window_start = now - window_seconds
+        for ts in bucket:
+            if ts > window_start:
+                return max(0, (ts + window_seconds) - now)
+        return 0
 
 
 # Global rate limiter
@@ -540,28 +718,11 @@ async def authenticate_websocket(websocket: WebSocket) -> Optional[User]:
     # Check query params for token
     token = websocket.query_params.get("token")
     if token:
-        token_data = verify_token(token)
+        token_data = verify_token(token, expected_token_type="access")
         if token_data:
             return USER_STORE.get_user(token_data.user_id)
 
     return None
-
-
-# Utility functions
-try:
-    import bcrypt as _bcrypt
-    _BCRYPT_AVAILABLE = True
-except ImportError:
-    _BCRYPT_AVAILABLE = False
-    logger.warning("bcrypt not available — install with: pip install bcrypt")
-
-
-def hash_password(password: str) -> str:
-    """Hash a password using bcrypt (preferred) or SHA-256 fallback."""
-    if _BCRYPT_AVAILABLE:
-        return _bcrypt.hashpw(password.encode(), _bcrypt.gensalt()).decode()
-    logger.warning("Using SHA-256 password hashing — install bcrypt for production use")
-    return hashlib.sha256(password.encode()).hexdigest()
 
 
 def generate_api_key() -> str:
@@ -595,8 +756,7 @@ async def login(username: str, password: str) -> Optional[Dict[str, str]]:
     Returns:
         Dict with access_token and refresh_token, or None if auth fails
     """
-    password_hash = hash_password(password)
-    user = USER_STORE.validate_credentials(username, password_hash)
+    user = USER_STORE.validate_credentials(username, password)
 
     if not user:
         return None

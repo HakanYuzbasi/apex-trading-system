@@ -26,6 +26,8 @@ except Exception:
 import pandas as pd
 
 from config import ApexConfig
+from pathlib import Path
+from execution.metrics_store import ExecutionMetricsStore
 from core.symbols import AssetClass, parse_symbol, normalize_symbol, is_market_open
 
 logger = logging.getLogger(__name__)
@@ -149,13 +151,8 @@ class IBKRConnector:
         max_rps = max(1.0, float(getattr(ApexConfig, "IBKR_MAX_REQ_PER_SEC", 6)))
         self._min_req_interval = 1.0 / max_rps
 
-        # Execution metrics tracking
-        self.execution_metrics = {
-            'total_trades': 0,
-            'total_slippage': 0.0,
-            'total_commission': 0.0,
-            'slippage_history': [],  # List of (symbol, expected_price, fill_price, slippage_bps)
-        }
+        # Execution metrics tracking (Persistent)
+        self.metrics_store = ExecutionMetricsStore(ApexConfig.DATA_DIR / "execution_metrics.json")
         
         # Event-driven streaming state
         self.tickers: Dict[str, Any] = {}
@@ -299,18 +296,17 @@ class IBKRConnector:
         else:
             slippage_bps = 0.0
 
-        self.execution_metrics['total_trades'] += 1
-        self.execution_metrics['total_slippage'] += abs(slippage_bps)
-        self.execution_metrics['total_commission'] += commission
-
-        self.execution_metrics['slippage_history'].append({
-            'timestamp': datetime.now().isoformat(),
-            'symbol': symbol,
-            'expected_price': expected_price,
-            'fill_price': fill_price,
-            'slippage_bps': slippage_bps,
-            'commission': commission
-        })
+        self.metrics_store.record_metrics(
+            slippage_bps=slippage_bps,
+            commission=commission,
+            trade_details={
+                'symbol': symbol,
+                'expected_price': expected_price,
+                'fill_price': fill_price,
+                'slippage_bps': slippage_bps,
+                'commission': commission
+            }
+        )
 
         # Log significant slippage
         if abs(slippage_bps) > 10:  # > 10 bps
@@ -325,7 +321,7 @@ class IBKRConnector:
 
     def get_execution_summary(self) -> Dict:
         """Get summary of execution metrics."""
-        metrics = self.execution_metrics
+        metrics = self.metrics_store.get_metrics()
         n_trades = metrics['total_trades']
 
         if n_trades == 0:

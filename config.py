@@ -33,6 +33,7 @@ class ApexConfig:
     # System Info
     SYSTEM_NAME: str = "APEX Trading System"
     VERSION: str = "2.0.0-PRODUCTION"
+    ENVIRONMENT: str = os.getenv("APEX_ENVIRONMENT", "prod")
     
     # ═══════════════════════════════════════════════════════════════
     # TRADING MODE
@@ -140,6 +141,47 @@ class ApexConfig:
     MAX_DAILY_LOSS = 0.03  # 3% max daily loss (Moderate risk profile)
     MAX_DRAWDOWN = 0.10  # 10% max drawdown
     MAX_SECTOR_EXPOSURE = 0.20  # 20% max per sector for proper diversification (was 0.50)
+
+    # Live performance governor (adaptive risk throttling by realized metrics)
+    PERFORMANCE_GOVERNOR_ENABLED: bool = os.getenv(
+        "APEX_PERFORMANCE_GOVERNOR_ENABLED", "true"
+    ).lower() == "true"
+    PERFORMANCE_TARGET_SHARPE: float = float(os.getenv("APEX_PERFORMANCE_TARGET_SHARPE", "1.5"))
+    PERFORMANCE_TARGET_SORTINO: float = float(os.getenv("APEX_PERFORMANCE_TARGET_SORTINO", "2.0"))
+    PERFORMANCE_MAX_DRAWDOWN: float = float(os.getenv("APEX_PERFORMANCE_MAX_DRAWDOWN", "0.08"))
+    PERFORMANCE_GOV_SAMPLE_MINUTES: int = int(os.getenv("APEX_PERFORMANCE_GOV_SAMPLE_MINUTES", "15"))
+    PERFORMANCE_GOV_MIN_SAMPLES: int = int(os.getenv("APEX_PERFORMANCE_GOV_MIN_SAMPLES", "30"))
+    PERFORMANCE_GOV_LOOKBACK_POINTS: int = int(os.getenv("APEX_PERFORMANCE_GOV_LOOKBACK_POINTS", "200"))
+    PERFORMANCE_GOV_RECOVERY_POINTS: int = int(os.getenv("APEX_PERFORMANCE_GOV_RECOVERY_POINTS", "3"))
+    PERFORMANCE_GOV_POINTS_PER_YEAR: int = int(os.getenv("APEX_PERFORMANCE_GOV_POINTS_PER_YEAR", "3276"))
+    GOVERNOR_POLICY_SCOPE: str = os.getenv("APEX_GOVERNOR_POLICY_SCOPE", "asset_class_regime")
+    GOVERNOR_TUNE_CADENCE_DEFAULT: str = os.getenv("APEX_GOVERNOR_TUNE_CADENCE_DEFAULT", "weekly")
+    GOVERNOR_TUNE_CADENCE_CRYPTO: str = os.getenv("APEX_GOVERNOR_TUNE_CADENCE_CRYPTO", "daily")
+    GOVERNOR_AUTO_PROMOTE_NON_PROD: bool = os.getenv(
+        "APEX_GOVERNOR_AUTO_PROMOTE_NON_PROD", "true"
+    ).lower() == "true"
+    GOVERNOR_PROD_MANUAL_APPROVAL: bool = os.getenv(
+        "APEX_GOVERNOR_PROD_MANUAL_APPROVAL", "true"
+    ).lower() == "true"
+
+    # Hard kill-switch (drawdown + Sharpe decay)
+    KILL_SWITCH_ENABLED: bool = os.getenv("APEX_KILL_SWITCH_ENABLED", "true").lower() == "true"
+    KILL_SWITCH_DD_MULTIPLIER: float = float(os.getenv("APEX_KILL_SWITCH_DD_MULTIPLIER", "1.5"))
+    KILL_SWITCH_SHARPE_WINDOW_DAYS: int = int(os.getenv("APEX_KILL_SWITCH_SHARPE_WINDOW_DAYS", "63"))
+    KILL_SWITCH_SHARPE_FLOOR: float = float(os.getenv("APEX_KILL_SWITCH_SHARPE_FLOOR", "0.2"))
+    KILL_SWITCH_LOGIC: str = os.getenv("APEX_KILL_SWITCH_LOGIC", "OR")
+    KILL_SWITCH_MIN_POINTS: int = int(os.getenv("APEX_KILL_SWITCH_MIN_POINTS", "20"))
+    KILL_SWITCH_HISTORICAL_MDD_BASELINE: float = float(
+        os.getenv("APEX_KILL_SWITCH_HISTORICAL_MDD_BASELINE", "0.08")
+    )
+
+    # Trading-loop Prometheus metrics exporter
+    PROMETHEUS_TRADING_METRICS_ENABLED: bool = os.getenv(
+        "APEX_PROMETHEUS_TRADING_METRICS_ENABLED", "true"
+    ).lower() == "true"
+    PROMETHEUS_TRADING_METRICS_PORT: int = int(
+        os.getenv("APEX_PROMETHEUS_TRADING_METRICS_PORT", "9108")
+    )
 
     # ═══════════════════════════════════════════════════════════════
     # CIRCUIT BREAKER (Automatic Trading Halt)
@@ -646,6 +688,27 @@ def validate_config() -> bool:
     if ApexConfig.TRADE_COOLDOWN_SECONDS < 60:
         warnings.append(
             f"⚠️  Cooldown ({ApexConfig.TRADE_COOLDOWN_SECONDS}s) is short - risk of overtrading"
+        )
+
+    if ApexConfig.PERFORMANCE_TARGET_SHARPE < 1.0:
+        warnings.append(
+            f"⚠️  Performance target Sharpe ({ApexConfig.PERFORMANCE_TARGET_SHARPE}) is lenient"
+        )
+
+    if ApexConfig.PERFORMANCE_MAX_DRAWDOWN > ApexConfig.MAX_DRAWDOWN:
+        warnings.append(
+            f"⚠️  Performance governor max drawdown ({ApexConfig.PERFORMANCE_MAX_DRAWDOWN:.1%}) "
+            f"exceeds hard system max drawdown ({ApexConfig.MAX_DRAWDOWN:.1%})"
+        )
+
+    if ApexConfig.KILL_SWITCH_DD_MULTIPLIER < 1.0:
+        warnings.append(
+            f"⚠️  Kill-switch DD multiplier ({ApexConfig.KILL_SWITCH_DD_MULTIPLIER}) is very strict"
+        )
+
+    if ApexConfig.KILL_SWITCH_LOGIC.upper() not in {"OR", "AND"}:
+        warnings.append(
+            f"⚠️  Kill-switch logic ({ApexConfig.KILL_SWITCH_LOGIC}) invalid, expected OR/AND"
         )
 
     for warning in warnings:

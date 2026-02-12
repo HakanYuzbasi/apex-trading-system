@@ -17,6 +17,7 @@ stripe==7.10.0
 
 # Redis
 redis[hiredis]==5.0.1
+prometheus-client==0.21.1
 
 # PDF generation
 reportlab==4.0.9

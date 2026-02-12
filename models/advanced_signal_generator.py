@@ -23,6 +23,7 @@ from joblib import dump, load
 
 from core.symbols import parse_symbol, AssetClass
 from config import ApexConfig
+from models.regime_common import get_regime
 
 logger = logging.getLogger(__name__)
 
@@ -54,41 +55,7 @@ except ImportError:
     pass
 
 
-class RegimeDetector:
-    """Market regime detection."""
-
-    @staticmethod
-    def detect_regime(prices: pd.Series, lookback: int = 60) -> str:
-        try:
-            if len(prices) < lookback:
-                return 'neutral'
-
-            # Ensure prices is a 1D Series
-            if isinstance(prices, pd.DataFrame):
-                prices = prices.iloc[:, 0]
-            if hasattr(prices, 'squeeze'):
-                prices = prices.squeeze()
-
-            recent = prices.iloc[-lookback:]
-            returns = recent.pct_change().dropna()
-
-            # Calculate scalars explicitly
-            ma_20 = float(prices.iloc[-20:].mean())
-            ma_60 = float(prices.iloc[-60:].mean())
-            trend = (ma_20 - ma_60) / ma_60 if ma_60 > 0 else 0.0
-
-            vol = float(returns.std()) * np.sqrt(252)
-
-            if vol > 0.35:
-                return 'volatile'
-            elif trend > 0.05:
-                return 'bull'
-            elif trend < -0.05:
-                return 'bear'
-            else:
-                return 'neutral'
-        except Exception:
-            return 'neutral'
+# RegimeDetector class removed - using models.regime_common.get_regime
 
 
 class AdvancedSignalGenerator:
@@ -616,7 +583,7 @@ class AdvancedSignalGenerator:
             prices_clean = pd.Series(values, index=range(len(values)))
 
             # Detect regime
-            regime = RegimeDetector.detect_regime(prices_clean, 60)
+            regime = get_regime(prices_clean, 60)
             
             # Get models
             models_by_class = self.asset_class_models.get(asset_class) or self.regime_models

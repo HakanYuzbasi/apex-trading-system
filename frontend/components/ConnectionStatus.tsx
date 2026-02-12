@@ -1,7 +1,7 @@
 "use client";
 
 import { motion, AnimatePresence } from "framer-motion";
-import { Wifi, WifiOff, RefreshCw, Loader2 } from "lucide-react";
+import { WifiOff, RefreshCw, Loader2 } from "lucide-react";
 import type { WebSocketState } from "@/hooks/useWebSocket";
 
 interface ConnectionStatusProps {
@@ -29,7 +29,7 @@ export default function ConnectionStatus({ wsState, onReconnect }: ConnectionSta
                         ? "bg-yellow-950/50 border border-yellow-500/30 text-yellow-400"
                         : "bg-red-950/50 border border-red-500/30 text-red-400"
                     }
-                `}>
+                `} role="status" aria-live="polite">
                     <div className="flex items-center gap-3">
                         {isConnecting ? (
                             <Loader2 className="w-4 h-4 animate-spin" />
@@ -62,6 +62,7 @@ export default function ConnectionStatus({ wsState, onReconnect }: ConnectionSta
                             onClick={onReconnect}
                             className="flex items-center gap-1.5 px-3 py-1 rounded text-xs font-medium
                                 bg-white/10 hover:bg-white/20 transition-colors"
+                            aria-label="Reconnect websocket"
                         >
                             <RefreshCw className="w-3 h-3" />
                             Reconnect

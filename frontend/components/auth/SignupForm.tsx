@@ -36,7 +36,7 @@ export function SignupForm({ onSwitchToLogin, className }: SignupFormProps) {
   return (
     <form onSubmit={handleSubmit} className={cn("space-y-4", className)}>
       {error && (
-        <div className="rounded-md bg-red-500/10 border border-red-500/30 text-red-400 text-sm px-3 py-2">
+        <div role="alert" aria-live="assertive" className="rounded-md bg-red-500/10 border border-red-500/30 text-red-400 text-sm px-3 py-2">
           {error}
         </div>
       )}

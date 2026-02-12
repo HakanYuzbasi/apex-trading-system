@@ -22,6 +22,23 @@ try:
 except ImportError:
     STRUCTLOG_AVAILABLE = False
 
+try:
+    from core.request_context import get_context as get_request_context
+    REQUEST_CONTEXT_AVAILABLE = True
+except Exception:
+    REQUEST_CONTEXT_AVAILABLE = False
+
+
+def _safe_request_context() -> Dict[str, Any]:
+    """Best-effort extraction of active async request/trade context."""
+    if not REQUEST_CONTEXT_AVAILABLE:
+        return {}
+    try:
+        ctx = get_request_context().to_dict()
+    except Exception:
+        return {}
+    return {k: v for k, v in ctx.items() if v is not None}
+
 
 @dataclass
 class LogContext:
@@ -64,6 +81,10 @@ class JsonFormatter(logging.Formatter):
             "message": record.getMessage(),
             "context": asdict(self.context),
         }
+
+        req_ctx = _safe_request_context()
+        if req_ctx:
+            log_entry["request_context"] = req_ctx
 
         # Add exception info if present
         if record.exc_info:
@@ -120,9 +141,23 @@ class ColoredConsoleFormatter(logging.Formatter):
     def format(self, record: logging.LogRecord) -> str:
         color = self.COLORS.get(record.levelname, '')
         timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        req_ctx = _safe_request_context()
+        req_id = req_ctx.get("request_id")
+        corr_id = req_ctx.get("correlation_id")
+        context_suffix = ""
+        if req_id or corr_id:
+            parts = []
+            if req_id:
+                parts.append(f"req={req_id}")
+            if corr_id:
+                parts.append(f"corr={corr_id}")
+            context_suffix = f" [{' '.join(parts)}]"
 
         # Format: timestamp - level - logger - message
-        formatted = f"{timestamp} - {color}{record.levelname:8}{self.RESET} - {record.name} - {record.getMessage()}"
+        formatted = (
+            f"{timestamp} - {color}{record.levelname:8}{self.RESET} - "
+            f"{record.name}{context_suffix} - {record.getMessage()}"
+        )
 
         if record.exc_info:
             formatted += f"\n{self.formatException(record.exc_info)}"

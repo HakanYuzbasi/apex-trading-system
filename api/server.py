@@ -8,20 +8,42 @@ Reads state from trading_state.json written by the ApexTrader.
 
 import asyncio
 import logging
-from typing import Dict, List, Optional
-from pathlib import Path
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, BackgroundTasks, Depends
+import os
+import threading
+import time
+from typing import Dict, List, Optional, Tuple
+from uuid import uuid4
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Depends, Request, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
+from fastapi.responses import PlainTextResponse
 import json
 import math
 from datetime import datetime
+from pydantic import BaseModel, Field
 
 from config import ApexConfig
 from core.logging_config import setup_logging
+from core.request_context import request_context as request_log_context
+from core.trading_control import (
+    read_control_state,
+    request_kill_switch_reset,
+    request_governor_policy_reload,
+)
+from risk.governor_policy import (
+    GovernorPolicyRepository,
+    PolicyPromotionService,
+    PromotionStatus,
+)
 
 logger = logging.getLogger("api")
-from api.auth import authenticate_websocket, require_user
+from api.auth import authenticate_websocket, require_user, require_role
+
+try:
+    from prometheus_client import Counter, Gauge, Histogram, generate_latest, CONTENT_TYPE_LATEST
+    PROMETHEUS_AVAILABLE = True
+except ImportError:
+    PROMETHEUS_AVAILABLE = False
+    CONTENT_TYPE_LATEST = "text/plain; version=0.0.4"
 
 setup_logging(
     level=ApexConfig.LOG_LEVEL,
@@ -47,18 +69,99 @@ def _sanitize_floats(obj):
 # Path to trading state file
 STATE_FILE = ApexConfig.DATA_DIR / "trading_state.json"
 PRICE_CACHE_FILE = ApexConfig.DATA_DIR / "price_cache.json"
+CONTROL_COMMAND_FILE = ApexConfig.DATA_DIR / "trading_control_commands.json"
+GOVERNOR_POLICY_DIR = ApexConfig.DATA_DIR / "governor_policies"
 
-def read_price_cache() -> Dict[str, float]:
-    """Read current price cache from file."""
+DEFAULT_STATE = {
+    "timestamp": None,
+    "capital": 0,
+    "positions": {},
+    "signals": {},
+    "daily_pnl": 0,
+    "total_pnl": 0,
+    "sector_exposure": {},
+}
+
+_price_cache_lock = threading.Lock()
+_price_cache_data: Dict[str, float] = {}
+_price_cache_mtime_ns: Optional[int] = None
+
+_state_cache_lock = threading.Lock()
+_state_cache_data: Dict = DEFAULT_STATE
+_state_cache_mtime_ns: Optional[int] = None
+_state_cache_price_mtime_ns: Optional[int] = None
+
+
+def _mtime_ns(path) -> Optional[int]:
     try:
-        if PRICE_CACHE_FILE.exists():
-            with open(PRICE_CACHE_FILE, 'r') as f:
-                return json.load(f)
+        return path.stat().st_mtime_ns
+    except OSError:
+        return None
+
+
+def read_price_cache() -> Tuple[Dict[str, float], Optional[int]]:
+    """Read current price cache from file with mtime-based caching."""
+    global _price_cache_data, _price_cache_mtime_ns
+
+    mtime_ns = _mtime_ns(PRICE_CACHE_FILE)
+    with _price_cache_lock:
+        if _price_cache_mtime_ns == mtime_ns:
+            return _price_cache_data, _price_cache_mtime_ns
+
+    if mtime_ns is None:
+        with _price_cache_lock:
+            _price_cache_data = {}
+            _price_cache_mtime_ns = None
+            return _price_cache_data, _price_cache_mtime_ns
+
+    try:
+        with open(PRICE_CACHE_FILE, "r") as f:
+            loaded = json.load(f)
+            if not isinstance(loaded, dict):
+                loaded = {}
     except Exception as e:
         logger.debug(f"Error reading price cache: {e}")
-    return {}
+        loaded = {}
+
+    with _price_cache_lock:
+        _price_cache_data = loaded
+        _price_cache_mtime_ns = mtime_ns
+        return _price_cache_data, _price_cache_mtime_ns
 
 app = FastAPI(title="APEX Trading API", version="2.0.0")
+
+if PROMETHEUS_AVAILABLE:
+    HTTP_REQUESTS_TOTAL = Counter(
+        "apex_api_http_requests_total",
+        "Total number of HTTP requests handled by API",
+        ["method", "path", "status"],
+    )
+    HTTP_REQUEST_DURATION = Histogram(
+        "apex_api_http_request_duration_seconds",
+        "HTTP request duration in seconds",
+        ["method", "path"],
+        buckets=(0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0),
+    )
+    HTTP_REQUESTS_IN_PROGRESS = Gauge(
+        "apex_api_http_requests_in_progress",
+        "Number of in-flight HTTP requests",
+        ["method", "path"],
+    )
+    WEBSOCKET_CONNECTIONS = Gauge(
+        "apex_api_websocket_connections",
+        "Number of active websocket connections",
+    )
+    WEBSOCKET_MESSAGES_TOTAL = Counter(
+        "apex_api_websocket_messages_total",
+        "Total websocket messages handled",
+        ["direction"],
+    )
+else:
+    HTTP_REQUESTS_TOTAL = None
+    HTTP_REQUEST_DURATION = None
+    HTTP_REQUESTS_IN_PROGRESS = None
+    WEBSOCKET_CONNECTIONS = None
+    WEBSOCKET_MESSAGES_TOTAL = None
 
 # Enable CORS for Next.js frontend
 app.add_middleware(
@@ -68,6 +171,60 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+@app.middleware("http")
+async def request_context_and_metrics_middleware(request: Request, call_next):
+    method = request.method
+    path = request.url.path
+    request_id = request.headers.get("X-Request-ID") or f"req-{uuid4().hex[:12]}"
+    correlation_id = request.headers.get("X-Correlation-ID") or request_id
+
+    metric_labels = None
+    if PROMETHEUS_AVAILABLE:
+        metric_labels = {"method": method, "path": path}
+        HTTP_REQUESTS_IN_PROGRESS.labels(**metric_labels).inc()
+
+    start = time.perf_counter()
+    status_code = 500
+
+    with request_log_context(
+        correlation_id=correlation_id,
+        request_id=request_id,
+        auto_generate=False,
+    ):
+        try:
+            response = await call_next(request)
+            status_code = response.status_code
+        except Exception:
+            logger.exception(
+                "HTTP request failed",
+                extra={"method": method, "path": path, "request_id": request_id},
+            )
+            raise
+        finally:
+            elapsed = time.perf_counter() - start
+            logger.info(
+                "HTTP request completed",
+                extra={
+                    "method": method,
+                    "path": path,
+                    "status_code": status_code,
+                    "duration_ms": round(elapsed * 1000, 3),
+                    "request_id": request_id,
+                },
+            )
+            if PROMETHEUS_AVAILABLE and metric_labels is not None:
+                HTTP_REQUEST_DURATION.labels(**metric_labels).observe(elapsed)
+                HTTP_REQUESTS_TOTAL.labels(
+                    method=method,
+                    path=path,
+                    status=str(status_code),
+                ).inc()
+                HTTP_REQUESTS_IN_PROGRESS.labels(**metric_labels).dec()
+
+    response.headers["X-Request-ID"] = request_id
+    return response
 
 # SaaS auth: resolve user from PostgreSQL (JWT/API key) or legacy in-memory; set request.state.user
 try:
@@ -139,28 +296,53 @@ class ConnectionManager:
         await websocket.accept()
         async with self._lock:
             self.active_connections.append(websocket)
+        if PROMETHEUS_AVAILABLE and WEBSOCKET_CONNECTIONS is not None:
+            WEBSOCKET_CONNECTIONS.inc()
         logger.info("Client connected via WebSocket")
 
     async def disconnect(self, websocket: WebSocket):
+        disconnected = False
         async with self._lock:
             if websocket in self.active_connections:
                 self.active_connections.remove(websocket)
-                logger.info("Client disconnected")
-            else:
-                logger.warning("Attempted to disconnect unknown websocket")
+                disconnected = True
+        if disconnected:
+            if PROMETHEUS_AVAILABLE and WEBSOCKET_CONNECTIONS is not None:
+                WEBSOCKET_CONNECTIONS.dec()
+            logger.info("Client disconnected")
+        else:
+            logger.warning("Attempted to disconnect unknown websocket")
 
     async def broadcast(self, message: Dict):
         """Send message to all connected clients."""
         async with self._lock:
-            dead: List[WebSocket] = []
-            for connection in self.active_connections:
-                try:
-                    await connection.send_json(message)
-                except Exception as e:
-                    logger.error(f"Error broadcasting: {e}")
-                    dead.append(connection)
-            for ws in dead:
-                self.active_connections.remove(ws)
+            connections = tuple(self.active_connections)
+        if not connections:
+            return
+
+        async def _send(connection: WebSocket):
+            try:
+                await connection.send_json(message)
+                if PROMETHEUS_AVAILABLE and WEBSOCKET_MESSAGES_TOTAL is not None:
+                    WEBSOCKET_MESSAGES_TOTAL.labels(direction="outbound").inc()
+                return None
+            except Exception as exc:
+                return exc
+
+        results = await asyncio.gather(*(_send(connection) for connection in connections))
+        dead: List[WebSocket] = []
+        for connection, result in zip(connections, results):
+            if result is not None:
+                logger.error(f"Error broadcasting: {result}")
+                dead.append(connection)
+
+        if dead:
+            async with self._lock:
+                for ws in dead:
+                    if ws in self.active_connections:
+                        self.active_connections.remove(ws)
+                        if PROMETHEUS_AVAILABLE and WEBSOCKET_CONNECTIONS is not None:
+                            WEBSOCKET_CONNECTIONS.dec()
 
 manager = ConnectionManager()
 
@@ -169,55 +351,72 @@ manager = ConnectionManager()
 # --------------------------------------------------------------------------------
 
 def read_trading_state() -> Dict:
-    """Read current trading state from file, enriched with live prices from cache."""
+    """Read current trading state with mtime-aware caching."""
+    global _state_cache_data, _state_cache_mtime_ns, _state_cache_price_mtime_ns
+
+    state_mtime_ns = _mtime_ns(STATE_FILE)
+    price_cache, price_mtime_ns = read_price_cache()
+
+    with _state_cache_lock:
+        if (
+            _state_cache_data is not None
+            and _state_cache_mtime_ns == state_mtime_ns
+            and _state_cache_price_mtime_ns == price_mtime_ns
+        ):
+            return _state_cache_data
+
+    if state_mtime_ns is None:
+        with _state_cache_lock:
+            _state_cache_data = DEFAULT_STATE
+            _state_cache_mtime_ns = None
+            _state_cache_price_mtime_ns = price_mtime_ns
+            return _state_cache_data
+
     try:
-        if STATE_FILE.exists():
-            with open(STATE_FILE, 'r') as f:
-                data = json.load(f)
-
-            # Enrich positions with live prices from price cache
-            price_cache = read_price_cache()
-            positions = data.get("positions", {})
-            total_position_pnl = 0.0
-
-            for symbol, pos in positions.items():
-                live_price = price_cache.get(symbol, 0)
-                avg_price = pos.get("avg_price", 0)
-                qty = pos.get("qty", 0)
-
-                if live_price > 0 and avg_price > 0:
-                    pos["current_price"] = live_price
-                    if qty > 0:  # Long
-                        pnl = (live_price - avg_price) * qty
-                        pnl_pct = (live_price / avg_price - 1) * 100
-                    else:  # Short
-                        pnl = (avg_price - live_price) * abs(qty)
-                        pnl_pct = (avg_price / live_price - 1) * 100 if live_price > 0 else 0
-                    pos["pnl"] = round(pnl, 2)
-                    pos["pnl_pct"] = round(pnl_pct, 2)
-                    total_position_pnl += pnl
-
-            # Update total_pnl if we have position P&L data
-            if total_position_pnl != 0:
-                starting_capital = data.get("starting_capital", data.get("capital", 0))
-                if starting_capital > 0:
-                    data["total_pnl"] = round(total_position_pnl, 2)
-                    data["daily_pnl"] = round(total_position_pnl, 2)  # Approximate as daily
-
-            return _sanitize_floats(data)
+        with open(STATE_FILE, "r") as f:
+            data = json.load(f)
     except Exception as e:
         logger.error(f"Error reading state file: {e}")
+        with _state_cache_lock:
+            _state_cache_data = DEFAULT_STATE
+            _state_cache_mtime_ns = None
+            _state_cache_price_mtime_ns = price_mtime_ns
+            return _state_cache_data
 
-    # Return default state if file doesn't exist
-    return {
-        "timestamp": None,
-        "capital": 0,
-        "positions": {},
-        "signals": {},
-        "daily_pnl": 0,
-        "total_pnl": 0,
-        "sector_exposure": {}
-    }
+    # Enrich positions with live prices from cache
+    positions = data.get("positions", {})
+    total_position_pnl = 0.0
+
+    for symbol, pos in positions.items():
+        live_price = price_cache.get(symbol, 0)
+        avg_price = pos.get("avg_price", 0)
+        qty = pos.get("qty", 0)
+
+        if live_price > 0 and avg_price > 0:
+            pos["current_price"] = live_price
+            if qty > 0:  # Long
+                pnl = (live_price - avg_price) * qty
+                pnl_pct = (live_price / avg_price - 1) * 100
+            else:  # Short
+                pnl = (avg_price - live_price) * abs(qty)
+                pnl_pct = (avg_price / live_price - 1) * 100 if live_price > 0 else 0
+            pos["pnl"] = round(pnl, 2)
+            pos["pnl_pct"] = round(pnl_pct, 2)
+            total_position_pnl += pnl
+
+    # Update total_pnl if we have position P&L data
+    if total_position_pnl != 0:
+        starting_capital = data.get("starting_capital", data.get("capital", 0))
+        if starting_capital > 0:
+            data["total_pnl"] = round(total_position_pnl, 2)
+            data["daily_pnl"] = round(total_position_pnl, 2)  # Approximate as daily
+
+    sanitized = _sanitize_floats(data)
+    with _state_cache_lock:
+        _state_cache_data = sanitized
+        _state_cache_mtime_ns = state_mtime_ns
+        _state_cache_price_mtime_ns = price_mtime_ns
+        return _state_cache_data
 
 def _parse_timestamp(ts: Optional[str]) -> Optional[datetime]:
     if not ts:
@@ -235,6 +434,35 @@ def _state_is_fresh(state: Dict, threshold_seconds: int) -> bool:
     age = (now - ts).total_seconds()
     return age <= threshold_seconds
 
+
+class KillSwitchResetRequest(BaseModel):
+    reason: str = Field(min_length=8, max_length=500)
+
+
+class GovernorPolicyApproveRequest(BaseModel):
+    policy_id: str = Field(min_length=8, max_length=200)
+    reason: str = Field(min_length=8, max_length=500)
+
+
+class GovernorPolicyRollbackRequest(BaseModel):
+    asset_class: str = Field(min_length=2, max_length=32)
+    regime: str = Field(min_length=1, max_length=64)
+    reason: str = Field(min_length=8, max_length=500)
+    target_version: Optional[str] = Field(default=None, min_length=1, max_length=128)
+
+
+def _governor_repo() -> GovernorPolicyRepository:
+    return GovernorPolicyRepository(GOVERNOR_POLICY_DIR)
+
+
+def _governor_service(repo: GovernorPolicyRepository) -> PolicyPromotionService:
+    return PolicyPromotionService(
+        repository=repo,
+        environment=ApexConfig.ENVIRONMENT,
+        live_trading=ApexConfig.LIVE_TRADING,
+        auto_promote_non_prod=ApexConfig.GOVERNOR_AUTO_PROMOTE_NON_PROD,
+    )
+
 # --------------------------------------------------------------------------------
 # Real-time State Streaming
 # --------------------------------------------------------------------------------
@@ -247,7 +475,7 @@ async def stream_trading_state():
             current_state = read_trading_state()
 
             # Only broadcast if state changed
-            if current_state != last_state:
+            if current_state is not last_state:
                 update = {
                     "type": "state_update",
                     "timestamp": current_state.get("timestamp", datetime.now().isoformat()),
@@ -278,6 +506,21 @@ async def startup_event():
     logger.info("APEX API Server Starting...")
     logger.info(f"Reading state from: {STATE_FILE}")
     asyncio.create_task(stream_trading_state())
+
+
+@app.get("/metrics", include_in_schema=False)
+async def get_metrics(request: Request):
+    """Prometheus scrape endpoint."""
+    if not PROMETHEUS_AVAILABLE:
+        return PlainTextResponse("prometheus_client unavailable\n", status_code=503)
+
+    token = os.getenv("APEX_METRICS_TOKEN", "").strip()
+    if token:
+        supplied = request.headers.get("X-Metrics-Token") or request.query_params.get("token")
+        if supplied != token:
+            return PlainTextResponse("forbidden\n", status_code=403)
+
+    return PlainTextResponse(generate_latest(), media_type=CONTENT_TYPE_LATEST)
 
 # --------------------------------------------------------------------------------
 # REST Endpoints
@@ -343,6 +586,192 @@ async def get_sector_exposure(user=Depends(require_user)):
     state = read_trading_state()
     return state.get("sector_exposure", {})
 
+
+@app.get("/ops/kill-switch")
+async def get_kill_switch_control(user=Depends(require_user)):
+    """Read operational kill-switch control command state."""
+    control_state = read_control_state(CONTROL_COMMAND_FILE)
+    state = read_trading_state()
+    kill_switch = state.get("kill_switch", {})
+    return {
+        "command": control_state,
+        "runtime": {
+            "active": bool(kill_switch.get("active", False)),
+            "reason": kill_switch.get("reason"),
+            "drawdown": float(kill_switch.get("drawdown", 0.0) or 0.0),
+            "sharpe_rolling": float(kill_switch.get("sharpe_rolling", 0.0) or 0.0),
+            "flatten_executed": bool(kill_switch.get("flatten_executed", False)),
+        },
+    }
+
+
+@app.post("/ops/kill-switch/reset")
+async def post_kill_switch_reset(
+    payload: KillSwitchResetRequest,
+    user=Depends(require_role("admin")),
+):
+    """Queue an external kill-switch reset command for the trading loop."""
+    current = read_control_state(CONTROL_COMMAND_FILE)
+    if current.get("kill_switch_reset_requested"):
+        raise HTTPException(
+            status_code=409,
+            detail=f"Kill-switch reset already requested (request_id={current.get('request_id')})",
+        )
+
+    requested_by = getattr(user, "username", None) or getattr(user, "user_id", "unknown")
+    command = request_kill_switch_reset(
+        filepath=CONTROL_COMMAND_FILE,
+        requested_by=str(requested_by),
+        reason=payload.reason.strip(),
+    )
+    logger.warning(
+        "Kill-switch reset requested by %s (request_id=%s)",
+        requested_by,
+        command.get("request_id"),
+    )
+    return {"status": "queued", "command": command}
+
+
+@app.get("/ops/governor/policies/active")
+async def get_governor_active_policies(user=Depends(require_role("admin"))):
+    repo = _governor_repo()
+    policies = sorted(repo.load_active(), key=lambda p: p.key().as_id())
+    return {
+        "count": len(policies),
+        "policies": [
+            {
+                "policy_id": policy.policy_id(),
+                "policy_key": policy.key().as_id(),
+                **policy.to_dict(),
+            }
+            for policy in policies
+        ],
+    }
+
+
+@app.get("/ops/governor/policies/candidates")
+async def get_governor_candidate_policies(
+    status: Optional[str] = None,
+    user=Depends(require_role("admin")),
+):
+    repo = _governor_repo()
+    policies = repo.load_candidates()
+    if status:
+        status_norm = status.strip().lower()
+        allowed = {s.value for s in PromotionStatus}
+        if status_norm not in allowed:
+            raise HTTPException(status_code=400, detail=f"Invalid status '{status}'")
+        policies = [policy for policy in policies if policy.status.value == status_norm]
+
+    policies = sorted(policies, key=lambda p: p.policy_id())
+    return {
+        "count": len(policies),
+        "policies": [
+            {
+                "policy_id": policy.policy_id(),
+                "policy_key": policy.key().as_id(),
+                **policy.to_dict(),
+            }
+            for policy in policies
+        ],
+    }
+
+
+@app.post("/ops/governor/policies/approve")
+async def post_governor_policy_approve(
+    payload: GovernorPolicyApproveRequest,
+    user=Depends(require_role("admin")),
+):
+    repo = _governor_repo()
+    service = _governor_service(repo)
+    approver = getattr(user, "username", None) or getattr(user, "user_id", "unknown")
+    policy_id = payload.policy_id.strip()
+    reason = payload.reason.strip()
+
+    decision = service.approve_staged(policy_id=policy_id, approver=str(approver), reason=reason)
+    if not decision.accepted:
+        raise HTTPException(status_code=400, detail=decision.reason)
+
+    reload_cmd = request_governor_policy_reload(
+        filepath=CONTROL_COMMAND_FILE,
+        requested_by=str(approver),
+        reason=f"manual_approve:{policy_id} {reason}",
+    )
+    return {
+        "status": "approved",
+        "decision": {
+            "accepted": decision.accepted,
+            "manual_approval_required": decision.manual_approval_required,
+            "status": decision.status.value,
+            "reason": decision.reason,
+        },
+        "reload_command": reload_cmd,
+    }
+
+
+@app.post("/ops/governor/policies/rollback")
+async def post_governor_policy_rollback(
+    payload: GovernorPolicyRollbackRequest,
+    user=Depends(require_role("admin")),
+):
+    repo = _governor_repo()
+    service = _governor_service(repo)
+    approver = getattr(user, "username", None) or getattr(user, "user_id", "unknown")
+    asset_class = payload.asset_class.strip().upper()
+    regime = payload.regime.strip().lower() or "default"
+    reason = payload.reason.strip()
+    target_version = payload.target_version.strip() if payload.target_version else None
+
+    decision = service.rollback_active(
+        asset_class=asset_class,
+        regime=regime,
+        approver=str(approver),
+        reason=reason,
+        target_version=target_version,
+    )
+    if not decision.accepted:
+        raise HTTPException(status_code=400, detail=decision.reason)
+
+    reload_cmd = request_governor_policy_reload(
+        filepath=CONTROL_COMMAND_FILE,
+        requested_by=str(approver),
+        reason=f"rollback:{asset_class}:{regime}:{target_version or 'previous'} {reason}",
+    )
+    return {
+        "status": "rolled_back",
+        "decision": {
+            "accepted": decision.accepted,
+            "manual_approval_required": decision.manual_approval_required,
+            "status": decision.status.value,
+            "reason": decision.reason,
+        },
+        "reload_command": reload_cmd,
+    }
+
+
+@app.get("/ops/governor/policies/audit")
+async def get_governor_policy_audit(
+    limit: int = 100,
+    asset_class: Optional[str] = None,
+    regime: Optional[str] = None,
+    user=Depends(require_role("admin")),
+):
+    if regime and not asset_class:
+        raise HTTPException(status_code=400, detail="asset_class is required when regime is provided")
+
+    bounded_limit = min(max(int(limit), 1), 2000)
+    policy_key: Optional[str] = None
+    if asset_class:
+        policy_key = f"{asset_class.strip().upper()}:{(regime or 'default').strip().lower() or 'default'}"
+
+    repo = _governor_repo()
+    events = repo.load_audit_events(limit=bounded_limit, policy_key=policy_key)
+    return {
+        "count": len(events),
+        "policy_key": policy_key,
+        "events": events,
+    }
+
 # --------------------------------------------------------------------------------
 # WebSocket Endpoint
 # --------------------------------------------------------------------------------
@@ -376,6 +805,8 @@ async def websocket_endpoint(websocket: WebSocket):
         })
         while True:
             data = await websocket.receive_text()
+            if PROMETHEUS_AVAILABLE and WEBSOCKET_MESSAGES_TOTAL is not None:
+                WEBSOCKET_MESSAGES_TOTAL.labels(direction="inbound").inc()
             logger.info(f"Received command: {data}")
     except WebSocketDisconnect:
         await manager.disconnect(websocket)

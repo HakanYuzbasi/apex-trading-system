@@ -107,6 +107,7 @@ async def register(body: RegisterRequest, db: AsyncSession = Depends(get_db)):
             username=body.username,
             email=body.email,
             roles=["user"],
+            password=body.password,
         )
         access = create_access_token(new_user)
         refresh = create_refresh_token(new_user)
@@ -158,7 +159,7 @@ async def refresh(body: RefreshRequest, db: AsyncSession = Depends(get_db)):
     # Fall back to legacy token verification + re-issue
     try:
         from api.auth import verify_token, USER_STORE, create_access_token, create_refresh_token
-        token_data = verify_token(body.refresh_token)
+        token_data = verify_token(body.refresh_token, expected_token_type="refresh")
         if token_data:
             user = USER_STORE.get_user(token_data.user_id)
             if user:

@@ -282,7 +282,7 @@ class TestMarketImpact:
 
     def test_higher_volatility_increases_impact(self):
         """Higher volatility should increase slippage."""
-        model = MarketImpactModel()
+        model = MarketImpactModel(random_slippage_std=0.0)
 
         low_vol_slippage = model.calculate_slippage_bps(
             order_size_usd=50000,

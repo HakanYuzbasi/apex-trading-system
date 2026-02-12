@@ -12,6 +12,7 @@ Validates:
 """
 
 import pytest
+import time
 from datetime import datetime, timedelta
 
 from api.auth import (
@@ -20,9 +21,11 @@ from api.auth import (
     UserStore,
     RateLimiter,
     create_access_token,
+    create_refresh_token,
     verify_token,
     configure_auth,
     hash_password,
+    verify_password,
     generate_api_key,
 )
 
@@ -44,6 +47,7 @@ def sample_user(user_store):
         username="testuser",
         email="test@example.com",
         roles=["user"],
+        password="password-123",
     )
 
 
@@ -116,6 +120,12 @@ class TestUserStore:
     def test_get_nonexistent_user(self, user_store):
         assert user_store.get_user("nonexistent") is None
 
+    def test_validate_credentials_success(self, sample_user, user_store):
+        assert user_store.validate_credentials(sample_user.username, "password-123") is not None
+
+    def test_validate_credentials_rejects_wrong_password(self, sample_user, user_store):
+        assert user_store.validate_credentials(sample_user.username, "wrong-password") is None
+
 
 # ---------------------------------------------------------------------------
 # Tests: JWT tokens
@@ -142,6 +152,10 @@ class TestJWTTokens:
         data = verify_token(token)
         assert data is not None
         assert "admin" in data.roles
+
+    def test_refresh_token_rejected_when_access_required(self, admin_user):
+        refresh = create_refresh_token(admin_user)
+        assert verify_token(refresh, expected_token_type="access") is None
 
 
 # ---------------------------------------------------------------------------
@@ -229,6 +243,74 @@ class TestStalenessDetection:
         assert _state_is_fresh(state, threshold_seconds=30) is False
 
 
+class TestStateCaching:
+    """State file reads should use mtime-aware cache semantics."""
+
+    def test_read_trading_state_returns_same_object_when_unchanged(self, tmp_path, monkeypatch):
+        import json
+        from api import server
+
+        state_file = tmp_path / "trading_state.json"
+        price_file = tmp_path / "price_cache.json"
+        state_file.write_text(
+            json.dumps(
+                {
+                    "timestamp": datetime.utcnow().isoformat(),
+                    "capital": 10000,
+                    "positions": {"AAPL": {"avg_price": 100, "qty": 10}},
+                }
+            )
+        )
+        price_file.write_text(json.dumps({"AAPL": 110.0}))
+
+        monkeypatch.setattr(server, "STATE_FILE", state_file)
+        monkeypatch.setattr(server, "PRICE_CACHE_FILE", price_file)
+        monkeypatch.setattr(server, "_price_cache_data", {})
+        monkeypatch.setattr(server, "_price_cache_mtime_ns", None)
+        monkeypatch.setattr(server, "_state_cache_data", server.DEFAULT_STATE)
+        monkeypatch.setattr(server, "_state_cache_mtime_ns", None)
+        monkeypatch.setattr(server, "_state_cache_price_mtime_ns", None)
+
+        s1 = server.read_trading_state()
+        s2 = server.read_trading_state()
+
+        assert s1 is s2
+        assert s1["positions"]["AAPL"]["current_price"] == 110.0
+
+    def test_read_trading_state_invalidates_when_price_cache_changes(self, tmp_path, monkeypatch):
+        import json
+        from api import server
+
+        state_file = tmp_path / "trading_state.json"
+        price_file = tmp_path / "price_cache.json"
+        state_file.write_text(
+            json.dumps(
+                {
+                    "timestamp": datetime.utcnow().isoformat(),
+                    "capital": 10000,
+                    "positions": {"AAPL": {"avg_price": 100, "qty": 10}},
+                }
+            )
+        )
+        price_file.write_text(json.dumps({"AAPL": 100.0}))
+
+        monkeypatch.setattr(server, "STATE_FILE", state_file)
+        monkeypatch.setattr(server, "PRICE_CACHE_FILE", price_file)
+        monkeypatch.setattr(server, "_price_cache_data", {})
+        monkeypatch.setattr(server, "_price_cache_mtime_ns", None)
+        monkeypatch.setattr(server, "_state_cache_data", server.DEFAULT_STATE)
+        monkeypatch.setattr(server, "_state_cache_mtime_ns", None)
+        monkeypatch.setattr(server, "_state_cache_price_mtime_ns", None)
+
+        s1 = server.read_trading_state()
+        time.sleep(0.01)
+        price_file.write_text(json.dumps({"AAPL": 120.0}))
+        s2 = server.read_trading_state()
+
+        assert s1 is not s2
+        assert s2["positions"]["AAPL"]["current_price"] == 120.0
+
+
 # ---------------------------------------------------------------------------
 # Tests: _parse_timestamp
 # ---------------------------------------------------------------------------
@@ -282,10 +364,10 @@ class TestAuthConfig:
         configure_auth(enabled=False, token_expire_minutes=60)
 
     def test_password_hashing(self):
-        h1 = hash_password("test123")
-        h2 = hash_password("test123")
-        assert h1 == h2
-        assert h1 != hash_password("different")
+        hashed = hash_password("test123")
+        assert hashed
+        assert verify_password("test123", hashed)
+        assert not verify_password("different", hashed)
 
     def test_generate_api_key(self):
         key = generate_api_key()
@@ -354,6 +436,7 @@ class TestHealthEndpoint:
                 headers={"X-API-Key": admin.api_key},
             )
             assert response.status_code == 200
+            assert "X-Request-ID" in response.headers
         finally:
             AUTH_CONFIG.enabled = original_enabled
 

@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import { AlertTriangle, XCircle, Info, CheckCircle, X, Bell, BellOff } from "lucide-react";
 
@@ -71,13 +71,7 @@ function AlertToast({ alert, onDismiss }: { alert: AlertItem; onDismiss: (id: st
         }
     }, [alert.id, alert.severity, onDismiss]);
 
-    const timeSince = () => {
-        const seconds = Math.floor((Date.now() - alert.timestamp.getTime()) / 1000);
-        if (seconds < 60) return `${seconds}s ago`;
-        const minutes = Math.floor(seconds / 60);
-        if (minutes < 60) return `${minutes}m ago`;
-        return `${Math.floor(minutes / 60)}h ago`;
-    };
+    const timeLabel = alert.timestamp.toLocaleTimeString();
 
     return (
         <motion.div
@@ -86,6 +80,8 @@ function AlertToast({ alert, onDismiss }: { alert: AlertItem; onDismiss: (id: st
             animate={{ opacity: 1, x: 0, scale: 1 }}
             exit={{ opacity: 0, x: 300, scale: 0.95 }}
             transition={{ type: "spring", stiffness: 400, damping: 30 }}
+            role={alert.severity === "critical" || alert.severity === "warning" ? "alert" : "status"}
+            aria-live={alert.severity === "critical" ? "assertive" : "polite"}
             className={`
                 ${config.bgColor} ${config.borderColor} ${config.glowColor}
                 border rounded-lg p-3 backdrop-blur-lg max-w-sm w-full
@@ -99,6 +95,7 @@ function AlertToast({ alert, onDismiss }: { alert: AlertItem; onDismiss: (id: st
                         <button
                             onClick={() => onDismiss(alert.id)}
                             className="text-muted-foreground hover:text-white transition-colors shrink-0"
+                            aria-label={`Dismiss alert: ${alert.title}`}
                         >
                             <X className="w-3.5 h-3.5" />
                         </button>
@@ -110,7 +107,7 @@ function AlertToast({ alert, onDismiss }: { alert: AlertItem; onDismiss: (id: st
                                 {alert.source}
                             </span>
                         )}
-                        <span className="text-[10px] text-muted-foreground/60">{timeSince()}</span>
+                        <span className="text-[10px] text-muted-foreground/60">{timeLabel}</span>
                     </div>
                 </div>
             </div>
@@ -130,6 +127,7 @@ export default function AlertNotifications({ alerts, onDismiss, onDismissAll }: 
                 <button
                     onClick={() => setMuted(false)}
                     className="relative glass-panel p-2 rounded-lg hover:bg-white/10 transition-colors"
+                    aria-label="Unmute notifications"
                 >
                     <BellOff className="w-4 h-4 text-muted-foreground" />
                     {visibleAlerts.length > 0 && (
@@ -143,13 +141,14 @@ export default function AlertNotifications({ alerts, onDismiss, onDismissAll }: 
     }
 
     return (
-        <div className="fixed top-4 right-4 z-50 flex flex-col items-end gap-2 pointer-events-none">
+        <div className="fixed top-4 right-4 z-50 flex flex-col items-end gap-2 pointer-events-none" aria-live="polite" aria-atomic="false">
             {/* Controls */}
             <div className="flex items-center gap-2 pointer-events-auto">
                 {visibleAlerts.length > 1 && (
                     <button
                         onClick={onDismissAll}
                         className="text-[10px] text-muted-foreground hover:text-white transition-colors px-2 py-1 glass-panel rounded"
+                        aria-label="Dismiss all alerts"
                     >
                         Clear all
                     </button>
@@ -158,6 +157,7 @@ export default function AlertNotifications({ alerts, onDismiss, onDismissAll }: 
                     onClick={() => setMuted(true)}
                     className="glass-panel p-1.5 rounded hover:bg-white/10 transition-colors"
                     title="Mute notifications"
+                    aria-label="Mute notifications"
                 >
                     <Bell className="w-3.5 h-3.5 text-muted-foreground" />
                 </button>

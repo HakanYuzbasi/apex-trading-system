@@ -19,12 +19,14 @@ Usage:
 
 import numpy as np
 import pandas as pd
-from typing import Dict, List, Optional, Any, Callable
+from typing import Dict, List, Optional, Any, Callable, Tuple
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 import hashlib
+import hmac
 import json
 import logging
+import os
 import pickle
 from pathlib import Path
 import threading
@@ -143,6 +145,12 @@ class RedisCache(CacheBackend):
     def __init__(self, url: str = "redis://localhost:6379", db: int = 0):
         self.client = redis.from_url(url, db=db, decode_responses=False)
         self._prefix = "apex:features:"
+        signing_key = os.getenv("APEX_FEATURE_CACHE_SIGNING_KEY") or os.getenv("APEX_SECRET_KEY")
+        if not signing_key:
+            raise ValueError(
+                "APEX_SECRET_KEY (or APEX_FEATURE_CACHE_SIGNING_KEY) must be set for secure Redis cache signing"
+            )
+        self._signing_key = signing_key.encode()
 
     def _key(self, key: str) -> str:
         return f"{self._prefix}{key}"
@@ -151,7 +159,16 @@ class RedisCache(CacheBackend):
         try:
             data = self.client.get(self._key(key))
             if data:
-                return pickle.loads(data)
+                parts = data.split(b":", 2)
+                if len(parts) != 3 or parts[0] != b"v1":
+                    logger.warning("Ignoring unsigned/legacy Redis cache payload for key=%s", key)
+                    return None
+                sig_hex, payload = parts[1], parts[2]
+                expected_sig = hmac.new(self._signing_key, payload, hashlib.sha256).hexdigest().encode()
+                if not hmac.compare_digest(sig_hex, expected_sig):
+                    logger.warning("Ignoring tampered Redis cache payload for key=%s", key)
+                    return None
+                return pickle.loads(payload)
             return None
         except Exception as e:
             logger.error(f"Redis get error: {e}")
@@ -159,7 +176,9 @@ class RedisCache(CacheBackend):
 
     def set(self, key: str, value: Any, ttl_seconds: int = None) -> bool:
         try:
-            data = pickle.dumps(value)
+            payload = pickle.dumps(value, protocol=pickle.HIGHEST_PROTOCOL)
+            sig_hex = hmac.new(self._signing_key, payload, hashlib.sha256).hexdigest().encode()
+            data = b":".join((b"v1", sig_hex, payload))
             if ttl_seconds:
                 self.client.setex(self._key(key), ttl_seconds, data)
             else:
@@ -566,7 +585,7 @@ class FeatureStore:
             if not filepath.exists():
                 return None
 
-            data = np.load(filepath, allow_pickle=True)
+            data = np.load(filepath, allow_pickle=False)
             metadata_dict = json.loads(str(data['metadata']))
 
             metadata = FeatureMetadata(

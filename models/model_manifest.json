@@ -1,0 +1,1044 @@
+{
+  "files": [
+    {
+      "modified_at": "2026-02-12T20:52:49.941777+00:00",
+      "path": "models/saved_advanced/CRYPTO/neutral/gb.pkl",
+      "sha256": "0b752563af5c056661efe4c7018be50b9095db1c49026cd10166ef190c8b6cf3",
+      "size_bytes": 364876
+    },
+    {
+      "modified_at": "2026-02-12T20:52:49.957519+00:00",
+      "path": "models/saved_advanced/CRYPTO/neutral/imputer.pkl",
+      "sha256": "45a911ced777dc683f35d9db9b010981db213677210450e523d59dae51d30a0d",
+      "size_bytes": 759
+    },
+    {
+      "modified_at": "2026-02-12T20:52:49.957185+00:00",
+      "path": "models/saved_advanced/CRYPTO/neutral/lgb.pkl",
+      "sha256": "ac719320bad69d9c14a0c60a3e509bc2b66196d5b66142d3aa7db2e125f93ab4",
+      "size_bytes": 134258
+    },
+    {
+      "modified_at": "2026-02-12T20:52:49.938698+00:00",
+      "path": "models/saved_advanced/CRYPTO/neutral/rf.pkl",
+      "sha256": "288df967c9c4bed83ad4c540681ce5779b2364971e372fd1524813b6df4acf2b",
+      "size_bytes": 980497
+    },
+    {
+      "modified_at": "2026-02-12T20:52:49.957808+00:00",
+      "path": "models/saved_advanced/CRYPTO/neutral/scaler.pkl",
+      "sha256": "e927229fbc5e044a383939330e9eaf0dd45e468469d16947e401e7ecb2083d01",
+      "size_bytes": 1047
+    },
+    {
+      "modified_at": "2026-02-12T20:52:49.951154+00:00",
+      "path": "models/saved_advanced/CRYPTO/neutral/xgb.json",
+      "sha256": "87b3e5423d2954a06cad730156c90f54c792251f1a5c9ccbb24a6c1ca5bf016d",
+      "size_bytes": 552621
+    },
+    {
+      "modified_at": "2026-02-12T20:52:49.979989+00:00",
+      "path": "models/saved_advanced/CRYPTO/volatile/gb.pkl",
+      "sha256": "c6b85c57311de3f74f7c0120ca9247d9ddec0e07b0cf50e8dff45d3b4756ba66",
+      "size_bytes": 422348
+    },
+    {
+      "modified_at": "2026-02-12T20:52:50.000799+00:00",
+      "path": "models/saved_advanced/CRYPTO/volatile/imputer.pkl",
+      "sha256": "a74f7dc33de0159bc96fd588ada952c3f349a39cc2364343886c727b843e4be5",
+      "size_bytes": 759
+    },
+    {
+      "modified_at": "2026-02-12T20:52:50.000182+00:00",
+      "path": "models/saved_advanced/CRYPTO/volatile/lgb.pkl",
+      "sha256": "596dce6b8f596438f92a27326975e6cbf7c2a70d03c051abf9248a916fa3e140",
+      "size_bytes": 297758
+    },
+    {
+      "modified_at": "2026-02-12T20:52:49.976899+00:00",
+      "path": "models/saved_advanced/CRYPTO/volatile/rf.pkl",
+      "sha256": "091b1bb197d43eceeabacc369325afae8d146f01a4f520af48d37129fe983275",
+      "size_bytes": 1824081
+    },
+    {
+      "modified_at": "2026-02-12T20:52:50.001083+00:00",
+      "path": "models/saved_advanced/CRYPTO/volatile/scaler.pkl",
+      "sha256": "9a2be6c62527f408e10631b86beed7cae3ee488e5f8ad2af0f43d1948ab478b6",
+      "size_bytes": 1047
+    },
+    {
+      "modified_at": "2026-02-12T20:52:49.994633+00:00",
+      "path": "models/saved_advanced/CRYPTO/volatile/xgb.json",
+      "sha256": "615b30cacddbe8b71612e210f65ca9b8cbd2614b58893d4b8e450bd05a35bd39",
+      "size_bytes": 803675
+    },
+    {
+      "modified_at": "2026-02-12T20:52:49.598624+00:00",
+      "path": "models/saved_advanced/EQUITY/bear/gb.pkl",
+      "sha256": "48c9e998c555b2b9a4e8e62ea3f8a2f867d9208bee501174bdfae6b984741f33",
+      "size_bytes": 418748
+    },
+    {
+      "modified_at": "2026-02-12T20:52:49.613248+00:00",
+      "path": "models/saved_advanced/EQUITY/bear/imputer.pkl",
+      "sha256": "4ebd11013746deecdb88afcaca260b4f0b4e8476297988604b947fc504d6a7fa",
+      "size_bytes": 759
+    },
+    {
+      "modified_at": "2026-02-12T20:52:49.612676+00:00",
+      "path": "models/saved_advanced/EQUITY/bear/lgb.pkl",
+      "sha256": "f531f7a4749c5b302de0f2ccb78ddad1b429e19e83ad411d1b855c9709f6d995",
+      "size_bytes": 239863
+    },
+    {
+      "modified_at": "2026-02-12T20:52:49.595674+00:00",
+      "path": "models/saved_advanced/EQUITY/bear/rf.pkl",
+      "sha256": "86ed65847984698add28cf17e9c449d5b9cc880e16876987e31ffe40e5e17148",
+      "size_bytes": 1565153
+    },
+    {
+      "modified_at": "2026-02-12T20:52:49.613544+00:00",
+      "path": "models/saved_advanced/EQUITY/bear/scaler.pkl",
+      "sha256": "9f63128e735bfdd1bbb67e80a36168b9c4de72261f2e78a0a28fc8a1dafd6b26",
+      "size_bytes": 1047
+    },
+    {
+      "modified_at": "2026-02-12T20:52:49.609038+00:00",
+      "path": "models/saved_advanced/EQUITY/bear/xgb.json",
+      "sha256": "f617e218ccd9c9fa57d164222bf34f817ec7d1ca1b00b913deab93551892eaba",
+      "size_bytes": 678127
+    },
+    {
+      "modified_at": "2026-02-12T20:52:49.544693+00:00",
+      "path": "models/saved_advanced/EQUITY/bull/gb.pkl",
+      "sha256": "5e8ea6b71d988251d8a3eabc28f96924028edcc77dae799e0103947970615d00",
+      "size_bytes": 418460
+    },
+    {
+      "modified_at": "2026-02-12T20:52:49.568984+00:00",
+      "path": "models/saved_advanced/EQUITY/bull/imputer.pkl",
+      "sha256": "c2257f013e413c7e0bf08885b44dbbd24046f24cf2d3213b36f5f76299ae5760",
+      "size_bytes": 759
+    },
+    {
+      "modified_at": "2026-02-12T20:52:49.567518+00:00",
+      "path": "models/saved_advanced/EQUITY/bull/lgb.pkl",
+      "sha256": "11402bbf0d240574d0bdf41066a7759e4ba4797f6caf16bef3f634cae3def92a",
+      "size_bytes": 322558
+    },
+    {
+      "modified_at": "2026-02-12T20:52:49.535952+00:00",
+      "path": "models/saved_advanced/EQUITY/bull/rf.pkl",
+      "sha256": "6d066af6d62bd1372fb3526a21e250a1bd8cab177a2da1889986991497a5f866",
+      "size_bytes": 1838465
+    },
+    {
+      "modified_at": "2026-02-12T20:52:49.570706+00:00",
+      "path": "models/saved_advanced/EQUITY/bull/scaler.pkl",
+      "sha256": "a332d8bf9e358b63fb692372a6b228eb5eb6f07af863f3e253beb880c7d90c4d",
+      "size_bytes": 1047
+    },
+    {
+      "modified_at": "2026-02-12T20:52:49.561935+00:00",
+      "path": "models/saved_advanced/EQUITY/bull/xgb.json",
+      "sha256": "693057720b0f0e9e284595b3e2976883f81ac816cce57d247774c3b817e9b3c3",
+      "size_bytes": 852004
+    },
+    {
+      "modified_at": "2026-02-12T20:52:49.639612+00:00",
+      "path": "models/saved_advanced/EQUITY/neutral/gb.pkl",
+      "sha256": "f79cdc498604290affb2ab4be588521ff317db4e69ab0e6a23c09c9a6ce5dba0",
+      "size_bytes": 447980
+    },
+    {
+      "modified_at": "2026-02-12T20:52:49.660297+00:00",
+      "path": "models/saved_advanced/EQUITY/neutral/imputer.pkl",
+      "sha256": "41eec9601847d218afda89f597c0b30a5a291aa709548fcd39dc6eac1d862fb1",
+      "size_bytes": 759
+    },
+    {
+      "modified_at": "2026-02-12T20:52:49.659708+00:00",
+      "path": "models/saved_advanced/EQUITY/neutral/lgb.pkl",
+      "sha256": "d7a6e72ac13f3648305c4bd1f93c988e760752720b708bdaa50f0647f2e17709",
+      "size_bytes": 429402
+    },
+    {
+      "modified_at": "2026-02-12T20:52:49.635113+00:00",
+      "path": "models/saved_advanced/EQUITY/neutral/rf.pkl",
+      "sha256": "bad2c22d16291b3f93775bef554ac96be987f47289ee49e76c563d285cc20efb",
+      "size_bytes": 2396193
+    },
+    {
+      "modified_at": "2026-02-12T20:52:49.660903+00:00",
+      "path": "models/saved_advanced/EQUITY/neutral/scaler.pkl",
+      "sha256": "6dd6c23dbb9a4e919596b66452cab69b64c5a983596ec6204bc15b21ee6410b8",
+      "size_bytes": 1047
+    },
+    {
+      "modified_at": "2026-02-12T20:52:49.655383+00:00",
+      "path": "models/saved_advanced/EQUITY/neutral/xgb.json",
+      "sha256": "79abc9a1f06fd2f21875d9df9414cdacddc542a80b3a445425844bbb246c4fa1",
+      "size_bytes": 1015255
+    },
+    {
+      "modified_at": "2026-02-12T20:52:49.689095+00:00",
+      "path": "models/saved_advanced/EQUITY/volatile/gb.pkl",
+      "sha256": "3e010d71f20d3a2067d567b1c41d003898c89bc01058737ca30938a7b75f2da8",
+      "size_bytes": 441212
+    },
+    {
+      "modified_at": "2026-02-12T20:52:49.709845+00:00",
+      "path": "models/saved_advanced/EQUITY/volatile/imputer.pkl",
+      "sha256": "dc54d15a1d80b9e166e8ae636971232cf79153ffdb1469672037d97210037da1",
+      "size_bytes": 759
+    },
+    {
+      "modified_at": "2026-02-12T20:52:49.709120+00:00",
+      "path": "models/saved_advanced/EQUITY/volatile/lgb.pkl",
+      "sha256": "dfb366145111d51a8a87360312d707d040b90d171b9f18c4dedaad0cebaf1ac5",
+      "size_bytes": 348538
+    },
+    {
+      "modified_at": "2026-02-12T20:52:49.681859+00:00",
+      "path": "models/saved_advanced/EQUITY/volatile/rf.pkl",
+      "sha256": "e8df74a4c4baef2ee00b10ef0acfbaef89f2a4737bea9a86e10e77c35a793cd0",
+      "size_bytes": 2165361
+    },
+    {
+      "modified_at": "2026-02-12T20:52:49.710157+00:00",
+      "path": "models/saved_advanced/EQUITY/volatile/scaler.pkl",
+      "sha256": "3cf833b43c54677eafc64cc2f57562178d1d7e2ce0912cd5a643db552d36e9be",
+      "size_bytes": 1047
+    },
+    {
+      "modified_at": "2026-02-12T20:52:49.701501+00:00",
+      "path": "models/saved_advanced/EQUITY/volatile/xgb.json",
+      "sha256": "63ed4f09ae35ad5af9f9eb80e56911f890e3cde8c0854b22d2b0ea1b2b9f096c",
+      "size_bytes": 829123
+    },
+    {
+      "modified_at": "2026-02-12T20:52:49.783868+00:00",
+      "path": "models/saved_advanced/FOREX/neutral/gb.pkl",
+      "sha256": "68546add73caa4cc7951a47f2b11639ee79677a93dfcae5b211136fd7ef48c51",
+      "size_bytes": 442940
+    },
+    {
+      "modified_at": "2026-02-12T20:52:49.845536+00:00",
+      "path": "models/saved_advanced/FOREX/neutral/imputer.pkl",
+      "sha256": "bbebb31565127178bac13c1efb2b1a6459a965164b192f4b0dec128c157402b8",
+      "size_bytes": 759
+    },
+    {
+      "modified_at": "2026-02-12T20:52:49.791941+00:00",
+      "path": "models/saved_advanced/FOREX/neutral/lgb.pkl",
+      "sha256": "ac18139ae65fd66a5db9b8b69ffca35590391ff4222a23b41c474fdec96b3724",
+      "size_bytes": 340277
+    },
+    {
+      "modified_at": "2026-02-12T20:52:49.778330+00:00",
+      "path": "models/saved_advanced/FOREX/neutral/rf.pkl",
+      "sha256": "2f89f5ea9d52b28b0ca4ad2f4e9ee1f39072eac80e85c321cae762a72701e8d9",
+      "size_bytes": 1857345
+    },
+    {
+      "modified_at": "2026-02-12T20:52:49.847008+00:00",
+      "path": "models/saved_advanced/FOREX/neutral/scaler.pkl",
+      "sha256": "f20063b8fa5e6fb40ce6cb250cf64756123712ff882ad07efcacca49a3aae266",
+      "size_bytes": 1047
+    },
+    {
+      "modified_at": "2026-02-12T20:52:49.834760+00:00",
+      "path": "models/saved_advanced/FOREX/neutral/xgb.json",
+      "sha256": "3659fc8678b0676fd48c75dd9c9f960339b16fd8321126758fde43036ddb65ca",
+      "size_bytes": 864941
+    },
+    {
+      "modified_at": "2026-02-07T13:44:10.239024+00:00",
+      "path": "models/saved_advanced/bear/gb.pkl",
+      "sha256": "690c7fb66c31afd9d250ffe609c0ec375aa544c28f6f38f689e9caeeb08519e4",
+      "size_bytes": 389644
+    },
+    {
+      "modified_at": "2026-02-07T13:44:10.249860+00:00",
+      "path": "models/saved_advanced/bear/imputer.pkl",
+      "sha256": "c79d580f6b76474542f8ea2b09719a953988cb099cbcb976664b4eff8f8f7bd4",
+      "size_bytes": 759
+    },
+    {
+      "modified_at": "2026-02-07T13:44:10.248990+00:00",
+      "path": "models/saved_advanced/bear/lgb.pkl",
+      "sha256": "b2ac9db303741e1a1efb9a229c2707aafae48ba2023048fe85287f6ff088db4d",
+      "size_bytes": 273356
+    },
+    {
+      "modified_at": "2026-02-07T13:44:10.237467+00:00",
+      "path": "models/saved_advanced/bear/rf.pkl",
+      "sha256": "0c97e480ca8c6a8121de2cc0d0ce4ab6c9d60b25228d1468de6ddf7b38364055",
+      "size_bytes": 1405761
+    },
+    {
+      "modified_at": "2026-02-07T13:44:10.250054+00:00",
+      "path": "models/saved_advanced/bear/scaler.pkl",
+      "sha256": "a60c6bee27f18a9b4cba7a87644fecec1816ece5c65ec898f040410d58aac65d",
+      "size_bytes": 1047
+    },
+    {
+      "modified_at": "2026-02-07T13:44:10.246392+00:00",
+      "path": "models/saved_advanced/bear/xgb.json",
+      "sha256": "1af00b0351b27bb805bb4787324805fa9151543a45540f148655cafeb18fd5f4",
+      "size_bytes": 745625
+    },
+    {
+      "modified_at": "2026-02-07T13:44:10.211116+00:00",
+      "path": "models/saved_advanced/bull/gb.pkl",
+      "sha256": "bad890735386977ab9a361109fd3bb841fee91dbfdf373c7a8d04c6ec03c4c3e",
+      "size_bytes": 423788
+    },
+    {
+      "modified_at": "2026-02-07T13:44:10.226729+00:00",
+      "path": "models/saved_advanced/bull/imputer.pkl",
+      "sha256": "7da97c1937270a66ef8217190bd3bff35e203424033cfdcb8f93db7ee8cd3631",
+      "size_bytes": 759
+    },
+    {
+      "modified_at": "2026-02-07T13:44:10.225979+00:00",
+      "path": "models/saved_advanced/bull/lgb.pkl",
+      "sha256": "4afc803be1e6f667e2f37c305c8b6836eac90dc8d742b59cb29c697a8325fd3f",
+      "size_bytes": 351482
+    },
+    {
+      "modified_at": "2026-02-07T13:44:10.204523+00:00",
+      "path": "models/saved_advanced/bull/rf.pkl",
+      "sha256": "f0f3a25d7a5f6742794e857855f285f09523ad2a8d0d68d3e1653d4f3101875f",
+      "size_bytes": 1505553
+    },
+    {
+      "modified_at": "2026-02-07T13:44:10.227069+00:00",
+      "path": "models/saved_advanced/bull/scaler.pkl",
+      "sha256": "f80eebcdf241c4fdbaaaf2edea90d60c6ec0bc39101aa6c78c48fa5ba05c84e1",
+      "size_bytes": 1047
+    },
+    {
+      "modified_at": "2026-02-07T13:44:10.222727+00:00",
+      "path": "models/saved_advanced/bull/xgb.json",
+      "sha256": "003d11f2adb7e6d7f9640cf6a64e33508f3d354a2b40b9ed04aa6e8d5343e766",
+      "size_bytes": 773641
+    },
+    {
+      "modified_at": "2026-02-12T20:52:50.004793+00:00",
+      "path": "models/saved_advanced/metadata.pkl",
+      "sha256": "639410e3a37400b6165887cb1703bb9c90f543ad0bb4bca6b28571e15b878fc8",
+      "size_bytes": 7905
+    },
+    {
+      "modified_at": "2026-02-07T13:44:10.264177+00:00",
+      "path": "models/saved_advanced/neutral/gb.pkl",
+      "sha256": "befb881cc2744780d0fe664c0bfaf57d4a02cfff76ee9b17a8c5c9637d8dd697",
+      "size_bytes": 419180
+    },
+    {
+      "modified_at": "2026-02-07T13:44:10.275834+00:00",
+      "path": "models/saved_advanced/neutral/imputer.pkl",
+      "sha256": "2ff6dbd1690854eb51f73afbc025867c3b4f5c9f261b34e59d99be6c76c93837",
+      "size_bytes": 759
+    },
+    {
+      "modified_at": "2026-02-07T13:44:10.275636+00:00",
+      "path": "models/saved_advanced/neutral/lgb.pkl",
+      "sha256": "97bbb373d69f550508251d8da92eac31669d6aed0efdfd92728b96802f1159a0",
+      "size_bytes": 435597
+    },
+    {
+      "modified_at": "2026-02-07T13:44:10.260007+00:00",
+      "path": "models/saved_advanced/neutral/rf.pkl",
+      "sha256": "82bee4e63ea12b72d3b32628fa7958cbe423e6201a624bdad11840decac95601",
+      "size_bytes": 1469393
+    },
+    {
+      "modified_at": "2026-02-07T13:44:10.275996+00:00",
+      "path": "models/saved_advanced/neutral/scaler.pkl",
+      "sha256": "967f00a233a32ba31ac6dafadeb4f2e2a4eaa58f97d50657f42ffc85534eedc4",
+      "size_bytes": 1047
+    },
+    {
+      "modified_at": "2026-02-07T13:44:10.273073+00:00",
+      "path": "models/saved_advanced/neutral/xgb.json",
+      "sha256": "1f0c750363bf59e0e9f412fc821c6a8982167e3b33de57fc03dcce0b87024437",
+      "size_bytes": 932368
+    },
+    {
+      "modified_at": "2026-02-07T13:44:10.289225+00:00",
+      "path": "models/saved_advanced/volatile/gb.pkl",
+      "sha256": "9a7c888e5681ee624c7df7b999ab434f7d1febc94ff76ba524198b9d55fe6d62",
+      "size_bytes": 434300
+    },
+    {
+      "modified_at": "2026-02-07T13:44:10.298979+00:00",
+      "path": "models/saved_advanced/volatile/imputer.pkl",
+      "sha256": "b34dab0b57baa1351435c2def01e34df8f8ec01c3a0635daba6a881b95a1fc63",
+      "size_bytes": 759
+    },
+    {
+      "modified_at": "2026-02-07T13:44:10.298800+00:00",
+      "path": "models/saved_advanced/volatile/lgb.pkl",
+      "sha256": "ba68a03c144923868d82544a2978e9e32cf388a3d3ae4751f1acf66b367c2ecd",
+      "size_bytes": 353741
+    },
+    {
+      "modified_at": "2026-02-07T13:44:10.287210+00:00",
+      "path": "models/saved_advanced/volatile/rf.pkl",
+      "sha256": "460fe49ea63775d8054ac0eb16c5df5546fa58bd06a7a811a135103b2024595f",
+      "size_bytes": 1652273
+    },
+    {
+      "modified_at": "2026-02-07T13:44:10.299461+00:00",
+      "path": "models/saved_advanced/volatile/scaler.pkl",
+      "sha256": "cb508bee28c686b18b6ea211d25ddbe1d30c56573f426de804d933d997727611",
+      "size_bytes": 1047
+    },
+    {
+      "modified_at": "2026-02-07T13:44:10.296621+00:00",
+      "path": "models/saved_advanced/volatile/xgb.json",
+      "sha256": "86568c6bc855b19332f11902b547e4426cedd48e0b4e3667650df10d3077c8fa",
+      "size_bytes": 801052
+    },
+    {
+      "modified_at": "2026-02-12T19:47:18.083638+00:00",
+      "path": "models/saved_ultimate/bear/anomaly_gb.pkl",
+      "sha256": "e57dca01d7f9231ed4d220b9019a6a1e13d26801eceec7d82630873550ca727e",
+      "size_bytes": 1193675
+    },
+    {
+      "modified_at": "2026-02-12T19:47:17.985200+00:00",
+      "path": "models/saved_ultimate/bear/bayesian_ridge.pkl",
+      "sha256": "83ccef91256c2ce24113059fb6a4961652b1a895ce80184d43cf504a9995dbd8",
+      "size_bytes": 24003
+    },
+    {
+      "modified_at": "2026-02-12T19:47:18.086427+00:00",
+      "path": "models/saved_ultimate/bear/catboost.pkl",
+      "sha256": "996526ec2308d2bfbb6f301c4cff4be3b8e11d1908695e2a66da33536c5685e9",
+      "size_bytes": 205117
+    },
+    {
+      "modified_at": "2026-02-12T19:47:17.984471+00:00",
+      "path": "models/saved_ultimate/bear/elastic_net.pkl",
+      "sha256": "4c50aa99f8d3f6f364317b62ad8da42847108335477639778d7aea7f07bf61ae",
+      "size_bytes": 2419
+    },
+    {
+      "modified_at": "2026-02-12T19:47:17.979669+00:00",
+      "path": "models/saved_ultimate/bear/gb.pkl",
+      "sha256": "4a84bad82e583fa38fc9bb67cba89ffc45ef175d2407b3a78814e717f57a7760",
+      "size_bytes": 171339
+    },
+    {
+      "modified_at": "2026-02-12T19:47:18.058799+00:00",
+      "path": "models/saved_ultimate/bear/gp.pkl",
+      "sha256": "b2066367906250b9f0029a365ccfbfb5d0160f0080063528617e98694766dc11",
+      "size_bytes": 26400194
+    },
+    {
+      "modified_at": "2026-02-12T19:47:18.102658+00:00",
+      "path": "models/saved_ultimate/bear/imputer.pkl",
+      "sha256": "1c7f024dbea82fe552d8a05302f31c6b069e156547a6802d102b4cab7329a111",
+      "size_bytes": 727
+    },
+    {
+      "modified_at": "2026-02-12T19:47:17.984071+00:00",
+      "path": "models/saved_ultimate/bear/lgb.pkl",
+      "sha256": "e478ae51cbd1093d6d3f2fdec502dd4eeb3a38d5ae3ff56f163c3ef071f860f1",
+      "size_bytes": 130444
+    },
+    {
+      "modified_at": "2026-02-12T19:47:17.977246+00:00",
+      "path": "models/saved_ultimate/bear/rf.pkl",
+      "sha256": "8e744c2f3528ca83e6714b8b08b3d102a48e102e9f5f3c0a9a329bdbc238ae59",
+      "size_bytes": 387985
+    },
+    {
+      "modified_at": "2026-02-12T19:47:18.102869+00:00",
+      "path": "models/saved_ultimate/bear/scaler.pkl",
+      "sha256": "67369e5fcf85eb79cdf0596d4ba59ffd22503c593076d03a9dab7455521bb68a",
+      "size_bytes": 983
+    },
+    {
+      "modified_at": "2026-02-12T19:47:18.102411+00:00",
+      "path": "models/saved_ultimate/bear/stacking.pkl",
+      "sha256": "901de7a7ec8066ffc779c437baf69333ad41d7debf22ebbba6343102f14c2882",
+      "size_bytes": 486755
+    },
+    {
+      "modified_at": "2026-02-12T19:47:17.993195+00:00",
+      "path": "models/saved_ultimate/bear/svr.pkl",
+      "sha256": "303094552e975179065bfabada14e145fe4b6e7f813b3793ee8697fff9d88d8b",
+      "size_bytes": 1057875
+    },
+    {
+      "modified_at": "2026-02-12T19:47:17.982385+00:00",
+      "path": "models/saved_ultimate/bear/xgb.json",
+      "sha256": "123a1d3c397a4c83daf289e4fc3238bc083fd86ac3c508e82e5a61ffa9811c09",
+      "size_bytes": 175118
+    },
+    {
+      "modified_at": "2026-02-12T19:47:17.936995+00:00",
+      "path": "models/saved_ultimate/bull/anomaly_gb.pkl",
+      "sha256": "9897d9ed9754bdbea1e9c3272130c37ddd64668a41e1e4d767aadedc0517db7b",
+      "size_bytes": 1104235
+    },
+    {
+      "modified_at": "2026-02-12T19:47:17.749983+00:00",
+      "path": "models/saved_ultimate/bull/bayesian_ridge.pkl",
+      "sha256": "4b38593f18ca82e6fe0ab1bcb49f902020098743b5c76061a5d0b46493cf98a3",
+      "size_bytes": 27091
+    },
+    {
+      "modified_at": "2026-02-12T19:47:17.941919+00:00",
+      "path": "models/saved_ultimate/bull/catboost.pkl",
+      "sha256": "ac46ea6e72e4e5bc8019fd0e456c7e01cfd496589ea27fd0ddc18e97fd9d95c9",
+      "size_bytes": 119133
+    },
+    {
+      "modified_at": "2026-02-12T19:47:17.748963+00:00",
+      "path": "models/saved_ultimate/bull/elastic_net.pkl",
+      "sha256": "bbd46309a60d5fb5eb9b818e55463427b350930a864907c511ea3068cf9f6c69",
+      "size_bytes": 2419
+    },
+    {
+      "modified_at": "2026-02-12T19:47:17.739195+00:00",
+      "path": "models/saved_ultimate/bull/gb.pkl",
+      "sha256": "f0c0593a787b785ac2ad243c371ffcacd98d15f5b33d743688faea843b1411a1",
+      "size_bytes": 108251
+    },
+    {
+      "modified_at": "2026-02-12T19:47:17.913920+00:00",
+      "path": "models/saved_ultimate/bull/gp.pkl",
+      "sha256": "fa2e390f48aa429376df12878241b142c910c71272e751a26787201f270e7b19",
+      "size_bytes": 32534482
+    },
+    {
+      "modified_at": "2026-02-12T19:47:17.957344+00:00",
+      "path": "models/saved_ultimate/bull/imputer.pkl",
+      "sha256": "012d30d8630b8bd3b1eaad16b63a815c8a8e09adfaf85d32c5e9b1342f1aaf49",
+      "size_bytes": 727
+    },
+    {
+      "modified_at": "2026-02-12T19:47:17.748093+00:00",
+      "path": "models/saved_ultimate/bull/lgb.pkl",
+      "sha256": "c1f27cf9c3a3eed0e1a67f50c55c2e5cc106c1b8555842b5c26e0e02742d22a0",
+      "size_bytes": 83408
+    },
+    {
+      "modified_at": "2026-02-12T19:47:17.731116+00:00",
+      "path": "models/saved_ultimate/bull/rf.pkl",
+      "sha256": "78221c49f7930aebb8a6a051ba4aa90942773aa45a534b818622d5addb32748b",
+      "size_bytes": 266593
+    },
+    {
+      "modified_at": "2026-02-12T19:47:17.957556+00:00",
+      "path": "models/saved_ultimate/bull/scaler.pkl",
+      "sha256": "65a1ca6578d971d25369dafa13ae9c6d75952731272975f9c1e32e453e099fd8",
+      "size_bytes": 983
+    },
+    {
+      "modified_at": "2026-02-12T19:47:17.957100+00:00",
+      "path": "models/saved_ultimate/bull/stacking.pkl",
+      "sha256": "9f933f8f3efe591e5663fd8f22b1d4665aee36ce70965c82499ec51265df7685",
+      "size_bytes": 313779
+    },
+    {
+      "modified_at": "2026-02-12T19:47:17.760185+00:00",
+      "path": "models/saved_ultimate/bull/svr.pkl",
+      "sha256": "27005f36014f6c50733bf54c8537bb90e4e1da2267d1e34b7aef822603f4cc67",
+      "size_bytes": 987427
+    },
+    {
+      "modified_at": "2026-02-12T19:47:17.745969+00:00",
+      "path": "models/saved_ultimate/bull/xgb.json",
+      "sha256": "97b1816a8f1cfc659e648b649f58e2041e754170b3ba897a3088875953d417aa",
+      "size_bytes": 111912
+    },
+    {
+      "modified_at": "2026-02-12T19:47:18.314875+00:00",
+      "path": "models/saved_ultimate/metadata.pkl",
+      "sha256": "8e62b54f95740cc1086b126647674282020afc509a8e40a5eace343e1b9daaab",
+      "size_bytes": 2642
+    },
+    {
+      "modified_at": "2026-02-12T19:47:18.187400+00:00",
+      "path": "models/saved_ultimate/neutral/anomaly_gb.pkl",
+      "sha256": "aa33153e1b41d725fb2bcf68a6f5ea73d639ba5b91bfc1abb73af0502acf921d",
+      "size_bytes": 1178827
+    },
+    {
+      "modified_at": "2026-02-12T19:47:18.138246+00:00",
+      "path": "models/saved_ultimate/neutral/bayesian_ridge.pkl",
+      "sha256": "69dadd72f5718c4109c48bed33e65557b1d6b40378d927e9dd49b868878acfde",
+      "size_bytes": 49827
+    },
+    {
+      "modified_at": "2026-02-12T19:47:18.190396+00:00",
+      "path": "models/saved_ultimate/neutral/catboost.pkl",
+      "sha256": "44ba35facd255f4ab7a8720395e9b4841119cf897471af059efb9e04f0e995cb",
+      "size_bytes": 197197
+    },
+    {
+      "modified_at": "2026-02-12T19:47:18.137402+00:00",
+      "path": "models/saved_ultimate/neutral/elastic_net.pkl",
+      "sha256": "1414c929f2da9641f5478394049ebe06cbd91da3c273b136b4e05bc17be8a3ea",
+      "size_bytes": 2419
+    },
+    {
+      "modified_at": "2026-02-12T19:47:18.123371+00:00",
+      "path": "models/saved_ultimate/neutral/gb.pkl",
+      "sha256": "af4b71e28a9cdbc6a10205b98aef63388331aaac4afb70e2bb4f0f1c900c7d7f",
+      "size_bytes": 158811
+    },
+    {
+      "modified_at": "2026-02-12T19:47:18.164660+00:00",
+      "path": "models/saved_ultimate/neutral/gp.pkl",
+      "sha256": "589f32af087ebf5711fba08ba4b70bad38527af21b0e14b205e9e50137df7cea",
+      "size_bytes": 32557218
+    },
+    {
+      "modified_at": "2026-02-12T19:47:18.214009+00:00",
+      "path": "models/saved_ultimate/neutral/imputer.pkl",
+      "sha256": "fa49b2c81c8caeb5b3d9e0384ee7024fc563ebc30d1033cb2f4b0031920a6181",
+      "size_bytes": 727
+    },
+    {
+      "modified_at": "2026-02-12T19:47:18.136991+00:00",
+      "path": "models/saved_ultimate/neutral/lgb.pkl",
+      "sha256": "effe360b20404455267801ca1e84b3a18acd39f7de8900837a794250e5969d1e",
+      "size_bytes": 133469
+    },
+    {
+      "modified_at": "2026-02-12T19:47:18.120169+00:00",
+      "path": "models/saved_ultimate/neutral/rf.pkl",
+      "sha256": "fe537c9c1fe01671ad6ca80eae38a70445ef70c3d32496814a4ce0ed29f45031",
+      "size_bytes": 401089
+    },
+    {
+      "modified_at": "2026-02-12T19:47:18.214223+00:00",
+      "path": "models/saved_ultimate/neutral/scaler.pkl",
+      "sha256": "397c8e20193c5a1e8d12722046c74c0a34141d32e8d27246cdd4c33d4672bd92",
+      "size_bytes": 983
+    },
+    {
+      "modified_at": "2026-02-12T19:47:18.213442+00:00",
+      "path": "models/saved_ultimate/neutral/stacking.pkl",
+      "sha256": "2d0de13bfa30e65b40d6627a1d67401701f5339418836f9af0bb9efde061b428",
+      "size_bytes": 470547
+    },
+    {
+      "modified_at": "2026-02-12T19:47:18.139191+00:00",
+      "path": "models/saved_ultimate/neutral/svr.pkl",
+      "sha256": "181302753ace6b626840337810871b73bd58499ffd6dd4ff278f4f77eade4670",
+      "size_bytes": 985347
+    },
+    {
+      "modified_at": "2026-02-12T19:47:18.125769+00:00",
+      "path": "models/saved_ultimate/neutral/xgb.json",
+      "sha256": "55be2cf72590bf92cc9c7588ae9f949b770aa8348f5e04cb6d39a8035a7838dd",
+      "size_bytes": 177471
+    },
+    {
+      "modified_at": "2026-02-12T19:47:18.294452+00:00",
+      "path": "models/saved_ultimate/volatile/anomaly_gb.pkl",
+      "sha256": "e38173f6c0191a00c159783d078813dcd6f530c5f4f11d9fffb167f823feccd8",
+      "size_bytes": 1194435
+    },
+    {
+      "modified_at": "2026-02-12T19:47:18.258869+00:00",
+      "path": "models/saved_ultimate/volatile/bayesian_ridge.pkl",
+      "sha256": "6197897bc523cc6664cf19da0ccb2fe59f95141597f84024046699e6c98103ac",
+      "size_bytes": 15043
+    },
+    {
+      "modified_at": "2026-02-12T19:47:18.297492+00:00",
+      "path": "models/saved_ultimate/volatile/catboost.pkl",
+      "sha256": "055c972ebc103c131b0f0c259e2e7b5e5c93a4522557c42c7fc83d23b9d64b8c",
+      "size_bytes": 116829
+    },
+    {
+      "modified_at": "2026-02-12T19:47:18.258280+00:00",
+      "path": "models/saved_ultimate/volatile/elastic_net.pkl",
+      "sha256": "e72c4e1cd50f08f8e617e462589f1e75393a091de6be9398c7a7703d719a2763",
+      "size_bytes": 2419
+    },
+    {
+      "modified_at": "2026-02-12T19:47:18.233279+00:00",
+      "path": "models/saved_ultimate/volatile/gb.pkl",
+      "sha256": "692837b7e3cef40b258e833534b8e563cfdb69d4f1c0234a577841e602f4288d",
+      "size_bytes": 111131
+    },
+    {
+      "modified_at": "2026-02-12T19:47:18.270986+00:00",
+      "path": "models/saved_ultimate/volatile/gp.pkl",
+      "sha256": "89132a8dd1589b25c0393fb71076e2226228f4b76f6b58595aafb18d903ce1d0",
+      "size_bytes": 18394434
+    },
+    {
+      "modified_at": "2026-02-12T19:47:18.313148+00:00",
+      "path": "models/saved_ultimate/volatile/imputer.pkl",
+      "sha256": "282fc38ebb5765078b1410d4f0ce724452fa71726043f74da4325c1351e027b7",
+      "size_bytes": 727
+    },
+    {
+      "modified_at": "2026-02-12T19:47:18.257771+00:00",
+      "path": "models/saved_ultimate/volatile/lgb.pkl",
+      "sha256": "80844dc45992bb8412d973fed120853699d98b2073d1f632acf7e1bd05d5f38b",
+      "size_bytes": 81685
+    },
+    {
+      "modified_at": "2026-02-12T19:47:18.230840+00:00",
+      "path": "models/saved_ultimate/volatile/rf.pkl",
+      "sha256": "0ea45c0fec15ecb8a1912b2c70482cdf8615503ca8b6fe9c68b6bf2288746b61",
+      "size_bytes": 233473
+    },
+    {
+      "modified_at": "2026-02-12T19:47:18.313362+00:00",
+      "path": "models/saved_ultimate/volatile/scaler.pkl",
+      "sha256": "9c4dd8487a14e28dba62837bbb7c75e73348757988fb5e61ab94f07edb3c1a94",
+      "size_bytes": 983
+    },
+    {
+      "modified_at": "2026-02-12T19:47:18.312908+00:00",
+      "path": "models/saved_ultimate/volatile/stacking.pkl",
+      "sha256": "842cf18f3d662be4191dc26ce4b592d8a1656013458b60a1f16defc048a7d85e",
+      "size_bytes": 307187
+    },
+    {
+      "modified_at": "2026-02-12T19:47:18.259940+00:00",
+      "path": "models/saved_ultimate/volatile/svr.pkl",
+      "sha256": "f91455cda0d061a5bef9b5f5e0a78596c63738c0743f32f8d6330af15889b399",
+      "size_bytes": 707923
+    },
+    {
+      "modified_at": "2026-02-12T19:47:18.234911+00:00",
+      "path": "models/saved_ultimate/volatile/xgb.json",
+      "sha256": "5677ede86262b5fc83a2e307caab9aa561d8c1ec118a76b92594ddf9166ca234",
+      "size_bytes": 110906
+    },
+    {
+      "modified_at": "2026-02-12T20:55:21.023332+00:00",
+      "path": "models/test_enhanced_features/bear/anomaly_gb.pkl",
+      "sha256": "e1f7fe52cb121e876470dc63d5936a0827c37f517bfb406fcb7f36d4be208202",
+      "size_bytes": 1359683
+    },
+    {
+      "modified_at": "2026-02-12T20:55:20.876327+00:00",
+      "path": "models/test_enhanced_features/bear/bayesian_ridge.pkl",
+      "sha256": "bd628c70d47e037367f6c3904326bc004750353a07f2caae61f5e2f64a424692",
+      "size_bytes": 16291
+    },
+    {
+      "modified_at": "2026-02-12T20:55:21.028394+00:00",
+      "path": "models/test_enhanced_features/bear/catboost.pkl",
+      "sha256": "e3349bdad0a15727737f375f48271cb6b1a7d6810c5046a176015deca9cb29b1",
+      "size_bytes": 203885
+    },
+    {
+      "modified_at": "2026-02-12T20:55:20.875458+00:00",
+      "path": "models/test_enhanced_features/bear/elastic_net.pkl",
+      "sha256": "ec1706c501c937d6a0a850f3657d8721be1bf7480e17a446193e317688cf80f9",
+      "size_bytes": 2419
+    },
+    {
+      "modified_at": "2026-02-12T20:55:20.868476+00:00",
+      "path": "models/test_enhanced_features/bear/gb.pkl",
+      "sha256": "c755a1feeeba334d9db15cc1deacfede4e898aa71bf64bab9752383dc1a59450",
+      "size_bytes": 151595
+    },
+    {
+      "modified_at": "2026-02-12T20:55:20.982917+00:00",
+      "path": "models/test_enhanced_features/bear/gp.pkl",
+      "sha256": "e4bb8cee222106e8b5366faa0f3daf4723a7d24d82aa10e019a18d3d21741eed",
+      "size_bytes": 26392482
+    },
+    {
+      "modified_at": "2026-02-12T20:55:21.054548+00:00",
+      "path": "models/test_enhanced_features/bear/imputer.pkl",
+      "sha256": "e329978dd9297d5fd7c26e6108ebdb0e7564fa512d773eab3361ee93b3c709de",
+      "size_bytes": 727
+    },
+    {
+      "modified_at": "2026-02-12T20:55:20.874869+00:00",
+      "path": "models/test_enhanced_features/bear/lgb.pkl",
+      "sha256": "1a240d12cba5d9b68ca381ce81a03911f28d95c5218f25b1de76359e07f27782",
+      "size_bytes": 124792
+    },
+    {
+      "modified_at": "2026-02-12T20:55:20.863554+00:00",
+      "path": "models/test_enhanced_features/bear/rf.pkl",
+      "sha256": "57c03716fced15d6c4e015b394c225b575e12b16df2c0e930054c137a34bcc04",
+      "size_bytes": 326193
+    },
+    {
+      "modified_at": "2026-02-12T20:55:21.054847+00:00",
+      "path": "models/test_enhanced_features/bear/scaler.pkl",
+      "sha256": "717b33a70935c12d329311fab9e49fc80c3be590a9576b09aa4774017de640dd",
+      "size_bytes": 983
+    },
+    {
+      "modified_at": "2026-02-12T20:55:21.054166+00:00",
+      "path": "models/test_enhanced_features/bear/stacking.pkl",
+      "sha256": "5fab2be39ef5401e56cf2b07ece7ea35ce566bfbe25b3fb4c2dfa895851ef57e",
+      "size_bytes": 474003
+    },
+    {
+      "modified_at": "2026-02-12T20:55:20.882586+00:00",
+      "path": "models/test_enhanced_features/bear/svr.pkl",
+      "sha256": "c251a4884ce022e15c720cfe812e3e96f2746932a82fc25cf926fe4265dd570a",
+      "size_bytes": 760707
+    },
+    {
+      "modified_at": "2026-02-12T20:55:20.872834+00:00",
+      "path": "models/test_enhanced_features/bear/xgb.json",
+      "sha256": "04c716ad1847403487e035292241b7a7e9cac3d975ef7ed146ee545febdfb03f",
+      "size_bytes": 171119
+    },
+    {
+      "modified_at": "2026-02-12T20:55:20.809717+00:00",
+      "path": "models/test_enhanced_features/bull/anomaly_gb.pkl",
+      "sha256": "5d35d4b456131f5f38bfb12d52d1ebe211dca18b786024d080bc11f4ad300f59",
+      "size_bytes": 1259363
+    },
+    {
+      "modified_at": "2026-02-12T20:55:20.617041+00:00",
+      "path": "models/test_enhanced_features/bull/bayesian_ridge.pkl",
+      "sha256": "a68172c0ccd5d52470471d60030dc2865cf416508f7c923d2230fe21a04f25fd",
+      "size_bytes": 16339
+    },
+    {
+      "modified_at": "2026-02-12T20:55:20.813791+00:00",
+      "path": "models/test_enhanced_features/bull/catboost.pkl",
+      "sha256": "5ea82ac1a4d70fb7c362a7cb183803b417924cecf9d4909cf2a9276bd8182fd3",
+      "size_bytes": 119501
+    },
+    {
+      "modified_at": "2026-02-12T20:55:20.615664+00:00",
+      "path": "models/test_enhanced_features/bull/elastic_net.pkl",
+      "sha256": "37e44fe4f3b424b5bc4bb5ae25c40748dc39c1c60037834b67e52de6336d8c43",
+      "size_bytes": 2419
+    },
+    {
+      "modified_at": "2026-02-12T20:55:20.603553+00:00",
+      "path": "models/test_enhanced_features/bull/gb.pkl",
+      "sha256": "2fa331cbc9e7951c5bb3633d80e1d86f982e99145caeb3bc293903298b943f26",
+      "size_bytes": 109547
+    },
+    {
+      "modified_at": "2026-02-12T20:55:20.754985+00:00",
+      "path": "models/test_enhanced_features/bull/gp.pkl",
+      "sha256": "4607853252ba5413ed9a7bd043419c06e996b269b0275dc07a1c45a947856184",
+      "size_bytes": 32523730
+    },
+    {
+      "modified_at": "2026-02-12T20:55:20.836243+00:00",
+      "path": "models/test_enhanced_features/bull/imputer.pkl",
+      "sha256": "2f8bbaeba5db51116ec22d78cbc9f1f9e3d2676ba56860c42b6990ed690a082b",
+      "size_bytes": 727
+    },
+    {
+      "modified_at": "2026-02-12T20:55:20.614484+00:00",
+      "path": "models/test_enhanced_features/bull/lgb.pkl",
+      "sha256": "37b45b7d75e5d7fc33ccf6db0f062ba78d7aa1d26a6fb75bf5b0057e6830cb37",
+      "size_bytes": 81296
+    },
+    {
+      "modified_at": "2026-02-12T20:55:20.593995+00:00",
+      "path": "models/test_enhanced_features/bull/rf.pkl",
+      "sha256": "9458ec9a7204eed65c77c7c192fc566ebcfa9243406908744350fef1a22ad9b4",
+      "size_bytes": 228561
+    },
+    {
+      "modified_at": "2026-02-12T20:55:20.838094+00:00",
+      "path": "models/test_enhanced_features/bull/scaler.pkl",
+      "sha256": "32952e7ec24a67c40704f5ae15b23516e162d60423ca7350a3bfa77a60e60870",
+      "size_bytes": 983
+    },
+    {
+      "modified_at": "2026-02-12T20:55:20.835510+00:00",
+      "path": "models/test_enhanced_features/bull/stacking.pkl",
+      "sha256": "7815334d83ad4f2ff090c9eefc6d112d9bfe82c736b57abaef1692e8f4b1ac96",
+      "size_bytes": 312515
+    },
+    {
+      "modified_at": "2026-02-12T20:55:20.623421+00:00",
+      "path": "models/test_enhanced_features/bull/svr.pkl",
+      "sha256": "25ad925b71690693870a947a6788a5f1fc1f825081802f4bc414c1cdaf28e5c4",
+      "size_bytes": 788003
+    },
+    {
+      "modified_at": "2026-02-12T20:55:20.610820+00:00",
+      "path": "models/test_enhanced_features/bull/xgb.json",
+      "sha256": "cb096471e8b18390a2c514d70357a3a9f90a9158dbaf06b48049c8ecc58a4785",
+      "size_bytes": 111084
+    },
+    {
+      "modified_at": "2026-02-12T20:55:21.453253+00:00",
+      "path": "models/test_enhanced_features/metadata.pkl",
+      "sha256": "d5b95b8cc40292f6b592f2af302d4307807272cb57cce72e252ccbe43ca0d438",
+      "size_bytes": 2612
+    },
+    {
+      "modified_at": "2026-02-12T20:55:21.273384+00:00",
+      "path": "models/test_enhanced_features/neutral/anomaly_gb.pkl",
+      "sha256": "89a9d0b67b4438319116856acc4e1fb22e1ec29ad99cd56616be0d7021291b3e",
+      "size_bytes": 1225299
+    },
+    {
+      "modified_at": "2026-02-12T20:55:21.094528+00:00",
+      "path": "models/test_enhanced_features/neutral/bayesian_ridge.pkl",
+      "sha256": "0db1e1dc697dbdf5d27198a07db88fd3c758b4dc99ba5d9b2cd74a0c31317825",
+      "size_bytes": 19603
+    },
+    {
+      "modified_at": "2026-02-12T20:55:21.277312+00:00",
+      "path": "models/test_enhanced_features/neutral/catboost.pkl",
+      "sha256": "473f527eecd87bcad6cf3f01646e0556d86e3a57fd2464807cd0f49ed2f0a912",
+      "size_bytes": 202301
+    },
+    {
+      "modified_at": "2026-02-12T20:55:21.093562+00:00",
+      "path": "models/test_enhanced_features/neutral/elastic_net.pkl",
+      "sha256": "dc4eae2f1e7e7b44a7eb05f4acfb6f2e61c7b37550646a44607d1e909a7c28eb",
+      "size_bytes": 2419
+    },
+    {
+      "modified_at": "2026-02-12T20:55:21.087056+00:00",
+      "path": "models/test_enhanced_features/neutral/gb.pkl",
+      "sha256": "f1dbec96237b9b7bb25094e8f4e889c0ca2a17e536cfb81958c7a5bbc3f7731c",
+      "size_bytes": 142955
+    },
+    {
+      "modified_at": "2026-02-12T20:55:21.218467+00:00",
+      "path": "models/test_enhanced_features/neutral/gp.pkl",
+      "sha256": "01ca1fcfc4fc5c7bd8055ace19dadffab009139121fdadb746b23d20d52a58bd",
+      "size_bytes": 32526994
+    },
+    {
+      "modified_at": "2026-02-12T20:55:21.305463+00:00",
+      "path": "models/test_enhanced_features/neutral/imputer.pkl",
+      "sha256": "84edbecfdd84c50ee45252f5e81b760d4100ce917888dec98fca1ecf61481914",
+      "size_bytes": 727
+    },
+    {
+      "modified_at": "2026-02-12T20:55:21.092953+00:00",
+      "path": "models/test_enhanced_features/neutral/lgb.pkl",
+      "sha256": "ae4b0c0fe366a094cc590fe8b8dc9e535bff31b993b1be9feae0ce5db7e86511",
+      "size_bytes": 110361
+    },
+    {
+      "modified_at": "2026-02-12T20:55:21.082479+00:00",
+      "path": "models/test_enhanced_features/neutral/rf.pkl",
+      "sha256": "bdbc9d36e5481fce82ae9cd51279c8e1899d0edd957d60c9f48c1eea76be429b",
+      "size_bytes": 266721
+    },
+    {
+      "modified_at": "2026-02-12T20:55:21.305761+00:00",
+      "path": "models/test_enhanced_features/neutral/scaler.pkl",
+      "sha256": "3386d72ada2f26facf0b5e091ab1dee585cc06b621e7201974bc05de205ac925",
+      "size_bytes": 983
+    },
+    {
+      "modified_at": "2026-02-12T20:55:21.305022+00:00",
+      "path": "models/test_enhanced_features/neutral/stacking.pkl",
+      "sha256": "550f2bb06b7a8dbd4f405f9539878894a13e86a59969db3fbc3bee441eff655b",
+      "size_bytes": 465987
+    },
+    {
+      "modified_at": "2026-02-12T20:55:21.102450+00:00",
+      "path": "models/test_enhanced_features/neutral/svr.pkl",
+      "sha256": "79fe0a82efaf69035f1bd2f195d1ea121efb68719a35e441bf3baf9bc3b16bdd",
+      "size_bytes": 1047747
+    },
+    {
+      "modified_at": "2026-02-12T20:55:21.091041+00:00",
+      "path": "models/test_enhanced_features/neutral/xgb.json",
+      "sha256": "fccdaaf2894750fc8a0e2a553330ce8bfb083f4175c0a5701bf607a239570524",
+      "size_bytes": 167970
+    },
+    {
+      "modified_at": "2026-02-12T20:55:21.394793+00:00",
+      "path": "models/test_enhanced_features/volatile/anomaly_gb.pkl",
+      "sha256": "9281d0ad16663786619a88096d1081db16b9e1490f52d4eb123f6057a92a1b18",
+      "size_bytes": 1299275
+    },
+    {
+      "modified_at": "2026-02-12T20:55:21.340249+00:00",
+      "path": "models/test_enhanced_features/volatile/bayesian_ridge.pkl",
+      "sha256": "c4f4b941953f0ad3ae7dc9eb8e54f6c884b373668d7ab31b310b3a323339b2c8",
+      "size_bytes": 12435
+    },
+    {
+      "modified_at": "2026-02-12T20:55:21.397991+00:00",
+      "path": "models/test_enhanced_features/volatile/catboost.pkl",
+      "sha256": "b182197cf25a7bdab3380c36593c543910e85f9590580d1b1875678f5347ce95",
+      "size_bytes": 119501
+    },
+    {
+      "modified_at": "2026-02-12T20:55:21.339489+00:00",
+      "path": "models/test_enhanced_features/volatile/elastic_net.pkl",
+      "sha256": "5c8958e72cca39299d35a482409f9e1487ca0bcd5f63144e48a050a01ee841fc",
+      "size_bytes": 2419
+    },
+    {
+      "modified_at": "2026-02-12T20:55:21.335009+00:00",
+      "path": "models/test_enhanced_features/volatile/gb.pkl",
+      "sha256": "d1a4c47a675e039e5119abb6c40f10f55e289cac1f59506b7be4b78b0533a857",
+      "size_bytes": 107099
+    },
+    {
+      "modified_at": "2026-02-12T20:55:21.358464+00:00",
+      "path": "models/test_enhanced_features/volatile/gp.pkl",
+      "sha256": "cfc13b5410c341acdee4d432da3d14b4f669c0bc7f700f054ca32ccb4127b7c7",
+      "size_bytes": 12929322
+    },
+    {
+      "modified_at": "2026-02-12T20:55:21.450737+00:00",
+      "path": "models/test_enhanced_features/volatile/imputer.pkl",
+      "sha256": "a197b19c6cb41c3b8233d71e8207927add4648f7586e606311acb2e965aca20d",
+      "size_bytes": 727
+    },
+    {
+      "modified_at": "2026-02-12T20:55:21.338916+00:00",
+      "path": "models/test_enhanced_features/volatile/lgb.pkl",
+      "sha256": "a814638bee8a4d51de22619ee2f2e3c3dc6e58c80e7621e7a5b00716835a2b26",
+      "size_bytes": 79248
+    },
+    {
+      "modified_at": "2026-02-12T20:55:21.331090+00:00",
+      "path": "models/test_enhanced_features/volatile/rf.pkl",
+      "sha256": "8a76cf390fc7e2014b30f11f2d9152b44e41c9a8e1c4b52ab55538b4e151e1d2",
+      "size_bytes": 165921
+    },
+    {
+      "modified_at": "2026-02-12T20:55:21.452257+00:00",
+      "path": "models/test_enhanced_features/volatile/scaler.pkl",
+      "sha256": "6c8aa7f9141ff38fffa13f5b2b3ea8efd5c13bef7a16016ead4e31839ac256fb",
+      "size_bytes": 983
+    },
+    {
+      "modified_at": "2026-02-12T20:55:21.449985+00:00",
+      "path": "models/test_enhanced_features/volatile/stacking.pkl",
+      "sha256": "337400e602fa6df86206f638ed574496f23cff8423f7de50edccd73708bac55e",
+      "size_bytes": 310515
+    },
+    {
+      "modified_at": "2026-02-12T20:55:21.343007+00:00",
+      "path": "models/test_enhanced_features/volatile/svr.pkl",
+      "sha256": "4280177630cd5f219b3284769933891a454fa6d5e00e62d1b8d179064e6bb026",
+      "size_bytes": 289843
+    },
+    {
+      "modified_at": "2026-02-12T20:55:21.337403+00:00",
+      "path": "models/test_enhanced_features/volatile/xgb.json",
+      "sha256": "f1bbd3d0dda5df3bfb2710de40f09950389cafe98e1fe4d42beda0ad100dab4d",
+      "size_bytes": 108887
+    }
+  ],
+  "generated_at": "2026-02-12T21:26:55.664710+00:00",
+  "version": 1
+}

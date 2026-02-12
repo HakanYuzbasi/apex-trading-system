@@ -80,6 +80,7 @@ class ModelVersion:
     """A specific version of a model."""
     model_name: str
     version: int
+    semantic_version: str
     stage: ModelStage
     created_at: datetime
     updated_at: datetime
@@ -89,12 +90,14 @@ class ModelVersion:
     description: str
     model_path: Path
     checksum: str
+    parent_version: Optional[int] = None
     training_data_info: Dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict:
         return {
             'model_name': self.model_name,
             'version': self.version,
+            'semantic_version': self.semantic_version,
             'stage': self.stage.value,
             'created_at': self.created_at.isoformat(),
             'updated_at': self.updated_at.isoformat(),
@@ -104,6 +107,7 @@ class ModelVersion:
             'description': self.description,
             'model_path': str(self.model_path),
             'checksum': self.checksum,
+            'parent_version': self.parent_version,
             'training_data_info': self.training_data_info
         }
 
@@ -112,6 +116,7 @@ class ModelVersion:
         return cls(
             model_name=data['model_name'],
             version=data['version'],
+            semantic_version=data.get('semantic_version', f"0.0.{data['version']}"),
             stage=ModelStage(data['stage']),
             created_at=datetime.fromisoformat(data['created_at']),
             updated_at=datetime.fromisoformat(data['updated_at']),
@@ -121,6 +126,7 @@ class ModelVersion:
             description=data['description'],
             model_path=Path(data['model_path']),
             checksum=data['checksum'],
+            parent_version=data.get('parent_version'),
             training_data_info=data.get('training_data_info', {})
         )
 
@@ -206,6 +212,31 @@ class ModelRegistry:
             return 1
         return max(self.models[model_name].keys()) + 1
 
+    @staticmethod
+    def _parse_semver(semantic_version: str) -> Tuple[int, int, int]:
+        parts = semantic_version.split(".")
+        if len(parts) != 3:
+            raise ValueError(f"Invalid semantic version: {semantic_version}")
+        return int(parts[0]), int(parts[1]), int(parts[2])
+
+    def _get_latest_semver(self, model_name: str) -> str:
+        if model_name not in self.models or not self.models[model_name]:
+            return "0.0.0"
+        latest = max(self.models[model_name].values(), key=lambda v: v.version)
+        return latest.semantic_version
+
+    def _next_semver(self, model_name: str, version_bump: str = "patch") -> str:
+        major, minor, patch = self._parse_semver(self._get_latest_semver(model_name))
+        if version_bump == "major":
+            major, minor, patch = major + 1, 0, 0
+        elif version_bump == "minor":
+            minor, patch = minor + 1, 0
+        elif version_bump == "patch":
+            patch += 1
+        else:
+            raise ValueError("version_bump must be one of: major, minor, patch")
+        return f"{major}.{minor}.{patch}"
+
     def register_model(
         self,
         model: Any,
@@ -215,7 +246,9 @@ class ModelRegistry:
         tags: Dict[str, str] = None,
         description: str = "",
         training_data_info: Dict[str, Any] = None,
-        stage: ModelStage = ModelStage.DEVELOPMENT
+        stage: ModelStage = ModelStage.DEVELOPMENT,
+        version_bump: str = "patch",
+        parent_version: Optional[int] = None,
     ) -> ModelVersion:
         """
         Register a new model version.
@@ -246,12 +279,14 @@ class ModelRegistry:
 
         # Compute checksum
         checksum = self._compute_checksum(model_path)
+        semantic_version = self._next_semver(model_name, version_bump)
 
         # Create version
         now = datetime.now()
         version = ModelVersion(
             model_name=model_name,
             version=version_num,
+            semantic_version=semantic_version,
             stage=stage,
             created_at=now,
             updated_at=now,
@@ -261,6 +296,7 @@ class ModelRegistry:
             description=description,
             model_path=model_path,
             checksum=checksum,
+            parent_version=parent_version or (version_num - 1 if version_num > 1 else None),
             training_data_info=training_data_info or {}
         )
 
@@ -272,18 +308,33 @@ class ModelRegistry:
         # Save metadata
         self._save_registry()
 
-        logger.info(f"✅ Registered {model_name} v{version_num} ({stage.value})")
+        logger.info(
+            "✅ Registered %s v%s (%s) semantic=%s parent=%s",
+            model_name,
+            version_num,
+            stage.value,
+            semantic_version,
+            version.parent_version,
+        )
         logger.info(f"   Metrics: Sharpe={metrics.sharpe_ratio:.2f}, WinRate={metrics.win_rate:.1%}")
 
         return version
 
-    def load_model(self, model_name: str, version: int = None) -> Tuple[Any, ModelVersion]:
+    def load_model(
+        self,
+        model_name: str,
+        version: int = None,
+        semantic_version: Optional[str] = None,
+        strict_checksum: bool = True,
+    ) -> Tuple[Any, ModelVersion]:
         """
         Load a model from the registry.
 
         Args:
             model_name: Name of the model
-            version: Specific version (latest if None)
+            version: Specific numeric version (latest if None)
+            semantic_version: Optional semantic version (overrides numeric version)
+            strict_checksum: Raise on checksum mismatch when True
 
         Returns:
             Tuple of (model, version_info)
@@ -291,7 +342,18 @@ class ModelRegistry:
         if model_name not in self.models:
             raise ValueError(f"Model '{model_name}' not found in registry")
 
-        if version is None:
+        if semantic_version is not None:
+            matched = [
+                v.version
+                for v in self.models[model_name].values()
+                if v.semantic_version == semantic_version
+            ]
+            if not matched:
+                raise ValueError(
+                    f"Semantic version {semantic_version} not found for model '{model_name}'"
+                )
+            version = max(matched)
+        elif version is None:
             version = max(self.models[model_name].keys())
 
         if version not in self.models[model_name]:
@@ -306,7 +368,13 @@ class ModelRegistry:
         # Verify checksum
         current_checksum = self._compute_checksum(version_info.model_path)
         if current_checksum != version_info.checksum:
-            logger.warning(f"⚠️ Checksum mismatch for {model_name} v{version}!")
+            message = (
+                f"Checksum mismatch for {model_name} v{version}: "
+                f"expected={version_info.checksum} actual={current_checksum}"
+            )
+            if strict_checksum:
+                raise ValueError(message)
+            logger.warning("⚠️ %s", message)
 
         logger.info(f"Loaded {model_name} v{version} ({version_info.stage.value})")
 
@@ -442,7 +510,9 @@ class ModelRegistry:
             result[model_name] = {
                 'num_versions': len(versions),
                 'latest_version': latest.version,
+                'latest_semantic_version': latest.semantic_version,
                 'production_version': production.version if production else None,
+                'production_semantic_version': production.semantic_version if production else None,
                 'latest_metrics': latest.metrics.to_dict(),
                 'stages': {stage.value: sum(1 for v in versions.values() if v.stage == stage)
                           for stage in ModelStage}

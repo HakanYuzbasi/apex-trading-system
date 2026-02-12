@@ -43,6 +43,9 @@ services:
       - LIVE_TRADING=True
       - IBKR_HOST=host.docker.internal
       - IBKR_PORT=7497
+      - APEX_ENVIRONMENT=staging
+      - APEX_PROMETHEUS_TRADING_METRICS_ENABLED=true
+      - APEX_PROMETHEUS_TRADING_METRICS_PORT=9108
     volumes:
       - ./logs:/app/logs
     network_mode: host
@@ -61,6 +64,7 @@ services:
       - REDIS_URL=redis://redis:6379/0
       - APEX_AUTH_ENABLED=true
       - APEX_SECRET_KEY=${APEX_SECRET_KEY:?Set APEX_SECRET_KEY in .env}
+      - APEX_METRICS_TOKEN=${APEX_METRICS_TOKEN:-}
       - STRIPE_SECRET_KEY=${STRIPE_SECRET_KEY:-}
       - STRIPE_WEBHOOK_SECRET=${STRIPE_WEBHOOK_SECRET:-}
     depends_on:
@@ -86,6 +90,35 @@ services:
     depends_on:
       - apex-api
 
+  prometheus:
+    image: prom/prometheus:v2.54.1
+    container_name: apex-prometheus
+    restart: unless-stopped
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./monitoring/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    depends_on:
+      - apex-api
+
+  grafana:
+    image: grafana/grafana:11.2.0
+    container_name: apex-grafana
+    restart: unless-stopped
+    ports:
+      - "3002:3000"
+    environment:
+      - GF_SECURITY_ADMIN_USER=${GRAFANA_ADMIN_USER:-admin}
+      - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_ADMIN_PASSWORD:-admin}
+      - GF_USERS_ALLOW_SIGN_UP=false
+    volumes:
+      - grafanadata:/var/lib/grafana
+      - ./monitoring/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./monitoring/grafana/dashboards:/var/lib/grafana/dashboards:ro
+    depends_on:
+      - prometheus
+
 volumes:
   pgdata:
   redisdata:
+  grafanadata:

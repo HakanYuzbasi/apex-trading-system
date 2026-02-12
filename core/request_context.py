@@ -195,6 +195,11 @@ def set_order_id(order_id: str) -> contextvars.Token:
     return order_id_var.set(order_id)
 
 
+def set_user_id(user_id: str) -> contextvars.Token:
+    """Set user ID and return token for reset."""
+    return user_id_var.set(user_id)
+
+
 def generate_trade_id() -> str:
     """Generate a new trade ID."""
     return f"TRD-{uuid.uuid4().hex[:12].upper()}"

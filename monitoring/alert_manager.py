@@ -391,7 +391,9 @@ class AlertManager:
                         metadata = rule.metadata_provider()
 
                     # Format message
-                    message = rule.message_template.format(**metadata, **self._state)
+                    context = self._state.copy()
+                    context.update(metadata)
+                    message = rule.message_template.format(**context)
 
                     # Trigger alert
                     alert = await self.trigger_alert(

@@ -104,6 +104,7 @@ class PrometheusMetrics:
         self._init_risk_metrics()
         self._init_system_metrics()
         self._init_model_metrics()
+        self._init_governor_metrics()
 
         logger.info(f"📊 Prometheus Metrics initialized on port {port}")
 
@@ -347,6 +348,68 @@ class PrometheusMetrics:
             registry=self.registry
         )
 
+    def _init_governor_metrics(self):
+        """Initialize performance governor and kill-switch metrics."""
+        self.governor_tier_level = Gauge(
+            'apex_governor_tier_level',
+            'Governor tier level by asset class and regime (green=0,yellow=1,orange=2,red=3)',
+            ['asset_class', 'regime'],
+            registry=self.registry
+        )
+        self.governor_transition_total = Counter(
+            'apex_governor_transition_total',
+            'Governor tier transitions',
+            ['asset_class', 'regime', 'from_tier', 'to_tier'],
+            registry=self.registry
+        )
+        self.governor_blocked_entries_total = Counter(
+            'apex_governor_blocked_entries_total',
+            'Entries blocked by governor controls',
+            ['asset_class', 'regime', 'reason'],
+            registry=self.registry
+        )
+        self.governor_size_multiplier = Gauge(
+            'apex_governor_size_multiplier',
+            'Effective governor size multiplier',
+            ['asset_class', 'regime'],
+            registry=self.registry
+        )
+        self.governor_signal_threshold_boost = Gauge(
+            'apex_governor_signal_threshold_boost',
+            'Effective governor signal threshold boost',
+            ['asset_class', 'regime'],
+            registry=self.registry
+        )
+        self.governor_confidence_boost = Gauge(
+            'apex_governor_confidence_boost',
+            'Effective governor confidence boost',
+            ['asset_class', 'regime'],
+            registry=self.registry
+        )
+        self.governor_halt_entries = Gauge(
+            'apex_governor_halt_entries',
+            'Governor entry halt flag (1=halt)',
+            ['asset_class', 'regime'],
+            registry=self.registry
+        )
+        self.governor_policy_active_info = Gauge(
+            'apex_governor_policy_active_info',
+            'Active governor policy info label (always 1)',
+            ['asset_class', 'regime', 'version'],
+            registry=self.registry
+        )
+        self.kill_switch_active = Gauge(
+            'apex_risk_kill_switch_active',
+            'Kill-switch state (1=active)',
+            registry=self.registry
+        )
+        self.kill_switch_triggers_total = Counter(
+            'apex_risk_kill_switch_triggers_total',
+            'Kill-switch trigger events',
+            ['reason'],
+            registry=self.registry
+        )
+
     def start(self):
         """Start the metrics HTTP server."""
         if not self.enabled:
@@ -568,6 +631,67 @@ class PrometheusMetrics:
         if not self.enabled:
             return
         self.model_predictions_total.inc()
+
+    # ===================
+    # Governor/Kill-Switch
+    # ===================
+
+    def update_governor_state(
+        self,
+        asset_class: str,
+        regime: str,
+        tier_level: int,
+        size_multiplier: float,
+        signal_threshold_boost: float,
+        confidence_boost: float,
+        halt_entries: bool,
+        policy_version: str,
+    ):
+        if not self.enabled:
+            return
+        labels = {"asset_class": asset_class, "regime": regime}
+        self.governor_tier_level.labels(**labels).set(tier_level)
+        self.governor_size_multiplier.labels(**labels).set(size_multiplier)
+        self.governor_signal_threshold_boost.labels(**labels).set(signal_threshold_boost)
+        self.governor_confidence_boost.labels(**labels).set(confidence_boost)
+        self.governor_halt_entries.labels(**labels).set(1 if halt_entries else 0)
+        self.governor_policy_active_info.labels(
+            asset_class=asset_class,
+            regime=regime,
+            version=policy_version,
+        ).set(1)
+
+    def record_governor_transition(
+        self,
+        asset_class: str,
+        regime: str,
+        from_tier: str,
+        to_tier: str,
+    ):
+        if not self.enabled:
+            return
+        self.governor_transition_total.labels(
+            asset_class=asset_class,
+            regime=regime,
+            from_tier=from_tier,
+            to_tier=to_tier,
+        ).inc()
+
+    def record_governor_blocked_entry(self, asset_class: str, regime: str, reason: str):
+        if not self.enabled:
+            return
+        self.governor_blocked_entries_total.labels(
+            asset_class=asset_class,
+            regime=regime,
+            reason=reason,
+        ).inc()
+
+    def update_kill_switch(self, active: bool, reason: str = ""):
+        if not self.enabled:
+            return
+        self.kill_switch_active.set(1 if active else 0)
+        if active and reason:
+            self.kill_switch_triggers_total.labels(reason=reason).inc()
 
 
 # Grafana Dashboard JSON (save to file)

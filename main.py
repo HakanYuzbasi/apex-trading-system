@@ -14,6 +14,7 @@ import asyncio
 import logging
 import math
 import os
+import random
 from datetime import datetime, timedelta
 from typing import Dict, Optional, List, Tuple
 try:
@@ -28,6 +29,11 @@ import json
 
 from execution.ibkr_connector import IBKRConnector
 from core.symbols import normalize_symbol, is_market_open, parse_symbol, AssetClass
+from core.trading_control import (
+    read_control_state,
+    mark_kill_switch_reset_processed,
+    mark_governor_policy_reload_processed,
+)
 from models.advanced_signal_generator import AdvancedSignalGenerator
 from risk.risk_manager import RiskManager
 from portfolio.portfolio_optimizer import PortfolioOptimizer
@@ -35,6 +41,7 @@ from data.market_data import MarketDataFetcher
 from monitoring.performance_tracker import PerformanceTracker
 from monitoring.live_monitor import LiveMonitor
 from config import ApexConfig
+from backtesting.governor_walkforward import WalkForwardTuningConfig, tune_policies
 
 # Institutional-grade components
 from models.institutional_signal_generator import (
@@ -68,6 +75,7 @@ from monitoring.health_dashboard import HealthDashboard, HealthStatus
 from monitoring.data_quality import DataQualityMonitor
 from risk.dynamic_exit_manager import DynamicExitManager, get_exit_manager, ExitUrgency
 from monitoring.signal_outcome_tracker import SignalOutcomeTracker
+from monitoring.prometheus_metrics import PrometheusMetrics
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # SIGNAL FORTRESS - Multi-Layer Signal Hardening
@@ -100,6 +108,15 @@ from risk.profit_ratchet import ProfitRatchet, ProfitTier
 from risk.liquidity_guard import LiquidityGuard, LiquidityRegime
 from risk.position_aging_manager import PositionAgingManager, AgingTier
 from risk.trading_excellence import TradingExcellenceManager, quick_mismatch_check, ProfitAction
+from risk.performance_governor import PerformanceGovernor, GovernorSnapshot, GovernorTier
+from risk.governor_policy import (
+    GovernorPolicyRepository,
+    GovernorPolicyResolver,
+    PolicyPromotionService,
+    TierControls,
+    default_policy_for,
+)
+from risk.kill_switch import KillSwitchConfig, RiskKillSwitch
 
 setup_logging(
     level=ApexConfig.LOG_LEVEL,
@@ -195,6 +212,94 @@ class ApexTradingSystem:
         self.market_data = MarketDataFetcher()
         self.performance_tracker = PerformanceTracker()
         self.live_monitor = LiveMonitor()
+        self.performance_governor: Optional[PerformanceGovernor] = None
+        self._performance_snapshot: Optional[GovernorSnapshot] = None
+        self.prometheus_metrics: Optional[PrometheusMetrics] = None
+        self._governor_last_tier_by_key: Dict[str, str] = {}
+        self._governor_regimes_by_asset: Dict[str, Tuple[str, ...]] = {
+            "EQUITY": ("default", "risk_on", "risk_off", "volatile"),
+            "FOREX": ("default", "carry", "carry_crash", "volatile"),
+            "CRYPTO": ("default", "trend", "crash", "high_vol"),
+        }
+
+        if ApexConfig.PERFORMANCE_GOVERNOR_ENABLED:
+            self.performance_governor = PerformanceGovernor(
+                target_sharpe=ApexConfig.PERFORMANCE_TARGET_SHARPE,
+                target_sortino=ApexConfig.PERFORMANCE_TARGET_SORTINO,
+                max_drawdown=ApexConfig.PERFORMANCE_MAX_DRAWDOWN,
+                sample_interval_minutes=ApexConfig.PERFORMANCE_GOV_SAMPLE_MINUTES,
+                min_samples=ApexConfig.PERFORMANCE_GOV_MIN_SAMPLES,
+                lookback_points=ApexConfig.PERFORMANCE_GOV_LOOKBACK_POINTS,
+                recovery_points=ApexConfig.PERFORMANCE_GOV_RECOVERY_POINTS,
+                points_per_year=ApexConfig.PERFORMANCE_GOV_POINTS_PER_YEAR,
+            )
+            self._performance_snapshot = self.performance_governor.get_snapshot()
+            logger.info(
+                "🧭 PerformanceGovernor enabled "
+                f"(target Sharpe={ApexConfig.PERFORMANCE_TARGET_SHARPE:.2f}, "
+                f"Sortino={ApexConfig.PERFORMANCE_TARGET_SORTINO:.2f}, "
+                f"max DD={ApexConfig.PERFORMANCE_MAX_DRAWDOWN:.1%})"
+            )
+
+        # Governor policy repository/resolver (asset-class + regime scope)
+        self.governor_policy_repo = GovernorPolicyRepository(ApexConfig.DATA_DIR / "governor_policies")
+        active_policies = self.governor_policy_repo.load_active()
+        if not active_policies:
+            bootstrap = [
+                default_policy_for("GLOBAL", "default"),
+                default_policy_for("EQUITY", "default"),
+                default_policy_for("FOREX", "default"),
+                default_policy_for("CRYPTO", "default"),
+            ]
+            self.governor_policy_repo.save_active(bootstrap)
+            active_policies = bootstrap
+            logger.info("🧭 Bootstrapped default governor policies")
+
+        self.governor_policy_resolver = GovernorPolicyResolver(active_policies)
+        self.governor_promotion = PolicyPromotionService(
+            repository=self.governor_policy_repo,
+            environment=ApexConfig.ENVIRONMENT,
+            live_trading=ApexConfig.LIVE_TRADING,
+            auto_promote_non_prod=ApexConfig.GOVERNOR_AUTO_PROMOTE_NON_PROD,
+        )
+        self._governor_tune_state_file = ApexConfig.DATA_DIR / "governor_policies" / "tuning_state.json"
+        self._governor_last_tune_at: Dict[str, datetime] = {}
+        self._load_governor_tuning_state()
+        self._control_commands_file = ApexConfig.DATA_DIR / "trading_control_commands.json"
+
+        # Hard kill-switch (DD + Sharpe decay)
+        self.kill_switch: Optional[RiskKillSwitch] = None
+        self._kill_switch_last_active = False
+        if ApexConfig.KILL_SWITCH_ENABLED:
+            dd_baseline = self.governor_policy_resolver.historical_mdd_baseline(
+                default_value=ApexConfig.KILL_SWITCH_HISTORICAL_MDD_BASELINE
+            )
+            self.kill_switch = RiskKillSwitch(
+                config=KillSwitchConfig(
+                    dd_multiplier=ApexConfig.KILL_SWITCH_DD_MULTIPLIER,
+                    sharpe_window_days=ApexConfig.KILL_SWITCH_SHARPE_WINDOW_DAYS,
+                    sharpe_floor=ApexConfig.KILL_SWITCH_SHARPE_FLOOR,
+                    logic=ApexConfig.KILL_SWITCH_LOGIC,
+                    min_points=ApexConfig.KILL_SWITCH_MIN_POINTS,
+                ),
+                historical_mdd_baseline=dd_baseline,
+            )
+            logger.info(
+                "🛑 Kill-switch enabled "
+                f"(DD>{ApexConfig.KILL_SWITCH_DD_MULTIPLIER:.2f}x hist MDD or "
+                f"Sharpe{ApexConfig.KILL_SWITCH_SHARPE_WINDOW_DAYS}d<{ApexConfig.KILL_SWITCH_SHARPE_FLOOR:.2f})"
+            )
+
+        # Trading-loop Prometheus exporter
+        if ApexConfig.PROMETHEUS_TRADING_METRICS_ENABLED:
+            try:
+                self.prometheus_metrics = PrometheusMetrics(
+                    port=ApexConfig.PROMETHEUS_TRADING_METRICS_PORT
+                )
+                self.prometheus_metrics.start()
+            except Exception as exc:
+                logger.warning("Prometheus trading metrics disabled: %s", exc)
+                self.prometheus_metrics = None
 
         # Institutional-grade components
         self.inst_signal_generator = InstitutionalSignalGenerator(
@@ -1079,9 +1184,304 @@ class ApexTradingSystem:
             return False
         
         return True
+
+    def _map_governor_regime(self, asset_class: str, market_regime: str) -> str:
+        """Map internal market regime into governor policy regime namespace."""
+        regime = (market_regime or "default").lower()
+        asset = asset_class.upper()
+
+        if asset == "EQUITY":
+            if regime in {"bear", "strong_bear"}:
+                return "risk_off"
+            if regime in {"volatile", "high_volatility"}:
+                return "volatile"
+            if regime in {"bull", "strong_bull"}:
+                return "risk_on"
+            return "default"
+
+        if asset == "FOREX":
+            if regime in {"bear", "strong_bear", "volatile", "high_volatility"}:
+                return "carry_crash"
+            if regime in {"bull", "strong_bull"}:
+                return "carry"
+            return "default"
+
+        if asset == "CRYPTO":
+            if regime in {"bear", "strong_bear"}:
+                return "crash"
+            if regime in {"volatile", "high_volatility"}:
+                return "high_vol"
+            if regime in {"bull", "strong_bull"}:
+                return "trend"
+            return "default"
+
+        return "default"
+
+    def _resolve_governor_controls(
+        self,
+        asset_class: str,
+        market_regime: str,
+        tier: GovernorTier,
+    ) -> Tuple[TierControls, str, object]:
+        regime_key = self._map_governor_regime(asset_class, market_regime)
+        controls, policy = self.governor_policy_resolver.controls_for(
+            asset_class=asset_class,
+            regime=regime_key,
+            tier=tier,
+        )
+        return controls, regime_key, policy
+
+    def _record_governor_observability(
+        self,
+        asset_class: str,
+        regime_key: str,
+        tier: GovernorTier,
+        controls: TierControls,
+        policy,
+    ) -> None:
+        key = f"{asset_class}:{regime_key}"
+        previous = self._governor_last_tier_by_key.get(key)
+        current = tier.value
+        if previous != current:
+            if self.prometheus_metrics and previous is not None:
+                self.prometheus_metrics.record_governor_transition(
+                    asset_class=asset_class,
+                    regime=regime_key,
+                    from_tier=previous,
+                    to_tier=current,
+                )
+            self._governor_last_tier_by_key[key] = current
+
+        if self.prometheus_metrics:
+            tier_level = {"green": 0, "yellow": 1, "orange": 2, "red": 3}.get(current, 0)
+            self.prometheus_metrics.update_governor_state(
+                asset_class=asset_class,
+                regime=regime_key,
+                tier_level=tier_level,
+                size_multiplier=controls.size_multiplier,
+                signal_threshold_boost=controls.signal_threshold_boost,
+                confidence_boost=controls.confidence_boost,
+                halt_entries=controls.halt_new_entries,
+                policy_version=getattr(policy, "version", "unknown"),
+            )
+
+    def _load_governor_tuning_state(self) -> None:
+        try:
+            if not self._governor_tune_state_file.exists():
+                return
+            with open(self._governor_tune_state_file, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            if not isinstance(data, dict):
+                return
+            parsed: Dict[str, datetime] = {}
+            for asset_class, iso_ts in data.items():
+                if isinstance(asset_class, str) and isinstance(iso_ts, str):
+                    parsed[asset_class.upper()] = datetime.fromisoformat(iso_ts)
+            self._governor_last_tune_at = parsed
+        except Exception as exc:
+            logger.debug("Failed loading governor tuning state: %s", exc)
+
+    def _save_governor_tuning_state(self) -> None:
+        try:
+            self._governor_tune_state_file.parent.mkdir(parents=True, exist_ok=True)
+            data = {
+                asset_class: ts.isoformat()
+                for asset_class, ts in self._governor_last_tune_at.items()
+            }
+            with open(self._governor_tune_state_file, "w", encoding="utf-8") as f:
+                json.dump(data, f, indent=2)
+        except Exception as exc:
+            logger.debug("Failed saving governor tuning state: %s", exc)
+
+    def _crypto_instability_detected(self, signal_df: pd.DataFrame) -> bool:
+        if signal_df.empty:
+            return False
+        local = signal_df.copy()
+        def _safe_asset(symbol_value: object) -> str:
+            if not isinstance(symbol_value, str):
+                return "EQUITY"
+            try:
+                return parse_symbol(symbol_value).asset_class.value
+            except Exception:
+                return "EQUITY"
+
+        local["asset_class"] = local["symbol"].map(_safe_asset)
+        crypto = local[local["asset_class"] == "CRYPTO"]
+        if len(crypto) < 50:
+            return False
+        returns = pd.to_numeric(crypto["return_10d"], errors="coerce").dropna()
+        if len(returns) < 25:
+            return False
+        return float(returns.std()) > 0.08
+
+    def _cadence_timedelta_for_asset(self, asset_class: str, signal_df: pd.DataFrame) -> timedelta:
+        asset = asset_class.upper()
+        cadence = ApexConfig.GOVERNOR_TUNE_CADENCE_DEFAULT.lower()
+        if asset == "CRYPTO":
+            cadence = ApexConfig.GOVERNOR_TUNE_CADENCE_CRYPTO.lower()
+            if cadence != "daily" and self._crypto_instability_detected(signal_df):
+                cadence = "daily"
+
+        if cadence == "daily":
+            return timedelta(days=1)
+        return timedelta(days=7)
+
+    def _maybe_tune_governor_policies(self, now: datetime) -> None:
+        try:
+            signal_df = self.signal_outcome_tracker.get_signals_for_ml()
+            if signal_df.empty or len(signal_df) < 120:
+                return
+
+            accepted = 0
+            for asset_class, regimes in self._governor_regimes_by_asset.items():
+                cadence_delta = self._cadence_timedelta_for_asset(asset_class, signal_df)
+                last_tuned = self._governor_last_tune_at.get(asset_class)
+                if last_tuned and (now - last_tuned) < cadence_delta:
+                    continue
+
+                cadence = "daily" if cadence_delta <= timedelta(days=1) else "weekly"
+                tuning_config = WalkForwardTuningConfig(
+                    cadence=cadence,
+                    sharpe_floor_63d=ApexConfig.KILL_SWITCH_SHARPE_FLOOR,
+                    historical_mdd_default=ApexConfig.KILL_SWITCH_HISTORICAL_MDD_BASELINE,
+                )
+                candidates = tune_policies(
+                    signal_df=signal_df,
+                    config=tuning_config,
+                    regimes_by_asset_class={asset_class: regimes},
+                )
+                if not candidates:
+                    continue
+
+                for candidate in candidates:
+                    decision = self.governor_promotion.submit_candidate(candidate)
+                    logger.info(
+                        "🧭 Governor policy %s -> %s (manual=%s): %s",
+                        candidate.policy_id(),
+                        decision.status.value,
+                        decision.manual_approval_required,
+                        decision.reason,
+                    )
+                    if decision.accepted:
+                        accepted += 1
+
+                self._governor_last_tune_at[asset_class] = now
+
+            if accepted > 0:
+                active = self.governor_policy_repo.load_active()
+                self.governor_policy_resolver.reload(active)
+            if accepted > 0 or self._governor_last_tune_at:
+                self._save_governor_tuning_state()
+
+        except Exception as exc:
+            logger.debug("Governor tuning cycle skipped due to error: %s", exc)
+
+    async def _process_external_control_commands(self) -> None:
+        """Process operational commands requested by API/ops tooling."""
+        try:
+            state = read_control_state(self._control_commands_file)
+        except Exception as exc:
+            logger.debug("Failed reading control commands: %s", exc)
+            return
+
+        if state.get("kill_switch_reset_requested"):
+            requested_by = str(state.get("requested_by") or "unknown")
+            request_id = str(state.get("request_id") or "unknown")
+            reason = str(state.get("reason") or "")
+
+            if not self.kill_switch:
+                note = "Kill-switch disabled in current runtime"
+                mark_kill_switch_reset_processed(
+                    self._control_commands_file,
+                    processed_by="apex-trader",
+                    note=note,
+                )
+                logger.warning("Control command %s ignored: %s", request_id, note)
+            else:
+                if self.kill_switch.active:
+                    self.kill_switch.reset()
+                    note = (
+                        "Kill-switch reset by external command "
+                        f"(requested_by={requested_by}, reason={reason})"
+                    )
+                    logger.warning("🛑 %s", note)
+                else:
+                    note = f"Kill-switch reset requested while inactive (requested_by={requested_by})"
+                    logger.info("Control command %s: %s", request_id, note)
+
+                mark_kill_switch_reset_processed(
+                    self._control_commands_file,
+                    processed_by="apex-trader",
+                    note=note,
+                )
+
+                # Keep exported state/metrics consistent immediately.
+                if self.prometheus_metrics:
+                    try:
+                        self.prometheus_metrics.update_kill_switch(active=self.kill_switch.active)
+                    except Exception:
+                        pass
+                self._kill_switch_last_active = bool(self.kill_switch.active)
+
+        if state.get("governor_policy_reload_requested"):
+            request_id = str(state.get("governor_policy_reload_request_id") or "unknown")
+            requested_by = str(state.get("governor_policy_reload_requested_by") or "unknown")
+            reason = str(state.get("governor_policy_reload_reason") or "")
+            try:
+                active = self.governor_policy_repo.load_active()
+                self.governor_policy_resolver.reload(active)
+                if self.kill_switch:
+                    self.kill_switch.historical_mdd_baseline = self.governor_policy_resolver.historical_mdd_baseline(
+                        default_value=ApexConfig.KILL_SWITCH_HISTORICAL_MDD_BASELINE
+                    )
+                note = (
+                    "Governor policies reloaded "
+                    f"(requested_by={requested_by}, count={len(active)}, reason={reason})"
+                )
+                logger.warning("🧭 %s", note)
+            except Exception as exc:
+                note = f"Governor policy reload failed: {exc}"
+                logger.error("Control command %s failed: %s", request_id, note)
+
+            mark_governor_policy_reload_processed(
+                self._control_commands_file,
+                processed_by="apex-trader",
+                note=note,
+            )
     
     async def process_symbol(self, symbol: str):
         """Process symbol with all protections including circuit breaker."""
+        try:
+            parsed_symbol = parse_symbol(symbol)
+            asset_class = parsed_symbol.asset_class.value
+        except Exception:
+            asset_class = "EQUITY"
+
+        perf_snapshot = self._performance_snapshot or GovernorSnapshot(
+            tier=GovernorTier.GREEN,
+            sharpe=0.0,
+            sortino=0.0,
+            drawdown=0.0,
+            sample_count=0,
+            size_multiplier=1.0,
+            signal_threshold_boost=0.0,
+            confidence_boost=0.0,
+            halt_new_entries=False,
+            reasons=[],
+        )
+
+        # Portfolio-level hard kill-switch: block only new entries, never exits.
+        if self.kill_switch and self.kill_switch.active:
+            existing_qty = self.positions.get(symbol, 0)
+            if existing_qty == 0:
+                if self.prometheus_metrics:
+                    self.prometheus_metrics.record_governor_blocked_entry(
+                        asset_class=asset_class,
+                        regime="default",
+                        reason="kill_switch",
+                    )
+                logger.warning("🛑 %s: New entries blocked by kill-switch", symbol)
+                return
 
         # Check 0: Circuit breaker check (use institutional for graduated response)
         if self.use_institutional:
@@ -1620,6 +2020,35 @@ class ApexTradingSystem:
                 except Exception:
                     self._current_regime = 'neutral'
 
+            governor_controls, governor_regime_key, active_policy = self._resolve_governor_controls(
+                asset_class=asset_class,
+                market_regime=self._current_regime,
+                tier=perf_snapshot.tier,
+            )
+            self._record_governor_observability(
+                asset_class=asset_class,
+                regime_key=governor_regime_key,
+                tier=perf_snapshot.tier,
+                controls=governor_controls,
+                policy=active_policy,
+            )
+
+            if current_pos == 0 and governor_controls.halt_new_entries:
+                if self.prometheus_metrics:
+                    self.prometheus_metrics.record_governor_blocked_entry(
+                        asset_class=asset_class,
+                        regime=governor_regime_key,
+                        reason="tier_halt",
+                    )
+                logger.info(
+                    "🧭 %s: Entry blocked by governor policy (%s/%s, tier=%s)",
+                    symbol,
+                    asset_class,
+                    governor_regime_key,
+                    perf_snapshot.tier.value,
+                )
+                return
+
             # ✅ Phase 3.1: Get regime-adjusted signal threshold (adaptive or static)
             if self.threshold_optimizer:
                 sym_thresholds = self.threshold_optimizer.get_thresholds(symbol, self._current_regime)
@@ -1629,8 +2058,41 @@ class ApexTradingSystem:
                     self._current_regime, ApexConfig.MIN_SIGNAL_THRESHOLD
                 )
 
-            if abs(signal) < signal_threshold:
-                logger.info(f"⏭️ {symbol}: Signal {signal:.3f} below regime threshold {signal_threshold} ({self._current_regime})")
+            effective_signal_threshold = min(
+                0.95, signal_threshold + governor_controls.signal_threshold_boost
+            )
+            effective_confidence_threshold = min(
+                0.95,
+                max(
+                    ApexConfig.MIN_CONFIDENCE,
+                    ApexConfig.MIN_CONFIDENCE + governor_controls.confidence_boost,
+                ),
+            )
+
+            if abs(signal) < effective_signal_threshold:
+                if self.prometheus_metrics:
+                    self.prometheus_metrics.record_governor_blocked_entry(
+                        asset_class=asset_class,
+                        regime=governor_regime_key,
+                        reason="threshold",
+                    )
+                logger.info(
+                    f"⏭️ {symbol}: Signal {signal:.3f} below effective threshold "
+                    f"{effective_signal_threshold:.3f} ({self._current_regime}, perf={perf_snapshot.tier.value})"
+                )
+                return
+
+            if confidence < effective_confidence_threshold:
+                if self.prometheus_metrics:
+                    self.prometheus_metrics.record_governor_blocked_entry(
+                        asset_class=asset_class,
+                        regime=governor_regime_key,
+                        reason="confidence",
+                    )
+                logger.info(
+                    f"⏭️ {symbol}: Confidence {confidence:.3f} below effective minimum "
+                    f"{effective_confidence_threshold:.3f} (perf={perf_snapshot.tier.value})"
+                )
                 return
 
             # ✅ Phase 1.2: Check VaR limit before new entries
@@ -1759,6 +2221,13 @@ class ApexTradingSystem:
                                 shares = max(1, int(shares * slip_adj))
                                 logger.debug(f"   🛡️ ExecutionShield slippage adj: {slip_adj:.0%} → {shares} shares")
 
+                        if governor_controls.size_multiplier < 1.0:
+                            shares = max(1, int(shares * governor_controls.size_multiplier))
+                            logger.info(
+                                f"   🧭 PerformanceGovernor: {governor_controls.size_multiplier:.0%} "
+                                f"size ({perf_snapshot.tier.value}, {governor_regime_key}) → {shares} shares"
+                            )
+
                         if sizing.constraints:
                             logger.debug(f"   Size constraints: {', '.join(sizing.constraints)}")
 
@@ -1781,6 +2250,13 @@ class ApexTradingSystem:
                         shares = min(shares, ApexConfig.MAX_SHARES_PER_POSITION)
                         # SOTA: Apply VIX multiplier
                         shares = int(shares * self._vix_risk_multiplier)
+
+                        if governor_controls.size_multiplier < 1.0:
+                            shares = max(1, int(shares * governor_controls.size_multiplier))
+                            logger.info(
+                                f"   🧭 PerformanceGovernor: {governor_controls.size_multiplier:.0%} "
+                                f"size ({perf_snapshot.tier.value}, {governor_regime_key}) → {shares} shares"
+                            )
 
                         if shares < 1:
                             logger.debug(f"⚠️ {symbol}: Price too high (${price:.2f})")
@@ -2519,6 +2995,10 @@ class ApexTradingSystem:
             loss_check = self.risk_manager.check_daily_loss(current_value)
             dd_check = self.risk_manager.check_drawdown(current_value)
             self.performance_tracker.record_equity(current_value)
+            perf_snapshot = self._performance_snapshot
+            if self.performance_governor:
+                perf_snapshot = self.performance_governor.update(current_value, datetime.now())
+                self._performance_snapshot = perf_snapshot
 
             # Update institutional components
             if self.use_institutional:
@@ -2542,7 +3022,13 @@ class ApexTradingSystem:
             except:
                 win_rate = 0.0
 
+            try:
+                sortino = self.performance_tracker.get_sortino_ratio()
+            except:
+                sortino = 0.0
+
             total_trades = len(self.performance_tracker.trades)
+            kill_state = self.kill_switch.update(self.performance_tracker.equity_curve) if self.kill_switch else None
 
             # Calculate sector exposure
             sector_exp = self.calculate_sector_exposure()
@@ -2556,6 +3042,23 @@ class ApexTradingSystem:
             logger.info(f"⏳ Pending: {len(self.pending_orders)}")
             logger.info(f"💸 Total Commissions: ${self.total_commissions:,.2f}")
             logger.info(f"📈 Sharpe: {sharpe:.2f} | Win Rate: {win_rate*100:.1f}% | Trades: {total_trades}")
+            if perf_snapshot:
+                logger.info(
+                    f"🧭 Governor: {perf_snapshot.tier.value.upper()} "
+                    f"(size={perf_snapshot.size_multiplier:.0%}, "
+                    f"thr+={perf_snapshot.signal_threshold_boost:.2f}, "
+                    f"conf+={perf_snapshot.confidence_boost:.2f}, "
+                    f"halt_entries={perf_snapshot.halt_new_entries})"
+                )
+            if kill_state:
+                logger.info(
+                    "🛑 Kill-Switch: active=%s dd=%.2f%% hist_mdd=%.2f%% sharpe_%dd=%.2f",
+                    kill_state.active,
+                    kill_state.drawdown * 100,
+                    kill_state.historical_mdd * 100,
+                    ApexConfig.KILL_SWITCH_SHARPE_WINDOW_DAYS,
+                    kill_state.sharpe_rolling,
+                )
 
             # Institutional risk metrics
             if self.use_institutional:
@@ -2599,6 +3102,46 @@ class ApexTradingSystem:
             
             logger.info("═" * 80)
             logger.info("")
+
+            if self.prometheus_metrics:
+                try:
+                    self.prometheus_metrics.update_portfolio_value(current_value)
+                    self.prometheus_metrics.update_portfolio_positions(self.position_count)
+                    self.prometheus_metrics.update_daily_pnl(
+                        pnl=float(loss_check.get("daily_pnl", 0.0)),
+                        return_pct=float(loss_check.get("daily_return", 0.0)),
+                    )
+                    self.prometheus_metrics.update_drawdown(
+                        current=float(dd_check.get("drawdown", 0.0)),
+                        maximum=float(self.performance_tracker.get_max_drawdown()),
+                    )
+                    self.prometheus_metrics.update_risk_ratios(
+                        sharpe=float(sharpe),
+                        sortino=float(sortino),
+                        var_95=float(portfolio_risk.var_95) if self.use_institutional else 0.0,
+                    )
+                    self.prometheus_metrics.update_sector_exposure(sector_exp)
+                    self.prometheus_metrics.update_circuit_breaker(
+                        bool(loss_check.get("breached", False) or dd_check.get("breached", False))
+                    )
+                    self.prometheus_metrics.record_heartbeat()
+                except Exception as metrics_exc:
+                    logger.debug("Prometheus update error: %s", metrics_exc)
+
+            if kill_state and kill_state.active and not self._kill_switch_last_active:
+                logger.critical("🛑 HARD KILL-SWITCH TRIGGERED: %s", kill_state.reason)
+                if self.prometheus_metrics:
+                    self.prometheus_metrics.update_kill_switch(active=True, reason="dd_sharpe_breach")
+
+            if kill_state and kill_state.active and not kill_state.flatten_executed:
+                logger.critical("🛑 Flattening all positions due to kill-switch")
+                await self.close_all_positions()
+                if self.kill_switch:
+                    self.kill_switch.mark_flattened()
+
+            if self.prometheus_metrics and kill_state:
+                self.prometheus_metrics.update_kill_switch(active=kill_state.active)
+            self._kill_switch_last_active = bool(kill_state.active) if kill_state else False
 
             # Refresh position prices before dashboard export
             await self.refresh_position_prices()
@@ -2794,7 +3337,9 @@ class ApexTradingSystem:
                 'win_rate': float(self.performance_tracker.get_win_rate()) if math.isfinite(self.performance_tracker.get_win_rate()) else 0.0,
                 'total_trades': len(self.performance_tracker.trades),
                 'open_positions': self.position_count,
-                'sector_exposure': self.calculate_sector_exposure()
+                'sector_exposure': self.calculate_sector_exposure(),
+                'performance_governor': self._performance_snapshot.to_dict() if self._performance_snapshot else None,
+                'kill_switch': self.kill_switch.state().__dict__ if self.kill_switch else None,
             }
             
             for symbol, qty in self.positions.items():
@@ -3002,7 +3547,9 @@ class ApexTradingSystem:
                 'sharpe_ratio': 0.0,
                 'win_rate': 0.0,
                 'total_trades': 0,
-                'open_positions': self.position_count
+                'open_positions': self.position_count,
+                'performance_governor': self._performance_snapshot.to_dict() if self._performance_snapshot else None,
+                'kill_switch': self.kill_switch.state().__dict__ if self.kill_switch else None,
             }
             self.live_monitor.update_state(state)
             self.export_dashboard_state()
@@ -3026,12 +3573,16 @@ class ApexTradingSystem:
             self.is_running = True
             cycle = 0
             last_data_refresh = datetime.now()
+            self._startup_time = datetime.now()
             
             while self.is_running:
                 try:
                     cycle += 1
                     self._cycle_count = cycle
                     now = datetime.now()
+
+                    # Process operator commands (e.g., kill-switch reset) each cycle.
+                    await self._process_external_control_commands()
 
                     # ═══════════════════════════════════════════════════════════════
                     # 1. DATA HEALTH CHECK (Dead Man's Switch)
@@ -3167,6 +3718,8 @@ class ApexTradingSystem:
                             await self._sync_positions()
 
                         await self.check_risk()
+                        if cycle % 200 == 0:
+                            self._maybe_tune_governor_policies(now)
 
                         # ═══════════════════════════════════════════════════════
                         # SIGNAL OUTCOME TRACKING - Periodic forward return update
@@ -3347,6 +3900,18 @@ class ApexTradingSystem:
                     # Clear cycle cache
                     self._cached_ibkr_positions = None
 
+                    if self.prometheus_metrics:
+                        try:
+                            self.prometheus_metrics.increment_cycle()
+                            self.prometheus_metrics.record_cycle_duration(
+                                (datetime.now() - now).total_seconds()
+                            )
+                            self.prometheus_metrics.update_uptime(
+                                (datetime.now() - self._startup_time).total_seconds()
+                            )
+                        except Exception as metrics_exc:
+                            logger.debug("Prometheus cycle metrics error: %s", metrics_exc)
+
                     await asyncio.sleep(ApexConfig.CHECK_INTERVAL_SECONDS)
                 
                 except KeyboardInterrupt:
@@ -3364,6 +3929,11 @@ class ApexTradingSystem:
                 self.ibkr.disconnect()
             if self.alpaca:
                 self.alpaca.disconnect()
+            if self.prometheus_metrics:
+                try:
+                    self.prometheus_metrics.stop()
+                except Exception:
+                    pass
             self.performance_tracker.print_summary()
 
             # Print institutional performance report
