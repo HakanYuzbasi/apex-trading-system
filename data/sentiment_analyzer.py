@@ -99,7 +99,8 @@ class SentimentAnalyzer:
     def analyze(
         self,
         symbol: str,
-        force_refresh: bool = False
+        force_refresh: bool = False,
+        historical_data: Optional[pd.DataFrame] = None
     ) -> SentimentResult:
         """
         Analyze sentiment for a symbol.
@@ -107,6 +108,7 @@ class SentimentAnalyzer:
         Args:
             symbol: Stock ticker
             force_refresh: Force refresh cache
+            historical_data: Optional pre-loaded price data (for forex/crypto)
         
         Returns:
             SentimentResult
@@ -123,7 +125,16 @@ class SentimentAnalyzer:
         
         if not headlines:
             # ✅ FALLBACK: Use Price/Volume Action if news fails
-            action_sentiment = VolumePriceSentiment.calculate(self._get_recent_prices(symbol))
+            # Prefer provided historical data (works for forex/crypto)
+            if historical_data is not None and not historical_data.empty:
+                prices = historical_data.get('Close', pd.Series())
+                volumes = historical_data.get('Volume', None)
+            else:
+                # Fallback to yfinance for stocks
+                prices = self._get_recent_prices(symbol)
+                volumes = None
+            
+            action_sentiment = VolumePriceSentiment.calculate(prices, volumes)
             fallback_score = action_sentiment.get('combined', 0.0)
             
             logger.info(f"🌑 Sentiment fallback for {symbol} (News failed): {fallback_score:+.2f}")
@@ -192,7 +203,10 @@ class SentimentAnalyzer:
     def _get_recent_prices(self, symbol: str) -> pd.Series:
         """Helper to get recent prices for action-based sentiment fallback."""
         try:
-            # First try Yahoo Finance since it's already used here
+            if not YFINANCE_AVAILABLE:
+                return pd.Series()
+            
+            # Try Yahoo Finance for stocks
             ticker = yf.Ticker(symbol)
             hist = ticker.history(period="1mo")
             if not hist.empty:
@@ -263,13 +277,15 @@ class SentimentAnalyzer:
     
     def analyze_batch(
         self,
-        symbols: List[str]
+        symbols: List[str],
+        historical_data_dict: Optional[Dict[str, pd.DataFrame]] = None
     ) -> Dict[str, SentimentResult]:
         """
         Analyze sentiment for multiple symbols.
         
         Args:
             symbols: List of tickers
+            historical_data_dict: Optional dict of {symbol: DataFrame}
         
         Returns:
             Dict of {symbol: SentimentResult}
@@ -277,7 +293,11 @@ class SentimentAnalyzer:
         results = {}
         for symbol in symbols:
             try:
-                results[symbol] = self.analyze(symbol)
+                hist_data = None
+                if historical_data_dict and symbol in historical_data_dict:
+                    hist_data = historical_data_dict[symbol]
+                
+                results[symbol] = self.analyze(symbol, historical_data=hist_data)
             except Exception as e:
                 logger.debug(f"Error analyzing {symbol}: {e}")
                 results[symbol] = self._neutral_result(symbol)

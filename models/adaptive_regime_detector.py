@@ -227,6 +227,37 @@ class AdaptiveRegimeDetector:
 
         return market_regime
 
+    def classify_history(
+        self,
+        prices: pd.Series,
+        vix_series: Optional[pd.Series] = None
+    ) -> pd.Series:
+        """
+        Classify regime for an entire price history.
+        Non-vectorized (uses internal state) but reliable for training data generation.
+        """
+        regimes = pd.Series(index=prices.index, dtype=str)
+        
+        # Reset state for fresh run
+        self._smoothed_probs = {r: 0.25 for r in REGIMES}
+        self._current_regime = "neutral"
+        self._regime_age_days = 0
+        
+        # Process loops (indicators need rolling windows)
+        for i in range(len(prices)):
+            if i < 60:
+                regimes.iloc[i] = "neutral"
+                continue
+                
+            p_slice = prices.iloc[:i+1]
+            v_val = vix_series.iloc[i] if (vix_series is not None and i < len(vix_series)) else None
+            
+            # Use assess_regime to update internal state and get prediction
+            assessment = self.assess_regime(p_slice, vix_level=v_val)
+            regimes.iloc[i] = assessment.primary_regime
+            
+        return regimes
+
     # ─── Indicator Computation ─────────────────────────────────────
 
     def _compute_indicator_scores(

@@ -70,6 +70,7 @@ class OptionContract:
     strike: float
     expiry: datetime
     multiplier: int = 100
+    trading_class: str = ""
 
     # Greeks (populated after pricing)
     delta: float = 0.0
@@ -112,7 +113,9 @@ class OptionContract:
             'theta': self.theta,
             'vega': self.vega,
             'implied_vol': self.implied_vol,
-            'mid_price': self.mid_price
+            'mid_price': self.mid_price,
+            'trading_class': self.trading_class,
+            'multiplier': self.multiplier
         }
 
 
@@ -380,7 +383,9 @@ class OptionsTrader:
                                         symbol=symbol,
                                         option_type=opt_type,
                                         strike=strike,
-                                        expiry=expiry_date
+                                        expiry=expiry_date,
+                                        trading_class=getattr(chain, 'tradingClass', ''),
+                                        multiplier=int(getattr(chain, 'multiplier', '100'))
                                     )
 
                                     # Calculate Greeks
@@ -519,18 +524,42 @@ class OptionsTrader:
         logger.info(f"   Delta: {put.delta:.2f}, Price: ${put.mid_price:.2f}")
         logger.info(f"   Contracts: {contracts}")
 
-        # Execute order (simplified - would need actual IBKR options order)
-        # In production, this would create an Option contract and execute
-        cost = contracts * put.mid_price * put.multiplier
+        # Execute actual order via IBKR
+        expiry_str = put.expiry.strftime('%Y%m%d')
+        right = 'P'
+        
+        trade_result = await self.ibkr.execute_option_order(
+            symbol=symbol,
+            expiry=expiry_str,
+            strike=put.strike,
+            right=right,
+            side='BUY',
+            quantity=contracts,
+            order_type='MKT',
+            trading_class=put.trading_class,
+            multiplier=put.multiplier
+        )
+        
+        if not trade_result:
+            logger.error(f"Failed to execute protective put for {symbol}")
+            return None
 
-        logger.info(f"   Total cost: ${cost:,.2f}")
+        # Record position
+        pos_key = f"{symbol}_{expiry_str}_{put.strike}_{right}"
+        self.positions[pos_key] = OptionPosition(
+            contract=put,
+            quantity=contracts,
+            entry_price=trade_result.get('price', put.mid_price),
+            entry_date=datetime.now()
+        )
 
         return {
             'strategy': OptionStrategy.PROTECTIVE_PUT.value,
             'symbol': symbol,
             'contract': put.to_dict(),
             'quantity': contracts,
-            'cost': cost
+            'cost': trade_result.get('price', 0) * contracts * put.multiplier,
+            'order_id': trade_result.get('order_id')
         }
 
     async def sell_covered_call(
@@ -578,17 +607,42 @@ class OptionsTrader:
         logger.info(f"   Delta: {call.delta:.2f}, Premium: ${call.mid_price:.2f}")
         logger.info(f"   Contracts: {contracts}")
 
-        # Premium received
-        premium = contracts * call.mid_price * call.multiplier
+        # Execute actual order via IBKR
+        expiry_str = call.expiry.strftime('%Y%m%d')
+        right = 'C'
+        
+        trade_result = await self.ibkr.execute_option_order(
+            symbol=symbol,
+            expiry=expiry_str,
+            strike=call.strike,
+            right=right,
+            side='SELL',
+            quantity=contracts,
+            order_type='MKT',
+            trading_class=call.trading_class,
+            multiplier=call.multiplier
+        )
+        
+        if not trade_result:
+            logger.error(f"Failed to execute covered call for {symbol}")
+            return None
 
-        logger.info(f"   Total premium: ${premium:,.2f}")
+        # Record position
+        pos_key = f"{symbol}_{expiry_str}_{call.strike}_{right}"
+        self.positions[pos_key] = OptionPosition(
+            contract=call,
+            quantity=-contracts,
+            entry_price=trade_result.get('price', call.mid_price),
+            entry_date=datetime.now()
+        )
 
         return {
             'strategy': OptionStrategy.COVERED_CALL.value,
             'symbol': symbol,
             'contract': call.to_dict(),
             'quantity': -contracts,  # Negative = short
-            'premium': premium
+            'premium': trade_result.get('price', 0) * contracts * call.multiplier,
+            'order_id': trade_result.get('order_id')
         }
 
     async def buy_straddle(
@@ -649,13 +703,61 @@ class OptionsTrader:
         logger.info(f"   Total cost: ${total_cost:,.2f}")
         logger.info(f"   Breakeven: ${atm_call.strike - atm_call.mid_price - atm_put.mid_price:.2f} / ${atm_call.strike + atm_call.mid_price + atm_put.mid_price:.2f}")
 
+        # Execute actual orders via IBKR
+        expiry_str = atm_call.expiry.strftime('%Y%m%d')
+        
+        # 1. Buy Call
+        call_result = await self.ibkr.execute_option_order(
+            symbol=symbol,
+            expiry=expiry_str,
+            strike=atm_call.strike,
+            right='C',
+            side='BUY',
+            quantity=contracts,
+            order_type='MKT'
+        )
+        
+        # 2. Buy Put
+        put_result = await self.ibkr.execute_option_order(
+            symbol=symbol,
+            expiry=expiry_str,
+            strike=atm_put.strike,
+            right='P',
+            side='BUY',
+            quantity=contracts,
+            order_type='MKT'
+        )
+        
+        if not call_result or not put_result:
+            logger.error(f"Failed to execute straddle for {symbol}")
+            return None
+
+        # Record positions
+        call_key = f"{symbol}_{expiry_str}_{atm_call.strike}_C"
+        put_key = f"{symbol}_{expiry_str}_{atm_put.strike}_P"
+        
+        self.positions[call_key] = OptionPosition(
+            contract=atm_call,
+            quantity=contracts,
+            entry_price=call_result.get('price', atm_call.mid_price),
+            entry_date=datetime.now()
+        )
+        self.positions[put_key] = OptionPosition(
+            contract=atm_put,
+            quantity=contracts,
+            entry_price=put_result.get('price', atm_put.mid_price),
+            entry_date=datetime.now()
+        )
+
         return {
             'strategy': OptionStrategy.STRADDLE.value,
             'symbol': symbol,
             'call': atm_call.to_dict(),
             'put': atm_put.to_dict(),
             'quantity': contracts,
-            'cost': total_cost
+            'cost': (call_result.get('price', 0) + put_result.get('price', 0)) * contracts * 100,
+            'call_order_id': call_result.get('order_id'),
+            'put_order_id': put_result.get('order_id')
         }
 
     def calculate_hedge_ratio(

@@ -11,6 +11,7 @@ import pandas as pd
 import logging
 from typing import Dict
 
+from config import ApexConfig
 from core.logging_config import setup_logging
 
 logger = logging.getLogger(__name__)
@@ -198,7 +199,7 @@ class AdaptivePositionSizer:
         kelly_pct *= kelly_fraction
         
         # Clip to reasonable range
-        kelly_pct = np.clip(kelly_pct, 0.0, 0.05)  # Max 5% of capital
+        kelly_pct = np.clip(kelly_pct, 0.0, ApexConfig.KELLY_MAX_POSITION_PCT)
         
         return kelly_pct
 

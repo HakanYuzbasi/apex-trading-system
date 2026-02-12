@@ -15,8 +15,11 @@ Environment variables can override defaults:
 """
 
 import os
+import logging
 from pathlib import Path
 from typing import Set, Dict, List
+
+_config_logger = logging.getLogger(__name__)
 
 
 class ApexConfig:
@@ -120,7 +123,7 @@ class ApexConfig:
     #   ibkr    = IBKR only
     #   alpaca  = Alpaca only (crypto paper trading)
     #   both    = IBKR for equities/forex, Alpaca for crypto (default)
-    BROKER_MODE: str = os.getenv("APEX_BROKER_MODE", "both")
+    BROKER_MODE: str = os.getenv("APEX_484BACKTEST_ONLY484", "both")
 
     # ═══════════════════════════════════════════════════════════════
     # CAPITAL & POSITION SIZING
@@ -217,6 +220,7 @@ class ApexConfig:
     TRAILING_STOP_ATR = 2.5  # Trailing stop = ATR * this multiplier (avoid whipsaws)
     USE_KELLY_SIZING = True  # Use Kelly criterion for position sizing
     KELLY_FRACTION = 0.5  # Kelly fraction (50% - slightly more aggressive)
+    KELLY_MAX_POSITION_PCT = 0.05  # Max 5% of capital per Kelly-sized position
 
     # Enable advanced risk features
     USE_ATR_STOPS = True  # Use dynamic ATR-based stops instead of fixed percentages
@@ -469,16 +473,17 @@ class ApexConfig:
 
         # Real Estate & Utilities
         "AMT", "PLD", "CCI", "EQIX", "PSA", "NEE", "DUK", "SO", "D", "AEP",
-
+        
         # ETFs & Commodities (removed duplicate CRM, AMAT)
         "SPY", "QQQ", "IWM", "GLD", "SLV", "USO", "UNG", "PALL",
 
-        # FX Majors (BASE/QUOTE)
-        "EUR/USD", "GBP/USD", "USD/JPY", "GBP/JPY", "AUD/USD", "USD/CHF",
+        # FX Majors (IBKR format: BASE.QUOTE for IDEALPRO)
+        "EUR.USD", "GBP.USD", "USD.JPY", "GBP.JPY", "AUD.USD", "USD.CHF",
 
         # Crypto (BASE/QUOTE)
         "BTC/USDT", "ETH/USDC", "SOL/USDT", "DOGE/USDT"
     ]
+    
     # Backtesting-only symbols (kept in universe, excluded from IBKR paper execution)
     BACKTEST_ONLY_SYMBOLS = {"SOL/USDT", "DOGE/USDT"}
 
@@ -586,7 +591,8 @@ class ApexConfig:
     BASE_DIR = Path(__file__).parent
     DATA_DIR = BASE_DIR / "data"
     LOGS_DIR = BASE_DIR / "logs"
-    MODELS_DIR = BASE_DIR / "models" / "saved"
+    MODELS_DIR = BASE_DIR / "models" / "saved_ultimate"
+    PRODUCTION_MODELS_DIR = BASE_DIR / "models" / "saved_ultimate"
     
     # Create directories
     DATA_DIR.mkdir(exist_ok=True)
@@ -642,13 +648,12 @@ def validate_config() -> bool:
             f"⚠️  Cooldown ({ApexConfig.TRADE_COOLDOWN_SECONDS}s) is short - risk of overtrading"
         )
 
-    # Print results
     for warning in warnings:
-        print(warning)
+        _config_logger.warning(warning)
 
     if errors:
         for error in errors:
-            print(error)
+            _config_logger.error(error)
         return False
 
     return True

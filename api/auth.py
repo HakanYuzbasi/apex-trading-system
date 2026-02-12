@@ -52,7 +52,7 @@ class AuthConfig:
     access_token_expire_minutes: int = 60
     refresh_token_expire_days: int = 7
     api_key_header: str = "X-API-Key"
-    enabled: bool = os.getenv("APEX_AUTH_ENABLED", "false").lower() == "true"
+    enabled: bool = os.getenv("APEX_AUTH_ENABLED", "true").lower() == "true"
     allowed_origins: List[str] = None
 
     def __post_init__(self):
@@ -77,6 +77,7 @@ class User:
     permissions: List[str] = None
     api_key: Optional[str] = None
     created_at: Optional[datetime] = None
+    tier: Optional[Any] = None  # SubscriptionTier when set by SaaS middleware
 
     def __post_init__(self):
         if self.roles is None:
@@ -117,7 +118,13 @@ class UserStore:
 
     def _create_default_admin(self):
         """Create default admin user if not exists."""
-        admin_key = os.getenv("APEX_ADMIN_API_KEY", "apex-admin-key-change-me")
+        admin_key = os.getenv("APEX_ADMIN_API_KEY")
+        if not admin_key:
+            admin_key = f"apex-{secrets.token_hex(16)}"
+            logger.warning(
+                "APEX_ADMIN_API_KEY not set — generated ephemeral key. "
+                "Set APEX_ADMIN_API_KEY env var for persistent admin access."
+            )
         admin = User(
             user_id="admin",
             username="admin",
@@ -179,6 +186,35 @@ class UserStore:
 USER_STORE = UserStore()
 
 
+# Token Blacklist (in-memory; production should use Redis)
+class TokenBlacklist:
+    """In-memory token blacklist for logout/revocation.
+
+    A production deployment should replace this with a Redis-backed store
+    for persistence and cross-process sharing.
+    """
+
+    def __init__(self):
+        self._revoked: Dict[str, float] = {}  # token_jti_or_raw -> expiry_ts
+        self._lock = asyncio.Lock()
+
+    async def revoke(self, token: str, expires_at: Optional[datetime] = None):
+        """Add a token to the blacklist."""
+        exp_ts = (expires_at or datetime.utcnow() + timedelta(hours=24)).timestamp()
+        async with self._lock:
+            self._revoked[token] = exp_ts
+            # Prune expired entries
+            now = time.time()
+            self._revoked = {k: v for k, v in self._revoked.items() if v > now}
+
+    def is_revoked(self, token: str) -> bool:
+        """Check if a token has been revoked."""
+        return token in self._revoked and self._revoked[token] > time.time()
+
+
+TOKEN_BLACKLIST = TokenBlacklist()
+
+
 # JWT Token Functions
 def create_access_token(user: User, expires_delta: Optional[timedelta] = None) -> str:
     """Create a JWT access token."""
@@ -220,9 +256,13 @@ def create_refresh_token(user: User) -> str:
 
 def verify_token(token: str) -> Optional[TokenData]:
     """Verify and decode a JWT token."""
+    if TOKEN_BLACKLIST.is_revoked(token):
+        logger.warning("Rejected revoked token")
+        return None
+
     if not JWT_AVAILABLE:
-        # Mock verification
-        if token.startswith("mock-token-"):
+        # Mock verification — only allowed when auth is explicitly disabled
+        if not AUTH_CONFIG.enabled and token.startswith("mock-token-"):
             user_id = token.replace("mock-token-", "")
             user = USER_STORE.get_user(user_id)
             if user:
@@ -233,6 +273,8 @@ def verify_token(token: str) -> Optional[TokenData]:
                     exp=datetime.utcnow() + timedelta(hours=1),
                     iat=datetime.utcnow()
                 )
+        if AUTH_CONFIG.enabled:
+            logger.error("JWT verification requested but PyJWT is not installed")
         return None
 
     try:
@@ -271,16 +313,34 @@ async def get_current_user(
     """
     Get current authenticated user.
 
-    Supports both JWT bearer tokens and API keys.
+    If SaaSAuthMiddleware set request.state.user (PostgreSQL/OAuth), use that.
+    Otherwise supports JWT bearer tokens and API keys via in-memory store.
     """
     if not AUTH_CONFIG.enabled:
-        # Return default user when auth is disabled
+        # Return default user when auth is disabled (read-only, non-admin)
         return User(
             user_id="default",
             username="default",
-            roles=["admin"],
-            permissions=["read", "write", "trade", "admin"]
+            roles=["user"],
+            permissions=["read"]
         )
+
+    # Bridge: use user set by SaaSAuthMiddleware (PostgreSQL/API key auth)
+    if request is not None:
+        state_user = getattr(request.state, "user", None)
+        if state_user is not None:
+            uid = getattr(state_user, "id", None) or getattr(state_user, "user_id", None)
+            if uid:
+                roles = getattr(request.state, "roles", None) or getattr(state_user, "roles", ["user"])
+                tier = getattr(request.state, "tier", None)
+                return User(
+                    user_id=str(uid),
+                    username=getattr(state_user, "username", "?"),
+                    email=getattr(state_user, "email", None),
+                    roles=roles if isinstance(roles, list) else list(roles),
+                    permissions=["read", "write"],
+                    tier=tier,
+                )
 
     # Try API key first
     if api_key:
@@ -466,8 +526,8 @@ async def authenticate_websocket(websocket: WebSocket) -> Optional[User]:
         return User(
             user_id="default",
             username="default",
-            roles=["admin"],
-            permissions=["read", "write", "trade", "admin"]
+            roles=["user"],
+            permissions=["read"]
         )
 
     # Check query params for API key
@@ -488,8 +548,19 @@ async def authenticate_websocket(websocket: WebSocket) -> Optional[User]:
 
 
 # Utility functions
+try:
+    import bcrypt as _bcrypt
+    _BCRYPT_AVAILABLE = True
+except ImportError:
+    _BCRYPT_AVAILABLE = False
+    logger.warning("bcrypt not available — install with: pip install bcrypt")
+
+
 def hash_password(password: str) -> str:
-    """Hash a password (use proper bcrypt in production)."""
+    """Hash a password using bcrypt (preferred) or SHA-256 fallback."""
+    if _BCRYPT_AVAILABLE:
+        return _bcrypt.hashpw(password.encode(), _bcrypt.gensalt()).decode()
+    logger.warning("Using SHA-256 password hashing — install bcrypt for production use")
     return hashlib.sha256(password.encode()).hexdigest()
 
 

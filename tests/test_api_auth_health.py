@@ -342,15 +342,16 @@ class TestHealthEndpoint:
         """Health should work with valid API key."""
         from fastapi.testclient import TestClient
         from api.server import app
-        from api.auth import AUTH_CONFIG
+        from api.auth import AUTH_CONFIG, USER_STORE
 
         original_enabled = AUTH_CONFIG.enabled
         AUTH_CONFIG.enabled = True
         try:
+            admin = USER_STORE.get_user("admin")
             client = TestClient(app)
             response = client.get(
                 "/health",
-                headers={"X-API-Key": "apex-admin-key-change-me"},
+                headers={"X-API-Key": admin.api_key},
             )
             assert response.status_code == 200
         finally:
@@ -375,15 +376,16 @@ class TestHealthEndpoint:
         """GET /state should return data with valid API key."""
         from fastapi.testclient import TestClient
         from api.server import app
-        from api.auth import AUTH_CONFIG
+        from api.auth import AUTH_CONFIG, USER_STORE
 
         original_enabled = AUTH_CONFIG.enabled
         AUTH_CONFIG.enabled = True
         try:
+            admin = USER_STORE.get_user("admin")
             client = TestClient(app)
             response = client.get(
                 "/state",
-                headers={"X-API-Key": "apex-admin-key-change-me"},
+                headers={"X-API-Key": admin.api_key},
             )
             assert response.status_code == 200
             data = response.json()

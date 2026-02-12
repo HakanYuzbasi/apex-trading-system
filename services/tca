@@ -1,0 +1,12 @@
+
+try:
+    from services.tca.router import router as tca_router
+    app.include_router(tca_router)
+except Exception as e:
+    logging.getLogger("api").warning(f"Could not load TCA router: {e}")
+
+try:
+    from services.tca.router import router as tca_router
+    app.include_router(tca_router)
+except Exception as e:
+    logging.getLogger("api").warning(f"Could not load TCA router: {e}")

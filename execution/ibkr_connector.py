@@ -962,7 +962,10 @@ class IBKRConnector:
                     }
 
                 elif trade.orderStatus.status in ['Cancelled', 'ApiCancelled', 'Inactive']:
-                    logger.error(f"❌ Order {action} {quantity} {symbol} cancelled")
+                    error_msg = ""
+                    if trade.log:
+                        error_msg = f" - {trade.log[-1].message}"
+                    logger.error(f"❌ Order {action} {quantity} {symbol} cancelled{error_msg}")
                     return None
 
             # Timeout - cancel the order
@@ -1221,7 +1224,9 @@ class IBKRConnector:
         symbol: str,
         expiry: str,  # Format: YYYYMMDD
         strike: float,
-        right: str  # 'C' for call, 'P' for put
+        right: str,  # 'C' for call, 'P' for put
+        trading_class: str = "",
+        multiplier: int = 100
     ) -> Optional[Option]:
         """
         Get or create an options contract.
@@ -1235,7 +1240,7 @@ class IBKRConnector:
         Returns:
             Option contract or None if not found
         """
-        cache_key = f"{symbol}_{expiry}_{strike}_{right}"
+        cache_key = f"{symbol}_{expiry}_{strike}_{right}_{trading_class}"
 
         if cache_key in self.contracts:
             return self.contracts[cache_key]
@@ -1247,6 +1252,8 @@ class IBKRConnector:
                 lastTradeDateOrContractMonth=expiry,
                 strike=strike,
                 right=right,
+                multiplier=str(multiplier),
+                tradingClass=trading_class,
                 exchange='SMART',
                 currency='USD'
             )
@@ -1260,7 +1267,11 @@ class IBKRConnector:
                 logger.debug(f"✅ Qualified option: {symbol} {expiry} {strike} {right}")
                 return qualified[0]
             else:
-                logger.warning(f"⚠️ Could not qualify option contract: {symbol} {expiry} {strike} {right}")
+                # Qualification failed - log details of the attempt
+                logger.warning(f"⚠️ Could not qualify option contract: {symbol} Exp:{expiry} Strike:{strike} Right:{right}")
+                # Try to see if it's a strike format issue
+                if isinstance(strike, float) and strike.is_integer():
+                     logger.debug(f"   Suggestion: Strike {strike} might need to be integer?")
                 return None
 
         except Exception as e:
@@ -1374,7 +1385,9 @@ class IBKRConnector:
         side: str,
         quantity: int,
         order_type: str = 'MKT',
-        limit_price: float = None
+        limit_price: float = None,
+        trading_class: str = "",
+        multiplier: int = 100
     ) -> Optional[dict]:
         """
         Execute an options order.
@@ -1407,7 +1420,11 @@ class IBKRConnector:
                 return None
 
             # Get option contract
-            contract = await self.get_option_contract(symbol, expiry, strike, right)
+            contract = await self.get_option_contract(
+                symbol, expiry, strike, right, 
+                trading_class=trading_class, 
+                multiplier=multiplier
+            )
             if not contract:
                 return None
 
@@ -1418,10 +1435,24 @@ class IBKRConnector:
             # Create order
             action = 'BUY' if side.upper() == 'BUY' else 'SELL'
 
+            # Use LMT by default for paper trading safety with delayed data
+            if order_type == 'MKT' and not ApexConfig.USE_LIVE_MARKET_DATA:
+                order_type = 'LMT'
+                if limit_price is None:
+                    limit_price = expected_price
+                logger.info(f"   🔄 Switching to LMT order for paper trading safety (${limit_price:.2f})")
+
             if order_type == 'MKT':
                 order = MarketOrder(action, quantity)
                 logger.info(f"📈 Option Market Order: {action} {quantity} {symbol} {expiry} {strike}{right}")
             else:
+                # Ensure we have a valid limit price
+                if limit_price is None or limit_price <= 0:
+                    limit_price = expected_price or 0.01 # Minimum tick
+                
+                # Round to 2 decimals for USD options
+                limit_price = round(limit_price, 2)
+                
                 order = LimitOrder(action, quantity, limit_price)
                 logger.info(f"💰 Option Limit Order: {action} {quantity} {symbol} {expiry} {strike}{right} @ ${limit_price:.2f}")
 
@@ -1453,7 +1484,14 @@ class IBKRConnector:
                     }
 
                 elif trade.orderStatus.status in ['Cancelled', 'ApiCancelled', 'Inactive']:
-                    logger.error(f"❌ Option order cancelled: {symbol} {expiry} {strike}{right}")
+                    error_msg = ""
+                    if trade.log:
+                        # Find the first entry with an error message
+                        for entry in reversed(trade.log):
+                            if entry.message:
+                                error_msg = f" - {entry.message}"
+                                break
+                    logger.error(f"❌ Option order cancelled: {symbol} {expiry} {strike}{right}{error_msg}")
                     return None
 
             # Timeout

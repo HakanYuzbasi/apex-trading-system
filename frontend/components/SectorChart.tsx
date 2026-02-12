@@ -56,12 +56,16 @@ export default function SectorChart({ data }: SectorChartProps) {
                             </Pie>
                             <Tooltip
                                 contentStyle={{
-                                    backgroundColor: 'rgba(10, 10, 15, 0.9)',
-                                    borderColor: 'rgba(255,255,255,0.1)',
+                                    backgroundColor: 'rgba(10, 10, 15, 0.95)',
+                                    borderColor: 'rgba(255,255,255,0.15)',
                                     borderRadius: '8px',
-                                    color: '#fff'
+                                    color: '#fff',
+                                    zIndex: 50,
                                 }}
-                                formatter={(value: number | undefined) => `${((value || 0) * 100).toFixed(1)}%`}
+                                itemStyle={{ color: '#fff' }}
+                                labelStyle={{ color: '#ccc', fontWeight: 600 }}
+                                formatter={(value: number | undefined) => [`${((value || 0) * 100).toFixed(1)}%`, 'Allocation']}
+                                wrapperStyle={{ zIndex: 50 }}
                             />
                             <Legend
                                 verticalAlign="bottom"

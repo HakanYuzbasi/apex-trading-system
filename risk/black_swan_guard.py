@@ -84,8 +84,6 @@ class BlackSwanGuard:
             
         self._vix_open: Optional[float] = None
         self._vix_current: Optional[float] = None
-        self._vix_open: Optional[float] = None
-        self._vix_current: Optional[float] = None
 
         # Block entry tracking
         self._entry_blocked_until: Optional[datetime] = None
@@ -121,7 +119,6 @@ class BlackSwanGuard:
         Run all crash detection triggers and determine threat level.
 
         Args:
-        Args:
             spy_prices: Deprecated (kept for compat). Use record_index_price.
             vix_level: Current VIX level
             vix_open: Today's VIX open
@@ -132,8 +129,7 @@ class BlackSwanGuard:
         """
         triggers = []
 
-        # Update internal state
-        # Update internal state
+        # Update internal state from legacy params
         if spy_prices:
             for p in spy_prices:
                 self.record_index_price("SPY", p)

@@ -32,7 +32,6 @@ setup_logging(
     backup_count=ApexConfig.LOG_BACKUP_COUNT,
 )
 
-
 def _sanitize_floats(obj):
     """Replace NaN/Inf float values with JSON-safe defaults."""
     if isinstance(obj, float):
@@ -44,10 +43,10 @@ def _sanitize_floats(obj):
     elif isinstance(obj, list):
         return [_sanitize_floats(v) for v in obj]
     return obj
+
 # Path to trading state file
 STATE_FILE = ApexConfig.DATA_DIR / "trading_state.json"
 PRICE_CACHE_FILE = ApexConfig.DATA_DIR / "price_cache.json"
-
 
 def read_price_cache() -> Dict[str, float]:
     """Read current price cache from file."""
@@ -70,6 +69,63 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# SaaS auth: resolve user from PostgreSQL (JWT/API key) or legacy in-memory; set request.state.user
+try:
+    from services.auth.middleware import SaaSAuthMiddleware
+    app.add_middleware(SaaSAuthMiddleware)
+except Exception as e:
+    logging.getLogger("api").warning("SaaS auth middleware not loaded: %s", e)
+
+# Mount SaaS auth and feature routers
+try:
+    from services.auth.router import router as auth_router
+    app.include_router(auth_router)
+except Exception as e:
+    logging.getLogger("api").warning("SaaS auth router not loaded: %s", e)
+
+try:
+    from services.backtest_validator.router import router as backtest_validator_router
+    app.include_router(backtest_validator_router)
+except Exception as e:
+    logging.getLogger("api").warning("Backtest validator router not loaded: %s", e)
+
+try:
+    from services.execution_simulator.router import router as execution_sim_router
+    app.include_router(execution_sim_router)
+except Exception as e:
+    logging.getLogger("api").warning("Execution simulator router not loaded: %s", e)
+
+try:
+    from services.drift_monitor.router import router as drift_monitor_router
+    app.include_router(drift_monitor_router)
+except Exception as e:
+    logging.getLogger("api").warning("Drift monitor router not loaded: %s", e)
+
+try:
+    from services.compliance_copilot.router import router as compliance_copilot_router
+    app.include_router(compliance_copilot_router)
+except Exception as e:
+    logging.getLogger("api").warning("Compliance copilot router not loaded: %s", e)
+
+try:
+    from services.portfolio_allocator.router import router as portfolio_allocator_router
+    app.include_router(portfolio_allocator_router)
+except Exception as e:
+    logging.getLogger("api").warning("Portfolio allocator router not loaded: %s", e)
+
+# Health check endpoints
+try:
+    from api.health import router as health_router
+    app.include_router(health_router)
+except Exception as e:
+    logging.getLogger("api").warning("Health router not loaded: %s", e)
+
+try:
+    from services.tca.router import router as tca_router
+    app.include_router(tca_router)
+except Exception as e:
+    logging.getLogger("api").warning("Could not load TCA router: %s", e)
+
 # --------------------------------------------------------------------------------
 # WebSocket Manager
 # --------------------------------------------------------------------------------
@@ -77,26 +133,34 @@ app.add_middleware(
 class ConnectionManager:
     def __init__(self):
         self.active_connections: List[WebSocket] = []
+        self._lock = asyncio.Lock()
 
     async def connect(self, websocket: WebSocket):
         await websocket.accept()
-        self.active_connections.append(websocket)
+        async with self._lock:
+            self.active_connections.append(websocket)
         logger.info("Client connected via WebSocket")
 
-    def disconnect(self, websocket: WebSocket):
-        if websocket in self.active_connections:
-            self.active_connections.remove(websocket)
-            logger.info("Client disconnected")
-        else:
-            logger.warning("Attempted to disconnect unknown websocket")
+    async def disconnect(self, websocket: WebSocket):
+        async with self._lock:
+            if websocket in self.active_connections:
+                self.active_connections.remove(websocket)
+                logger.info("Client disconnected")
+            else:
+                logger.warning("Attempted to disconnect unknown websocket")
 
     async def broadcast(self, message: Dict):
         """Send message to all connected clients."""
-        for connection in self.active_connections:
-            try:
-                await connection.send_json(message)
-            except Exception as e:
-                logger.error(f"Error broadcasting: {e}")
+        async with self._lock:
+            dead: List[WebSocket] = []
+            for connection in self.active_connections:
+                try:
+                    await connection.send_json(message)
+                except Exception as e:
+                    logger.error(f"Error broadcasting: {e}")
+                    dead.append(connection)
+            for ws in dead:
+                self.active_connections.remove(ws)
 
 manager = ConnectionManager()
 
@@ -188,6 +252,7 @@ async def stream_trading_state():
                     "type": "state_update",
                     "timestamp": current_state.get("timestamp", datetime.now().isoformat()),
                     "capital": current_state.get("capital", 0),
+                    "initial_capital": current_state.get("initial_capital", 0),
                     "starting_capital": current_state.get("starting_capital", 0),
                     "positions": current_state.get("positions", {}),
                     "daily_pnl": current_state.get("daily_pnl", 0),
@@ -197,6 +262,7 @@ async def stream_trading_state():
                     "win_rate": current_state.get("win_rate", 0),
                     "sector_exposure": current_state.get("sector_exposure", {}),
                     "open_positions": current_state.get("open_positions", 0),
+                    "max_positions": current_state.get("max_positions", ApexConfig.MAX_POSITIONS),
                     "total_trades": current_state.get("total_trades", 0)
                 }
                 await manager.broadcast(update)
@@ -218,7 +284,7 @@ async def startup_event():
 # --------------------------------------------------------------------------------
 
 @app.get("/status")
-async def get_status():
+async def get_status(user=Depends(require_user)):
     state = read_trading_state()
     return {
         "status": "online" if _state_is_fresh(state, ApexConfig.HEALTH_STALENESS_SECONDS) else "offline",
@@ -235,7 +301,7 @@ async def get_status():
     }
 
 @app.get("/positions")
-async def get_positions():
+async def get_positions(user=Depends(require_user)):
     state = read_trading_state()
     positions = state.get("positions", {})
 
@@ -272,7 +338,7 @@ async def get_health(user=Depends(require_user)):
     }
 
 @app.get("/sectors")
-async def get_sector_exposure():
+async def get_sector_exposure(user=Depends(require_user)):
     """Get sector exposure breakdown."""
     state = read_trading_state()
     return state.get("sector_exposure", {})
@@ -295,6 +361,7 @@ async def websocket_endpoint(websocket: WebSocket):
             "type": "state_update",
             "timestamp": current_state.get("timestamp", datetime.now().isoformat()),
             "capital": current_state.get("capital", 0),
+            "initial_capital": current_state.get("initial_capital", 0),
             "starting_capital": current_state.get("starting_capital", 0),
             "positions": current_state.get("positions", {}),
             "daily_pnl": current_state.get("daily_pnl", 0),
@@ -304,10 +371,11 @@ async def websocket_endpoint(websocket: WebSocket):
             "win_rate": current_state.get("win_rate", 0),
             "sector_exposure": current_state.get("sector_exposure", {}),
             "open_positions": current_state.get("open_positions", 0),
+            "max_positions": current_state.get("max_positions", ApexConfig.MAX_POSITIONS),
             "total_trades": current_state.get("total_trades", 0)
         })
         while True:
             data = await websocket.receive_text()
             logger.info(f"Received command: {data}")
     except WebSocketDisconnect:
-        manager.disconnect(websocket)
+        await manager.disconnect(websocket)

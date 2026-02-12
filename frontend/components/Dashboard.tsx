@@ -8,10 +8,12 @@ import AlertNotifications, { AlertItem, AlertSeverity } from "./AlertNotificatio
 import ConnectionStatus from "./ConnectionStatus";
 import PerformanceCharts from "./PerformanceCharts";
 import { useWebSocket } from "@/hooks/useWebSocket";
+import { useAuthContext as useAuth } from "@/components/auth/AuthProvider";
 import { formatCurrency, formatPct } from "@/lib/utils";
 import { Activity, TrendingUp, DollarSign, Zap, AlertTriangle, BarChart3 } from "lucide-react";
 import { motion } from "framer-motion";
 import dynamic from 'next/dynamic';
+import Link from "next/link";
 
 // Dynamic import for 3D component (SSR disabled)
 const VolatilitySurface3D = dynamic(() => import('./VolatilitySurface3D'), {
@@ -39,6 +41,9 @@ interface EquityPoint {
 interface TradingState {
     timestamp: string;
     capital: number;
+    initial_capital?: number;
+    starting_capital?: number;
+    max_positions?: number;
     positions: Record<string, Position>;
     daily_pnl: number;
     total_pnl: number;
@@ -156,9 +161,10 @@ export default function Dashboard() {
         }
     }, [pushAlert]);
 
+    const { accessToken: saasToken } = useAuth();
     const apiBaseUrl = (process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000").replace(/\/+$/, "");
     const apiKey = process.env.NEXT_PUBLIC_API_KEY;
-    const authToken = process.env.NEXT_PUBLIC_AUTH_TOKEN;
+    const authToken = saasToken || process.env.NEXT_PUBLIC_AUTH_TOKEN;
     const wsDefault = apiBaseUrl.replace(/^http/, "ws") + "/ws";
     const wsUrlBase = process.env.NEXT_PUBLIC_WS_URL || wsDefault;
     const wsQuery = apiKey ? `api_key=${encodeURIComponent(apiKey)}` :
@@ -232,14 +238,15 @@ export default function Dashboard() {
             isMounted = false;
             clearInterval(id);
         };
-    }, [apiBaseUrl]);
+    }, [apiBaseUrl, apiKey, authToken]);
 
     // Safe defaults
     const capital = state?.capital ?? 0;
     const totalPnl = state?.total_pnl ?? 0;
-    const initialCapital = state?.initial_capital ?? (capital > 0 ? capital : 100000);
-    const pnlPct = initialCapital > 0 ? (totalPnl / initialCapital) * 100 : 0;
+    const startingCapital = state?.starting_capital ?? state?.initial_capital ?? 0;
+    const pnlPct = startingCapital > 0 ? (totalPnl / startingCapital) * 100 : 0;
     const openPositions = state?.open_positions ?? 0;
+    const maxPositions = state?.max_positions ?? 40;
     const totalTrades = state?.total_trades ?? 0;
     const positions = state?.positions ?? {};
 
@@ -315,6 +322,12 @@ export default function Dashboard() {
                             {backendOnline === null ? "BACKEND…" : backendOnline ? "BACKEND OK" : "BACKEND DOWN"}
                         </span>
                     </div>
+                    {/* Auth links */}
+                    {saasToken ? (
+                        <Link href="/settings" className="text-xs text-muted-foreground hover:text-foreground transition">Settings</Link>
+                    ) : (
+                        <Link href="/login" className="text-xs text-primary hover:underline">Sign in</Link>
+                    )}
                 </div>
             </header>
 
@@ -360,8 +373,8 @@ export default function Dashboard() {
                     <MetricCard
                         title="Open Positions"
                         value={openPositions}
-                        subValue="of 15 max"
-                        trend={openPositions > 10 ? "neutral" : "up"}
+                        subValue={`of ${maxPositions} max`}
+                        trend={openPositions > maxPositions * 0.8 ? "neutral" : "up"}
                         icon={<Activity className="w-4 h-4" />}
                     />
                     <MetricCard
@@ -458,7 +471,7 @@ export default function Dashboard() {
                     /* Charts Tab - Performance Charts */
                     <PerformanceCharts
                         equityHistory={equityHistory}
-                        initialCapital={initialCapital}
+                        initialCapital={startingCapital}
                     />
                 )}
             </div>

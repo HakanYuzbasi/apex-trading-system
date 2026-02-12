@@ -198,6 +198,7 @@ class ApexTradingSystem:
 
         # Institutional-grade components
         self.inst_signal_generator = InstitutionalSignalGenerator(
+            model_dir=str(ApexConfig.PRODUCTION_MODELS_DIR),
             lookback=60,
             n_cv_splits=5,
             purge_gap=5,
@@ -660,8 +661,9 @@ class ApexTradingSystem:
                 self.capital = ibkr_capital
             else:
                 logger.warning(f"⚠️  IBKR returned ${ibkr_capital:,.2f}, keeping initial capital ${self.capital:,.2f}")
-            self.risk_manager.set_starting_capital(self.capital)
-            logger.info(f"💰 IBKR Account: ${self.capital:,.2f}")
+                self.risk_manager.set_starting_capital(self.capital)
+                self.risk_manager.day_start_capital = self.capital  # ✅ CRITICAL
+                logger.info(f"✅ IBKR Account ${self.capital:,.2f}")
             
             # Load existing positions from IBKR
             await self.sync_positions_with_ibkr()
@@ -1203,6 +1205,7 @@ class ApexTradingSystem:
 
             # Generate signal (use institutional or standard)
             prices = self.historical_data[symbol]['Close']
+            data = self.historical_data[symbol]
 
             # SOTA: Get Cross-Sectional Momentum
             cs_data = self.cs_momentum.get_signal(symbol, self.historical_data)

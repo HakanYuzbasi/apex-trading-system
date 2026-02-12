@@ -204,7 +204,10 @@ export function useWebSocket(config: WebSocketConfig): UseWebSocketReturn {
         }
     }, []);
 
-    // Auto-connect on mount (intentionally empty deps - only run once on mount)
+    // Track URL to reconnect when it changes (e.g. auth token added)
+    const prevUrlRef = useRef(url);
+
+    // Auto-connect on mount
     useEffect(() => {
         connect();
         return () => {
@@ -212,6 +215,20 @@ export function useWebSocket(config: WebSocketConfig): UseWebSocketReturn {
         };
         // eslint-disable-next-line react-hooks/exhaustive-deps
     }, []);
+
+    // Reconnect when URL changes (auth token acquired after login)
+    useEffect(() => {
+        if (prevUrlRef.current !== url) {
+            prevUrlRef.current = url;
+            // Close existing connection and reconnect with new URL
+            if (wsRef.current) {
+                wsRef.current.close(1000, "URL changed");
+                wsRef.current = null;
+            }
+            reconnectAttemptsRef.current = 0;
+            connect();
+        }
+    }, [url, connect]);
 
     return { state, send, connect, disconnect };
 }
