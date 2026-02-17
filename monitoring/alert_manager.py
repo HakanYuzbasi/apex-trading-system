@@ -18,6 +18,7 @@ import asyncio
 import logging
 import json
 from datetime import datetime, timedelta
+from string import Formatter
 
 from config import ApexConfig
 from typing import Dict, List, Optional, Callable, Any, Union
@@ -28,6 +29,15 @@ from pathlib import Path
 import aiohttp
 
 logger = logging.getLogger(__name__)
+
+_TEMPLATE_FORMATTER = Formatter()
+
+
+class _SafeTemplateContext(dict):
+    """Mapping for tolerant alert template formatting."""
+
+    def __missing__(self, key):
+        return "{" + str(key) + "}"
 
 
 class AlertSeverity(Enum):
@@ -362,6 +372,15 @@ class AlertManager:
         if rule_id in self.rules:
             self.rules[rule_id].enabled = False
 
+    def _render_message_template(self, template: str, context: Dict[str, Any]) -> str:
+        """Render rule message templates safely without raising on missing/duplicate keys."""
+        safe_context = _SafeTemplateContext(context or {})
+        try:
+            return _TEMPLATE_FORMATTER.vformat(template, (), safe_context)
+        except Exception as exc:
+            logger.warning("Alert template rendering failed, using raw template: %s", exc)
+            return str(template)
+
     async def check_rules(self) -> List[Alert]:
         """
         Check all registered rules and trigger alerts as needed.
@@ -393,7 +412,7 @@ class AlertManager:
                     # Format message
                     context = self._state.copy()
                     context.update(metadata)
-                    message = rule.message_template.format(**context)
+                    message = self._render_message_template(rule.message_template, context)
 
                     # Trigger alert
                     alert = await self.trigger_alert(

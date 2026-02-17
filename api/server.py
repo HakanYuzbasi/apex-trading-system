@@ -28,12 +28,14 @@ from core.trading_control import (
     read_control_state,
     request_kill_switch_reset,
     request_governor_policy_reload,
+    request_equity_reconciliation_latch,
 )
 from risk.governor_policy import (
     GovernorPolicyRepository,
     PolicyPromotionService,
     PromotionStatus,
 )
+from risk.social_decision_audit import SocialDecisionAuditRepository
 
 logger = logging.getLogger("api")
 from api.auth import authenticate_websocket, require_user, require_role
@@ -71,6 +73,8 @@ STATE_FILE = ApexConfig.DATA_DIR / "trading_state.json"
 PRICE_CACHE_FILE = ApexConfig.DATA_DIR / "price_cache.json"
 CONTROL_COMMAND_FILE = ApexConfig.DATA_DIR / "trading_control_commands.json"
 GOVERNOR_POLICY_DIR = ApexConfig.DATA_DIR / "governor_policies"
+PREFLIGHT_STATUS_FILE = ApexConfig.DATA_DIR / "preflight_status.json"
+SOCIAL_DECISION_AUDIT_FILE = ApexConfig.DATA_DIR / "audit" / "social_governor_decisions.jsonl"
 
 DEFAULT_STATE = {
     "timestamp": None,
@@ -90,6 +94,9 @@ _state_cache_lock = threading.Lock()
 _state_cache_data: Dict = DEFAULT_STATE
 _state_cache_mtime_ns: Optional[int] = None
 _state_cache_price_mtime_ns: Optional[int] = None
+
+_preflight_metrics_lock = threading.Lock()
+_preflight_metrics_mtime_ns: Optional[int] = None
 
 
 def _mtime_ns(path) -> Optional[int]:
@@ -128,6 +135,62 @@ def read_price_cache() -> Tuple[Dict[str, float], Optional[int]]:
         _price_cache_mtime_ns = mtime_ns
         return _price_cache_data, _price_cache_mtime_ns
 
+
+def _update_preflight_metrics_from_file() -> None:
+    """Refresh preflight Prometheus gauges from latest persisted preflight status."""
+    if not PROMETHEUS_AVAILABLE:
+        return
+
+    mtime_ns = _mtime_ns(PREFLIGHT_STATUS_FILE)
+    with _preflight_metrics_lock:
+        global _preflight_metrics_mtime_ns
+        if _preflight_metrics_mtime_ns == mtime_ns:
+            return
+
+    if mtime_ns is None:
+        return
+
+    try:
+        payload = json.loads(PREFLIGHT_STATUS_FILE.read_text(encoding="utf-8"))
+    except Exception as exc:
+        logger.debug("Could not read preflight status file: %s", exc)
+        return
+
+    if not isinstance(payload, dict):
+        return
+
+    total_checks = float(payload.get("total_checks", 0) or 0)
+    passed_checks = float(payload.get("passed_checks", 0) or 0)
+    pass_rate = float(payload.get("pass_rate", 0.0) or 0.0)
+    exit_code = float(payload.get("exit_code", 0) or 0)
+    run_at_raw = str(payload.get("run_at", "") or "")
+    run_at_ts = 0.0
+    if run_at_raw:
+        try:
+            run_at_ts = datetime.fromisoformat(run_at_raw.replace("Z", "+00:00")).timestamp()
+        except ValueError:
+            run_at_ts = 0.0
+
+    PREFLIGHT_CHECKS_TOTAL.set(total_checks)
+    PREFLIGHT_CHECKS_PASSED.set(passed_checks)
+    PREFLIGHT_PASS_RATE.set(pass_rate)
+    PREFLIGHT_LAST_EXIT_CODE.set(exit_code)
+    PREFLIGHT_LAST_RUN_TIMESTAMP.set(run_at_ts)
+
+    results = payload.get("results", [])
+    if isinstance(results, list):
+        for row in results:
+            if not isinstance(row, dict):
+                continue
+            check_name = str(row.get("name", "") or "").strip()
+            if not check_name:
+                continue
+            check_ok = 1.0 if bool(row.get("ok", False)) else 0.0
+            PREFLIGHT_CHECK_STATUS.labels(check=check_name).set(check_ok)
+
+    with _preflight_metrics_lock:
+        _preflight_metrics_mtime_ns = mtime_ns
+
 app = FastAPI(title="APEX Trading API", version="2.0.0")
 
 if PROMETHEUS_AVAILABLE:
@@ -156,17 +219,53 @@ if PROMETHEUS_AVAILABLE:
         "Total websocket messages handled",
         ["direction"],
     )
+    PREFLIGHT_PASS_RATE = Gauge(
+        "apex_preflight_pass_rate",
+        "Latest full-stack preflight pass rate (0-1).",
+    )
+    PREFLIGHT_CHECKS_TOTAL = Gauge(
+        "apex_preflight_checks_total",
+        "Number of checks executed in latest preflight run.",
+    )
+    PREFLIGHT_CHECKS_PASSED = Gauge(
+        "apex_preflight_checks_passed_total",
+        "Number of passing checks in latest preflight run.",
+    )
+    PREFLIGHT_LAST_RUN_TIMESTAMP = Gauge(
+        "apex_preflight_last_run_timestamp",
+        "Unix timestamp of the latest preflight run.",
+    )
+    PREFLIGHT_LAST_EXIT_CODE = Gauge(
+        "apex_preflight_last_exit_code",
+        "Latest preflight process exit code (0=pass).",
+    )
+    PREFLIGHT_CHECK_STATUS = Gauge(
+        "apex_preflight_check_status",
+        "Latest preflight status for each check (1=pass, 0=fail).",
+        ["check"],
+    )
 else:
     HTTP_REQUESTS_TOTAL = None
     HTTP_REQUEST_DURATION = None
     HTTP_REQUESTS_IN_PROGRESS = None
     WEBSOCKET_CONNECTIONS = None
     WEBSOCKET_MESSAGES_TOTAL = None
+    PREFLIGHT_PASS_RATE = None
+    PREFLIGHT_CHECKS_TOTAL = None
+    PREFLIGHT_CHECKS_PASSED = None
+    PREFLIGHT_LAST_RUN_TIMESTAMP = None
+    PREFLIGHT_LAST_EXIT_CODE = None
+    PREFLIGHT_CHECK_STATUS = None
 
 # Enable CORS for Next.js frontend
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000", "http://localhost:3001"],
+    allow_origins=[
+        "http://localhost:3000",
+        "http://localhost:3001",
+        "http://127.0.0.1:3000",
+        "http://127.0.0.1:3001",
+    ],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -269,6 +368,12 @@ try:
     app.include_router(portfolio_allocator_router)
 except Exception as e:
     logging.getLogger("api").warning("Portfolio allocator router not loaded: %s", e)
+
+try:
+    from services.mandate_copilot.router import router as mandate_copilot_router
+    app.include_router(mandate_copilot_router)
+except Exception as e:
+    logging.getLogger("api").warning("Mandate copilot router not loaded: %s", e)
 
 # Health check endpoints
 try:
@@ -439,6 +544,11 @@ class KillSwitchResetRequest(BaseModel):
     reason: str = Field(min_length=8, max_length=500)
 
 
+class EquityReconciliationLatchRequest(BaseModel):
+    block_entries: bool
+    reason: str = Field(min_length=8, max_length=500)
+
+
 class GovernorPolicyApproveRequest(BaseModel):
     policy_id: str = Field(min_length=8, max_length=200)
     reason: str = Field(min_length=8, max_length=500)
@@ -462,6 +572,10 @@ def _governor_service(repo: GovernorPolicyRepository) -> PolicyPromotionService:
         live_trading=ApexConfig.LIVE_TRADING,
         auto_promote_non_prod=ApexConfig.GOVERNOR_AUTO_PROMOTE_NON_PROD,
     )
+
+
+def _social_audit_repo() -> SocialDecisionAuditRepository:
+    return SocialDecisionAuditRepository(SOCIAL_DECISION_AUDIT_FILE)
 
 # --------------------------------------------------------------------------------
 # Real-time State Streaming
@@ -520,6 +634,7 @@ async def get_metrics(request: Request):
         if supplied != token:
             return PlainTextResponse("forbidden\n", status_code=403)
 
+    _update_preflight_metrics_from_file()
     return PlainTextResponse(generate_latest(), media_type=CONTENT_TYPE_LATEST)
 
 # --------------------------------------------------------------------------------
@@ -540,6 +655,8 @@ async def get_status(user=Depends(require_user)):
         "sharpe_ratio": state.get("sharpe_ratio", 0),
         "win_rate": state.get("win_rate", 0),
         "open_positions": state.get("open_positions", 0),
+        "option_positions": state.get("option_positions", 0),
+        "open_positions_total": state.get("open_positions_total", state.get("open_positions", 0)),
         "total_trades": state.get("total_trades", 0)
     }
 
@@ -628,6 +745,87 @@ async def post_kill_switch_reset(
         "Kill-switch reset requested by %s (request_id=%s)",
         requested_by,
         command.get("request_id"),
+    )
+    return {"status": "queued", "command": command}
+
+
+@app.get("/ops/equity-reconciliation")
+async def get_equity_reconciliation_control(user=Depends(require_user)):
+    """Read operational equity reconciliation latch command + runtime state."""
+    control_state = read_control_state(CONTROL_COMMAND_FILE)
+    state = read_trading_state()
+    reconciliation = state.get("equity_reconciliation", {}) or {}
+    return {
+        "command": {
+            "equity_reconciliation_latch_requested": bool(
+                control_state.get("equity_reconciliation_latch_requested", False)
+            ),
+            "equity_reconciliation_latch_request_id": control_state.get(
+                "equity_reconciliation_latch_request_id"
+            ),
+            "equity_reconciliation_latch_requested_at": control_state.get(
+                "equity_reconciliation_latch_requested_at"
+            ),
+            "equity_reconciliation_latch_requested_by": control_state.get(
+                "equity_reconciliation_latch_requested_by"
+            ),
+            "equity_reconciliation_latch_reason": control_state.get(
+                "equity_reconciliation_latch_reason"
+            ),
+            "equity_reconciliation_latch_target_block_entries": control_state.get(
+                "equity_reconciliation_latch_target_block_entries"
+            ),
+            "equity_reconciliation_latch_processed_at": control_state.get(
+                "equity_reconciliation_latch_processed_at"
+            ),
+            "equity_reconciliation_latch_processed_by": control_state.get(
+                "equity_reconciliation_latch_processed_by"
+            ),
+            "equity_reconciliation_latch_processing_note": control_state.get(
+                "equity_reconciliation_latch_processing_note"
+            ),
+        },
+        "runtime": {
+            "block_entries": bool(reconciliation.get("block_entries", False)),
+            "reason": reconciliation.get("reason"),
+            "gap_dollars": float(reconciliation.get("gap_dollars", 0.0) or 0.0),
+            "gap_pct": float(reconciliation.get("gap_pct", 0.0) or 0.0),
+            "breached": bool(reconciliation.get("breached", False)),
+            "breach_streak": int(reconciliation.get("breach_streak", 0) or 0),
+            "healthy_streak": int(reconciliation.get("healthy_streak", 0) or 0),
+            "timestamp": reconciliation.get("timestamp"),
+        },
+    }
+
+
+@app.post("/ops/equity-reconciliation/latch")
+async def post_equity_reconciliation_latch(
+    payload: EquityReconciliationLatchRequest,
+    user=Depends(require_role("admin")),
+):
+    """Queue a manual reconciliation latch command to force block/clear in live loop."""
+    current = read_control_state(CONTROL_COMMAND_FILE)
+    if current.get("equity_reconciliation_latch_requested"):
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "Equity reconciliation latch command already requested "
+                f"(request_id={current.get('equity_reconciliation_latch_request_id')})"
+            ),
+        )
+
+    requested_by = getattr(user, "username", None) or getattr(user, "user_id", "unknown")
+    command = request_equity_reconciliation_latch(
+        filepath=CONTROL_COMMAND_FILE,
+        requested_by=str(requested_by),
+        reason=payload.reason.strip(),
+        block_entries=bool(payload.block_entries),
+    )
+    logger.warning(
+        "Equity reconciliation latch requested by %s (request_id=%s, target_block=%s)",
+        requested_by,
+        command.get("equity_reconciliation_latch_request_id"),
+        bool(payload.block_entries),
     )
     return {"status": "queued", "command": command}
 
@@ -769,6 +967,31 @@ async def get_governor_policy_audit(
     return {
         "count": len(events),
         "policy_key": policy_key,
+        "events": events,
+    }
+
+
+@app.get("/api/v1/social-governor/decisions")
+async def get_social_governor_decisions(
+    limit: int = 100,
+    asset_class: Optional[str] = None,
+    regime: Optional[str] = None,
+    user=Depends(require_role("admin")),
+):
+    """Review immutable social-governor decision audits."""
+    if regime and not asset_class:
+        raise HTTPException(status_code=400, detail="asset_class is required when regime is provided")
+    bounded_limit = min(max(int(limit), 1), 2000)
+    repo = _social_audit_repo()
+    events = repo.load_events(
+        limit=bounded_limit,
+        asset_class=asset_class,
+        regime=regime,
+    )
+    return {
+        "count": len(events),
+        "asset_class": asset_class.upper().strip() if asset_class else None,
+        "regime": regime.lower().strip() if regime else None,
         "events": events,
     }
 

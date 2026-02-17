@@ -329,6 +329,36 @@ class AlpacaConnector:
             logger.error(f"Error getting price for {symbol}: {e}")
             return 0.0
 
+    async def get_quote(self, symbol: str) -> Dict[str, float]:
+        """Get latest bid/ask/mid quote for spread controls."""
+        try:
+            normalized = normalize_symbol(symbol)
+            if self.offline_mode:
+                return {}
+
+            alpaca_sym = self._to_alpaca_symbol(symbol)
+            data = await self._request(
+                "GET",
+                "/v1beta3/crypto/us/latest/quotes",
+                base_url=self.DATA_BASE_URL,
+                params={"symbols": alpaca_sym},
+            )
+            quotes = data.get("quotes", {})
+            quote = quotes.get(alpaca_sym, {})
+            bid = float(quote.get("bp", 0.0) or 0.0)
+            ask = float(quote.get("ap", 0.0) or 0.0)
+            if bid <= 0 or ask <= 0:
+                return {}
+            return {
+                "symbol": normalized,
+                "bid": bid,
+                "ask": ask,
+                "mid": (bid + ask) / 2.0,
+                "last": float(quote.get("ap", 0.0) or 0.0),
+            }
+        except Exception:
+            return {}
+
     def _fallback_price(self, normalized: str) -> float:
         """Fallback to MarketDataFetcher if Alpaca unavailable."""
         if not getattr(ApexConfig, "USE_DATA_FALLBACK_FOR_PRICES", False):

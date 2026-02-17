@@ -1,0 +1,959 @@
+apiVersion: 1
+
+groups:
+  - orgId: 1
+    name: apex-execution-gates
+    folder: APEX
+    interval: 1m
+    rules:
+      - uid: apex_exec_spread_gate_rate
+        title: APEX Execution Spread Gate Blocks Detected
+        condition: C
+        data:
+          - refId: A
+            relativeTimeRange:
+              from: 300
+              to: 0
+            datasourceUid: prometheus
+            model:
+              editorMode: code
+              expr: sum(rate(apex_execution_spread_gate_blocks_total[5m])) by (asset_class, regime)
+              instant: false
+              intervalMs: 1000
+              maxDataPoints: 43200
+              legendFormat: "{{asset_class}} {{regime}}"
+              refId: A
+          - refId: C
+            relativeTimeRange:
+              from: 300
+              to: 0
+            datasourceUid: __expr__
+            model:
+              conditions:
+                - evaluator:
+                    params:
+                      - 0
+                    type: gt
+                  operator:
+                    type: and
+                  query:
+                    params:
+                      - A
+                  reducer:
+                    params: []
+                    type: max
+                  type: query
+              datasource:
+                type: __expr__
+                uid: __expr__
+              expression: A
+              intervalMs: 1000
+              maxDataPoints: 43200
+              refId: C
+              type: classic_conditions
+        dashboardUid: apex-governor-risk
+        panelId: 7
+        noDataState: NoData
+        execErrState: Error
+        for: 10m
+        annotations:
+          summary: "Execution spread gate blocking entries for >=10m"
+          description: "Check spread thresholds and venue liquidity. Review top blocked asset_class/regime pairs in dashboard panel 9."
+        labels:
+          severity: warning
+          category: execution
+          component: spread_gate
+        isPaused: false
+
+      - uid: apex_exec_slippage_budget_rate
+        title: APEX Execution Slippage Budget Blocks Detected
+        condition: C
+        data:
+          - refId: A
+            relativeTimeRange:
+              from: 300
+              to: 0
+            datasourceUid: prometheus
+            model:
+              editorMode: code
+              expr: sum(rate(apex_execution_slippage_budget_blocks_total[5m])) by (asset_class, regime)
+              instant: false
+              intervalMs: 1000
+              maxDataPoints: 43200
+              legendFormat: "{{asset_class}} {{regime}}"
+              refId: A
+          - refId: C
+            relativeTimeRange:
+              from: 300
+              to: 0
+            datasourceUid: __expr__
+            model:
+              conditions:
+                - evaluator:
+                    params:
+                      - 0
+                    type: gt
+                  operator:
+                    type: and
+                  query:
+                    params:
+                      - A
+                  reducer:
+                    params: []
+                    type: max
+                  type: query
+              datasource:
+                type: __expr__
+                uid: __expr__
+              expression: A
+              intervalMs: 1000
+              maxDataPoints: 43200
+              refId: C
+              type: classic_conditions
+        dashboardUid: apex-governor-risk
+        panelId: 8
+        noDataState: NoData
+        execErrState: Error
+        for: 15m
+        annotations:
+          summary: "Execution slippage budget gate blocking entries for >=15m"
+          description: "Check slippage budgets and execution quality degradation. Review top blocked asset_class/regime pairs in dashboard panel 10."
+        labels:
+          severity: warning
+          category: execution
+          component: slippage_budget
+        isPaused: false
+
+      - uid: apex_exec_edge_gate_rate
+        title: APEX Execution Edge Gate Blocks Detected
+        condition: C
+        data:
+          - refId: A
+            relativeTimeRange:
+              from: 300
+              to: 0
+            datasourceUid: prometheus
+            model:
+              editorMode: code
+              expr: sum(rate(apex_execution_edge_gate_blocks_total[5m])) by (asset_class, regime)
+              instant: false
+              intervalMs: 1000
+              maxDataPoints: 43200
+              legendFormat: "{{asset_class}} {{regime}}"
+              refId: A
+          - refId: C
+            relativeTimeRange:
+              from: 300
+              to: 0
+            datasourceUid: __expr__
+            model:
+              conditions:
+                - evaluator:
+                    params:
+                      - 0
+                    type: gt
+                  operator:
+                    type: and
+                  query:
+                    params:
+                      - A
+                  reducer:
+                    params: []
+                    type: max
+                  type: query
+              datasource:
+                type: __expr__
+                uid: __expr__
+              expression: A
+              intervalMs: 1000
+              maxDataPoints: 43200
+              refId: C
+              type: classic_conditions
+        dashboardUid: apex-governor-risk
+        panelId: 19
+        noDataState: NoData
+        execErrState: Error
+        for: 10m
+        annotations:
+          summary: "Execution edge gate blocking entries for >=10m"
+          description: "Expected edge is failing to clear modeled execution cost + buffer. Review signal quality and tune signal-to-edge or asset-class edge buffers."
+        labels:
+          severity: warning
+          category: execution
+          component: edge_gate
+        isPaused: false
+
+      - uid: apex_attr_exec_drag_spike_equities
+        title: APEX Attribution Execution Drag Spike (Equities)
+        condition: C
+        data:
+          - refId: A
+            relativeTimeRange:
+              from: 3600
+              to: 0
+            datasourceUid: prometheus
+            model:
+              editorMode: code
+              expr: sum(rate(apex_attribution_execution_drag_cumulative_dollars_total{sleeve="equities_sleeve"}[1h])) * 3600
+              instant: false
+              intervalMs: 1000
+              maxDataPoints: 43200
+              legendFormat: "equities_sleeve"
+              refId: A
+          - refId: C
+            relativeTimeRange:
+              from: 3600
+              to: 0
+            datasourceUid: __expr__
+            model:
+              conditions:
+                - evaluator:
+                    params:
+                      - 150
+                    type: gt
+                  operator:
+                    type: and
+                  query:
+                    params:
+                      - A
+                  reducer:
+                    params: []
+                    type: max
+                  type: query
+              datasource:
+                type: __expr__
+                uid: __expr__
+              expression: A
+              intervalMs: 1000
+              maxDataPoints: 43200
+              refId: C
+              type: classic_conditions
+        dashboardUid: apex-governor-risk
+        panelId: 15
+        noDataState: NoData
+        execErrState: Error
+        for: 15m
+        annotations:
+          summary: "Execution drag spike > $150/hour for >=15m (equities_sleeve)"
+          description: "Equities sleeve execution drag burn rate is elevated. Review attribution drag panel and execution quality controls."
+        labels:
+          severity: warning
+          category: attribution
+          component: execution_drag
+          sleeve: equities_sleeve
+        isPaused: false
+
+      - uid: apex_attr_exec_drag_spike_fx
+        title: APEX Attribution Execution Drag Spike (FX)
+        condition: C
+        data:
+          - refId: A
+            relativeTimeRange:
+              from: 3600
+              to: 0
+            datasourceUid: prometheus
+            model:
+              editorMode: code
+              expr: sum(rate(apex_attribution_execution_drag_cumulative_dollars_total{sleeve="fx_sleeve"}[1h])) * 3600
+              instant: false
+              intervalMs: 1000
+              maxDataPoints: 43200
+              legendFormat: "fx_sleeve"
+              refId: A
+          - refId: C
+            relativeTimeRange:
+              from: 3600
+              to: 0
+            datasourceUid: __expr__
+            model:
+              conditions:
+                - evaluator:
+                    params:
+                      - 180
+                    type: gt
+                  operator:
+                    type: and
+                  query:
+                    params:
+                      - A
+                  reducer:
+                    params: []
+                    type: max
+                  type: query
+              datasource:
+                type: __expr__
+                uid: __expr__
+              expression: A
+              intervalMs: 1000
+              maxDataPoints: 43200
+              refId: C
+              type: classic_conditions
+        dashboardUid: apex-governor-risk
+        panelId: 15
+        noDataState: NoData
+        execErrState: Error
+        for: 15m
+        annotations:
+          summary: "Execution drag spike > $180/hour for >=15m (fx_sleeve)"
+          description: "FX sleeve execution drag burn rate is elevated. Review attribution drag panel and venue routing."
+        labels:
+          severity: warning
+          category: attribution
+          component: execution_drag
+          sleeve: fx_sleeve
+        isPaused: false
+
+      - uid: apex_attr_exec_drag_spike_crypto
+        title: APEX Attribution Execution Drag Spike (Crypto)
+        condition: C
+        data:
+          - refId: A
+            relativeTimeRange:
+              from: 3600
+              to: 0
+            datasourceUid: prometheus
+            model:
+              editorMode: code
+              expr: sum(rate(apex_attribution_execution_drag_cumulative_dollars_total{sleeve="crypto_sleeve"}[1h])) * 3600
+              instant: false
+              intervalMs: 1000
+              maxDataPoints: 43200
+              legendFormat: "crypto_sleeve"
+              refId: A
+          - refId: C
+            relativeTimeRange:
+              from: 3600
+              to: 0
+            datasourceUid: __expr__
+            model:
+              conditions:
+                - evaluator:
+                    params:
+                      - 450
+                    type: gt
+                  operator:
+                    type: and
+                  query:
+                    params:
+                      - A
+                  reducer:
+                    params: []
+                    type: max
+                  type: query
+              datasource:
+                type: __expr__
+                uid: __expr__
+              expression: A
+              intervalMs: 1000
+              maxDataPoints: 43200
+              refId: C
+              type: classic_conditions
+        dashboardUid: apex-governor-risk
+        panelId: 15
+        noDataState: NoData
+        execErrState: Error
+        for: 15m
+        annotations:
+          summary: "Execution drag spike > $450/hour for >=15m (crypto_sleeve)"
+          description: "Crypto sleeve execution drag burn rate is elevated. Review attribution drag panel and liquidity stress."
+        labels:
+          severity: warning
+          category: attribution
+          component: execution_drag
+          sleeve: crypto_sleeve
+        isPaused: false
+
+      - uid: apex_attr_exec_drag_spike_options
+        title: APEX Attribution Execution Drag Spike (Options)
+        condition: C
+        data:
+          - refId: A
+            relativeTimeRange:
+              from: 3600
+              to: 0
+            datasourceUid: prometheus
+            model:
+              editorMode: code
+              expr: sum(rate(apex_attribution_execution_drag_cumulative_dollars_total{sleeve="options_sleeve"}[1h])) * 3600
+              instant: false
+              intervalMs: 1000
+              maxDataPoints: 43200
+              legendFormat: "options_sleeve"
+              refId: A
+          - refId: C
+            relativeTimeRange:
+              from: 3600
+              to: 0
+            datasourceUid: __expr__
+            model:
+              conditions:
+                - evaluator:
+                    params:
+                      - 300
+                    type: gt
+                  operator:
+                    type: and
+                  query:
+                    params:
+                      - A
+                  reducer:
+                    params: []
+                    type: max
+                  type: query
+              datasource:
+                type: __expr__
+                uid: __expr__
+              expression: A
+              intervalMs: 1000
+              maxDataPoints: 43200
+              refId: C
+              type: classic_conditions
+        dashboardUid: apex-governor-risk
+        panelId: 15
+        noDataState: NoData
+        execErrState: Error
+        for: 15m
+        annotations:
+          summary: "Execution drag spike > $300/hour for >=15m (options_sleeve)"
+          description: "Options sleeve execution drag burn rate is elevated. Review attribution drag panel and option execution quality."
+        labels:
+          severity: warning
+          category: attribution
+          component: execution_drag
+          sleeve: options_sleeve
+        isPaused: false
+
+      - uid: apex_attr_slippage_drag_spike_equities
+        title: APEX Attribution Slippage Drag Spike (Equities)
+        condition: C
+        data:
+          - refId: A
+            relativeTimeRange:
+              from: 3600
+              to: 0
+            datasourceUid: prometheus
+            model:
+              editorMode: code
+              expr: sum(rate(apex_attribution_slippage_drag_cumulative_dollars_total{sleeve="equities_sleeve"}[1h])) * 3600
+              instant: false
+              intervalMs: 1000
+              maxDataPoints: 43200
+              legendFormat: "equities_sleeve"
+              refId: A
+          - refId: C
+            relativeTimeRange:
+              from: 3600
+              to: 0
+            datasourceUid: __expr__
+            model:
+              conditions:
+                - evaluator:
+                    params:
+                      - 75
+                    type: gt
+                  operator:
+                    type: and
+                  query:
+                    params:
+                      - A
+                  reducer:
+                    params: []
+                    type: max
+                  type: query
+              datasource:
+                type: __expr__
+                uid: __expr__
+              expression: A
+              intervalMs: 1000
+              maxDataPoints: 43200
+              refId: C
+              type: classic_conditions
+        dashboardUid: apex-governor-risk
+        panelId: 15
+        noDataState: NoData
+        execErrState: Error
+        for: 15m
+        annotations:
+          summary: "Slippage drag spike > $75/hour for >=15m (equities_sleeve)"
+          description: "Equities sleeve slippage drag burn rate is elevated. Check spread/slippage gates and venue liquidity."
+        labels:
+          severity: warning
+          category: attribution
+          component: slippage_drag
+          sleeve: equities_sleeve
+        isPaused: false
+
+      - uid: apex_attr_slippage_drag_spike_fx
+        title: APEX Attribution Slippage Drag Spike (FX)
+        condition: C
+        data:
+          - refId: A
+            relativeTimeRange:
+              from: 3600
+              to: 0
+            datasourceUid: prometheus
+            model:
+              editorMode: code
+              expr: sum(rate(apex_attribution_slippage_drag_cumulative_dollars_total{sleeve="fx_sleeve"}[1h])) * 3600
+              instant: false
+              intervalMs: 1000
+              maxDataPoints: 43200
+              legendFormat: "fx_sleeve"
+              refId: A
+          - refId: C
+            relativeTimeRange:
+              from: 3600
+              to: 0
+            datasourceUid: __expr__
+            model:
+              conditions:
+                - evaluator:
+                    params:
+                      - 90
+                    type: gt
+                  operator:
+                    type: and
+                  query:
+                    params:
+                      - A
+                  reducer:
+                    params: []
+                    type: max
+                  type: query
+              datasource:
+                type: __expr__
+                uid: __expr__
+              expression: A
+              intervalMs: 1000
+              maxDataPoints: 43200
+              refId: C
+              type: classic_conditions
+        dashboardUid: apex-governor-risk
+        panelId: 15
+        noDataState: NoData
+        execErrState: Error
+        for: 15m
+        annotations:
+          summary: "Slippage drag spike > $90/hour for >=15m (fx_sleeve)"
+          description: "FX sleeve slippage drag burn rate is elevated. Check spread/slippage gates and venue liquidity."
+        labels:
+          severity: warning
+          category: attribution
+          component: slippage_drag
+          sleeve: fx_sleeve
+        isPaused: false
+
+      - uid: apex_attr_slippage_drag_spike_crypto
+        title: APEX Attribution Slippage Drag Spike (Crypto)
+        condition: C
+        data:
+          - refId: A
+            relativeTimeRange:
+              from: 3600
+              to: 0
+            datasourceUid: prometheus
+            model:
+              editorMode: code
+              expr: sum(rate(apex_attribution_slippage_drag_cumulative_dollars_total{sleeve="crypto_sleeve"}[1h])) * 3600
+              instant: false
+              intervalMs: 1000
+              maxDataPoints: 43200
+              legendFormat: "crypto_sleeve"
+              refId: A
+          - refId: C
+            relativeTimeRange:
+              from: 3600
+              to: 0
+            datasourceUid: __expr__
+            model:
+              conditions:
+                - evaluator:
+                    params:
+                      - 240
+                    type: gt
+                  operator:
+                    type: and
+                  query:
+                    params:
+                      - A
+                  reducer:
+                    params: []
+                    type: max
+                  type: query
+              datasource:
+                type: __expr__
+                uid: __expr__
+              expression: A
+              intervalMs: 1000
+              maxDataPoints: 43200
+              refId: C
+              type: classic_conditions
+        dashboardUid: apex-governor-risk
+        panelId: 15
+        noDataState: NoData
+        execErrState: Error
+        for: 15m
+        annotations:
+          summary: "Slippage drag spike > $240/hour for >=15m (crypto_sleeve)"
+          description: "Crypto sleeve slippage drag burn rate is elevated. Check spread/slippage gates and market conditions."
+        labels:
+          severity: warning
+          category: attribution
+          component: slippage_drag
+          sleeve: crypto_sleeve
+        isPaused: false
+
+      - uid: apex_attr_slippage_drag_spike_options
+        title: APEX Attribution Slippage Drag Spike (Options)
+        condition: C
+        data:
+          - refId: A
+            relativeTimeRange:
+              from: 3600
+              to: 0
+            datasourceUid: prometheus
+            model:
+              editorMode: code
+              expr: sum(rate(apex_attribution_slippage_drag_cumulative_dollars_total{sleeve="options_sleeve"}[1h])) * 3600
+              instant: false
+              intervalMs: 1000
+              maxDataPoints: 43200
+              legendFormat: "options_sleeve"
+              refId: A
+          - refId: C
+            relativeTimeRange:
+              from: 3600
+              to: 0
+            datasourceUid: __expr__
+            model:
+              conditions:
+                - evaluator:
+                    params:
+                      - 150
+                    type: gt
+                  operator:
+                    type: and
+                  query:
+                    params:
+                      - A
+                  reducer:
+                    params: []
+                    type: max
+                  type: query
+              datasource:
+                type: __expr__
+                uid: __expr__
+              expression: A
+              intervalMs: 1000
+              maxDataPoints: 43200
+              refId: C
+              type: classic_conditions
+        dashboardUid: apex-governor-risk
+        panelId: 15
+        noDataState: NoData
+        execErrState: Error
+        for: 15m
+        annotations:
+          summary: "Slippage drag spike > $150/hour for >=15m (options_sleeve)"
+          description: "Options sleeve slippage drag burn rate is elevated. Check option pricing/venue quality and execution path."
+        labels:
+          severity: warning
+          category: attribution
+          component: slippage_drag
+          sleeve: options_sleeve
+        isPaused: false
+
+      - uid: apex_equity_validation_rejections_incident
+        title: APEX Equity Validation Rejections Detected
+        condition: C
+        data:
+          - refId: A
+            relativeTimeRange:
+              from: 300
+              to: 0
+            datasourceUid: prometheus
+            model:
+              editorMode: code
+              expr: sum(increase(apex_equity_validation_rejections_total[5m])) by (reason)
+              instant: false
+              intervalMs: 1000
+              maxDataPoints: 43200
+              legendFormat: "{{reason}}"
+              refId: A
+          - refId: C
+            relativeTimeRange:
+              from: 300
+              to: 0
+            datasourceUid: __expr__
+            model:
+              conditions:
+                - evaluator:
+                    params:
+                      - 0
+                    type: gt
+                  operator:
+                    type: and
+                  query:
+                    params:
+                      - A
+                  reducer:
+                    params: []
+                    type: max
+                  type: query
+              datasource:
+                type: __expr__
+                uid: __expr__
+              expression: A
+              intervalMs: 1000
+              maxDataPoints: 43200
+              refId: C
+              type: classic_conditions
+        dashboardUid: apex-governor-risk
+        panelId: 16
+        noDataState: NoData
+        execErrState: Error
+        for: 0m
+        annotations:
+          summary: "Equity validation rejections detected in last 5m"
+          description: "Potential broker/feed equity glitch detected. Guard is filtering values, but live risk telemetry needs investigation immediately."
+        labels:
+          severity: critical
+          category: data_quality
+          component: equity_validation
+        isPaused: false
+
+      - uid: apex_equity_reconciliation_gap_blocked
+        title: APEX Equity Reconciliation Entry Block Active
+        condition: C
+        data:
+          - refId: A
+            relativeTimeRange:
+              from: 300
+              to: 0
+            datasourceUid: prometheus
+            model:
+              editorMode: code
+              expr: max_over_time(apex_reconciliation_entry_block_active[5m])
+              instant: false
+              intervalMs: 1000
+              maxDataPoints: 43200
+              legendFormat: "entry_block_active"
+              refId: A
+          - refId: C
+            relativeTimeRange:
+              from: 300
+              to: 0
+            datasourceUid: __expr__
+            model:
+              conditions:
+                - evaluator:
+                    params:
+                      - 0
+                    type: gt
+                  operator:
+                    type: and
+                  query:
+                    params:
+                      - A
+                  reducer:
+                    params: []
+                    type: max
+                  type: query
+              datasource:
+                type: __expr__
+                uid: __expr__
+              expression: A
+              intervalMs: 1000
+              maxDataPoints: 43200
+              refId: C
+              type: classic_conditions
+        dashboardUid: apex-governor-risk
+        panelId: 17
+        noDataState: NoData
+        execErrState: Error
+        for: 0m
+        annotations:
+          summary: "Equity reconciliation hard entry block is active"
+          description: "Entry block latch engaged due to reconciliation breach. Validate broker equity/cash feeds and modeled equity parity before resuming entries."
+        labels:
+          severity: critical
+          category: reconciliation
+          component: equity_gap
+        isPaused: false
+
+      - uid: apex_social_risk_sustained_high
+        title: APEX Social Risk Sustained High
+        condition: C
+        data:
+          - refId: A
+            relativeTimeRange:
+              from: 900
+              to: 0
+            datasourceUid: prometheus
+            model:
+              editorMode: code
+              expr: max by (asset_class, regime) (avg_over_time(apex_social_risk_score[15m]))
+              instant: false
+              intervalMs: 1000
+              maxDataPoints: 43200
+              legendFormat: "{{asset_class}} {{regime}}"
+              refId: A
+          - refId: C
+            relativeTimeRange:
+              from: 900
+              to: 0
+            datasourceUid: __expr__
+            model:
+              conditions:
+                - evaluator:
+                    params:
+                      - 0.75
+                    type: gt
+                  operator:
+                    type: and
+                  query:
+                    params:
+                      - A
+                  reducer:
+                    params: []
+                    type: max
+                  type: query
+              datasource:
+                type: __expr__
+                uid: __expr__
+              expression: A
+              intervalMs: 1000
+              maxDataPoints: 43200
+              refId: C
+              type: classic_conditions
+        dashboardUid: apex-governor-risk
+        panelId: 21
+        noDataState: NoData
+        execErrState: Error
+        for: 10m
+        annotations:
+          summary: "Social risk score sustained above 0.75 for >=10m"
+          description: "Cross-platform social risk remains elevated. Review active narratives and verify whether block/reduce policy is over- or under-reacting."
+        labels:
+          severity: warning
+          category: social
+          component: sustained_risk
+        isPaused: false
+
+      - uid: apex_social_verification_failures_spike
+        title: APEX Social Verification Failures Spike
+        condition: C
+        data:
+          - refId: A
+            relativeTimeRange:
+              from: 600
+              to: 0
+            datasourceUid: prometheus
+            model:
+              editorMode: code
+              expr: sum(increase(apex_prediction_market_verification_fail_total[10m])) by (event, reason)
+              instant: false
+              intervalMs: 1000
+              maxDataPoints: 43200
+              legendFormat: "{{event}} {{reason}}"
+              refId: A
+          - refId: C
+            relativeTimeRange:
+              from: 600
+              to: 0
+            datasourceUid: __expr__
+            model:
+              conditions:
+                - evaluator:
+                    params:
+                      - 5
+                    type: gt
+                  operator:
+                    type: and
+                  query:
+                    params:
+                      - A
+                  reducer:
+                    params: []
+                    type: max
+                  type: query
+              datasource:
+                type: __expr__
+                uid: __expr__
+              expression: A
+              intervalMs: 1000
+              maxDataPoints: 43200
+              refId: C
+              type: classic_conditions
+        dashboardUid: apex-governor-risk
+        panelId: 23
+        noDataState: NoData
+        execErrState: Error
+        for: 5m
+        annotations:
+          summary: "Prediction verification failures spiking (>5 in 10m)"
+          description: "Event verification quality is degrading. Check divergence/source-disagreement inputs and upstream social/event data quality."
+        labels:
+          severity: warning
+          category: social
+          component: verification_failures
+        isPaused: false
+
+      - uid: apex_social_block_latch_prolonged
+        title: APEX Social Block Latch Prolonged
+        condition: C
+        data:
+          - refId: A
+            relativeTimeRange:
+              from: 1200
+              to: 0
+            datasourceUid: prometheus
+            model:
+              editorMode: code
+              expr: max by (asset_class, regime) (avg_over_time(apex_social_block_entries_active[20m]))
+              instant: false
+              intervalMs: 1000
+              maxDataPoints: 43200
+              legendFormat: "{{asset_class}} {{regime}}"
+              refId: A
+          - refId: C
+            relativeTimeRange:
+              from: 1200
+              to: 0
+            datasourceUid: __expr__
+            model:
+              conditions:
+                - evaluator:
+                    params:
+                      - 0.8
+                    type: gt
+                  operator:
+                    type: and
+                  query:
+                    params:
+                      - A
+                  reducer:
+                    params: []
+                    type: max
+                  type: query
+              datasource:
+                type: __expr__
+                uid: __expr__
+              expression: A
+              intervalMs: 1000
+              maxDataPoints: 43200
+              refId: C
+              type: classic_conditions
+        dashboardUid: apex-governor-risk
+        panelId: 24
+        noDataState: NoData
+        execErrState: Error
+        for: 15m
+        annotations:
+          summary: "Social block latch effectively active for >=15m"
+          description: "Entries remain socially blocked for a prolonged interval. Validate live event quality and confirm policy thresholds are appropriate."
+        labels:
+          severity: critical
+          category: social
+          component: block_latch
+        isPaused: false

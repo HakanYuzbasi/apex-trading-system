@@ -13,7 +13,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from services.auth.service import AuthService, decode_token
 from services.common.db import get_db
-from services.common.schemas import SubscriptionInfo, SubscriptionTier, UserPublic
+from services.common.schemas import PlanOffer, SubscriptionInfo, SubscriptionTier, UserPublic
+from services.common.plan_catalog import get_plan_catalog
 from services.common.subscription import get_features_for_tier
 from api.auth import RATE_LIMITER
 
@@ -29,6 +30,16 @@ async def _rate_limit_auth(request: Request):
     key = f"auth:{request.url.path}:{ip}"
     if not await RATE_LIMITER.is_allowed(key, max_requests=10, window_seconds=60):
         raise HTTPException(status_code=429, detail="Too many requests — try again later")
+
+
+async def _safe_rollback(db: Optional[AsyncSession]) -> None:
+    """Rollback failed DB transactions without masking fallback auth paths."""
+    if db is None:
+        return
+    try:
+        await db.rollback()
+    except Exception as exc:
+        logger.debug("DB rollback skipped/failed during auth fallback: %s", exc)
 
 
 # ---------------------------------------------------------------------------
@@ -85,9 +96,11 @@ class ApiKeyResponse(BaseModel):
 # ---------------------------------------------------------------------------
 
 @router.post("/register", response_model=TokenResponse, dependencies=[Depends(_rate_limit_auth)])
-async def register(body: RegisterRequest, db: AsyncSession = Depends(get_db)):
+async def register(body: RegisterRequest, db: Optional[AsyncSession] = Depends(get_db)):
     # Try DB-backed registration first
     try:
+        if db is None:
+            raise RuntimeError("DB session unavailable")
         svc = AuthService(db)
         user, access, refresh = await svc.register(
             username=body.username,
@@ -96,8 +109,10 @@ async def register(body: RegisterRequest, db: AsyncSession = Depends(get_db)):
         )
         return TokenResponse(access_token=access, refresh_token=refresh)
     except ValueError as e:
+        await _safe_rollback(db)
         raise HTTPException(status_code=409, detail=str(e))
     except Exception as exc:
+        await _safe_rollback(db)
         logger.debug("DB register failed, trying legacy: %s", exc)
 
     # Fall back to legacy in-memory user creation
@@ -118,15 +133,18 @@ async def register(body: RegisterRequest, db: AsyncSession = Depends(get_db)):
 
 
 @router.post("/login", response_model=TokenResponse, dependencies=[Depends(_rate_limit_auth)])
-async def login(body: LoginRequest, db: AsyncSession = Depends(get_db)):
+async def login(body: LoginRequest, db: Optional[AsyncSession] = Depends(get_db)):
     # Try DB-backed auth first
     try:
+        if db is None:
+            raise RuntimeError("DB session unavailable")
         svc = AuthService(db)
         result = await svc.login(body.username, body.password)
         if result:
             user, access, refresh = result
             return TokenResponse(access_token=access, refresh_token=refresh)
     except Exception as exc:
+        await _safe_rollback(db)
         logger.debug("DB login failed, trying legacy auth: %s", exc)
 
     # Fall back to legacy in-memory auth (works without PostgreSQL)
@@ -145,15 +163,18 @@ async def login(body: LoginRequest, db: AsyncSession = Depends(get_db)):
 
 
 @router.post("/refresh", response_model=TokenResponse, dependencies=[Depends(_rate_limit_auth)])
-async def refresh(body: RefreshRequest, db: AsyncSession = Depends(get_db)):
+async def refresh(body: RefreshRequest, db: Optional[AsyncSession] = Depends(get_db)):
     # Try DB first
     try:
+        if db is None:
+            raise RuntimeError("DB session unavailable")
         svc = AuthService(db)
         result = await svc.refresh_tokens(body.refresh_token)
         if result:
             access, new_refresh = result
             return TokenResponse(access_token=access, refresh_token=new_refresh)
     except Exception as exc:
+        await _safe_rollback(db)
         logger.debug("DB refresh failed, trying legacy: %s", exc)
 
     # Fall back to legacy token verification + re-issue
@@ -185,13 +206,15 @@ async def logout(request: Request):
 
 
 @router.get("/me", response_model=UserPublic)
-async def get_me(request: Request, db: AsyncSession = Depends(get_db)):
+async def get_me(request: Request, db: Optional[AsyncSession] = Depends(get_db)):
     user_id = _get_user_id(request)
     if not user_id:
         raise HTTPException(status_code=401, detail="Not authenticated")
 
     # Try DB first
     try:
+        if db is None:
+            raise RuntimeError("DB session unavailable")
         svc = AuthService(db)
         info = await svc.get_user_with_subscription(user_id)
         if info:
@@ -204,6 +227,7 @@ async def get_me(request: Request, db: AsyncSession = Depends(get_db)):
                 tier=info["tier"],
             )
     except Exception as exc:
+        await _safe_rollback(db)
         logger.debug("DB /me lookup failed, trying legacy: %s", exc)
 
     # Fall back to legacy in-memory user store
@@ -225,24 +249,60 @@ async def get_me(request: Request, db: AsyncSession = Depends(get_db)):
 
 
 @router.get("/me/subscription", response_model=SubscriptionInfo)
-async def get_subscription(request: Request, db: AsyncSession = Depends(get_db)):
+async def get_subscription(request: Request, db: Optional[AsyncSession] = Depends(get_db)):
     user_id = _get_user_id(request)
     if not user_id:
         raise HTTPException(status_code=401, detail="Not authenticated")
-    svc = AuthService(db)
-    info = await svc.get_user_with_subscription(user_id)
-    if not info:
-        raise HTTPException(status_code=404, detail="User not found")
-    sub = info["subscription"]
-    tier = info["tier"]
-    return SubscriptionInfo(
-        tier=tier,
-        status=sub.status if sub else "active",
-        current_period_start=sub.current_period_start if sub else None,
-        current_period_end=sub.current_period_end if sub else None,
-        stripe_subscription_id=sub.stripe_subscription_id if sub else None,
-        features=get_features_for_tier(tier),
-    )
+    try:
+        if db is None:
+            raise RuntimeError("DB session unavailable")
+        svc = AuthService(db)
+        info = await svc.get_user_with_subscription(user_id)
+        if not info:
+            raise HTTPException(status_code=404, detail="User not found")
+        sub = info["subscription"]
+        tier = info["tier"]
+        return SubscriptionInfo(
+            tier=tier,
+            status=sub.status if sub else "active",
+            current_period_start=sub.current_period_start if sub else None,
+            current_period_end=sub.current_period_end if sub else None,
+            stripe_subscription_id=sub.stripe_subscription_id if sub else None,
+            features=get_features_for_tier(tier),
+        )
+    except HTTPException:
+        await _safe_rollback(db)
+        raise
+    except Exception as exc:
+        await _safe_rollback(db)
+        logger.debug("DB /me/subscription lookup failed, trying legacy: %s", exc)
+
+    # Legacy fallback: map admin->enterprise, others->free
+    try:
+        from api.auth import USER_STORE
+        legacy_user = USER_STORE.get_user(user_id)
+        if not legacy_user:
+            raise HTTPException(status_code=404, detail="User not found")
+        tier = SubscriptionTier.ENTERPRISE if "admin" in legacy_user.roles else SubscriptionTier.FREE
+        return SubscriptionInfo(
+            tier=tier,
+            status="active",
+            current_period_start=None,
+            current_period_end=None,
+            stripe_subscription_id=None,
+            features=get_features_for_tier(tier),
+        )
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.debug("Legacy /me/subscription also failed: %s", exc)
+        raise HTTPException(status_code=500, detail="Subscription lookup unavailable")
+
+
+@router.get("/plans", response_model=list[PlanOffer])
+async def get_plans():
+    """Return the branded subscription plan catalog."""
+    return get_plan_catalog()
 
 
 # --- MFA ---

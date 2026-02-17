@@ -243,3 +243,42 @@ def test_governor_policy_approve_and_rollback_endpoints_require_admin_and_audit(
     actions = [event.get("action") for event in audit_resp.json()["events"]]
     assert "manual_approved" in actions
     assert "rollback_activated" in actions
+
+
+def test_social_governor_decision_audit_endpoint_requires_admin(
+    client: TestClient,
+    tmp_path,
+    monkeypatch,
+):
+    from api import server
+    from risk.social_decision_audit import SocialDecisionAuditRepository
+
+    audit_file = tmp_path / "audit" / "social_governor_decisions.jsonl"
+    monkeypatch.setattr(server, "SOCIAL_DECISION_AUDIT_FILE", audit_file)
+
+    repo = SocialDecisionAuditRepository(audit_file)
+    repo.append_event(
+        {
+            "asset_class": "EQUITY",
+            "regime": "risk_off",
+            "policy_version": "sshock-test",
+            "decision": {"block_new_entries": True},
+        }
+    )
+
+    unauth = client.get(
+        "/api/v1/social-governor/decisions?limit=10",
+    )
+    assert unauth.status_code in {401, 403}
+
+    admin = USER_STORE.get_user("admin")
+    assert admin is not None
+    assert admin.api_key
+    admin_resp = client.get(
+        "/api/v1/social-governor/decisions?asset_class=EQUITY&regime=risk_off&limit=10",
+        headers={"X-API-Key": admin.api_key},
+    )
+    assert admin_resp.status_code == 200
+    body = admin_resp.json()
+    assert body["count"] == 1
+    assert body["events"][0]["asset_class"] == "EQUITY"

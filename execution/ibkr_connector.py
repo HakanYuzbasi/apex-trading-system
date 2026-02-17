@@ -12,6 +12,7 @@ Features:
 
 import asyncio
 import logging
+import math
 import random
 import time
 from datetime import datetime
@@ -182,6 +183,17 @@ class IBKRConnector:
     def _unit_label(self, asset_class: AssetClass) -> str:
         return "shares" if asset_class == AssetClass.EQUITY else "units"
 
+    @staticmethod
+    def _finite_float(value: Any, default: float = 0.0) -> float:
+        """Convert arbitrary value to finite float; fallback to default when invalid/NaN/Inf."""
+        try:
+            converted = float(value)
+        except Exception:
+            return float(default)
+        if not math.isfinite(converted):
+            return float(default)
+        return float(converted)
+
     def _build_ibkr_pair_map(self) -> Dict[str, str]:
         mapping = {}
         raw_map = getattr(ApexConfig, "IBKR_PAIR_MAP", {}) or {}
@@ -229,6 +241,23 @@ class IBKRConnector:
             currency=parsed.quote,
             exchange=crypto_exchange,
         )
+
+    def _fx_fallback_contracts(self, parsed) -> list:
+        """Return explicit CASH contract fallbacks for FX qualification."""
+        exchanges = []
+        preferred = getattr(ApexConfig, "IBKR_FX_EXCHANGE", "IDEALPRO")
+        for exch in (preferred, "IDEALPRO", "SMART"):
+            if exch and exch not in exchanges:
+                exchanges.append(exch)
+        return [
+            Contract(
+                secType="CASH",
+                symbol=parsed.base,
+                currency=parsed.quote,
+                exchange=exchange,
+            )
+            for exchange in exchanges
+        ]
 
     def _fallback_price(self, normalized: str, reason: str) -> float:
         if not getattr(ApexConfig, "USE_DATA_FALLBACK_FOR_PRICES", False):
@@ -465,6 +494,18 @@ class IBKRConnector:
                 self.contracts[key] = qualified[0]
                 return qualified[0]
             else:
+                if parsed.asset_class == AssetClass.FOREX:
+                    for fallback in self._fx_fallback_contracts(broker_parsed):
+                        await self._throttle_ibkr("qualify_contract_fx_fallback")
+                        fallback_qualified = await self.ib.qualifyContractsAsync(fallback)
+                        if fallback_qualified:
+                            self.contracts[key] = fallback_qualified[0]
+                            logger.warning(
+                                "⚠️  FX fallback contract qualified for %s via exchange=%s",
+                                parsed.normalized,
+                                getattr(fallback_qualified[0], "exchange", "unknown"),
+                            )
+                            return fallback_qualified[0]
                 logger.warning(f"⚠️  Could not qualify contract for {parsed.normalized}")
                 return None
                 
@@ -597,6 +638,64 @@ class IBKRConnector:
         except Exception as e:
             logger.debug(f"Error getting price for {symbol}: {e}")
             return 0.0
+
+    async def get_quote(self, symbol: str) -> Dict[str, float]:
+        """Get latest bid/ask/mid quote for spread controls."""
+        try:
+            try:
+                normalized = self._normalize_symbol(symbol)
+            except ValueError:
+                return {}
+
+            if self.offline_mode or not self.ib.isConnected():
+                return {}
+
+            if normalized in self.tickers:
+                ticker = self.tickers[normalized]
+                bid = float(ticker.bid or 0.0)
+                ask = float(ticker.ask or 0.0)
+                last = float(ticker.last or 0.0)
+                if bid > 0 and ask > 0:
+                    return {
+                        "symbol": normalized,
+                        "bid": bid,
+                        "ask": ask,
+                        "mid": (bid + ask) / 2.0,
+                        "last": last,
+                    }
+
+            contract = await self.get_contract(symbol)
+            if not contract:
+                return {}
+
+            await self._throttle_ibkr("snapshot_quote")
+            ticker = self.ib.reqMktData(contract, '', False, True)
+            bid = 0.0
+            ask = 0.0
+            last = 0.0
+            for _ in range(15):
+                await asyncio.sleep(0.1)
+                bid = float(ticker.bid or 0.0)
+                ask = float(ticker.ask or 0.0)
+                last = float(ticker.last or 0.0)
+                if bid > 0 and ask > 0:
+                    break
+            try:
+                self.ib.cancelMktData(contract)
+            except Exception:
+                pass
+
+            if bid > 0 and ask > 0:
+                return {
+                    "symbol": normalized,
+                    "bid": bid,
+                    "ask": ask,
+                    "mid": (bid + ask) / 2.0,
+                    "last": last,
+                }
+            return {}
+        except Exception:
+            return {}
     
     async def get_portfolio_value(self) -> float:
         """
@@ -1349,18 +1448,25 @@ class IBKRConnector:
 
             self.ib.cancelMktData(contract)
 
+            bid = self._finite_float(getattr(ticker, "bid", 0.0), 0.0)
+            ask = self._finite_float(getattr(ticker, "ask", 0.0), 0.0)
+            last = self._finite_float(getattr(ticker, "last", 0.0), 0.0)
+            mid = (bid + ask) / 2.0 if bid > 0 and ask > 0 else 0.0
+            if mid <= 0:
+                mid = last if last > 0 else (bid if bid > 0 else ask)
+
             # Get model Greeks if available
-            delta = getattr(ticker.modelGreeks, 'delta', 0) if ticker.modelGreeks else 0
-            gamma = getattr(ticker.modelGreeks, 'gamma', 0) if ticker.modelGreeks else 0
-            theta = getattr(ticker.modelGreeks, 'theta', 0) if ticker.modelGreeks else 0
-            vega = getattr(ticker.modelGreeks, 'vega', 0) if ticker.modelGreeks else 0
-            iv = getattr(ticker.modelGreeks, 'impliedVol', 0) if ticker.modelGreeks else 0
+            delta = self._finite_float(getattr(ticker.modelGreeks, 'delta', 0), 0.0) if ticker.modelGreeks else 0.0
+            gamma = self._finite_float(getattr(ticker.modelGreeks, 'gamma', 0), 0.0) if ticker.modelGreeks else 0.0
+            theta = self._finite_float(getattr(ticker.modelGreeks, 'theta', 0), 0.0) if ticker.modelGreeks else 0.0
+            vega = self._finite_float(getattr(ticker.modelGreeks, 'vega', 0), 0.0) if ticker.modelGreeks else 0.0
+            iv = self._finite_float(getattr(ticker.modelGreeks, 'impliedVol', 0), 0.0) if ticker.modelGreeks else 0.0
 
             return {
-                'bid': ticker.bid or 0,
-                'ask': ticker.ask or 0,
-                'last': ticker.last or 0,
-                'mid': (ticker.bid + ticker.ask) / 2 if ticker.bid and ticker.ask else 0,
+                'bid': bid,
+                'ask': ask,
+                'last': last,
+                'mid': mid,
                 'delta': delta,
                 'gamma': gamma,
                 'theta': theta,
@@ -1426,7 +1532,9 @@ class IBKRConnector:
 
             # Get current price for reference
             price_data = await self.get_option_price(symbol, expiry, strike, right)
-            expected_price = price_data.get('mid', 0)
+            expected_price = self._finite_float(price_data.get('mid', 0.0), 0.0)
+            if expected_price <= 0:
+                expected_price = self._finite_float(price_data.get('last', 0.0), 0.0)
 
             # Create order
             action = 'BUY' if side.upper() == 'BUY' else 'SELL'
@@ -1436,6 +1544,9 @@ class IBKRConnector:
                 order_type = 'LMT'
                 if limit_price is None:
                     limit_price = expected_price
+                limit_price = self._finite_float(limit_price, 0.0)
+                if limit_price <= 0:
+                    limit_price = 0.01
                 logger.info(f"   🔄 Switching to LMT order for paper trading safety (${limit_price:.2f})")
 
             if order_type == 'MKT':
@@ -1443,11 +1554,12 @@ class IBKRConnector:
                 logger.info(f"📈 Option Market Order: {action} {quantity} {symbol} {expiry} {strike}{right}")
             else:
                 # Ensure we have a valid limit price
-                if limit_price is None or limit_price <= 0:
-                    limit_price = expected_price or 0.01 # Minimum tick
-                
+                limit_price = self._finite_float(limit_price, 0.0)
+                if limit_price <= 0:
+                    limit_price = expected_price if expected_price > 0 else 0.01  # Minimum tick
+
                 # Round to 2 decimals for USD options
-                limit_price = round(limit_price, 2)
+                limit_price = max(0.01, round(limit_price, 2))
                 
                 order = LimitOrder(action, quantity, limit_price)
                 logger.info(f"💰 Option Limit Order: {action} {quantity} {symbol} {expiry} {strike}{right} @ ${limit_price:.2f}")

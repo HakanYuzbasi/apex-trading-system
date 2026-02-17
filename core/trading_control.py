@@ -32,6 +32,15 @@ def _default_state() -> Dict[str, object]:
         "governor_policy_reload_processed_at": None,
         "governor_policy_reload_processed_by": None,
         "governor_policy_reload_processing_note": None,
+        "equity_reconciliation_latch_requested": False,
+        "equity_reconciliation_latch_request_id": None,
+        "equity_reconciliation_latch_requested_at": None,
+        "equity_reconciliation_latch_requested_by": None,
+        "equity_reconciliation_latch_reason": None,
+        "equity_reconciliation_latch_target_block_entries": None,
+        "equity_reconciliation_latch_processed_at": None,
+        "equity_reconciliation_latch_processed_by": None,
+        "equity_reconciliation_latch_processing_note": None,
     }
 
 
@@ -126,6 +135,48 @@ def mark_governor_policy_reload_processed(
             "governor_policy_reload_processed_at": datetime.utcnow().isoformat(),
             "governor_policy_reload_processed_by": processed_by,
             "governor_policy_reload_processing_note": note,
+        }
+    )
+    write_control_state(filepath, state)
+    return state
+
+
+def request_equity_reconciliation_latch(
+    filepath: Path,
+    requested_by: str,
+    reason: str,
+    block_entries: bool,
+) -> Dict[str, object]:
+    state = read_control_state(filepath)
+    state.update(
+        {
+            "equity_reconciliation_latch_requested": True,
+            "equity_reconciliation_latch_request_id": f"erl-{uuid4().hex[:12]}",
+            "equity_reconciliation_latch_requested_at": datetime.utcnow().isoformat(),
+            "equity_reconciliation_latch_requested_by": requested_by,
+            "equity_reconciliation_latch_reason": reason,
+            "equity_reconciliation_latch_target_block_entries": bool(block_entries),
+            "equity_reconciliation_latch_processed_at": None,
+            "equity_reconciliation_latch_processed_by": None,
+            "equity_reconciliation_latch_processing_note": None,
+        }
+    )
+    write_control_state(filepath, state)
+    return state
+
+
+def mark_equity_reconciliation_latch_processed(
+    filepath: Path,
+    processed_by: str,
+    note: str,
+) -> Dict[str, object]:
+    state = read_control_state(filepath)
+    state.update(
+        {
+            "equity_reconciliation_latch_requested": False,
+            "equity_reconciliation_latch_processed_at": datetime.utcnow().isoformat(),
+            "equity_reconciliation_latch_processed_by": processed_by,
+            "equity_reconciliation_latch_processing_note": note,
         }
     )
     write_control_state(filepath, state)

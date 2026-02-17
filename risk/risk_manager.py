@@ -151,6 +151,55 @@ class RiskManager:
             logger.info(f"      Drawdown Trigger: {ApexConfig.CIRCUIT_BREAKER_DRAWDOWN*100:.1f}%")
             logger.info(f"      Consecutive Loss Trigger: {ApexConfig.CIRCUIT_BREAKER_CONSECUTIVE_LOSSES}")
 
+    def heal_baselines(self, current_capital: float, source: str = "runtime") -> bool:
+        """
+        Self-heal invalid baseline state (zero/negative/NaN-like values).
+
+        Returns True if any baseline was repaired.
+        """
+        try:
+            value = float(current_capital)
+        except Exception:
+            return False
+
+        if value <= 0:
+            return False
+
+        changed = False
+        today = datetime.now().strftime('%Y-%m-%d')
+
+        if self.starting_capital <= 0:
+            self.starting_capital = value
+            logger.warning(
+                "🩹 Recovered invalid starting_capital from %s: $%.2f",
+                source,
+                value,
+            )
+            changed = True
+
+        if self.peak_capital <= 0:
+            self.peak_capital = value
+            logger.warning(
+                "🩹 Recovered invalid peak_capital from %s: $%.2f",
+                source,
+                value,
+            )
+            changed = True
+
+        if self.current_day != today:
+            self.current_day = today
+
+        if self.day_start_capital <= 0:
+            self.day_start_capital = value
+            logger.warning(
+                "🩹 Recovered invalid day_start_capital from %s: $%.2f",
+                source,
+                value,
+            )
+            changed = True
+
+        return changed
+
     def save_state(self):
         """Save risk state to disk."""
         try:
@@ -186,12 +235,19 @@ class RiskManager:
             if state.get('current_day') == today:
                 self.day_start_capital = float(state.get('day_start_capital', 0))
                 self.current_day = today
-                logger.info(f"💾 Restored daily start capital: ${self.day_start_capital:,.2f}")
+                if self.day_start_capital > 0:
+                    logger.info(f"💾 Restored daily start capital: ${self.day_start_capital:,.2f}")
+                else:
+                    logger.warning("⚠️  Restored invalid daily start capital (<=0); awaiting self-heal")
             else:
                 logger.info("📅 New day detected, not restoring daily start capital")
             
             self.peak_capital = float(state.get('peak_capital', self.peak_capital))
             self.starting_capital = float(state.get('starting_capital', self.starting_capital))
+            if self.starting_capital <= 0:
+                logger.warning("⚠️  Restored invalid starting capital (<=0); awaiting self-heal")
+            if self.peak_capital <= 0:
+                logger.warning("⚠️  Restored invalid peak capital (<=0); awaiting self-heal")
             
             cb_state = state.get('circuit_breaker', {})
             if cb_state.get('is_tripped'):
@@ -225,19 +281,28 @@ class RiskManager:
 
     def set_starting_capital(self, capital: float):
         """Set starting capital and initialize tracking."""
+        try:
+            capital = float(capital)
+        except Exception:
+            logger.warning("⚠️  Ignoring invalid starting capital value: %s", capital)
+            return
+        if capital <= 0:
+            logger.warning("⚠️  Ignoring non-positive starting capital value: %s", capital)
+            return
+
         # Only set overall starting capital if not already set (absolute system start)
         if getattr(self, 'starting_capital', 0) == 0:
-            self.starting_capital = float(capital)
+            self.starting_capital = capital
             logger.info(f"💰 Account starting capital initialized: ${self.starting_capital:,.2f}")
         
         # Only initialize peak if not already set
         if getattr(self, 'peak_capital', 0) == 0:
-            self.peak_capital = float(capital)
+            self.peak_capital = capital
             
         today = datetime.now().strftime('%Y-%m-%d')
         # CRITICAL: Only overwrite day_start_capital if it's 0 OR it's a new day
         if getattr(self, 'day_start_capital', 0) == 0 or self.current_day != today:
-            self.day_start_capital = float(capital)
+            self.day_start_capital = capital
             self.current_day = today
             logger.info(f"💰 Day start capital initialized: ${self.day_start_capital:,.2f}")
         else:
@@ -254,6 +319,7 @@ class RiskManager:
         """
         try:
             current_value = float(current_value)
+            self.heal_baselines(current_capital=current_value, source="check_daily_loss")
 
             # Reset daily tracking if new day
             today = datetime.now().strftime('%Y-%m-%d')
@@ -301,6 +367,7 @@ class RiskManager:
         """
         try:
             current_value = float(current_value)
+            self.heal_baselines(current_capital=current_value, source="check_drawdown")
 
             # Update peak
             if current_value > self.peak_capital:
@@ -381,3 +448,15 @@ class RiskManager:
     def get_circuit_breaker_status(self) -> Dict:
         """Get circuit breaker status for dashboard."""
         return self.circuit_breaker.get_status()
+
+    def manual_reset_circuit_breaker(self, requested_by: str, reason: str) -> bool:
+        """Manually reset circuit breaker latch."""
+        if not self.circuit_breaker.is_tripped:
+            return False
+        logger.warning(
+            "🔄 Circuit breaker manually reset by %s (reason=%s)",
+            requested_by,
+            reason,
+        )
+        self.circuit_breaker.reset()
+        return True

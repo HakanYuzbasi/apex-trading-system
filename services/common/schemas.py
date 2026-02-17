@@ -45,6 +45,29 @@ class FeatureLimit(BaseModel):
 
 
 FEATURE_MATRIX: Dict[str, FeatureLimit] = {
+    "mandate_copilot_preview": FeatureLimit(
+        min_tier=SubscriptionTier.FREE,
+        daily_limits={
+            SubscriptionTier.FREE: 25,
+            SubscriptionTier.BASIC: 150,
+            SubscriptionTier.PRO: 500,
+            SubscriptionTier.ENTERPRISE: -1,
+        },
+    ),
+    "mandate_workflow_pack": FeatureLimit(
+        min_tier=SubscriptionTier.PRO,
+        daily_limits={
+            SubscriptionTier.PRO: 60,
+            SubscriptionTier.ENTERPRISE: -1,
+        },
+    ),
+    "mandate_model_risk_report": FeatureLimit(
+        min_tier=SubscriptionTier.PRO,
+        daily_limits={
+            SubscriptionTier.PRO: 120,
+            SubscriptionTier.ENTERPRISE: -1,
+        },
+    ),
     "backtest_validator": FeatureLimit(
         min_tier=SubscriptionTier.BASIC,
         daily_limits={
@@ -141,6 +164,19 @@ class SubscriptionInfo(BaseModel):
         default_factory=dict,
         description="Feature key → daily limit for current tier",
     )
+
+
+class PlanOffer(BaseModel):
+    code: str
+    name: str
+    tier: SubscriptionTier
+    monthly_usd: int
+    annual_usd: int
+    recommended: bool = False
+    target_user: str
+    usp: str
+    feature_highlights: List[str] = Field(default_factory=list)
+    feature_limits: Dict[str, int] = Field(default_factory=dict)
 
 
 class RateLimitInfo(BaseModel):

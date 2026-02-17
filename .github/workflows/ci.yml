@@ -98,3 +98,106 @@ jobs:
         run: npm run build
         env:
           NEXT_PUBLIC_API_URL: http://localhost:8000
+
+  preflight_gate:
+    name: Deploy Blocking Preflight Gate
+    runs-on: ubuntu-latest
+    needs: [test, lint, frontend]
+    timeout-minutes: 25
+    env:
+      APEX_AUTH_ENABLED: "true"
+      APEX_LIVE_TRADING: "false"
+      NEXT_PUBLIC_API_URL: "http://127.0.0.1:8000"
+      APEX_API_URL: "http://127.0.0.1:8000"
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install backend dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Install frontend dependencies
+        working-directory: frontend
+        run: npm ci
+
+      - name: Build frontend
+        working-directory: frontend
+        run: npm run build
+
+      - name: Generate CI admin password
+        run: echo "APEX_ADMIN_PASSWORD=$(openssl rand -hex 24)" >> "$GITHUB_ENV"
+
+      - name: Start backend API
+        run: |
+          rm -f data/users.json
+          nohup python -m uvicorn api.server:app --host 127.0.0.1 --port 8000 > /tmp/apex_backend.log 2>&1 &
+          echo $! > /tmp/apex_backend.pid
+
+      - name: Wait for backend readiness
+        run: |
+          for i in {1..60}; do
+            if curl -fsS http://127.0.0.1:8000/openapi.json > /dev/null; then
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "Backend failed to become ready"
+          cat /tmp/apex_backend.log || true
+          exit 1
+
+      - name: Start frontend app
+        working-directory: frontend
+        run: |
+          nohup npm run start -- --hostname 127.0.0.1 --port 3000 > /tmp/apex_frontend.log 2>&1 &
+          echo $! > /tmp/apex_frontend.pid
+
+      - name: Wait for frontend readiness
+        run: |
+          for i in {1..90}; do
+            if curl -fsS http://127.0.0.1:3000/login > /dev/null; then
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "Frontend failed to become ready"
+          cat /tmp/apex_frontend.log || true
+          exit 1
+
+      - name: Run full-stack preflight (deploy-blocking)
+        run: |
+          python scripts/preflight_full_stack.py \
+            --backend-base http://127.0.0.1:8000 \
+            --frontend-base http://127.0.0.1:3000 \
+            --username admin \
+            --password "$APEX_ADMIN_PASSWORD" \
+            --exercise-workflow
+
+      - name: Upload preflight artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: preflight-artifacts
+          path: |
+            data/preflight_status.json
+            data/preflight_history.jsonl
+            /tmp/apex_backend.log
+            /tmp/apex_frontend.log
+
+      - name: Stop services
+        if: always()
+        run: |
+          if [ -f /tmp/apex_frontend.pid ]; then kill "$(cat /tmp/apex_frontend.pid)" || true; fi
+          if [ -f /tmp/apex_backend.pid ]; then kill "$(cat /tmp/apex_backend.pid)" || true; fi

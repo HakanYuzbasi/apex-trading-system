@@ -105,6 +105,10 @@ class PrometheusMetrics:
         self._init_system_metrics()
         self._init_model_metrics()
         self._init_governor_metrics()
+        self._init_pretrade_metrics()
+        self._init_social_metrics()
+        self._init_attribution_metrics()
+        self._init_reconciliation_metrics()
 
         logger.info(f"📊 Prometheus Metrics initialized on port {port}")
 
@@ -298,6 +302,37 @@ class PrometheusMetrics:
             'Unix timestamp of last heartbeat',
             registry=self.registry
         )
+        self.equity_validation_accepted = Gauge(
+            'apex_equity_validation_accepted',
+            'Latest equity sample acceptance flag (1=accepted, 0=rejected)',
+            registry=self.registry
+        )
+        self.equity_validation_raw_value = Gauge(
+            'apex_equity_validation_raw_value_dollars',
+            'Latest raw equity sample before validation',
+            registry=self.registry
+        )
+        self.equity_validation_filtered_value = Gauge(
+            'apex_equity_validation_filtered_value_dollars',
+            'Latest filtered equity sample used for risk metrics',
+            registry=self.registry
+        )
+        self.equity_validation_deviation_pct = Gauge(
+            'apex_equity_validation_deviation_percent',
+            'Latest equity sample deviation percent versus last accepted sample',
+            registry=self.registry
+        )
+        self.equity_validation_suspect_streak = Gauge(
+            'apex_equity_validation_suspect_streak',
+            'Current consecutive suspect sample count',
+            registry=self.registry
+        )
+        self.equity_validation_rejections_total = Counter(
+            'apex_equity_validation_rejections_total',
+            'Rejected equity samples by validation reason',
+            ['reason'],
+            registry=self.registry
+        )
 
         # Latency metrics
         self.cycle_duration = Histogram(
@@ -406,6 +441,215 @@ class PrometheusMetrics:
         self.kill_switch_triggers_total = Counter(
             'apex_risk_kill_switch_triggers_total',
             'Kill-switch trigger events',
+            ['reason'],
+            registry=self.registry
+        )
+
+    def _init_pretrade_metrics(self):
+        """Initialize pre-trade hard-limit gateway metrics."""
+        self.pretrade_gate_decisions_total = Counter(
+            'apex_pretrade_gate_decisions_total',
+            'Pre-trade gateway decisions',
+            ['asset_class', 'result', 'reason'],
+            registry=self.registry
+        )
+        self.execution_spread_gate_blocks_total = Counter(
+            'apex_execution_spread_gate_blocks_total',
+            'Entries blocked by execution spread gate',
+            ['asset_class', 'regime'],
+            registry=self.registry
+        )
+        self.execution_edge_gate_blocks_total = Counter(
+            'apex_execution_edge_gate_blocks_total',
+            'Entries blocked by execution edge-over-cost gate',
+            ['asset_class', 'regime'],
+            registry=self.registry
+        )
+
+    def _init_social_metrics(self):
+        """Initialize social shock governor + prediction verification metrics."""
+        self.social_risk_score = Gauge(
+            'apex_social_risk_score',
+            'Current social-risk score by asset class and regime (0-1)',
+            ['asset_class', 'regime'],
+            registry=self.registry
+        )
+        self.social_attention_zscore = Gauge(
+            'apex_social_attention_zscore',
+            'Current aggregate social attention z-score',
+            ['asset_class', 'regime'],
+            registry=self.registry
+        )
+        self.social_sentiment_score = Gauge(
+            'apex_social_sentiment_score',
+            'Current aggregate social sentiment score (-1 to 1)',
+            ['asset_class', 'regime'],
+            registry=self.registry
+        )
+        self.social_gross_exposure_multiplier = Gauge(
+            'apex_social_gross_exposure_multiplier',
+            'Gross exposure multiplier from social shock governor',
+            ['asset_class', 'regime'],
+            registry=self.registry
+        )
+        self.social_block_entries_active = Gauge(
+            'apex_social_block_entries_active',
+            'Social shock block latch for new entries (1=blocked)',
+            ['asset_class', 'regime'],
+            registry=self.registry
+        )
+        self.social_shock_blocks_total = Counter(
+            'apex_social_shock_blocks_total',
+            'Entries blocked by social shock governor',
+            ['asset_class', 'regime', 'reason'],
+            registry=self.registry
+        )
+        self.social_decisions_total = Counter(
+            'apex_social_decisions_total',
+            'Social-governor decision events by result',
+            ['asset_class', 'regime', 'result', 'policy_version'],
+            registry=self.registry
+        )
+        self.prediction_market_verified_probability = Gauge(
+            'apex_prediction_market_verified_probability',
+            'Verified prediction-market probability used by risk engine',
+            ['asset_class', 'regime', 'event'],
+            registry=self.registry
+        )
+        self.prediction_market_verification_fail_total = Counter(
+            'apex_prediction_market_verification_fail_total',
+            'Prediction-market inputs rejected by verification gate',
+            ['event', 'reason'],
+            registry=self.registry
+        )
+
+    def _init_attribution_metrics(self):
+        """Initialize performance attribution metrics."""
+        self.attribution_net_alpha_dollars = Gauge(
+            'apex_attribution_net_alpha_dollars',
+            'Net alpha by sleeve over lookback window',
+            ['sleeve', 'lookback_days'],
+            registry=self.registry
+        )
+        self.attribution_execution_drag_dollars = Gauge(
+            'apex_attribution_execution_drag_dollars',
+            'Modeled execution drag by sleeve over lookback window',
+            ['sleeve', 'lookback_days'],
+            registry=self.registry
+        )
+        self.attribution_slippage_drag_dollars = Gauge(
+            'apex_attribution_slippage_drag_dollars',
+            'Modeled slippage drag by sleeve over lookback window',
+            ['sleeve', 'lookback_days'],
+            registry=self.registry
+        )
+        self.attribution_closed_trades = Gauge(
+            'apex_attribution_closed_trades',
+            'Closed trade count by sleeve over lookback window',
+            ['sleeve', 'lookback_days'],
+            registry=self.registry
+        )
+        self.attribution_execution_drag_dollars_total = Counter(
+            'apex_attribution_execution_drag_cumulative_dollars_total',
+            'Cumulative modeled execution drag by sleeve',
+            ['sleeve'],
+            registry=self.registry
+        )
+        self.attribution_slippage_drag_dollars_total = Counter(
+            'apex_attribution_slippage_drag_cumulative_dollars_total',
+            'Cumulative modeled slippage drag by sleeve',
+            ['sleeve'],
+            registry=self.registry
+        )
+        self.attribution_net_alpha_positive_dollars_total = Counter(
+            'apex_attribution_net_alpha_positive_dollars_total',
+            'Cumulative positive net alpha by sleeve',
+            ['sleeve'],
+            registry=self.registry
+        )
+        self.attribution_net_alpha_negative_dollars_total = Counter(
+            'apex_attribution_net_alpha_negative_dollars_total',
+            'Cumulative absolute negative net alpha by sleeve',
+            ['sleeve'],
+            registry=self.registry
+        )
+        self.attribution_closed_trades_total = Counter(
+            'apex_attribution_closed_trades_events_total',
+            'Cumulative closed trades by sleeve',
+            ['sleeve'],
+            registry=self.registry
+        )
+        self.social_blocked_alpha_opportunity_dollars = Gauge(
+            'apex_social_blocked_alpha_opportunity_dollars',
+            'Estimated blocked alpha opportunity from social governor',
+            ['asset_class', 'regime', 'lookback_days'],
+            registry=self.registry
+        )
+        self.social_avoided_drawdown_estimate_dollars = Gauge(
+            'apex_social_avoided_drawdown_estimate_dollars',
+            'Estimated avoided drawdown from social governor controls',
+            ['asset_class', 'regime', 'lookback_days'],
+            registry=self.registry
+        )
+        self.social_hedge_cost_drag_dollars = Gauge(
+            'apex_social_hedge_cost_drag_dollars',
+            'Estimated hedge-cost drag attributed to social risk events',
+            ['asset_class', 'regime', 'lookback_days'],
+            registry=self.registry
+        )
+        self.execution_slippage_budget_blocks_total = Counter(
+            'apex_execution_slippage_budget_blocks_total',
+            'Entries blocked by execution slippage budget gate',
+            ['asset_class', 'regime'],
+            registry=self.registry
+        )
+
+    def _init_reconciliation_metrics(self):
+        """Initialize equity reconciliation telemetry metrics."""
+        self.reconciliation_broker_equity_dollars = Gauge(
+            'apex_reconciliation_broker_equity_dollars',
+            'Latest broker-reported equity used by reconciler',
+            registry=self.registry
+        )
+        self.reconciliation_modeled_equity_dollars = Gauge(
+            'apex_reconciliation_modeled_equity_dollars',
+            'Latest locally modeled equity used by reconciler',
+            registry=self.registry
+        )
+        self.reconciliation_equity_gap_dollars = Gauge(
+            'apex_reconciliation_equity_gap_dollars',
+            'Absolute equity reconciliation gap in dollars',
+            registry=self.registry
+        )
+        self.reconciliation_equity_gap_pct = Gauge(
+            'apex_reconciliation_equity_gap_percent',
+            'Absolute equity reconciliation gap percentage',
+            registry=self.registry
+        )
+        self.reconciliation_entry_block_active = Gauge(
+            'apex_reconciliation_entry_block_active',
+            'Equity reconciliation entry block latch (1=active)',
+            registry=self.registry
+        )
+        self.reconciliation_breach_streak = Gauge(
+            'apex_reconciliation_breach_streak',
+            'Consecutive reconciliation breach count',
+            registry=self.registry
+        )
+        self.reconciliation_healthy_streak = Gauge(
+            'apex_reconciliation_healthy_streak',
+            'Consecutive healthy reconciliation sample count',
+            registry=self.registry
+        )
+        self.reconciliation_equity_breaches_total = Counter(
+            'apex_reconciliation_equity_breaches_total',
+            'Reconciliation breach transition events by reason',
+            ['reason'],
+            registry=self.registry
+        )
+        self.reconciliation_entry_blocks_total = Counter(
+            'apex_reconciliation_entry_blocks_total',
+            'Entries blocked by equity reconciliation latch',
             ['reason'],
             registry=self.registry
         )
@@ -591,6 +835,62 @@ class PrometheusMetrics:
             return
         self.system_last_heartbeat.set(time.time())
 
+    def update_equity_validation(
+        self,
+        *,
+        accepted: bool,
+        reason: str,
+        raw_value: float,
+        filtered_value: float,
+        deviation_pct: float,
+        suspect_count: int,
+    ):
+        """Update equity validation telemetry."""
+        if not self.enabled:
+            return
+        self.equity_validation_accepted.set(1 if accepted else 0)
+        self.equity_validation_raw_value.set(float(raw_value))
+        self.equity_validation_filtered_value.set(float(filtered_value))
+        self.equity_validation_deviation_pct.set(float(deviation_pct) * 100.0)
+        self.equity_validation_suspect_streak.set(float(suspect_count))
+        if not accepted:
+            self.equity_validation_rejections_total.labels(reason=str(reason or "unknown")).inc()
+
+    def update_equity_reconciliation(
+        self,
+        *,
+        broker_equity: float,
+        modeled_equity: float,
+        gap_dollars: float,
+        gap_pct: float,
+        block_entries: bool,
+        breach_streak: int,
+        healthy_streak: int,
+        reason: str,
+        breached: bool,
+        breach_event: bool,
+    ):
+        """Update equity reconciliation gauges and optional breach transition counter."""
+        if not self.enabled:
+            return
+        self.reconciliation_broker_equity_dollars.set(float(broker_equity))
+        self.reconciliation_modeled_equity_dollars.set(float(modeled_equity))
+        self.reconciliation_equity_gap_dollars.set(float(gap_dollars))
+        self.reconciliation_equity_gap_pct.set(float(gap_pct) * 100.0)
+        self.reconciliation_entry_block_active.set(1 if block_entries else 0)
+        self.reconciliation_breach_streak.set(float(breach_streak))
+        self.reconciliation_healthy_streak.set(float(healthy_streak))
+        if breached and breach_event:
+            self.reconciliation_equity_breaches_total.labels(
+                reason=str(reason or "unknown")
+            ).inc()
+
+    def record_equity_reconciliation_entry_block(self, reason: str):
+        """Increment counter when an entry is rejected by reconciliation latch."""
+        if not self.enabled:
+            return
+        self.reconciliation_entry_blocks_total.labels(reason=str(reason or "unknown")).inc()
+
     def record_cycle_duration(self, seconds: float):
         """Record cycle duration."""
         if not self.enabled:
@@ -692,6 +992,187 @@ class PrometheusMetrics:
         self.kill_switch_active.set(1 if active else 0)
         if active and reason:
             self.kill_switch_triggers_total.labels(reason=reason).inc()
+
+    def record_pretrade_gate_decision(self, asset_class: str, allowed: bool, reason: str):
+        if not self.enabled:
+            return
+        self.pretrade_gate_decisions_total.labels(
+            asset_class=asset_class,
+            result="allow" if allowed else "block",
+            reason=reason,
+        ).inc()
+
+    def record_execution_spread_gate_block(self, asset_class: str, regime: str):
+        if not self.enabled:
+            return
+        self.execution_spread_gate_blocks_total.labels(
+            asset_class=asset_class,
+            regime=regime,
+        ).inc()
+
+    def record_execution_slippage_budget_block(self, asset_class: str, regime: str):
+        if not self.enabled:
+            return
+        self.execution_slippage_budget_blocks_total.labels(
+            asset_class=asset_class,
+            regime=regime,
+        ).inc()
+
+    def record_execution_edge_gate_block(self, asset_class: str, regime: str):
+        if not self.enabled:
+            return
+        self.execution_edge_gate_blocks_total.labels(
+            asset_class=asset_class,
+            regime=regime,
+        ).inc()
+
+    def update_social_risk_state(
+        self,
+        *,
+        asset_class: str,
+        regime: str,
+        social_risk_score: float,
+        attention_z: float,
+        sentiment_score: float,
+        gross_exposure_multiplier: float,
+        block_new_entries: bool,
+    ):
+        if not self.enabled:
+            return
+        labels = {"asset_class": str(asset_class), "regime": str(regime)}
+        self.social_risk_score.labels(**labels).set(float(social_risk_score))
+        self.social_attention_zscore.labels(**labels).set(float(attention_z))
+        self.social_sentiment_score.labels(**labels).set(float(sentiment_score))
+        self.social_gross_exposure_multiplier.labels(**labels).set(float(gross_exposure_multiplier))
+        self.social_block_entries_active.labels(**labels).set(1 if block_new_entries else 0)
+
+    def record_social_shock_block(self, *, asset_class: str, regime: str, reason: str):
+        if not self.enabled:
+            return
+        self.social_shock_blocks_total.labels(
+            asset_class=str(asset_class),
+            regime=str(regime),
+            reason=str(reason or "unknown"),
+        ).inc()
+
+    def record_social_decision(
+        self,
+        *,
+        asset_class: str,
+        regime: str,
+        result: str,
+        policy_version: str = "runtime-config",
+    ):
+        if not self.enabled:
+            return
+        self.social_decisions_total.labels(
+            asset_class=str(asset_class),
+            regime=str(regime),
+            result=str(result or "normal"),
+            policy_version=str(policy_version or "runtime-config"),
+        ).inc()
+
+    def update_prediction_verification(
+        self,
+        *,
+        asset_class: str,
+        regime: str,
+        event: str,
+        verified_probability: float,
+        verified: bool,
+        failure_reason: str = "",
+    ):
+        if not self.enabled:
+            return
+        event_label = str(event or "unknown_event")
+        if verified:
+            self.prediction_market_verified_probability.labels(
+                asset_class=str(asset_class),
+                regime=str(regime),
+                event=event_label,
+            ).set(float(verified_probability))
+            return
+
+        self.prediction_market_verification_fail_total.labels(
+            event=event_label,
+            reason=str(failure_reason or "verification_failed"),
+        ).inc()
+
+    def update_attribution_summary(self, summary: Dict):
+        """Update sleeve-level attribution gauges from a summary payload."""
+        if not self.enabled:
+            return
+        if not isinstance(summary, dict):
+            return
+
+        lookback_days = str(int(summary.get("lookback_days", 30)))
+        by_sleeve = summary.get("by_sleeve", {}) or {}
+        for sleeve, bucket in by_sleeve.items():
+            sleeve_label = str(sleeve or "unknown")
+            net_alpha = float(bucket.get("net_pnl", 0.0) or 0.0)
+            execution_drag = float(bucket.get("modeled_execution_drag", 0.0) or 0.0)
+            slippage_drag = float(bucket.get("modeled_slippage_drag", 0.0) or 0.0)
+
+            self.attribution_net_alpha_dollars.labels(
+                sleeve=sleeve_label,
+                lookback_days=lookback_days,
+            ).set(net_alpha)
+            self.attribution_execution_drag_dollars.labels(
+                sleeve=sleeve_label,
+                lookback_days=lookback_days,
+            ).set(execution_drag)
+            self.attribution_slippage_drag_dollars.labels(
+                sleeve=sleeve_label,
+                lookback_days=lookback_days,
+            ).set(slippage_drag)
+            self.attribution_closed_trades.labels(
+                sleeve=sleeve_label,
+                lookback_days=lookback_days,
+            ).set(float(bucket.get("trades", 0) or 0))
+
+        social_summary = summary.get("social_governor", {}) or {}
+        by_scope = social_summary.get("by_asset_class_regime", {}) or {}
+        for _, row in by_scope.items():
+            asset = str(row.get("asset_class", "UNKNOWN")).upper()
+            regime = str(row.get("regime", "default")).lower()
+            self.social_blocked_alpha_opportunity_dollars.labels(
+                asset_class=asset,
+                regime=regime,
+                lookback_days=lookback_days,
+            ).set(float(row.get("blocked_alpha_opportunity", 0.0) or 0.0))
+            self.social_avoided_drawdown_estimate_dollars.labels(
+                asset_class=asset,
+                regime=regime,
+                lookback_days=lookback_days,
+            ).set(float(row.get("avoided_drawdown_estimate", 0.0) or 0.0))
+            self.social_hedge_cost_drag_dollars.labels(
+                asset_class=asset,
+                regime=regime,
+                lookback_days=lookback_days,
+            ).set(float(row.get("hedge_cost_drag", 0.0) or 0.0))
+
+    def record_attribution_trade(
+        self,
+        sleeve: str,
+        net_alpha: float,
+        execution_drag: float,
+        slippage_drag: float,
+    ):
+        """Record per-closed-trade attribution counters."""
+        if not self.enabled:
+            return
+        sleeve_label = str(sleeve or "unknown")
+        net = float(net_alpha or 0.0)
+        exec_drag = max(0.0, float(execution_drag or 0.0))
+        slip_drag = max(0.0, float(slippage_drag or 0.0))
+
+        self.attribution_closed_trades_total.labels(sleeve=sleeve_label).inc()
+        self.attribution_execution_drag_dollars_total.labels(sleeve=sleeve_label).inc(exec_drag)
+        self.attribution_slippage_drag_dollars_total.labels(sleeve=sleeve_label).inc(slip_drag)
+        if net >= 0:
+            self.attribution_net_alpha_positive_dollars_total.labels(sleeve=sleeve_label).inc(net)
+        else:
+            self.attribution_net_alpha_negative_dollars_total.labels(sleeve=sleeve_label).inc(abs(net))
 
 
 # Grafana Dashboard JSON (save to file)

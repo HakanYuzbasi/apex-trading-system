@@ -1,0 +1,102 @@
+name: Social Risk Daily Cycle
+
+on:
+  schedule:
+    - cron: "20 6 * * *"
+  workflow_dispatch:
+    inputs:
+      activate:
+        description: "Activate tuned policy snapshot after calibration"
+        required: false
+        default: true
+        type: boolean
+      freshness_sla_seconds:
+        description: "Social feed freshness SLA used during ingestion"
+        required: false
+        default: "1800"
+        type: string
+
+jobs:
+  social-risk-daily:
+    runs-on: ubuntu-latest
+    env:
+      FRESHNESS_SLA_SECONDS: ${{ github.event.inputs.freshness_sla_seconds || '1800' }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run daily social ingestion + calibration
+        run: |
+          ACTIVATE_FLAG="--activate"
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ "${{ inputs.activate }}" = "false" ]; then
+            ACTIVATE_FLAG="--no-activate"
+          fi
+          python scripts/run_daily_social_risk_cycle.py \
+            --data-dir data \
+            --artifacts-dir artifacts/social-risk-daily \
+            --freshness-sla-seconds "$FRESHNESS_SLA_SECONDS" \
+            "$ACTIVATE_FLAG"
+
+      - name: Upload artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: social-risk-daily
+          path: |
+            artifacts/social-risk-daily/
+            data/social_risk_inputs.json
+            data/governor_policies/social_shock_active.json
+            data/governor_policies/social_shock_policy_*.json
+
+      - name: Add workflow summary
+        if: always()
+        run: |
+          python - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          step_summary = Path(os.environ["GITHUB_STEP_SUMMARY"])
+          summary_file = Path("artifacts/social-risk-daily/social_risk_daily_summary.json")
+          if not summary_file.exists():
+              with open(step_summary, "a", encoding="utf-8") as fh:
+                  fh.write("## Social Risk Daily Cycle\n\n")
+                  fh.write("No summary file was generated.\n")
+              raise SystemExit(0)
+
+          payload = json.loads(summary_file.read_text(encoding="utf-8"))
+          lines = [
+              "## Social Risk Daily Cycle",
+              "",
+              f"- Ran at: `{payload.get('ran_at', 'n/a')}`",
+              f"- Inputs file: `{payload.get('social_inputs_file', 'n/a')}`",
+              f"- Latest snapshot: `{payload.get('latest_snapshot', 'n/a')}`",
+              f"- Active snapshot present: `{payload.get('active_snapshot_present', False)}`",
+              f"- Activation requested: `{payload.get('activate_requested', False)}`",
+          ]
+          validation = payload.get("social_inputs_validation", {}) if isinstance(payload.get("social_inputs_validation"), dict) else {}
+          if validation:
+              lines.extend(
+                  [
+                      "",
+                      "Validation:",
+                      f"- valid: `{validation.get('valid', False)}`",
+                      f"- has_usable_feeds: `{validation.get('has_usable_feeds', False)}`",
+                      f"- warning_count: `{validation.get('warning_count', 0)}`",
+                      f"- error_count: `{validation.get('error_count', 0)}`",
+                  ]
+              )
+          with open(step_summary, "a", encoding="utf-8") as fh:
+              fh.write("\n".join(lines) + "\n")
+          PY

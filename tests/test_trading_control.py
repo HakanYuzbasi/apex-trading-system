@@ -1,7 +1,9 @@
 from core.trading_control import (
+    mark_equity_reconciliation_latch_processed,
     mark_governor_policy_reload_processed,
     mark_kill_switch_reset_processed,
     read_control_state,
+    request_equity_reconciliation_latch,
     request_governor_policy_reload,
     request_kill_switch_reset,
 )
@@ -56,3 +58,28 @@ def test_request_and_process_governor_policy_reload(tmp_path):
     assert processed["governor_policy_reload_requested"] is False
     assert processed["governor_policy_reload_processed_by"] == "apex-trader"
     assert processed["governor_policy_reload_processing_note"] == "Governor policies reloaded from active file"
+
+
+def test_request_and_process_equity_reconciliation_latch(tmp_path):
+    path = tmp_path / "trading_control_commands.json"
+    requested = request_equity_reconciliation_latch(
+        filepath=path,
+        requested_by="ops-user",
+        reason="Force latch for alert wiring test",
+        block_entries=True,
+    )
+    assert requested["equity_reconciliation_latch_requested"] is True
+    assert requested["equity_reconciliation_latch_request_id"].startswith("erl-")
+    assert requested["equity_reconciliation_latch_requested_by"] == "ops-user"
+    assert requested["equity_reconciliation_latch_target_block_entries"] is True
+    assert requested["equity_reconciliation_latch_processed_at"] is None
+
+    processed = mark_equity_reconciliation_latch_processed(
+        filepath=path,
+        processed_by="apex-trader",
+        note="Manual reconciliation latch applied",
+    )
+    assert processed["equity_reconciliation_latch_requested"] is False
+    assert processed["equity_reconciliation_latch_processed_by"] == "apex-trader"
+    assert processed["equity_reconciliation_latch_processing_note"] == "Manual reconciliation latch applied"
+    assert processed["equity_reconciliation_latch_processed_at"] is not None

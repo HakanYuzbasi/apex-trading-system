@@ -1,0 +1,418 @@
+{
+  "timestamp": "2026-02-13T21:41:47.471795",
+  "capital": 99993.78,
+  "initial_capital": 1100000.0,
+  "starting_capital": 99993.78,
+  "positions": {},
+  "signals": {
+    "AAPL": {
+      "signal": 0.026316895114857353,
+      "confidence": 0.0,
+      "direction": "NEUTRAL",
+      "strength_pct": 2.6316895114857353,
+      "timestamp": "2026-02-13T21:41:43.292358"
+    },
+    "MSFT": {
+      "signal": 0.01378305020050534,
+      "confidence": 0.2249999471945645,
+      "direction": "NEUTRAL",
+      "strength_pct": 1.378305020050534,
+      "timestamp": "2026-02-13T21:41:43.331198"
+    },
+    "NVDA": {
+      "signal": 0.15305155553188443,
+      "confidence": 0.3452893600735623,
+      "direction": "NEUTRAL",
+      "strength_pct": 15.305155553188444,
+      "timestamp": "2026-02-13T21:41:43.372378"
+    },
+    "GOOGL": {
+      "signal": 0.05881198585208314,
+      "confidence": 0.9796176795741084,
+      "direction": "NEUTRAL",
+      "strength_pct": 5.881198585208313,
+      "timestamp": "2026-02-13T21:41:43.415130"
+    },
+    "META": {
+      "signal": 0.2621005951690576,
+      "confidence": 0.22499999999977843,
+      "direction": "WEAK BUY",
+      "strength_pct": 26.21005951690576,
+      "timestamp": "2026-02-13T21:41:43.458641"
+    },
+    "TSLA": {
+      "signal": -0.14009345059370046,
+      "confidence": 0.5545893345613935,
+      "direction": "NEUTRAL",
+      "strength_pct": 14.009345059370046,
+      "timestamp": "2026-02-13T21:41:43.502777"
+    },
+    "AVGO": {
+      "signal": -0.0438246527881805,
+      "confidence": 0.22439409861506343,
+      "direction": "NEUTRAL",
+      "strength_pct": 4.38246527881805,
+      "timestamp": "2026-02-13T21:41:43.548507"
+    },
+    "ORCL": {
+      "signal": -0.2136526758414707,
+      "confidence": 0.0,
+      "direction": "WEAK SELL",
+      "strength_pct": 21.36526758414707,
+      "timestamp": "2026-02-13T21:41:43.593907"
+    },
+    "CSCO": {
+      "signal": 0.08537796459328373,
+      "confidence": 0.29999999999999005,
+      "direction": "NEUTRAL",
+      "strength_pct": 8.537796459328373,
+      "timestamp": "2026-02-13T21:41:43.638223"
+    },
+    "ADBE": {
+      "signal": -0.03485836652032809,
+      "confidence": 0.32385403941358565,
+      "direction": "NEUTRAL",
+      "strength_pct": 3.485836652032809,
+      "timestamp": "2026-02-13T21:41:43.681646"
+    },
+    "CRM": {
+      "signal": -0.017113668837389066,
+      "confidence": 0.0,
+      "direction": "NEUTRAL",
+      "strength_pct": 1.7113668837389067,
+      "timestamp": "2026-02-13T21:41:43.726851"
+    },
+    "ACN": {
+      "signal": 0.013944423560299207,
+      "confidence": 0.22472177411909497,
+      "direction": "NEUTRAL",
+      "strength_pct": 1.3944423560299208,
+      "timestamp": "2026-02-13T21:41:43.783933"
+    },
+    "AMD": {
+      "signal": 0.05525894295788882,
+      "confidence": 0.22488602066229588,
+      "direction": "NEUTRAL",
+      "strength_pct": 5.525894295788882,
+      "timestamp": "2026-02-13T21:41:43.829126"
+    },
+    "INTC": {
+      "signal": -0.1505132227309518,
+      "confidence": 0.0,
+      "direction": "NEUTRAL",
+      "strength_pct": 15.051322273095181,
+      "timestamp": "2026-02-13T21:41:43.873637"
+    },
+    "IBM": {
+      "signal": 0.036892097894891424,
+      "confidence": 0.0,
+      "direction": "NEUTRAL",
+      "strength_pct": 3.6892097894891425,
+      "timestamp": "2026-02-13T21:41:43.915595"
+    },
+    "QCOM": {
+      "signal": 0.16494486025143779,
+      "confidence": 0.47003916872142937,
+      "direction": "NEUTRAL",
+      "strength_pct": 16.49448602514378,
+      "timestamp": "2026-02-13T21:41:43.957549"
+    },
+    "TXN": {
+      "signal": 0.16127503880961716,
+      "confidence": 0.42396654316551124,
+      "direction": "NEUTRAL",
+      "strength_pct": 16.127503880961715,
+      "timestamp": "2026-02-13T21:41:44.007949"
+    },
+    "AMAT": {
+      "signal": 0.003503322844361889,
+      "confidence": 0.281776554560902,
+      "direction": "NEUTRAL",
+      "strength_pct": 0.3503322844361889,
+      "timestamp": "2026-02-13T21:41:44.060587"
+    },
+    "MU": {
+      "signal": -0.18642203768108187,
+      "confidence": 0.0,
+      "direction": "NEUTRAL",
+      "strength_pct": 18.642203768108185,
+      "timestamp": "2026-02-13T21:41:44.118253"
+    },
+    "LRCX": {
+      "signal": -0.09397461090604947,
+      "confidence": 0.0,
+      "direction": "NEUTRAL",
+      "strength_pct": 9.397461090604947,
+      "timestamp": "2026-02-13T21:41:44.181217"
+    },
+    "JPM": {
+      "signal": 0.30941606125417,
+      "confidence": 0.983254647251167,
+      "direction": "WEAK BUY",
+      "strength_pct": 30.941606125417,
+      "timestamp": "2026-02-13T21:41:44.246194"
+    },
+    "BAC": {
+      "signal": -0.2310644010448456,
+      "confidence": 0.9863961930577693,
+      "direction": "WEAK SELL",
+      "strength_pct": 23.10644010448456,
+      "timestamp": "2026-02-13T21:41:44.306082"
+    },
+    "WFC": {
+      "signal": -0.08230400389655324,
+      "confidence": 0.8791550741749371,
+      "direction": "NEUTRAL",
+      "strength_pct": 8.230400389655323,
+      "timestamp": "2026-02-13T21:41:45.434953"
+    },
+    "GS": {
+      "signal": 0.8355273955052913,
+      "confidence": 0.8538572411889194,
+      "direction": "STRONG BUY",
+      "strength_pct": 83.55273955052913,
+      "timestamp": "2026-02-13T21:41:45.484589"
+    },
+    "MS": {
+      "signal": 0.573109224914328,
+      "confidence": 0.8618534201180416,
+      "direction": "BUY",
+      "strength_pct": 57.310922491432805,
+      "timestamp": "2026-02-13T21:41:45.536309"
+    },
+    "C": {
+      "signal": 0.5730895290585997,
+      "confidence": 0.5858109443696362,
+      "direction": "BUY",
+      "strength_pct": 57.30895290585997,
+      "timestamp": "2026-02-13T21:41:45.593903"
+    },
+    "BLK": {
+      "signal": 0.8829348652832549,
+      "confidence": 0.899859010349873,
+      "direction": "STRONG BUY",
+      "strength_pct": 88.29348652832549,
+      "timestamp": "2026-02-13T21:41:45.652021"
+    },
+    "AXP": {
+      "signal": -0.2047624882470795,
+      "confidence": 0.9286821989167278,
+      "direction": "WEAK SELL",
+      "strength_pct": 20.476248824707948,
+      "timestamp": "2026-02-13T21:41:45.716113"
+    },
+    "SCHW": {
+      "signal": 0.5842327121123723,
+      "confidence": 0.580038668136955,
+      "direction": "BUY",
+      "strength_pct": 58.42327121123723,
+      "timestamp": "2026-02-13T21:41:45.789675"
+    },
+    "USB": {
+      "signal": -0.37082969493408546,
+      "confidence": 0.3103203383947373,
+      "direction": "WEAK SELL",
+      "strength_pct": 37.08296949340855,
+      "timestamp": "2026-02-13T21:41:45.861693"
+    },
+    "UNH": {
+      "signal": 0.019530667330991777,
+      "confidence": 0.2249999923058928,
+      "direction": "NEUTRAL",
+      "strength_pct": 1.9530667330991778,
+      "timestamp": "2026-02-13T21:41:45.960808"
+    },
+    "JNJ": {
+      "signal": 0.05464437822826834,
+      "confidence": 0.747872519240841,
+      "direction": "NEUTRAL",
+      "strength_pct": 5.464437822826834,
+      "timestamp": "2026-02-13T21:41:46.054726"
+    },
+    "LLY": {
+      "signal": 0.32030897031460903,
+      "confidence": 0.5013948081632126,
+      "direction": "WEAK BUY",
+      "strength_pct": 32.0308970314609,
+      "timestamp": "2026-02-13T21:41:46.160725"
+    },
+    "ABBV": {
+      "signal": 0.649503080245781,
+      "confidence": 1.0,
+      "direction": "STRONG BUY",
+      "strength_pct": 64.95030802457809,
+      "timestamp": "2026-02-13T21:41:46.242806"
+    },
+    "MRK": {
+      "signal": 0.06659674022823349,
+      "confidence": 0.0,
+      "direction": "NEUTRAL",
+      "strength_pct": 6.659674022823349,
+      "timestamp": "2026-02-13T21:41:46.330316"
+    },
+    "TMO": {
+      "signal": -0.17878632628725152,
+      "confidence": 0.02502748945642192,
+      "direction": "NEUTRAL",
+      "strength_pct": 17.878632628725153,
+      "timestamp": "2026-02-13T21:41:46.425359"
+    },
+    "ABT": {
+      "signal": 0.263094152718542,
+      "confidence": 0.3876142966479322,
+      "direction": "WEAK BUY",
+      "strength_pct": 26.3094152718542,
+      "timestamp": "2026-02-13T21:41:46.510780"
+    },
+    "DHR": {
+      "signal": -0.06484736855354756,
+      "confidence": 0.6131580161913851,
+      "direction": "NEUTRAL",
+      "strength_pct": 6.484736855354756,
+      "timestamp": "2026-02-13T21:41:46.612101"
+    },
+    "PFE": {
+      "signal": 0.5004764882968114,
+      "confidence": 0.662518244332178,
+      "direction": "BUY",
+      "strength_pct": 50.04764882968114,
+      "timestamp": "2026-02-13T21:41:46.674115"
+    },
+    "BMY": {
+      "signal": -0.573082456908806,
+      "confidence": 0.0,
+      "direction": "SELL",
+      "strength_pct": 57.3082456908806,
+      "timestamp": "2026-02-13T21:41:46.742701"
+    },
+    "AMZN": {
+      "signal": 0.02296067163831922,
+      "confidence": 0.004073801238341575,
+      "direction": "NEUTRAL",
+      "strength_pct": 2.296067163831922,
+      "timestamp": "2026-02-13T21:41:46.815967"
+    },
+    "WMT": {
+      "signal": 0.35871266656232176,
+      "confidence": 0.0,
+      "direction": "WEAK BUY",
+      "strength_pct": 35.87126665623217,
+      "timestamp": "2026-02-13T21:41:46.878130"
+    },
+    "HD": {
+      "signal": -0.6177969110198033,
+      "confidence": 0.0,
+      "direction": "STRONG SELL",
+      "strength_pct": 61.779691101980326,
+      "timestamp": "2026-02-13T21:41:46.943581"
+    },
+    "MCD": {
+      "signal": 0.29713523986464013,
+      "confidence": 0.8261547719885393,
+      "direction": "WEAK BUY",
+      "strength_pct": 29.713523986464015,
+      "timestamp": "2026-02-13T21:41:47.015145"
+    },
+    "NKE": {
+      "signal": 0.6059106314332967,
+      "confidence": 0.9071770518144298,
+      "direction": "STRONG BUY",
+      "strength_pct": 60.59106314332967,
+      "timestamp": "2026-02-13T21:41:47.078259"
+    },
+    "SBUX": {
+      "signal": 0.03241121594293578,
+      "confidence": 0.9362274505438939,
+      "direction": "NEUTRAL",
+      "strength_pct": 3.2411215942935776,
+      "timestamp": "2026-02-13T21:41:47.142561"
+    },
+    "LOW": {
+      "signal": -0.1687291904549136,
+      "confidence": 0.0,
+      "direction": "NEUTRAL",
+      "strength_pct": 16.87291904549136,
+      "timestamp": "2026-02-13T21:41:47.230261"
+    },
+    "TGT": {
+      "signal": 0.03691857957538178,
+      "confidence": 0.5335555989246081,
+      "direction": "NEUTRAL",
+      "strength_pct": 3.691857957538178,
+      "timestamp": "2026-02-13T21:41:47.322343"
+    },
+    "DG": {
+      "signal": -0.27627832401796004,
+      "confidence": 0.974893163214115,
+      "direction": "WEAK SELL",
+      "strength_pct": 27.627832401796006,
+      "timestamp": "2026-02-13T21:41:47.392150"
+    },
+    "DLTR": {
+      "signal": -0.1766703127783594,
+      "confidence": 0.5303857456908303,
+      "direction": "NEUTRAL",
+      "strength_pct": 17.66703127783594,
+      "timestamp": "2026-02-13T21:41:47.471544"
+    }
+  },
+  "daily_pnl": 0.0,
+  "total_pnl": 0.0,
+  "total_commissions": 0.0,
+  "max_drawdown": 0.9221107189444785,
+  "sharpe_ratio": 0.20305713564023778,
+  "win_rate": 0.0,
+  "total_trades": 31,
+  "open_positions": 0,
+  "sector_exposure": {},
+  "performance_governor": {
+    "tier": "green",
+    "sharpe": 0.0,
+    "sortino": 0.0,
+    "drawdown": 0.0,
+    "sample_count": 1,
+    "size_multiplier": 1.0,
+    "signal_threshold_boost": 0.0,
+    "confidence_boost": 0.0,
+    "halt_new_entries": false,
+    "reasons": [
+      "Warming up: insufficient performance samples"
+    ]
+  },
+  "kill_switch": {
+    "active": true,
+    "triggered_at": "2026-02-13T20:41:43.052271",
+    "reason": "DD/Sharpe breach: dd=92.21%>12.00% or sharpe=12.41<0.20",
+    "drawdown": 0.9221107189444785,
+    "historical_mdd": 0.08,
+    "sharpe_rolling": 12.411359607166041,
+    "flatten_executed": true
+  },
+  "equity_reconciliation": {
+    "timestamp": "2026-02-13T21:41:42.667329",
+    "broker_equity": 99993.78,
+    "modeled_equity": 99993.78,
+    "gap_dollars": 0.0,
+    "gap_pct": 0.0,
+    "max_gap_dollars": 20000.0,
+    "max_gap_pct": 0.015,
+    "breached": false,
+    "block_entries": false,
+    "reason": "ok",
+    "breach_streak": 0,
+    "healthy_streak": 4
+  },
+  "performance_attribution": {
+    "lookback_days": 30,
+    "closed_trades": 0,
+    "open_positions_tracked": 0,
+    "gross_pnl": 0.0,
+    "net_pnl": 0.0,
+    "commissions": 0.0,
+    "modeled_execution_drag": 0.0,
+    "modeled_slippage_drag": 0.0,
+    "by_sleeve": {},
+    "by_asset_class": {}
+  },
+  "signal_quality": {}
+}

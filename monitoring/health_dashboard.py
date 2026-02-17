@@ -149,13 +149,15 @@ class HealthDashboard:
             'max_daily_loss_pct': 0.02,
             'max_drawdown_pct': 0.10,
             'max_stale_symbols': 5,
-            'max_pending_orders': 10
+            'max_pending_orders': 10,
+            'alert_repeat_cooldown_seconds': 300,
         }
         
         # History
         self.health_checks: List[HealthCheck] = []
         self.alerts: List[Dict] = []
         self.metrics_history: List[SystemMetrics] = []
+        self._last_alert_logged_at: Dict[str, datetime] = {}
         
         logger.info("HealthDashboard initialized")
     
@@ -344,13 +346,20 @@ class HealthDashboard:
     
     def _process_alerts(self, checks: List[HealthCheck]):
         """Process health checks and generate alerts."""
+        now = datetime.now()
+        repeat_cooldown = max(1, int(self.thresholds.get('alert_repeat_cooldown_seconds', 300)))
         for check in checks:
             if check.status in [HealthStatus.ERROR, HealthStatus.CRITICAL]:
+                signature = f"{check.name}:{check.status.value}:{check.message}"
+                last_logged = self._last_alert_logged_at.get(signature)
+                if last_logged and (now - last_logged).total_seconds() < repeat_cooldown:
+                    continue
+                self._last_alert_logged_at[signature] = now
                 alert = {
                     'check': check.name,
                     'status': check.status.value,
                     'message': check.message,
-                    'timestamp': datetime.now().isoformat()
+                    'timestamp': now.isoformat()
                 }
                 
                 self.alerts.append(alert)

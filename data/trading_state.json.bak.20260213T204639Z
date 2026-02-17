@@ -1,0 +1,318 @@
+{
+  "timestamp": "2026-02-13T21:45:10.393152",
+  "capital": 1181663.69,
+  "initial_capital": 1100000.0,
+  "starting_capital": 99993.78,
+  "positions": {
+    "XOM": {
+      "qty": 80,
+      "side": "LONG",
+      "avg_price": 146.4225,
+      "current_price": 148.6199951171875,
+      "pnl": 175.7996093749989,
+      "pnl_pct": 1.500790600616364,
+      "entry_time": "2026-02-13T21:44:31.323018",
+      "current_signal": 0.9999999943720146,
+      "signal_direction": "STRONG BUY"
+    },
+    "HAL": {
+      "qty": -6,
+      "side": "SHORT",
+      "avg_price": 75.29796665,
+      "current_price": 33.994998931884766,
+      "pnl": 247.81780630869144,
+      "pnl_pct": 121.49718786834893,
+      "entry_time": "2026-02-13T21:44:31.323053",
+      "current_signal": 0.9999999943720146,
+      "signal_direction": "STRONG BUY"
+    },
+    "LRCX": {
+      "qty": 39,
+      "side": "LONG",
+      "avg_price": 213.49564105,
+      "current_price": 235.02000427246094,
+      "pnl": 839.450165675977,
+      "pnl_pct": 10.081874794539726,
+      "entry_time": "2026-02-13T21:44:31.323056",
+      "current_signal": 0.9999999916963842,
+      "signal_direction": "STRONG BUY"
+    },
+    "COP": {
+      "qty": -2,
+      "side": "SHORT",
+      "avg_price": 96.94795,
+      "current_price": 111.4800033569336,
+      "pnl": -29.064106713867176,
+      "pnl_pct": -13.035569536543035,
+      "entry_time": "2026-02-13T21:44:31.323057",
+      "current_signal": 0.9999999916963842,
+      "signal_direction": "STRONG BUY"
+    },
+    "VLO": {
+      "qty": 60,
+      "side": "LONG",
+      "avg_price": 194.17666665,
+      "current_price": 199.72500610351562,
+      "pnl": 332.90036721093827,
+      "pnl_pct": 2.8573667213663834,
+      "entry_time": "2026-02-13T21:44:31.323057",
+      "current_signal": 0.9999999943720146,
+      "signal_direction": "STRONG BUY"
+    },
+    "ALB": {
+      "qty": 55,
+      "side": "LONG",
+      "avg_price": 157.0281818,
+      "current_price": 165.93499755859375,
+      "pnl": 489.8748667226563,
+      "pnl_pct": 5.672112901324922,
+      "entry_time": "2026-02-13T21:44:31.323059",
+      "current_signal": 0.9999999943720146,
+      "signal_direction": "STRONG BUY"
+    },
+    "CAT": {
+      "qty": 17,
+      "side": "LONG",
+      "avg_price": 679.32882355,
+      "current_price": 772.8499755859375,
+      "pnl": 1589.859584610937,
+      "pnl_pct": 13.76669865812843,
+      "entry_time": "2026-02-13T21:44:31.323059",
+      "current_signal": 0.9999999916963842,
+      "signal_direction": "STRONG BUY"
+    },
+    "NEM": {
+      "qty": 83,
+      "side": "LONG",
+      "avg_price": 108.6220482,
+      "current_price": 125.09100341796875,
+      "pnl": 1366.9232830914066,
+      "pnl_pct": 15.161705648972257,
+      "entry_time": "2026-02-13T21:44:31.323060",
+      "current_signal": 0.9999999916963842,
+      "signal_direction": "STRONG BUY"
+    },
+    "LMT": {
+      "qty": 19,
+      "side": "LONG",
+      "avg_price": 611.1126316,
+      "current_price": 650.030029296875,
+      "pnl": 739.4305562406253,
+      "pnl_pct": 6.368285596549117,
+      "entry_time": "2026-02-13T21:44:31.323061",
+      "current_signal": 0.9999999916963842,
+      "signal_direction": "STRONG BUY"
+    },
+    "GS": {
+      "qty": 13,
+      "side": "LONG",
+      "avg_price": 895.0269231,
+      "current_price": 901.3250122070312,
+      "pnl": 81.87515839140656,
+      "pnl_pct": 0.7036759391792824,
+      "entry_time": "2026-02-13T21:44:31.323062",
+      "current_signal": 0.9999999943720146,
+      "signal_direction": "STRONG BUY"
+    },
+    "SLB": {
+      "qty": 280,
+      "side": "LONG",
+      "avg_price": 49.755,
+      "current_price": 50.474998474121094,
+      "pnl": 201.59957275390553,
+      "pnl_pct": 1.4470876778637232,
+      "entry_time": "2026-02-13T21:44:31.323063",
+      "current_signal": 0.9999999916963842,
+      "signal_direction": "STRONG BUY"
+    },
+    "CVX": {
+      "qty": 66,
+      "side": "LONG",
+      "avg_price": 179.6151515,
+      "current_price": 183.72000122070312,
+      "pnl": 270.9200815664065,
+      "pnl_pct": 2.2853582709603026,
+      "entry_time": "2026-02-13T21:44:31.323065",
+      "current_signal": 0.9999999943720146,
+      "signal_direction": "STRONG BUY"
+    },
+    "DLTR": {
+      "qty": 98,
+      "side": "LONG",
+      "avg_price": 120.1102041,
+      "current_price": 125.98999786376953,
+      "pnl": 576.2197888494136,
+      "pnl_pct": 4.895332422276288,
+      "entry_time": "2026-02-13T21:44:31.323066",
+      "current_signal": 0.9999999916963842,
+      "signal_direction": "STRONG BUY"
+    },
+    "ORCL": {
+      "qty": 82,
+      "side": "LONG",
+      "avg_price": 137.4021951,
+      "current_price": 159.67999267578125,
+      "pnl": 1826.7794012140625,
+      "pnl_pct": 16.213567446697397,
+      "entry_time": "2026-02-13T21:44:31.323067",
+      "current_signal": 0.9999999943720146,
+      "signal_direction": "STRONG BUY"
+    }
+  },
+  "signals": {
+    "XOM": {
+      "signal": 0.9999999943720146,
+      "confidence": 0.9999999805477782,
+      "direction": "STRONG BUY",
+      "strength_pct": 99.99999943720145,
+      "timestamp": "2026-02-13T21:45:10.038618"
+    },
+    "HAL": {
+      "signal": 0.9999999943720146,
+      "confidence": 0.9999999805477782,
+      "direction": "STRONG BUY",
+      "strength_pct": 99.99999943720145,
+      "timestamp": "2026-02-13T21:45:10.067264"
+    },
+    "LRCX": {
+      "signal": 0.9999999916963842,
+      "confidence": 0.9999999712791303,
+      "direction": "STRONG BUY",
+      "strength_pct": 99.99999916963841,
+      "timestamp": "2026-02-13T21:45:10.096531"
+    },
+    "COP": {
+      "signal": 0.9999999916963842,
+      "confidence": 0.9999999712791303,
+      "direction": "STRONG BUY",
+      "strength_pct": 99.99999916963841,
+      "timestamp": "2026-02-13T21:45:10.119595"
+    },
+    "VLO": {
+      "signal": 0.9999999943720146,
+      "confidence": 0.9999999805477782,
+      "direction": "STRONG BUY",
+      "strength_pct": 99.99999943720145,
+      "timestamp": "2026-02-13T21:45:10.142821"
+    },
+    "ALB": {
+      "signal": 0.9999999943720146,
+      "confidence": 0.9999999805477782,
+      "direction": "STRONG BUY",
+      "strength_pct": 99.99999943720145,
+      "timestamp": "2026-02-13T21:45:10.167340"
+    },
+    "CAT": {
+      "signal": 0.9999999916963842,
+      "confidence": 0.9999999712791303,
+      "direction": "STRONG BUY",
+      "strength_pct": 99.99999916963841,
+      "timestamp": "2026-02-13T21:45:10.196438"
+    },
+    "NEM": {
+      "signal": 0.9999999916963842,
+      "confidence": 0.9999999712791303,
+      "direction": "STRONG BUY",
+      "strength_pct": 99.99999916963841,
+      "timestamp": "2026-02-13T21:45:10.221678"
+    },
+    "LMT": {
+      "signal": 0.9999999916963842,
+      "confidence": 0.9999999712791303,
+      "direction": "STRONG BUY",
+      "strength_pct": 99.99999916963841,
+      "timestamp": "2026-02-13T21:45:10.249613"
+    },
+    "GS": {
+      "signal": 0.9999999943720146,
+      "confidence": 0.9999999805477782,
+      "direction": "STRONG BUY",
+      "strength_pct": 99.99999943720145,
+      "timestamp": "2026-02-13T21:45:10.277173"
+    },
+    "SLB": {
+      "signal": 0.9999999916963842,
+      "confidence": 0.9999999712791303,
+      "direction": "STRONG BUY",
+      "strength_pct": 99.99999916963841,
+      "timestamp": "2026-02-13T21:45:10.309523"
+    },
+    "CVX": {
+      "signal": 0.9999999943720146,
+      "confidence": 0.9999999805477782,
+      "direction": "STRONG BUY",
+      "strength_pct": 99.99999943720145,
+      "timestamp": "2026-02-13T21:45:10.337402"
+    },
+    "DLTR": {
+      "signal": 0.9999999916963842,
+      "confidence": 0.9999999712791303,
+      "direction": "STRONG BUY",
+      "strength_pct": 99.99999916963841,
+      "timestamp": "2026-02-13T21:45:10.365702"
+    },
+    "ORCL": {
+      "signal": 0.9999999943720146,
+      "confidence": 0.9999999805477782,
+      "direction": "STRONG BUY",
+      "strength_pct": 99.99999943720145,
+      "timestamp": "2026-02-13T21:45:10.393141"
+    }
+  },
+  "daily_pnl": 1081669.91,
+  "total_pnl": 1081669.91,
+  "total_commissions": 0.0,
+  "max_drawdown": 0.0,
+  "sharpe_ratio": 0.0,
+  "win_rate": 0.0,
+  "total_trades": 0,
+  "open_positions": 14,
+  "sector_exposure": {
+    "Energy": 0.3563464277344946,
+    "Technology": 0.1568895363008998,
+    "Materials": 0.13750304791728743,
+    "Industrials": 0.17965153946315782,
+    "Financials": 0.08258526715821761,
+    "Consumer": 0.08702418142594276
+  },
+  "performance_governor": {
+    "tier": "green",
+    "sharpe": 0.0,
+    "sortino": 0.0,
+    "drawdown": 0.0,
+    "sample_count": 0,
+    "size_multiplier": 1.0,
+    "signal_threshold_boost": 0.0,
+    "confidence_boost": 0.0,
+    "halt_new_entries": false,
+    "reasons": [
+      "Warming up: insufficient performance samples"
+    ]
+  },
+  "kill_switch": {
+    "active": false,
+    "triggered_at": null,
+    "reason": "",
+    "drawdown": 0.0,
+    "historical_mdd": 0.08,
+    "sharpe_rolling": 0.0,
+    "flatten_executed": false
+  },
+  "equity_reconciliation": {
+    "block_entries": false,
+    "reason": "not_evaluated"
+  },
+  "performance_attribution": {
+    "lookback_days": 30,
+    "closed_trades": 0,
+    "open_positions_tracked": 0,
+    "gross_pnl": 0.0,
+    "net_pnl": 0.0,
+    "commissions": 0.0,
+    "modeled_execution_drag": 0.0,
+    "modeled_slippage_drag": 0.0,
+    "by_sleeve": {},
+    "by_asset_class": {}
+  },
+  "signal_quality": {}
+}

@@ -1,100 +1,182 @@
-'use client';
+"use client";
 
-import { useState } from 'react';
-import { useRouter } from 'next/navigation';
-import { Button } from '@/components/ui/button';
-import { Input } from '@/components/ui/input';
-import { Label } from '@/components/ui/label';
-import { Card, CardContent, CardDescription, CardFooter, CardHeader, CardTitle } from '@/components/ui/card';
-import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
-import { Lock, User } from 'lucide-react';
+import { useEffect, useState } from "react";
+import { useRouter, useSearchParams } from "next/navigation";
+import Link from "next/link";
+import { ArrowRight, Lock, Moon, Radar, ShieldCheck, Sun, User } from "lucide-react";
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
+import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
+import { useTheme } from "@/components/theme/ThemeProvider";
 
 export default function Login() {
-    const [username, setUsername] = useState('');
-    const [password, setPassword] = useState('');
-    const [error, setError] = useState('');
-    const [loading, setLoading] = useState(false);
-    const router = useRouter();
+  const { theme, toggleTheme } = useTheme();
+  const [mounted, setMounted] = useState(false);
+  const [username, setUsername] = useState("");
+  const [password, setPassword] = useState("");
+  const [error, setError] = useState("");
+  const [loading, setLoading] = useState(false);
+  const router = useRouter();
+  const searchParams = useSearchParams();
+  const reason = searchParams.get("reason");
 
-    const handleLogin = async (e: React.FormEvent) => {
-        e.preventDefault();
-        setLoading(true);
-        setError('');
+  useEffect(() => {
+    setMounted(true);
+  }, []);
 
-        try {
-            const res = await fetch('/api/v1/auth/token', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-                body: new URLSearchParams({ username, password }),
-            });
+  const handleLogin = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setLoading(true);
+    setError("");
 
-            if (!res.ok) {
-                throw new Error('Invalid credentials');
-            }
+    try {
+      const res = await fetch("/api/auth/login", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ username, password }),
+      });
 
-            const data = await res.json();
-            // Store token in cookie for middleware access (simplified)
-            document.cookie = `token=${data.access_token}; path=/; max-age=1800`; // 30 mins
-
-            router.push('/dashboard');
-        } catch (err: any) {
-            setError(err.message);
-        } finally {
-            setLoading(false);
+      if (!res.ok) {
+        const errorBody = await res.json().catch(() => ({})) as { detail?: string; attempts?: string[] };
+        let message = typeof errorBody?.detail === "string" ? errorBody.detail : "Invalid credentials";
+        if (res.status === 503) {
+          const attempts = Array.isArray(errorBody.attempts) ? errorBody.attempts.join(" | ") : "";
+          message = attempts ? `${message} (${attempts})` : message;
         }
-    };
+        throw new Error(message);
+      }
 
-    return (
-        <div className="flex items-center justify-center min-h-screen bg-slate-50 dark:bg-slate-900">
-            <Card className="w-[350px]">
-                <CardHeader>
-                    <CardTitle>Apex Trading</CardTitle>
-                    <CardDescription>Enter your credentials to access the terminal.</CardDescription>
-                </CardHeader>
-                <form onSubmit={handleLogin}>
-                    <CardContent className="space-y-4">
-                        {error && (
-                            <Alert variant="destructive">
-                                <AlertTitle>Error</AlertTitle>
-                                <AlertDescription>{error}</AlertDescription>
-                            </Alert>
-                        )}
-                        <div className="space-y-2">
-                            <Label htmlFor="username">Username</Label>
-                            <div className="relative">
-                                <User className="absolute left-2 top-2.5 h-4 w-4 text-muted-foreground" />
-                                <Input
-                                    id="username"
-                                    placeholder="admin"
-                                    className="pl-8"
-                                    value={username}
-                                    onChange={(e) => setUsername(e.target.value)}
-                                    required
-                                />
-                            </div>
-                        </div>
-                        <div className="space-y-2">
-                            <Label htmlFor="password">Password</Label>
-                            <div className="relative">
-                                <Lock className="absolute left-2 top-2.5 h-4 w-4 text-muted-foreground" />
-                                <Input
-                                    id="password"
-                                    type="password"
-                                    className="pl-8"
-                                    value={password}
-                                    onChange={(e) => setPassword(e.target.value)}
-                                    required
-                                />
-                            </div>
-                        </div>
-                    </CardContent>
-                    <CardFooter>
-                        <Button type="submit" className="w-full" disabled={loading}>
-                            {loading ? 'Authenticating...' : 'Login'}
-                        </Button>
-                    </CardFooter>
-                </form>
-            </Card>
-        </div>
-    );
+      const data = await res.json();
+      document.cookie = `token=${data.access_token}; path=/; max-age=1800; samesite=lax`;
+      router.push("/dashboard");
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : "Login failed";
+      setError(message);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  return (
+    <main className="apex-shell min-h-screen px-4 py-6 sm:px-6 lg:px-10">
+      <div className="mx-auto grid w-full max-w-6xl gap-6 lg:grid-cols-[1.2fr_0.8fr]">
+        <section className="apex-panel apex-fade-up hidden min-h-[560px] rounded-3xl p-8 lg:flex lg:flex-col lg:justify-between">
+          <header className="space-y-4">
+            <p className="inline-flex items-center gap-2 rounded-full bg-primary/10 px-3 py-1 text-xs font-semibold tracking-wide text-primary">
+              <Radar className="h-3.5 w-3.5" />
+              APEX Trading Command
+            </p>
+            <h1 className="max-w-xl text-4xl font-semibold leading-tight text-foreground">
+              Institutional execution monitoring with hardened risk controls.
+            </h1>
+            <p className="max-w-lg text-base text-muted-foreground">
+              Review live exposure, governor behavior, and reconciliation health from a single operational console.
+            </p>
+          </header>
+          <div className="grid grid-cols-2 gap-3">
+            <div className="rounded-2xl border border-border/80 bg-background/70 p-4">
+              <p className="text-xs font-medium uppercase tracking-wider text-muted-foreground">Execution</p>
+              <p className="mt-2 text-lg font-semibold text-foreground">Spread and slippage gates active</p>
+            </div>
+            <div className="rounded-2xl border border-border/80 bg-background/70 p-4">
+              <p className="text-xs font-medium uppercase tracking-wider text-muted-foreground">Risk</p>
+              <p className="mt-2 text-lg font-semibold text-foreground">Kill-switch and reconciliation latch guarded</p>
+            </div>
+          </div>
+        </section>
+
+        <section className="apex-panel apex-fade-up rounded-3xl p-6 sm:p-8">
+          <div className="mb-5 flex justify-end">
+            <Button
+              type="button"
+              variant="outline"
+              className="rounded-xl"
+              onClick={toggleTheme}
+              aria-label={
+                !mounted
+                  ? "Toggle theme"
+                  : theme === "dark"
+                    ? "Switch to light mode"
+                    : "Switch to dark mode"
+              }
+            >
+              {!mounted ? <Moon className="h-4 w-4" /> : theme === "dark" ? <Sun className="h-4 w-4" /> : <Moon className="h-4 w-4" />}
+              {!mounted ? "Theme" : theme === "dark" ? "Light" : "Dark"}
+            </Button>
+          </div>
+          <div className="mb-8 space-y-3">
+            <p className="inline-flex items-center gap-2 rounded-full bg-accent px-3 py-1 text-xs font-semibold tracking-wide text-accent-foreground">
+              <ShieldCheck className="h-3.5 w-3.5" />
+              Secure Operator Login
+            </p>
+            <h2 className="text-3xl font-semibold tracking-tight text-foreground">Sign in to APEX</h2>
+            <p className="text-sm text-muted-foreground">
+              Use your assigned admin credentials to access the trading dashboard.
+            </p>
+            <p className="text-xs text-muted-foreground">
+              Need plan details first?{" "}
+              <Link href="/pricing" className="font-semibold text-primary hover:underline">
+                View pricing
+              </Link>
+            </p>
+          </div>
+
+          <form className="space-y-4" onSubmit={handleLogin} aria-label="APEX admin login form">
+            {reason === "session_expired" ? (
+              <Alert>
+                <AlertTitle>Session expired</AlertTitle>
+                <AlertDescription>Please sign in again to continue.</AlertDescription>
+              </Alert>
+            ) : null}
+            {error && (
+              <Alert variant="destructive">
+                <AlertTitle>Authentication failed</AlertTitle>
+                <AlertDescription>{error}</AlertDescription>
+              </Alert>
+            )}
+
+            <div className="space-y-2">
+              <Label htmlFor="username">Username</Label>
+              <div className="relative">
+                <User className="pointer-events-none absolute left-3 top-2.5 h-4 w-4 text-muted-foreground" />
+                <Input
+                  id="username"
+                  aria-label="Username"
+                  autoComplete="username"
+                  placeholder="admin"
+                  className="h-11 rounded-xl pl-10"
+                  value={username}
+                  onChange={(e) => setUsername(e.target.value)}
+                  required
+                />
+              </div>
+            </div>
+
+            <div className="space-y-2">
+              <Label htmlFor="password">Password</Label>
+              <div className="relative">
+                <Lock className="pointer-events-none absolute left-3 top-2.5 h-4 w-4 text-muted-foreground" />
+                <Input
+                  id="password"
+                  aria-label="Password"
+                  autoComplete="current-password"
+                  type="password"
+                  className="h-11 rounded-xl pl-10"
+                  value={password}
+                  onChange={(e) => setPassword(e.target.value)}
+                  required
+                />
+              </div>
+            </div>
+
+            <Button type="submit" className="h-11 w-full rounded-xl text-sm font-semibold" disabled={loading}>
+              {loading ? "Authenticating..." : "Log In"}
+              {!loading ? <ArrowRight className="h-4 w-4" /> : null}
+            </Button>
+          </form>
+        </section>
+      </div>
+    </main>
+  );
 }

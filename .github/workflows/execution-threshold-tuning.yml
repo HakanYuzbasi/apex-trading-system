@@ -1,0 +1,53 @@
+name: Execution Threshold Tuning
+
+on:
+  schedule:
+    - cron: "15 6 * * *"
+  workflow_dispatch:
+
+jobs:
+  tune-execution-thresholds:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install tuner dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install numpy
+
+      - name: Run daily execution tuner
+        run: |
+          python scripts/tune_execution_thresholds.py \
+            --log-dir logs \
+            --attribution-file data/performance_attribution.json \
+            --lookback-days 28 \
+            --env-file .env.example \
+            --write-overrides artifacts/execution_threshold_overrides.env \
+            --write-diff artifacts/execution_thresholds.env.diff \
+            --write-report artifacts/execution_thresholds_report.md
+
+      - name: Publish approval package
+        uses: actions/upload-artifact@v4
+        with:
+          name: execution-threshold-tuning
+          path: artifacts/
+
+      - name: Add workflow summary
+        run: |
+          echo "## Execution Threshold Tuning" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "Generated artifacts:" >> "$GITHUB_STEP_SUMMARY"
+          echo "- artifacts/execution_thresholds_report.md" >> "$GITHUB_STEP_SUMMARY"
+          echo "- artifacts/execution_thresholds.env.diff" >> "$GITHUB_STEP_SUMMARY"
+          echo "- artifacts/execution_threshold_overrides.env" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "Manual approval is required before applying any recommended env changes." >> "$GITHUB_STEP_SUMMARY"
+          echo "Lookback calibration window: 28 days (2-4 week target)." >> "$GITHUB_STEP_SUMMARY"

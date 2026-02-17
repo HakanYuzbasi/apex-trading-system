@@ -1,0 +1,78 @@
+{
+  "policy_type": "social_shock",
+  "version": "sshock-20260217081520",
+  "created_at": "2026-02-17T08:15:20.983315",
+  "metadata": {
+    "source": "no_data_fallback"
+  },
+  "policies": [
+    {
+      "asset_class": "GLOBAL",
+      "regime": "default",
+      "version": "sshock-20260217081520",
+      "reduce_threshold": 0.6,
+      "block_threshold": 0.85,
+      "verified_event_weight": 0.3,
+      "verified_event_probability_floor": 0.55,
+      "max_probability_divergence": 0.15,
+      "max_source_disagreement": 0.2,
+      "min_independent_sources": 2,
+      "minimum_market_probability": 0.05,
+      "created_at": "2026-02-17T08:15:20.983211",
+      "metadata": {
+        "source": "config_default_bootstrap"
+      }
+    },
+    {
+      "asset_class": "EQUITY",
+      "regime": "default",
+      "version": "sshock-20260217081520",
+      "reduce_threshold": 0.6,
+      "block_threshold": 0.85,
+      "verified_event_weight": 0.3,
+      "verified_event_probability_floor": 0.55,
+      "max_probability_divergence": 0.15,
+      "max_source_disagreement": 0.2,
+      "min_independent_sources": 2,
+      "minimum_market_probability": 0.05,
+      "created_at": "2026-02-17T08:15:20.983216",
+      "metadata": {
+        "source": "config_default_bootstrap"
+      }
+    },
+    {
+      "asset_class": "FOREX",
+      "regime": "default",
+      "version": "sshock-20260217081520",
+      "reduce_threshold": 0.6,
+      "block_threshold": 0.85,
+      "verified_event_weight": 0.3,
+      "verified_event_probability_floor": 0.55,
+      "max_probability_divergence": 0.15,
+      "max_source_disagreement": 0.2,
+      "min_independent_sources": 2,
+      "minimum_market_probability": 0.05,
+      "created_at": "2026-02-17T08:15:20.983218",
+      "metadata": {
+        "source": "config_default_bootstrap"
+      }
+    },
+    {
+      "asset_class": "CRYPTO",
+      "regime": "default",
+      "version": "sshock-20260217081520",
+      "reduce_threshold": 0.6,
+      "block_threshold": 0.85,
+      "verified_event_weight": 0.3,
+      "verified_event_probability_floor": 0.55,
+      "max_probability_divergence": 0.15,
+      "max_source_disagreement": 0.2,
+      "min_independent_sources": 2,
+      "minimum_market_probability": 0.05,
+      "created_at": "2026-02-17T08:15:20.983220",
+      "metadata": {
+        "source": "config_default_bootstrap"
+      }
+    }
+  ]
+}

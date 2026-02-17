@@ -1,21 +1,68 @@
 {
+  "uid": "apex-governor-risk",
   "title": "APEX Governor & Kill-Switch",
   "schemaVersion": 39,
-  "version": 1,
+  "version": 9,
   "refresh": "10s",
   "panels": [
     {
+      "id": 11,
+      "type": "alertlist",
+      "title": "Execution, Attribution, Edge & Data Quality Alerts (Active)",
+      "gridPos": {
+        "h": 4,
+        "w": 24,
+        "x": 0,
+        "y": 0
+      },
+      "datasource": {
+        "type": "grafana",
+        "uid": "-- Grafana --"
+      },
+      "options": {
+        "viewMode": "list",
+        "groupMode": "default",
+        "maxItems": 20,
+        "sortOrder": 1,
+        "show": "current",
+        "stateFilter": {
+          "firing": true,
+          "pending": true,
+          "error": true,
+          "noData": true,
+          "normal": false,
+          "inactive": false
+        },
+        "alertInstanceLabelFilter": "grafana_rule_uid=~\"apex_exec_spread_gate_rate|apex_exec_slippage_budget_rate|apex_exec_edge_gate_rate|apex_attr_exec_drag_spike_.*|apex_attr_slippage_drag_spike_.*|apex_equity_validation_rejections_incident|apex_equity_reconciliation_gap_blocked|apex_social_risk_sustained_high|apex_social_verification_failures_spike|apex_social_block_latch_prolonged\""
+      }
+    },
+    {
+      "id": 1,
       "type": "timeseries",
       "title": "Governor Tier Level",
-      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 0},
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 4
+      },
       "targets": [
-        {"expr": "apex_governor_tier_level", "legendFormat": "{{asset_class}} {{regime}}"}
+        {
+          "expr": "apex_governor_tier_level",
+          "legendFormat": "{{asset_class}} {{regime}}"
+        }
       ]
     },
     {
+      "id": 2,
       "type": "timeseries",
       "title": "Blocked Entries Rate (5m)",
-      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 0},
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 4
+      },
       "targets": [
         {
           "expr": "sum(rate(apex_governor_blocked_entries_total[5m])) by (asset_class, regime, reason)",
@@ -24,9 +71,15 @@
       ]
     },
     {
+      "id": 3,
       "type": "timeseries",
       "title": "Governor Transitions (1h)",
-      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 8},
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 12
+      },
       "targets": [
         {
           "expr": "sum(increase(apex_governor_transition_total[1h])) by (asset_class, regime, from_tier, to_tier)",
@@ -35,27 +88,359 @@
       ]
     },
     {
+      "id": 4,
       "type": "timeseries",
       "title": "Effective Size Multiplier",
-      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 8},
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 12
+      },
       "targets": [
-        {"expr": "apex_governor_size_multiplier", "legendFormat": "{{asset_class}} {{regime}}"}
+        {
+          "expr": "apex_governor_size_multiplier",
+          "legendFormat": "{{asset_class}} {{regime}}"
+        }
       ]
     },
     {
+      "id": 5,
       "type": "timeseries",
       "title": "Kill-Switch Active",
-      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 16},
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 20
+      },
       "targets": [
-        {"expr": "apex_risk_kill_switch_active", "legendFormat": "kill-switch"}
+        {
+          "expr": "apex_risk_kill_switch_active",
+          "legendFormat": "kill-switch"
+        }
       ]
     },
     {
+      "id": 6,
       "type": "timeseries",
       "title": "Kill-Switch Triggers (24h)",
-      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 16},
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 20
+      },
       "targets": [
-        {"expr": "sum(increase(apex_risk_kill_switch_triggers_total[24h])) by (reason)", "legendFormat": "{{reason}}"}
+        {
+          "expr": "sum(increase(apex_risk_kill_switch_triggers_total[24h])) by (reason)",
+          "legendFormat": "{{reason}}"
+        }
+      ]
+    },
+    {
+      "id": 7,
+      "type": "timeseries",
+      "title": "Execution Spread Gate Blocks Rate (5m)",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 28
+      },
+      "targets": [
+        {
+          "expr": "sum(rate(apex_execution_spread_gate_blocks_total[5m])) by (asset_class, regime)",
+          "legendFormat": "{{asset_class}} {{regime}}"
+        }
+      ]
+    },
+    {
+      "id": 8,
+      "type": "timeseries",
+      "title": "Execution Slippage Budget Blocks Rate (5m)",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 28
+      },
+      "targets": [
+        {
+          "expr": "sum(rate(apex_execution_slippage_budget_blocks_total[5m])) by (asset_class, regime)",
+          "legendFormat": "{{asset_class}} {{regime}}"
+        }
+      ]
+    },
+    {
+      "id": 9,
+      "type": "timeseries",
+      "title": "Top Spread Gate Blockers (24h)",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 36
+      },
+      "targets": [
+        {
+          "expr": "topk(10, sum(increase(apex_execution_spread_gate_blocks_total[24h])) by (asset_class, regime))",
+          "legendFormat": "{{asset_class}} {{regime}}"
+        }
+      ]
+    },
+    {
+      "id": 10,
+      "type": "timeseries",
+      "title": "Top Slippage Budget Blockers (24h)",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 36
+      },
+      "targets": [
+        {
+          "expr": "topk(10, sum(increase(apex_execution_slippage_budget_blocks_total[24h])) by (asset_class, regime))",
+          "legendFormat": "{{asset_class}} {{regime}}"
+        }
+      ]
+    },
+    {
+      "id": 12,
+      "type": "timeseries",
+      "title": "Attribution Net Alpha by Sleeve (30d)",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 44
+      },
+      "targets": [
+        {
+          "expr": "apex_attribution_net_alpha_dollars{lookback_days=\"30\"}",
+          "legendFormat": "{{sleeve}}"
+        }
+      ]
+    },
+    {
+      "id": 13,
+      "type": "timeseries",
+      "title": "Attribution Execution Drag by Sleeve (30d)",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 44
+      },
+      "targets": [
+        {
+          "expr": "apex_attribution_execution_drag_dollars{lookback_days=\"30\"}",
+          "legendFormat": "{{sleeve}}"
+        }
+      ]
+    },
+    {
+      "id": 14,
+      "type": "timeseries",
+      "title": "Attribution Slippage Drag by Sleeve (30d)",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 52
+      },
+      "targets": [
+        {
+          "expr": "apex_attribution_slippage_drag_dollars{lookback_days=\"30\"}",
+          "legendFormat": "{{sleeve}}"
+        }
+      ]
+    },
+    {
+      "id": 15,
+      "type": "timeseries",
+      "title": "Attribution Drag Spend Rate ($/h)",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 52
+      },
+      "targets": [
+        {
+          "expr": "sum(rate(apex_attribution_execution_drag_cumulative_dollars_total[1h])) by (sleeve)",
+          "legendFormat": "exec {{sleeve}}"
+        },
+        {
+          "expr": "sum(rate(apex_attribution_slippage_drag_cumulative_dollars_total[1h])) by (sleeve)",
+          "legendFormat": "slippage {{sleeve}}"
+        }
+      ]
+    },
+    {
+      "id": 16,
+      "type": "timeseries",
+      "title": "Equity Validation Rejections (5m Increase)",
+      "gridPos": {
+        "h": 8,
+        "w": 24,
+        "x": 0,
+        "y": 60
+      },
+      "targets": [
+        {
+          "expr": "sum(increase(apex_equity_validation_rejections_total[5m])) by (reason)",
+          "legendFormat": "{{reason}}"
+        }
+      ]
+    },
+    {
+      "id": 17,
+      "type": "timeseries",
+      "title": "Equity Reconciliation Gap & Block Latch",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 68
+      },
+      "targets": [
+        {
+          "expr": "apex_reconciliation_equity_gap_dollars",
+          "legendFormat": "gap dollars"
+        },
+        {
+          "expr": "apex_reconciliation_equity_gap_percent",
+          "legendFormat": "gap percent"
+        },
+        {
+          "expr": "apex_reconciliation_entry_block_active",
+          "legendFormat": "entry block active"
+        }
+      ]
+    },
+    {
+      "id": 18,
+      "type": "timeseries",
+      "title": "Equity Reconciliation Breaches/Blocks (24h)",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 68
+      },
+      "targets": [
+        {
+          "expr": "sum(increase(apex_reconciliation_equity_breaches_total[24h])) by (reason)",
+          "legendFormat": "breach {{reason}}"
+        },
+        {
+          "expr": "sum(increase(apex_reconciliation_entry_blocks_total[24h])) by (reason)",
+          "legendFormat": "entry block {{reason}}"
+        }
+      ]
+    },
+    {
+      "id": 19,
+      "type": "timeseries",
+      "title": "Execution Edge Gate Blocks Rate (5m)",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 76
+      },
+      "targets": [
+        {
+          "expr": "sum(rate(apex_execution_edge_gate_blocks_total[5m])) by (asset_class, regime)",
+          "legendFormat": "{{asset_class}} {{regime}}"
+        }
+      ]
+    },
+    {
+      "id": 20,
+      "type": "timeseries",
+      "title": "Top Edge Gate Blockers (24h)",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 76
+      },
+      "targets": [
+        {
+          "expr": "topk(10, sum(increase(apex_execution_edge_gate_blocks_total[24h])) by (asset_class, regime))",
+          "legendFormat": "{{asset_class}} {{regime}}"
+        }
+      ]
+    },
+    {
+      "id": 21,
+      "type": "timeseries",
+      "title": "Social Risk Score by Asset/Regime",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 84
+      },
+      "targets": [
+        {
+          "expr": "apex_social_risk_score",
+          "legendFormat": "{{asset_class}} {{regime}}"
+        }
+      ]
+    },
+    {
+      "id": 22,
+      "type": "timeseries",
+      "title": "Social Block Rate (15m, %)",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 84
+      },
+      "targets": [
+        {
+          "expr": "100 * (sum(rate(apex_social_decisions_total{result=\"block\"}[15m])) by (asset_class, regime) / clamp_min(sum(rate(apex_social_decisions_total[15m])) by (asset_class, regime), 1e-6))",
+          "legendFormat": "{{asset_class}} {{regime}}"
+        }
+      ]
+    },
+    {
+      "id": 23,
+      "type": "timeseries",
+      "title": "Verification Failures by Event/Reason (15m)",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 92
+      },
+      "targets": [
+        {
+          "expr": "sum(increase(apex_prediction_market_verification_fail_total[15m])) by (event, reason)",
+          "legendFormat": "{{event}} {{reason}}"
+        }
+      ]
+    },
+    {
+      "id": 24,
+      "type": "timeseries",
+      "title": "Social Block Latch (Avg 15m)",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 92
+      },
+      "targets": [
+        {
+          "expr": "avg_over_time(apex_social_block_entries_active[15m])",
+          "legendFormat": "{{asset_class}} {{regime}}"
+        }
       ]
     }
   ]

@@ -344,3 +344,25 @@ class PerformanceTracker:
             logger.info(f"📊 Restored {len(self.trades)} trades and {len(self.equity_curve)} equity points")
         except Exception as e:
             logger.error(f"Failed to load performance state: {e}")
+
+    def reset_history(self, *, starting_capital: float, reason: str = "manual_reset"):
+        """Reset persisted performance history and seed with a single baseline equity point."""
+        try:
+            capital = float(starting_capital)
+        except Exception:
+            logger.warning("Cannot reset performance history with invalid capital: %s", starting_capital)
+            return
+
+        if capital <= 0:
+            logger.warning("Cannot reset performance history with non-positive capital: %s", capital)
+            return
+
+        self.trades = []
+        self.equity_curve = [(datetime.now().isoformat(), capital)]
+        self.starting_capital = capital
+        self._save_state()
+        logger.warning(
+            "🩹 Performance history reset (%s). Seeded baseline equity: $%.2f",
+            reason,
+            capital,
+        )

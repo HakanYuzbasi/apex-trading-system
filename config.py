@@ -38,15 +38,25 @@ class ApexConfig:
     # ═══════════════════════════════════════════════════════════════
     # TRADING MODE
     # ═══════════════════════════════════════════════════════════════
-    LIVE_TRADING: bool = os.getenv("APEX_LIVE_TRADING", "true").lower() == "true"
+    LIVE_TRADING: bool = os.getenv(
+        "APEX_LIVE_TRADING",
+        os.getenv("LIVE_TRADING", "true"),
+    ).lower() == "true"
 
     # ═══════════════════════════════════════════════════════════════
     # IBKR CONNECTION
     # ═══════════════════════════════════════════════════════════════
-    IBKR_HOST: str = os.getenv("APEX_IBKR_HOST", "127.0.0.1")
-    IBKR_PORT: int = int(os.getenv("APEX_IBKR_PORT", "7497"))  # 7497 = Paper, 7496 = Live
+    IBKR_HOST: str = os.getenv("APEX_IBKR_HOST", os.getenv("IBKR_HOST", "127.0.0.1"))
+    IBKR_PORT: int = int(
+        os.getenv("APEX_IBKR_PORT", os.getenv("IBKR_PORT", "7497"))
+    )  # 7497 = Paper, 7496 = Live
     import random
-    IBKR_CLIENT_ID: int = int(os.getenv("APEX_IBKR_CLIENT_ID", str(random.randint(10, 99))))
+    IBKR_CLIENT_ID: int = int(
+        os.getenv(
+            "APEX_IBKR_CLIENT_ID",
+            os.getenv("IBKR_CLIENT_ID", str(random.randint(10, 99))),
+        )
+    )
     IBKR_FX_EXCHANGE: str = os.getenv("APEX_IBKR_FX_EXCHANGE", "IDEALPRO")
     IBKR_CRYPTO_EXCHANGE: str = os.getenv("APEX_IBKR_CRYPTO_EXCHANGE", "PAXOS")
 
@@ -124,12 +134,45 @@ class ApexConfig:
     #   ibkr    = IBKR only
     #   alpaca  = Alpaca only (crypto paper trading)
     #   both    = IBKR for equities/forex, Alpaca for crypto (default)
-    BROKER_MODE: str = os.getenv("APEX_484BACKTEST_ONLY484", "both")
+    BROKER_MODE: str = os.getenv(
+        "APEX_BROKER_MODE",
+        os.getenv("BROKER_MODE", os.getenv("APEX_484BACKTEST_ONLY484", "both")),
+    )
+    BROKER_EQUITY_CACHE_TTL_SECONDS: int = int(
+        os.getenv("APEX_BROKER_EQUITY_CACHE_TTL_SECONDS", "900")
+    )
+    BROKER_EQUITY_QUORUM_MIN_BROKERS: int = int(
+        os.getenv("APEX_BROKER_EQUITY_QUORUM_MIN_BROKERS", "1")
+    )
+    # Paper-session startup hygiene: stale persisted state can block trading after restarts.
+    PAPER_STARTUP_RISK_SELF_HEAL_ENABLED: bool = os.getenv(
+        "APEX_PAPER_STARTUP_RISK_SELF_HEAL_ENABLED", "true"
+    ).lower() == "true"
+    PAPER_STARTUP_RISK_MISMATCH_RATIO: float = float(
+        os.getenv("APEX_PAPER_STARTUP_RISK_MISMATCH_RATIO", "0.30")
+    )
+    PAPER_STARTUP_RESET_CIRCUIT_BREAKER: bool = os.getenv(
+        "APEX_PAPER_STARTUP_RESET_CIRCUIT_BREAKER", "true"
+    ).lower() == "true"
+    PAPER_STARTUP_PERFORMANCE_REBASE_ENABLED: bool = os.getenv(
+        "APEX_PAPER_STARTUP_PERFORMANCE_REBASE_ENABLED", "true"
+    ).lower() == "true"
+    PAPER_STARTUP_PERFORMANCE_REBASE_RATIO: float = float(
+        os.getenv("APEX_PAPER_STARTUP_PERFORMANCE_REBASE_RATIO", "0.30")
+    )
+    UNIFIED_LATCH_RESET_REBASE_RISK_BASELINES: bool = os.getenv(
+        "APEX_UNIFIED_LATCH_RESET_REBASE_RISK_BASELINES", "true"
+    ).lower() == "true"
+    UNIFIED_LATCH_RESET_REBASE_PERFORMANCE: bool = os.getenv(
+        "APEX_UNIFIED_LATCH_RESET_REBASE_PERFORMANCE", "true"
+    ).lower() == "true"
 
     # ═══════════════════════════════════════════════════════════════
     # CAPITAL & POSITION SIZING
     # ═══════════════════════════════════════════════════════════════
-    INITIAL_CAPITAL: int = int(os.getenv("APEX_INITIAL_CAPITAL", "1100000"))
+    INITIAL_CAPITAL: int = int(
+        os.getenv("APEX_INITIAL_CAPITAL", os.getenv("INITIAL_CAPITAL", "1100000"))
+    )
     POSITION_SIZE_USD = 20_000  # $20K per position (~1.8% of capital)
     MAX_POSITIONS = 40  # Increased from 15 for better capital utilization
     MAX_SHARES_PER_POSITION = 500  # Cap max shares per position
@@ -141,6 +184,36 @@ class ApexConfig:
     MAX_DAILY_LOSS = 0.03  # 3% max daily loss (Moderate risk profile)
     MAX_DRAWDOWN = 0.10  # 10% max drawdown
     MAX_SECTOR_EXPOSURE = 0.20  # 20% max per sector for proper diversification (was 0.50)
+    EQUITY_OUTLIER_GUARD_ENABLED: bool = os.getenv(
+        "APEX_EQUITY_OUTLIER_GUARD_ENABLED", "true"
+    ).lower() == "true"
+    EQUITY_OUTLIER_MAX_STEP_MOVE_PCT: float = float(
+        os.getenv("APEX_EQUITY_OUTLIER_MAX_STEP_MOVE_PCT", "0.25")
+    )
+    EQUITY_OUTLIER_CONFIRM_SAMPLES: int = int(
+        os.getenv("APEX_EQUITY_OUTLIER_CONFIRM_SAMPLES", "3")
+    )
+    EQUITY_OUTLIER_MATCH_TOLERANCE_PCT: float = float(
+        os.getenv("APEX_EQUITY_OUTLIER_MATCH_TOLERANCE_PCT", "0.02")
+    )
+    EQUITY_RECONCILIATION_ENABLED: bool = os.getenv(
+        "APEX_EQUITY_RECONCILIATION_ENABLED", "true"
+    ).lower() == "true"
+    EQUITY_RECONCILIATION_MAX_GAP_DOLLARS: float = float(
+        os.getenv("APEX_EQUITY_RECONCILIATION_MAX_GAP_DOLLARS", "20000")
+    )
+    EQUITY_RECONCILIATION_MAX_GAP_PCT: float = float(
+        os.getenv("APEX_EQUITY_RECONCILIATION_MAX_GAP_PCT", "0.015")
+    )
+    EQUITY_RECONCILIATION_BREACH_CONFIRMATIONS: int = int(
+        os.getenv("APEX_EQUITY_RECONCILIATION_BREACH_CONFIRMATIONS", "2")
+    )
+    EQUITY_RECONCILIATION_HEAL_CONFIRMATIONS: int = int(
+        os.getenv("APEX_EQUITY_RECONCILIATION_HEAL_CONFIRMATIONS", "3")
+    )
+    EQUITY_RECONCILIATION_FAIL_CLOSED: bool = os.getenv(
+        "APEX_EQUITY_RECONCILIATION_FAIL_CLOSED", "true"
+    ).lower() == "true"
 
     # Live performance governor (adaptive risk throttling by realized metrics)
     PERFORMANCE_GOVERNOR_ENABLED: bool = os.getenv(
@@ -173,6 +246,82 @@ class ApexConfig:
     KILL_SWITCH_MIN_POINTS: int = int(os.getenv("APEX_KILL_SWITCH_MIN_POINTS", "20"))
     KILL_SWITCH_HISTORICAL_MDD_BASELINE: float = float(
         os.getenv("APEX_KILL_SWITCH_HISTORICAL_MDD_BASELINE", "0.08")
+    )
+
+    # Social-media shock governor (attention/sentiment + verified prediction odds)
+    SOCIAL_SHOCK_GOVERNOR_ENABLED: bool = os.getenv(
+        "APEX_SOCIAL_SHOCK_GOVERNOR_ENABLED", "true"
+    ).lower() == "true"
+    SOCIAL_RISK_ATTENTION_TRIGGER_Z: float = float(
+        os.getenv("APEX_SOCIAL_RISK_ATTENTION_TRIGGER_Z", "1.0")
+    )
+    SOCIAL_RISK_ATTENTION_EXTREME_Z: float = float(
+        os.getenv("APEX_SOCIAL_RISK_ATTENTION_EXTREME_Z", "3.0")
+    )
+    SOCIAL_RISK_NEGATIVE_SENTIMENT_TRIGGER: float = float(
+        os.getenv("APEX_SOCIAL_RISK_NEGATIVE_SENTIMENT_TRIGGER", "-0.35")
+    )
+    SOCIAL_RISK_POSITIVE_SENTIMENT_TRIGGER: float = float(
+        os.getenv("APEX_SOCIAL_RISK_POSITIVE_SENTIMENT_TRIGGER", "0.75")
+    )
+    SOCIAL_RISK_ATTENTION_WEIGHT: float = float(
+        os.getenv("APEX_SOCIAL_RISK_ATTENTION_WEIGHT", "0.60")
+    )
+    SOCIAL_RISK_SENTIMENT_WEIGHT: float = float(
+        os.getenv("APEX_SOCIAL_RISK_SENTIMENT_WEIGHT", "0.40")
+    )
+    SOCIAL_RISK_MIN_PLATFORMS: int = int(
+        os.getenv("APEX_SOCIAL_RISK_MIN_PLATFORMS", "2")
+    )
+    SOCIAL_SHOCK_REDUCE_THRESHOLD: float = float(
+        os.getenv("APEX_SOCIAL_SHOCK_REDUCE_THRESHOLD", "0.60")
+    )
+    SOCIAL_SHOCK_BLOCK_THRESHOLD: float = float(
+        os.getenv("APEX_SOCIAL_SHOCK_BLOCK_THRESHOLD", "0.85")
+    )
+    SOCIAL_SHOCK_MIN_GROSS_MULTIPLIER: float = float(
+        os.getenv("APEX_SOCIAL_SHOCK_MIN_GROSS_MULTIPLIER", "0.35")
+    )
+    SOCIAL_SHOCK_VERIFIED_EVENT_WEIGHT: float = float(
+        os.getenv("APEX_SOCIAL_SHOCK_VERIFIED_EVENT_WEIGHT", "0.30")
+    )
+    SOCIAL_SHOCK_VERIFIED_EVENT_FLOOR: float = float(
+        os.getenv("APEX_SOCIAL_SHOCK_VERIFIED_EVENT_FLOOR", "0.55")
+    )
+    PREDICTION_VERIFY_MIN_SOURCES: int = int(
+        os.getenv("APEX_PREDICTION_VERIFY_MIN_SOURCES", "2")
+    )
+    PREDICTION_VERIFY_MAX_PROB_DIVERGENCE: float = float(
+        os.getenv("APEX_PREDICTION_VERIFY_MAX_PROB_DIVERGENCE", "0.15")
+    )
+    PREDICTION_VERIFY_MAX_SOURCE_DISAGREEMENT: float = float(
+        os.getenv("APEX_PREDICTION_VERIFY_MAX_SOURCE_DISAGREEMENT", "0.20")
+    )
+    PREDICTION_VERIFY_MIN_MARKET_PROB: float = float(
+        os.getenv("APEX_PREDICTION_VERIFY_MIN_MARKET_PROB", "0.05")
+    )
+
+    # Institutional pre-trade hard-limit gateway (fat-finger/leverage/ADV)
+    PRETRADE_GATEWAY_ENABLED: bool = os.getenv(
+        "APEX_PRETRADE_GATEWAY_ENABLED", "true"
+    ).lower() == "true"
+    PRETRADE_GATEWAY_FAIL_CLOSED: bool = os.getenv(
+        "APEX_PRETRADE_GATEWAY_FAIL_CLOSED", "true"
+    ).lower() == "true"
+    PRETRADE_MAX_ORDER_NOTIONAL: float = float(
+        os.getenv("APEX_PRETRADE_MAX_ORDER_NOTIONAL", "250000")
+    )
+    PRETRADE_MAX_ORDER_SHARES: int = int(
+        os.getenv("APEX_PRETRADE_MAX_ORDER_SHARES", "10000")
+    )
+    PRETRADE_MAX_PRICE_DEVIATION_BPS: float = float(
+        os.getenv("APEX_PRETRADE_MAX_PRICE_DEVIATION_BPS", "250")
+    )
+    PRETRADE_MAX_PARTICIPATION_RATE: float = float(
+        os.getenv("APEX_PRETRADE_MAX_PARTICIPATION_RATE", "0.10")
+    )
+    PRETRADE_MAX_GROSS_EXPOSURE_RATIO: float = float(
+        os.getenv("APEX_PRETRADE_MAX_GROSS_EXPOSURE_RATIO", "2.0")
     )
 
     # Trading-loop Prometheus metrics exporter
@@ -349,6 +498,47 @@ class ApexConfig:
     EXECUTION_VWAP_THRESHOLD = 200000    # $200K+ uses VWAP
     MAX_ACCEPTABLE_SLIPPAGE_BPS = 15     # Flag symbols with avg slippage > 15bps
     CRITICAL_SLIPPAGE_BPS = 30           # Reduce size 20% above this
+    EXECUTION_SLIPPAGE_BUDGET_BPS: float = float(
+        os.getenv("APEX_EXECUTION_SLIPPAGE_BUDGET_BPS", "250")
+    )
+    # Tuned from recent live fill logs (crypto-heavy sample) with conservative priors.
+    EXECUTION_SLIPPAGE_BUDGET_BPS_EQUITY: float = float(
+        os.getenv("APEX_EXECUTION_SLIPPAGE_BUDGET_BPS_EQUITY", "221")
+    )
+    EXECUTION_SLIPPAGE_BUDGET_BPS_FX: float = float(
+        os.getenv("APEX_EXECUTION_SLIPPAGE_BUDGET_BPS_FX", "180")
+    )
+    EXECUTION_SLIPPAGE_BUDGET_BPS_CRYPTO: float = float(
+        os.getenv("APEX_EXECUTION_SLIPPAGE_BUDGET_BPS_CRYPTO", "156")
+    )
+    EXECUTION_SLIPPAGE_BUDGET_WINDOW: int = int(
+        os.getenv("APEX_EXECUTION_SLIPPAGE_BUDGET_WINDOW", "20")
+    )
+    EXECUTION_MAX_SPREAD_BPS_EQUITY: float = float(
+        os.getenv("APEX_EXECUTION_MAX_SPREAD_BPS_EQUITY", "12")
+    )
+    EXECUTION_MAX_SPREAD_BPS_FX: float = float(
+        os.getenv("APEX_EXECUTION_MAX_SPREAD_BPS_FX", "8")
+    )
+    EXECUTION_MAX_SPREAD_BPS_CRYPTO: float = float(
+        os.getenv("APEX_EXECUTION_MAX_SPREAD_BPS_CRYPTO", "26")
+    )
+    EXECUTION_EDGE_GATE_ENABLED: bool = os.getenv(
+        "APEX_EXECUTION_EDGE_GATE_ENABLED",
+        "true",
+    ).strip().lower() == "true"
+    EXECUTION_SIGNAL_TO_EDGE_BPS: float = float(
+        os.getenv("APEX_EXECUTION_SIGNAL_TO_EDGE_BPS", "80")
+    )
+    EXECUTION_MIN_EDGE_OVER_COST_BPS_EQUITY: float = float(
+        os.getenv("APEX_EXECUTION_MIN_EDGE_OVER_COST_BPS_EQUITY", "8")
+    )
+    EXECUTION_MIN_EDGE_OVER_COST_BPS_FX: float = float(
+        os.getenv("APEX_EXECUTION_MIN_EDGE_OVER_COST_BPS_FX", "6")
+    )
+    EXECUTION_MIN_EDGE_OVER_COST_BPS_CRYPTO: float = float(
+        os.getenv("APEX_EXECUTION_MIN_EDGE_OVER_COST_BPS_CRYPTO", "10")
+    )
 
     # ═══════════════════════════════════════════════════════════════
     # SIGNAL FORTRESS PHASE 4 (Macro & Event Risk)
@@ -420,6 +610,9 @@ class ApexConfig:
     OPTIONS_MAX_PORTFOLIO_GAMMA = 500  # Maximum portfolio gamma exposure
     OPTIONS_MAX_OPTIONS_CAPITAL_PCT = 0.10  # Max 10% of capital in options premiums
     OPTIONS_MAX_SINGLE_POSITION_PCT = 0.02  # Max 2% of capital per option position
+    OPTIONS_FAILED_TRADE_RETRY_COOLDOWN_SECONDS: int = int(
+        os.getenv("APEX_OPTIONS_FAILED_TRADE_RETRY_COOLDOWN_SECONDS", "1800")
+    )
 
     # Correlation Management
     MAX_CORRELATION = 0.70  # Max correlation between positions
@@ -709,6 +902,37 @@ def validate_config() -> bool:
     if ApexConfig.KILL_SWITCH_LOGIC.upper() not in {"OR", "AND"}:
         warnings.append(
             f"⚠️  Kill-switch logic ({ApexConfig.KILL_SWITCH_LOGIC}) invalid, expected OR/AND"
+        )
+
+    if ApexConfig.PRETRADE_MAX_ORDER_NOTIONAL <= 0:
+        warnings.append("⚠️  PRETRADE max order notional must be > 0")
+
+    if ApexConfig.PRETRADE_MAX_ORDER_SHARES <= 0:
+        warnings.append("⚠️  PRETRADE max order shares must be > 0")
+
+    if not (0 < ApexConfig.PRETRADE_MAX_PARTICIPATION_RATE <= 1):
+        warnings.append(
+            f"⚠️  PRETRADE max participation ({ApexConfig.PRETRADE_MAX_PARTICIPATION_RATE}) should be in (0,1]"
+        )
+
+    if ApexConfig.PRETRADE_MAX_GROSS_EXPOSURE_RATIO < 1.0:
+        warnings.append(
+            f"⚠️  PRETRADE max gross exposure ratio ({ApexConfig.PRETRADE_MAX_GROSS_EXPOSURE_RATIO}) is very strict"
+        )
+
+    if not (0 < ApexConfig.PAPER_STARTUP_RISK_MISMATCH_RATIO <= 2):
+        warnings.append(
+            f"⚠️  PAPER startup risk mismatch ratio ({ApexConfig.PAPER_STARTUP_RISK_MISMATCH_RATIO}) should be in (0,2]"
+        )
+
+    if not (0 < ApexConfig.PAPER_STARTUP_PERFORMANCE_REBASE_RATIO <= 2):
+        warnings.append(
+            f"⚠️  PAPER startup performance rebase ratio ({ApexConfig.PAPER_STARTUP_PERFORMANCE_REBASE_RATIO}) should be in (0,2]"
+        )
+
+    if ApexConfig.OPTIONS_FAILED_TRADE_RETRY_COOLDOWN_SECONDS < 60:
+        warnings.append(
+            f"⚠️  OPTIONS failed-trade retry cooldown ({ApexConfig.OPTIONS_FAILED_TRADE_RETRY_COOLDOWN_SECONDS}s) is very short"
         )
 
     for warning in warnings:

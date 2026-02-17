@@ -11,12 +11,13 @@ PRODUCTION VERSION - All critical fixes implemented
 """
 
 import asyncio
+import hashlib
 import logging
 import math
 import os
 import random
 from datetime import datetime, timedelta
-from typing import Dict, Optional, List, Tuple
+from typing import Any, Dict, Optional, List, Tuple
 try:
     import pytz
     PYTZ_AVAILABLE = True
@@ -33,11 +34,13 @@ from core.trading_control import (
     read_control_state,
     mark_kill_switch_reset_processed,
     mark_governor_policy_reload_processed,
+    mark_equity_reconciliation_latch_processed,
 )
 from models.advanced_signal_generator import AdvancedSignalGenerator
 from risk.risk_manager import RiskManager
 from portfolio.portfolio_optimizer import PortfolioOptimizer
 from data.market_data import MarketDataFetcher
+from data.social.validator import validate_social_risk_inputs
 from monitoring.performance_tracker import PerformanceTracker
 from monitoring.live_monitor import LiveMonitor
 from config import ApexConfig
@@ -76,6 +79,7 @@ from monitoring.data_quality import DataQualityMonitor
 from risk.dynamic_exit_manager import DynamicExitManager, get_exit_manager, ExitUrgency
 from monitoring.signal_outcome_tracker import SignalOutcomeTracker
 from monitoring.prometheus_metrics import PrometheusMetrics
+from monitoring.performance_attribution import PerformanceAttributionTracker
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # SIGNAL FORTRESS - Multi-Layer Signal Hardening
@@ -94,7 +98,11 @@ from monitoring.signal_decay_shield import SignalDecayShield
 from risk.exit_quality_guard import ExitQualityGuard
 from risk.correlation_cascade_breaker import CorrelationCascadeBreaker, CorrelationRegime
 from risk.drawdown_cascade_breaker import DrawdownCascadeBreaker, DrawdownTier
-from execution.execution_shield import ExecutionShield, Urgency as ExecUrgency
+from execution.execution_shield import (
+    ExecutionShield,
+    ExecutionAlgo,
+    Urgency as ExecUrgency,
+)
 from risk.macro_shield import MacroShield
 from monitoring.data_watchdog import DataWatchdog
 from core.logging_config import setup_logging
@@ -117,6 +125,23 @@ from risk.governor_policy import (
     default_policy_for,
 )
 from risk.kill_switch import KillSwitchConfig, RiskKillSwitch
+from risk.pretrade_risk_gateway import PreTradeLimitConfig, PreTradeRiskGateway
+from risk.equity_outlier_guard import EquityOutlierGuard
+from risk.social_risk_factor import SocialRiskConfig, SocialRiskFactor, SocialRiskSnapshot
+from risk.social_shock_governor import (
+    SocialShockDecision,
+    SocialShockGovernor,
+    SocialShockGovernorConfig,
+)
+from risk.social_governor_policy import SocialGovernorPolicyRepository
+from risk.social_decision_audit import SocialDecisionAuditRepository
+from market.prediction_market_verifier import (
+    PredictionEventInput,
+    PredictionMarketVerificationConfig,
+    PredictionMarketVerificationGate,
+    PredictionVerificationResult,
+)
+from reconciliation.equity_reconciler import EquityReconciler, EquityReconciliationSnapshot
 
 setup_logging(
     level=ApexConfig.LOG_LEVEL,
@@ -290,6 +315,91 @@ class ApexTradingSystem:
                 f"Sharpe{ApexConfig.KILL_SWITCH_SHARPE_WINDOW_DAYS}d<{ApexConfig.KILL_SWITCH_SHARPE_FLOOR:.2f})"
             )
 
+        self.pretrade_gateway = PreTradeRiskGateway(
+            config=PreTradeLimitConfig(
+                enabled=ApexConfig.PRETRADE_GATEWAY_ENABLED,
+                fail_closed=ApexConfig.PRETRADE_GATEWAY_FAIL_CLOSED,
+                max_order_notional=ApexConfig.PRETRADE_MAX_ORDER_NOTIONAL,
+                max_order_shares=ApexConfig.PRETRADE_MAX_ORDER_SHARES,
+                max_price_deviation_bps=ApexConfig.PRETRADE_MAX_PRICE_DEVIATION_BPS,
+                max_participation_rate=ApexConfig.PRETRADE_MAX_PARTICIPATION_RATE,
+                max_gross_exposure_ratio=ApexConfig.PRETRADE_MAX_GROSS_EXPOSURE_RATIO,
+            ),
+            audit_dir=ApexConfig.DATA_DIR / "audit" / "pretrade_gateway",
+        )
+        logger.info(
+            "🧱 Pre-trade gateway %s (notional<=%s, shares<=%s, price_band<=%.0fbps, adv<=%.1f%%, gross<=%.2fx, fail_closed=%s)",
+            "enabled" if self.pretrade_gateway.config.enabled else "disabled",
+            f"${self.pretrade_gateway.config.max_order_notional:,.0f}",
+            self.pretrade_gateway.config.max_order_shares,
+            self.pretrade_gateway.config.max_price_deviation_bps,
+            self.pretrade_gateway.config.max_participation_rate * 100,
+            self.pretrade_gateway.config.max_gross_exposure_ratio,
+            self.pretrade_gateway.config.fail_closed,
+        )
+
+        # Social shock governor (cross-platform sentiment + verified event odds)
+        self.social_risk_factor: Optional[SocialRiskFactor] = None
+        self.social_shock_governor: Optional[SocialShockGovernor] = None
+        self.prediction_market_verifier: Optional[PredictionMarketVerificationGate] = None
+        self._social_policy_repo = SocialGovernorPolicyRepository(
+            ApexConfig.DATA_DIR / "governor_policies"
+        )
+        self._social_policy_version: str = "runtime-default"
+        self._social_active_policies: Dict[Tuple[str, str], object] = {}
+        self._social_audit_repo = SocialDecisionAuditRepository(
+            ApexConfig.DATA_DIR / "audit" / "social_governor_decisions.jsonl"
+        )
+        self._social_input_validation: Dict[str, object] = {}
+        self._social_feed_warning_cache: Dict[Tuple[str, str], List[str]] = {}
+        self._social_feed_path = ApexConfig.DATA_DIR / "social_risk_inputs.json"
+        self._social_inputs_payload: Dict[str, object] = {}
+        self._social_snapshot_cache: Dict[Tuple[str, str], SocialRiskSnapshot] = {}
+        self._social_decision_cache: Dict[Tuple[str, str], SocialShockDecision] = {}
+        self._prediction_results_cache: Dict[Tuple[str, str], List[PredictionVerificationResult]] = {}
+        self._social_policy_version, self._social_active_policies = self._social_policy_repo.load_active()
+        if ApexConfig.SOCIAL_SHOCK_GOVERNOR_ENABLED:
+            self.social_risk_factor = SocialRiskFactor(
+                SocialRiskConfig(
+                    attention_trigger_z=ApexConfig.SOCIAL_RISK_ATTENTION_TRIGGER_Z,
+                    attention_extreme_z=ApexConfig.SOCIAL_RISK_ATTENTION_EXTREME_Z,
+                    negative_sentiment_trigger=ApexConfig.SOCIAL_RISK_NEGATIVE_SENTIMENT_TRIGGER,
+                    positive_sentiment_trigger=ApexConfig.SOCIAL_RISK_POSITIVE_SENTIMENT_TRIGGER,
+                    attention_weight=ApexConfig.SOCIAL_RISK_ATTENTION_WEIGHT,
+                    sentiment_weight=ApexConfig.SOCIAL_RISK_SENTIMENT_WEIGHT,
+                    min_platforms=ApexConfig.SOCIAL_RISK_MIN_PLATFORMS,
+                )
+            )
+            self.social_shock_governor = SocialShockGovernor(
+                SocialShockGovernorConfig(
+                    reduce_threshold=ApexConfig.SOCIAL_SHOCK_REDUCE_THRESHOLD,
+                    block_threshold=ApexConfig.SOCIAL_SHOCK_BLOCK_THRESHOLD,
+                    min_gross_exposure_multiplier=ApexConfig.SOCIAL_SHOCK_MIN_GROSS_MULTIPLIER,
+                    verified_event_weight=ApexConfig.SOCIAL_SHOCK_VERIFIED_EVENT_WEIGHT,
+                    verified_event_probability_floor=ApexConfig.SOCIAL_SHOCK_VERIFIED_EVENT_FLOOR,
+                )
+            )
+            self.prediction_market_verifier = PredictionMarketVerificationGate(
+                PredictionMarketVerificationConfig(
+                    min_independent_sources=ApexConfig.PREDICTION_VERIFY_MIN_SOURCES,
+                    max_probability_divergence=ApexConfig.PREDICTION_VERIFY_MAX_PROB_DIVERGENCE,
+                    max_source_disagreement=ApexConfig.PREDICTION_VERIFY_MAX_SOURCE_DISAGREEMENT,
+                    minimum_market_probability=ApexConfig.PREDICTION_VERIFY_MIN_MARKET_PROB,
+                )
+            )
+            logger.info(
+                "📣 SocialShockGovernor enabled (reduce>=%.2f block>=%.2f, min_gross=%.0f%%)",
+                ApexConfig.SOCIAL_SHOCK_REDUCE_THRESHOLD,
+                ApexConfig.SOCIAL_SHOCK_BLOCK_THRESHOLD,
+                ApexConfig.SOCIAL_SHOCK_MIN_GROSS_MULTIPLIER * 100.0,
+            )
+            if self._social_active_policies:
+                logger.info(
+                    "📣 Loaded active social policy snapshot version=%s (%d scoped policies)",
+                    self._social_policy_version,
+                    len(self._social_active_policies),
+                )
+
         # Trading-loop Prometheus exporter
         if ApexConfig.PROMETHEUS_TRADING_METRICS_ENABLED:
             try:
@@ -341,6 +451,7 @@ class ApexTradingSystem:
         # ✅ Options trader for hedging and income generation
         self.options_trader: Optional[OptionsTrader] = None  # Initialized after IBKR connection
         self.options_positions: Dict[str, dict] = {}  # Track options positions
+        self._options_retry_after: Dict[str, datetime] = {}  # Per-symbol action backoff after failed option order
 
         # ✅ Phase 3.2: GodLevel signal generator for regime detection
         self.god_signal_generator = GodLevelSignalGenerator()
@@ -389,6 +500,10 @@ class ApexTradingSystem:
             data_dir=str(ApexConfig.DATA_DIR),
             lookback_windows=[1, 5, 10, 20],
             target_returns=[0.02, 0.05, 0.10]
+        )
+        self.performance_attribution = PerformanceAttributionTracker(
+            data_dir=ApexConfig.DATA_DIR,
+            max_closed_trades=10_000,
         )
 
         logger.info("✅ SOTA modules initialized (VIX, Momentum, Sentiment, Health, SignalTracker)")
@@ -531,6 +646,13 @@ class ApexTradingSystem:
                 vwap_threshold=ApexConfig.EXECUTION_VWAP_THRESHOLD,
                 max_slippage_bps=ApexConfig.MAX_ACCEPTABLE_SLIPPAGE_BPS,
                 critical_slippage_bps=ApexConfig.CRITICAL_SLIPPAGE_BPS,
+                slippage_budget_bps=ApexConfig.EXECUTION_SLIPPAGE_BUDGET_BPS,
+                slippage_budget_window=ApexConfig.EXECUTION_SLIPPAGE_BUDGET_WINDOW,
+                max_spread_bps=max(
+                    ApexConfig.EXECUTION_MAX_SPREAD_BPS_EQUITY,
+                    ApexConfig.EXECUTION_MAX_SPREAD_BPS_FX,
+                    ApexConfig.EXECUTION_MAX_SPREAD_BPS_CRYPTO,
+                ),
             )
             logger.info("🛡️ Signal Fortress V2: ExecutionShield enabled")
         else:
@@ -621,9 +743,30 @@ class ApexTradingSystem:
         
         # State
         self.capital = ApexConfig.INITIAL_CAPITAL
+        self._last_good_total_equity: float = float(self.capital)
         self.positions: Dict[str, int] = {}  # symbol -> quantity (positive=long, negative=short)
         self.is_running = False
         self._cached_ibkr_positions: Optional[Dict[str, int]] = None  # Cycle-level cache
+        self._broker_equity_cache: Dict[str, Tuple[float, datetime]] = {}
+        self._broker_cash_cache: Dict[str, Tuple[float, datetime]] = {}
+        self._last_good_total_cash: Optional[float] = None
+        self.equity_outlier_guard = EquityOutlierGuard(
+            enabled=ApexConfig.EQUITY_OUTLIER_GUARD_ENABLED,
+            max_step_move_pct=ApexConfig.EQUITY_OUTLIER_MAX_STEP_MOVE_PCT,
+            confirmations_required=ApexConfig.EQUITY_OUTLIER_CONFIRM_SAMPLES,
+            suspect_match_tolerance_pct=ApexConfig.EQUITY_OUTLIER_MATCH_TOLERANCE_PCT,
+        )
+        self.equity_outlier_guard.seed(float(self.capital))
+        self.equity_reconciler = EquityReconciler(
+            enabled=ApexConfig.EQUITY_RECONCILIATION_ENABLED,
+            max_gap_dollars=ApexConfig.EQUITY_RECONCILIATION_MAX_GAP_DOLLARS,
+            max_gap_pct=ApexConfig.EQUITY_RECONCILIATION_MAX_GAP_PCT,
+            breach_confirmations=ApexConfig.EQUITY_RECONCILIATION_BREACH_CONFIRMATIONS,
+            heal_confirmations=ApexConfig.EQUITY_RECONCILIATION_HEAL_CONFIRMATIONS,
+            fail_closed_on_unavailable=ApexConfig.EQUITY_RECONCILIATION_FAIL_CLOSED,
+        )
+        self._equity_reconciliation_snapshot: Optional[EquityReconciliationSnapshot] = None
+        self._equity_reconciliation_block_entries: bool = False
         
         # Cache
         self.price_cache: Dict[str, float] = {}
@@ -668,13 +811,165 @@ class ApexTradingSystem:
         if broker_mode == "both":
             try:
                 parsed = parse_symbol(symbol)
-                if parsed.asset_class == AssetClass.CRYPTO and self.alpaca:
+                if parsed.asset_class == AssetClass.CRYPTO:
                     return self.alpaca
+                # In mixed mode, non-crypto instruments must route via IBKR.
+                # Do not silently fall back to Alpaca, which can cause symbol incompatibility
+                # and fake simulation behavior when IBKR is down.
+                return self.ibkr
             except ValueError:
-                pass
+                return self.ibkr
         if broker_mode == "alpaca":
             return self.alpaca
         return self.ibkr or self.alpaca
+
+    def _is_paper_session(self) -> bool:
+        """Best-effort detection of paper session (IBKR paper port / Alpaca paper URL)."""
+        if self.ibkr and getattr(self.ibkr, "port", None) == 7497:
+            return True
+        alpaca_base = str(getattr(ApexConfig, "ALPACA_BASE_URL", "") or "").lower()
+        if self.alpaca and "paper" in alpaca_base:
+            return True
+        return not bool(getattr(ApexConfig, "LIVE_TRADING", True))
+
+    async def _refresh_capital_from_brokers_for_startup(self):
+        """Refresh startup capital from broker equity before paper-state self-heal."""
+        if not (self.ibkr or self.alpaca):
+            return
+        try:
+            observed_equity = float(await self._get_total_portfolio_value())
+        except Exception as exc:
+            logger.debug("Startup broker equity refresh failed: %s", exc)
+            return
+        if not math.isfinite(observed_equity) or observed_equity <= 0:
+            return
+
+        previous_capital = float(self.capital or 0.0)
+        self.capital = float(observed_equity)
+        self._last_good_total_equity = float(observed_equity)
+        self.equity_outlier_guard.seed(float(observed_equity))
+
+        if previous_capital > 0:
+            drift_ratio = abs(observed_equity - previous_capital) / max(previous_capital, 1e-9)
+            if drift_ratio >= 0.10:
+                logger.warning(
+                    "🧭 Startup broker equity sync adjusted capital from $%.2f to $%.2f (delta=%.2f%%)",
+                    previous_capital,
+                    observed_equity,
+                    drift_ratio * 100.0,
+                )
+
+    def _sanitize_startup_state_for_paper(self):
+        """Auto-heal stale persisted risk/performance state for paper sessions."""
+        if not ApexConfig.PAPER_STARTUP_RISK_SELF_HEAL_ENABLED:
+            return
+        if not self._is_paper_session():
+            return
+
+        try:
+            capital = float(self.capital)
+        except Exception:
+            return
+        if capital <= 0:
+            return
+
+        mismatch_ratio = 0.0
+        if self.risk_manager.starting_capital > 0:
+            mismatch_ratio = abs(self.risk_manager.starting_capital - capital) / max(capital, 1e-9)
+        needs_risk_rebase = (
+            self.risk_manager.starting_capital <= 0
+            or self.risk_manager.peak_capital <= 0
+            or self.risk_manager.day_start_capital <= 0
+            or mismatch_ratio >= ApexConfig.PAPER_STARTUP_RISK_MISMATCH_RATIO
+        )
+
+        if needs_risk_rebase:
+            logger.warning(
+                "🩹 Paper startup risk self-heal: rebasing baselines to $%.2f (old_start=$%.2f old_peak=$%.2f old_day_start=$%.2f mismatch=%.2f%%)",
+                capital,
+                self.risk_manager.starting_capital,
+                self.risk_manager.peak_capital,
+                self.risk_manager.day_start_capital,
+                mismatch_ratio * 100.0,
+            )
+            self.risk_manager.starting_capital = capital
+            self.risk_manager.peak_capital = capital
+            self.risk_manager.day_start_capital = capital
+            self.risk_manager.current_day = datetime.now().strftime('%Y-%m-%d')
+            self._last_good_total_equity = float(capital)
+            drawdown_breaker = getattr(self, "drawdown_breaker", None)
+            if drawdown_breaker:
+                drawdown_breaker.reset_peak(capital)
+                logger.warning(
+                    "🩹 Paper startup risk self-heal: reset DrawdownCascadeBreaker peak to $%.2f",
+                    capital,
+                )
+            if (
+                ApexConfig.PAPER_STARTUP_RESET_CIRCUIT_BREAKER
+                and self.risk_manager.circuit_breaker.is_tripped
+            ):
+                self.risk_manager.circuit_breaker.reset()
+                logger.warning("🩹 Paper startup risk self-heal: cleared persisted circuit breaker latch")
+            self.risk_manager.save_state()
+
+        if ApexConfig.PAPER_STARTUP_PERFORMANCE_REBASE_ENABLED:
+            try:
+                if self.performance_tracker.equity_curve:
+                    first = float(self.performance_tracker.equity_curve[0][1])
+                    perf_mismatch = abs(first - capital) / max(capital, 1e-9)
+                else:
+                    perf_mismatch = 1.0
+            except Exception:
+                perf_mismatch = 1.0
+
+            if perf_mismatch >= ApexConfig.PAPER_STARTUP_PERFORMANCE_REBASE_RATIO:
+                self.performance_tracker.reset_history(
+                    starting_capital=capital,
+                    reason="paper_startup_rebase",
+                )
+
+    def _rebase_latches_after_reset_for_paper(self, requested_by: str, reason: str, reset_notes: List[str]) -> None:
+        """In paper sessions, align risk/performance baselines after manual latch reset."""
+        if not self._is_paper_session():
+            reset_notes.append("paper_rebase=skipped_non_paper")
+            return
+
+        try:
+            baseline = float(self.capital)
+        except Exception:
+            baseline = 0.0
+        if baseline <= 0:
+            baseline = float(self.risk_manager.starting_capital or 0.0)
+        if baseline <= 0:
+            reset_notes.append("paper_rebase=skipped_no_baseline")
+            return
+
+        if ApexConfig.UNIFIED_LATCH_RESET_REBASE_RISK_BASELINES:
+            self.risk_manager.starting_capital = baseline
+            self.risk_manager.peak_capital = baseline
+            self.risk_manager.day_start_capital = baseline
+            self.risk_manager.current_day = datetime.now().strftime("%Y-%m-%d")
+            self._last_good_total_equity = float(baseline)
+            if self.drawdown_breaker:
+                self.drawdown_breaker.reset_peak(baseline)
+            reset_notes.append("paper_risk_rebase=applied")
+            logger.warning(
+                "🩹 Unified latch reset rebased paper risk baselines to $%.2f (requested_by=%s, reason=%s)",
+                baseline,
+                requested_by,
+                reason,
+            )
+        else:
+            reset_notes.append("paper_risk_rebase=disabled")
+
+        if ApexConfig.UNIFIED_LATCH_RESET_REBASE_PERFORMANCE:
+            self.performance_tracker.reset_history(
+                starting_capital=baseline,
+                reason="unified_latch_reset",
+            )
+            reset_notes.append("paper_performance_rebase=applied")
+        else:
+            reset_notes.append("paper_performance_rebase=disabled")
 
     @property
     def position_count(self) -> int:
@@ -760,19 +1055,37 @@ class ApexTradingSystem:
         self.load_price_cache()
         # Connect to IBKR
         if self.ibkr:
-            await self.ibkr.connect()
+            try:
+                await self.ibkr.connect()
+                if self.prometheus_metrics:
+                    self.prometheus_metrics.update_ibkr_status(True)
+            except Exception as ibkr_exc:
+                if self.prometheus_metrics:
+                    self.prometheus_metrics.update_ibkr_status(False)
+                broker_mode = str(getattr(ApexConfig, "BROKER_MODE", "ibkr") or "ibkr").lower()
+                if broker_mode == "both" and self.alpaca:
+                    logger.error("❌ IBKR unavailable in BOTH mode: %s", ibkr_exc)
+                    logger.warning(
+                        "⚠️ Degrading to Alpaca-only session; IBKR symbols will be skipped until IBKR recovers"
+                    )
+                    self.ibkr = None
+                else:
+                    raise
+
+        if self.ibkr:
             ibkr_capital = await self.ibkr.get_portfolio_value()
             if ibkr_capital > 0:
                 self.capital = ibkr_capital
+                self.equity_outlier_guard.seed(float(self.capital))
             else:
                 logger.warning(f"⚠️  IBKR returned ${ibkr_capital:,.2f}, keeping initial capital ${self.capital:,.2f}")
                 self.risk_manager.set_starting_capital(self.capital)
                 self.risk_manager.day_start_capital = self.capital  # ✅ CRITICAL
                 logger.info(f"✅ IBKR Account ${self.capital:,.2f}")
-            
+
             # Load existing positions from IBKR
             await self.sync_positions_with_ibkr()
-            
+
             # ═══════════════════════════════════════════════════════════════
             # PRE-LOAD DATA FOR POSITIONS (Ensures non-zero P&L on startup)
             # ═══════════════════════════════════════════════════════════════
@@ -804,7 +1117,7 @@ class ApexTradingSystem:
                             if not price or price <= 0:
                                 # Fallback 1: Check price cache (loaded from disk)
                                 price = self.price_cache.get(symbol, 0)
-                                
+
                             if not price or price <= 0:
                                 # Fallback 2: Use last candle from historical data
                                 if symbol in self.historical_data and not self.historical_data[symbol].empty:
@@ -813,7 +1126,7 @@ class ApexTradingSystem:
 
                             if price and price > 0:
                                 self.price_cache[symbol] = price
-                                
+
                                 # CRITICAL: Only set entry metadata if NOT already loaded from disk
                                 if symbol in saved_metadata:
                                     meta = saved_metadata[symbol]
@@ -834,7 +1147,7 @@ class ApexTradingSystem:
                                 logger.info(f"   {symbol}: {abs(qty)} shares ({pos_type})")
                         except:
                             logger.info(f"   {symbol}: {abs(qty)} shares ({pos_type})")
-            
+
             # Load pending orders
             await self.refresh_pending_orders()
 
@@ -885,6 +1198,7 @@ class ApexTradingSystem:
             if alpaca_equity > 0 and not self.ibkr:
                 # Only use Alpaca capital when running Alpaca-only mode
                 self.capital = alpaca_equity
+                self.equity_outlier_guard.seed(float(self.capital))
                 self.risk_manager.set_starting_capital(self.capital)
             logger.info(f"Alpaca Account: ${alpaca_equity:,.2f}")
 
@@ -904,6 +1218,12 @@ class ApexTradingSystem:
                 if self.data_watchdog:
                     self.alpaca.set_data_callback(self.data_watchdog.feed_heartbeat)
                 await self.alpaca.stream_quotes(crypto_symbols)
+
+        # Sync startup capital from broker APIs before self-healing persisted paper state.
+        await self._refresh_capital_from_brokers_for_startup()
+
+        # Prevent stale persisted paper state from tripping risk/kill controls at startup.
+        self._sanitize_startup_state_for_paper()
 
         # Pre-load historical data
         logger.info("📥 Loading historical data for ML training...")
@@ -953,6 +1273,9 @@ class ApexTradingSystem:
                     except Exception as e:
                         logger.warning(f"   ⚠️ Could not set stops for {symbol}: {e}")
             logger.info("✅ Position stops initialized")
+
+        # Restore attribution context for any open positions carried across restarts.
+        self._seed_attribution_for_open_positions()
 
         # Train ML models
         logger.info("")
@@ -1118,20 +1441,412 @@ class ApexTradingSystem:
         if self.alpaca:
             await self.sync_positions_with_alpaca()
 
+    async def _read_broker_equity(self, broker_name: str, connector) -> Optional[float]:
+        """Read broker equity and refresh cache on valid updates."""
+        if connector is None:
+            return None
+        try:
+            value = float(await connector.get_portfolio_value())
+        except Exception as exc:
+            logger.debug("Broker equity read failed for %s: %s", broker_name, exc)
+            return None
+        if value > 0:
+            self._broker_equity_cache[broker_name] = (value, datetime.utcnow())
+            return value
+        return None
+
+    async def _read_broker_cash(self, broker_name: str, connector) -> Optional[float]:
+        """Read broker cash and refresh cache on valid updates."""
+        if connector is None or not hasattr(connector, "get_account_cash"):
+            return None
+        try:
+            value = float(await connector.get_account_cash())
+        except Exception as exc:
+            logger.debug("Broker cash read failed for %s: %s", broker_name, exc)
+            return None
+        if math.isfinite(value):
+            self._broker_cash_cache[broker_name] = (value, datetime.utcnow())
+            return value
+        return None
+
+    async def _get_connector_quote(self, connector, symbol: str) -> Dict[str, float]:
+        """Fetch bid/ask quote when connector supports it."""
+        if connector is None or not hasattr(connector, "get_quote"):
+            return {}
+        try:
+            quote = await connector.get_quote(symbol)
+            if isinstance(quote, dict):
+                return quote
+        except Exception as exc:
+            logger.debug("Quote lookup unavailable for %s: %s", symbol, exc)
+        return {}
+
+    def _spread_limit_bps_for_asset(self, asset_class: str) -> float:
+        """Return spread gate threshold by asset class."""
+        normalized = str(asset_class or "EQUITY").upper()
+        if normalized == "FOREX":
+            return float(ApexConfig.EXECUTION_MAX_SPREAD_BPS_FX)
+        if normalized == "CRYPTO":
+            return float(ApexConfig.EXECUTION_MAX_SPREAD_BPS_CRYPTO)
+        return float(ApexConfig.EXECUTION_MAX_SPREAD_BPS_EQUITY)
+
+    def _slippage_budget_bps_for_asset(self, asset_class: str) -> float:
+        """Return slippage budget threshold by asset class."""
+        normalized = str(asset_class or "EQUITY").upper()
+        if normalized == "FOREX":
+            return float(ApexConfig.EXECUTION_SLIPPAGE_BUDGET_BPS_FX)
+        if normalized == "CRYPTO":
+            return float(ApexConfig.EXECUTION_SLIPPAGE_BUDGET_BPS_CRYPTO)
+        return float(ApexConfig.EXECUTION_SLIPPAGE_BUDGET_BPS_EQUITY)
+
+    def _edge_buffer_bps_for_asset(self, asset_class: str) -> float:
+        """Return minimum expected edge-over-cost buffer by asset class."""
+        normalized = str(asset_class or "EQUITY").upper()
+        if normalized == "FOREX":
+            return float(ApexConfig.EXECUTION_MIN_EDGE_OVER_COST_BPS_FX)
+        if normalized == "CRYPTO":
+            return float(ApexConfig.EXECUTION_MIN_EDGE_OVER_COST_BPS_CRYPTO)
+        return float(ApexConfig.EXECUTION_MIN_EDGE_OVER_COST_BPS_EQUITY)
+
+    @staticmethod
+    def _compute_slippage_bps(expected_price: float, fill_price: float) -> float:
+        """Compute absolute slippage in basis points."""
+        try:
+            expected = float(expected_price)
+            fill = float(fill_price)
+        except (TypeError, ValueError):
+            return 0.0
+        if expected <= 0 or fill <= 0:
+            return 0.0
+        return abs(fill - expected) / expected * 10000.0
+
+    def _infer_sleeve(self, symbol: str, asset_class: str) -> str:
+        """Map symbol/asset class to portfolio sleeve for attribution."""
+        normalized_asset = str(asset_class or "EQUITY").upper()
+        symbol_upper = str(symbol or "").upper()
+        if "OPT:" in symbol_upper or symbol_upper.startswith("OPTION:"):
+            return "options_sleeve"
+        if normalized_asset == "FOREX":
+            return "fx_sleeve"
+        if normalized_asset == "CRYPTO":
+            return "crypto_sleeve"
+        return "equities_sleeve"
+
+    def _record_entry_attribution(
+        self,
+        *,
+        symbol: str,
+        asset_class: str,
+        side: str,
+        quantity: float,
+        entry_price: float,
+        entry_signal: float,
+        entry_confidence: float,
+        governor_tier: str,
+        governor_regime: str,
+        risk_multiplier: float,
+        vix_multiplier: float,
+        governor_size_multiplier: float,
+        entry_slippage_bps: float,
+        entry_time: Optional[datetime] = None,
+        source: str = "trade_entry",
+    ) -> None:
+        """Safely record entry attribution context."""
+        try:
+            self.performance_attribution.record_entry(
+                symbol=symbol,
+                asset_class=asset_class,
+                sleeve=self._infer_sleeve(symbol, asset_class),
+                side=side,
+                quantity=abs(float(quantity)),
+                entry_price=float(entry_price),
+                entry_signal=float(entry_signal),
+                entry_confidence=float(entry_confidence),
+                governor_tier=governor_tier,
+                governor_regime=governor_regime,
+                risk_multiplier=float(risk_multiplier),
+                vix_multiplier=float(vix_multiplier),
+                governor_size_multiplier=float(governor_size_multiplier),
+                entry_slippage_bps=float(entry_slippage_bps),
+                entry_time=entry_time,
+                source=source,
+            )
+        except Exception as exc:
+            logger.debug("Attribution entry record skipped for %s: %s", symbol, exc)
+
+    def _record_exit_attribution(
+        self,
+        *,
+        symbol: str,
+        asset_class: str,
+        side: str,
+        quantity: float,
+        entry_price: float,
+        exit_price: float,
+        commissions: float,
+        exit_reason: str,
+        entry_signal: float,
+        entry_confidence: float,
+        governor_tier: str,
+        governor_regime: str,
+        entry_time: Optional[datetime] = None,
+        exit_time: Optional[datetime] = None,
+        exit_slippage_bps: float = 0.0,
+        source: str = "trade_exit",
+    ) -> None:
+        """Safely record closed-trade attribution."""
+        try:
+            qty = abs(float(quantity))
+            entry_px = float(entry_price)
+            exit_px = float(exit_price)
+            comm = float(commissions)
+            is_short = str(side).upper() == "SHORT"
+            sleeve = self._infer_sleeve(symbol, asset_class)
+            entry_ctx = self.performance_attribution.open_positions.get(symbol, {}) or {}
+            entry_slippage_bps_ctx = float(entry_ctx.get("entry_slippage_bps", 0.0) or 0.0)
+            entry_notional = abs(qty * (entry_px if entry_px > 0 else exit_px))
+            exit_notional = abs(qty * exit_px)
+            entry_slippage_cost = entry_notional * abs(entry_slippage_bps_ctx) / 10000.0
+            exit_slippage_cost = exit_notional * abs(float(exit_slippage_bps or 0.0)) / 10000.0
+            slippage_drag = entry_slippage_cost + exit_slippage_cost
+            execution_drag = comm + slippage_drag
+            gross_pnl = (
+                (entry_px - exit_px) * qty
+                if is_short
+                else (exit_px - entry_px) * qty
+            )
+            net_pnl = gross_pnl - comm
+            self.performance_attribution.record_exit(
+                symbol=symbol,
+                quantity=qty,
+                exit_price=exit_px,
+                gross_pnl=gross_pnl,
+                net_pnl=net_pnl,
+                commissions=comm,
+                exit_reason=exit_reason,
+                exit_slippage_bps=float(exit_slippage_bps),
+                asset_class_fallback=asset_class,
+                sleeve_fallback=sleeve,
+                side_fallback=side,
+                entry_price_fallback=entry_px,
+                entry_signal_fallback=float(entry_signal),
+                entry_confidence_fallback=float(entry_confidence),
+                governor_tier_fallback=governor_tier,
+                governor_regime_fallback=governor_regime,
+                entry_time_fallback=entry_time,
+                exit_time=exit_time,
+                source=source,
+            )
+            if self.prometheus_metrics:
+                self.prometheus_metrics.record_attribution_trade(
+                    sleeve=sleeve,
+                    net_alpha=net_pnl,
+                    execution_drag=execution_drag,
+                    slippage_drag=slippage_drag,
+                )
+        except Exception as exc:
+            logger.debug("Attribution exit record skipped for %s: %s", symbol, exc)
+
+    def _seed_attribution_for_open_positions(self) -> None:
+        """Ensure startup-restored open positions are represented in attribution state."""
+        for symbol, qty in self.positions.items():
+            if qty == 0:
+                continue
+            try:
+                asset_class = parse_symbol(symbol).asset_class.value
+            except Exception:
+                asset_class = "EQUITY"
+
+            entry_price = float(self.position_entry_prices.get(symbol, 0.0) or 0.0)
+            if entry_price <= 0:
+                entry_price = float(self.price_cache.get(symbol, 0.0) or 0.0)
+            if entry_price <= 0:
+                hist = self.historical_data.get(symbol)
+                if hist is not None and not hist.empty:
+                    try:
+                        entry_price = float(hist["Close"].iloc[-1])
+                    except Exception:
+                        entry_price = 0.0
+            if entry_price <= 0:
+                continue
+
+            entry_time = self.position_entry_times.get(symbol, datetime.now())
+            entry_signal = float(self.position_entry_signals.get(symbol, 0.5 if qty > 0 else -0.5))
+            side = "LONG" if qty > 0 else "SHORT"
+            governor_regime = self._map_governor_regime(asset_class, self._current_regime)
+            governor_tier = self._performance_snapshot.tier.value if self._performance_snapshot else "green"
+
+            self._record_entry_attribution(
+                symbol=symbol,
+                asset_class=asset_class,
+                side=side,
+                quantity=abs(float(qty)),
+                entry_price=entry_price,
+                entry_signal=entry_signal,
+                entry_confidence=min(1.0, max(0.0, abs(entry_signal))),
+                governor_tier=governor_tier,
+                governor_regime=governor_regime,
+                risk_multiplier=float(self._risk_multiplier),
+                vix_multiplier=float(self._vix_risk_multiplier),
+                governor_size_multiplier=1.0,
+                entry_slippage_bps=0.0,
+                entry_time=entry_time,
+                source="startup_restore",
+            )
+
     async def _get_total_portfolio_value(self) -> float:
-        """Get combined portfolio value across all active brokers."""
-        total = 0.0
+        """Get combined portfolio value across brokers with quorum + cache fallback."""
+        brokers = {}
         if self.ibkr:
-            val = await self.ibkr.get_portfolio_value()
-            if val > 0:
-                total += val
+            brokers["ibkr"] = self.ibkr
         if self.alpaca:
-            val = await self.alpaca.get_portfolio_value()
-            if val > 0:
-                total += val
-        if total <= 0:
-            total = self.capital
-        return total
+            brokers["alpaca"] = self.alpaca
+        if not brokers:
+            return float(self.capital)
+
+        now = datetime.utcnow()
+        stale_seconds = max(
+            1,
+            int(getattr(ApexConfig, "BROKER_EQUITY_CACHE_TTL_SECONDS", 900)),
+        )
+        configured_quorum = max(
+            1,
+            int(getattr(ApexConfig, "BROKER_EQUITY_QUORUM_MIN_BROKERS", 1)),
+        )
+        required_quorum = min(len(brokers), configured_quorum)
+        included_values: Dict[str, float] = {}
+
+        for broker_name, connector in brokers.items():
+            fresh = await self._read_broker_equity(broker_name, connector)
+            if fresh is not None and fresh > 0:
+                included_values[broker_name] = fresh
+                continue
+
+            cached = self._broker_equity_cache.get(broker_name)
+            if not cached:
+                continue
+            cached_value, cached_at = cached
+            age_seconds = (now - cached_at).total_seconds()
+            if cached_value > 0 and age_seconds <= stale_seconds:
+                included_values[broker_name] = cached_value
+                logger.warning(
+                    "⚠️ %s equity unavailable, reusing cached value $%.2f (age=%.0fs)",
+                    broker_name,
+                    cached_value,
+                    age_seconds,
+                )
+
+        if len(included_values) >= required_quorum:
+            total = float(sum(included_values.values()))
+            if total > 0:
+                self._last_good_total_equity = total
+                return total
+
+        if self._last_good_total_equity > 0:
+            logger.warning(
+                "⚠️ Broker equity quorum not met (%d/%d), using last good total $%.2f",
+                len(included_values),
+                required_quorum,
+                self._last_good_total_equity,
+            )
+            return float(self._last_good_total_equity)
+
+        return float(self.capital)
+
+    async def _get_total_account_cash(self) -> Optional[float]:
+        """Get combined cash across active brokers with cache fallback."""
+        brokers = {}
+        if self.ibkr:
+            brokers["ibkr"] = self.ibkr
+        if self.alpaca:
+            brokers["alpaca"] = self.alpaca
+        if not brokers:
+            return None
+
+        now = datetime.utcnow()
+        stale_seconds = max(
+            1,
+            int(getattr(ApexConfig, "BROKER_EQUITY_CACHE_TTL_SECONDS", 900)),
+        )
+        configured_quorum = max(
+            1,
+            int(getattr(ApexConfig, "BROKER_EQUITY_QUORUM_MIN_BROKERS", 1)),
+        )
+        required_quorum = min(len(brokers), configured_quorum)
+        included_values: Dict[str, float] = {}
+
+        for broker_name, connector in brokers.items():
+            fresh = await self._read_broker_cash(broker_name, connector)
+            if fresh is not None:
+                included_values[broker_name] = fresh
+                continue
+
+            cached = self._broker_cash_cache.get(broker_name)
+            if not cached:
+                continue
+            cached_value, cached_at = cached
+            age_seconds = (now - cached_at).total_seconds()
+            if math.isfinite(cached_value) and age_seconds <= stale_seconds:
+                included_values[broker_name] = cached_value
+                logger.warning(
+                    "⚠️ %s cash unavailable, reusing cached value $%.2f (age=%.0fs)",
+                    broker_name,
+                    cached_value,
+                    age_seconds,
+                )
+
+        if len(included_values) >= required_quorum:
+            total_cash = float(sum(included_values.values()))
+            if math.isfinite(total_cash):
+                self._last_good_total_cash = total_cash
+                return total_cash
+
+        if self._last_good_total_cash is not None and math.isfinite(self._last_good_total_cash):
+            logger.warning(
+                "⚠️ Broker cash quorum not met (%d/%d), using last good cash $%.2f",
+                len(included_values),
+                required_quorum,
+                self._last_good_total_cash,
+            )
+            return float(self._last_good_total_cash)
+
+        return None
+
+    def _compute_marked_positions_value(self) -> float:
+        """Compute mark-to-market value of open positions using local pricing."""
+        total = 0.0
+        for symbol, qty in self.positions.items():
+            if qty == 0:
+                continue
+            price = float(self.price_cache.get(symbol, 0.0) or 0.0)
+            if price <= 0:
+                price = float(self.position_entry_prices.get(symbol, 0.0) or 0.0)
+            if price <= 0:
+                continue
+            total += float(qty) * price
+        return float(total)
+
+    async def _evaluate_equity_reconciliation(
+        self,
+        broker_equity: float,
+        observed_at: Optional[datetime] = None,
+    ) -> EquityReconciliationSnapshot:
+        """Reconcile broker equity vs modeled equity and update block latch."""
+        modeled_equity: Optional[float]
+        if self.ibkr or self.alpaca:
+            total_cash = await self._get_total_account_cash()
+            if total_cash is None:
+                modeled_equity = None
+            else:
+                modeled_equity = float(total_cash + self._compute_marked_positions_value())
+        else:
+            modeled_equity = float(broker_equity)
+
+        return self.equity_reconciler.evaluate(
+            broker_equity=float(broker_equity),
+            modeled_equity=modeled_equity,
+            timestamp=observed_at or datetime.now(),
+        )
 
     def calculate_sector_exposure(self) -> Dict[str, float]:
         """Calculate current exposure by sector."""
@@ -1216,6 +1931,390 @@ class ApexTradingSystem:
             return "default"
 
         return "default"
+
+    def _reload_social_inputs(self) -> None:
+        """Refresh social + prediction inputs once per risk cycle."""
+        self._social_snapshot_cache.clear()
+        self._social_decision_cache.clear()
+        self._prediction_results_cache.clear()
+        self._social_feed_warning_cache.clear()
+        self._social_policy_version, self._social_active_policies = self._social_policy_repo.load_active()
+        if not self.social_shock_governor:
+            self._social_inputs_payload = {}
+            self._social_input_validation = {}
+            return
+        if not self._social_feed_path.exists():
+            self._social_inputs_payload = {}
+            self._social_input_validation = {
+                "valid": True,
+                "has_usable_feeds": False,
+                "warnings": [{"code": "missing_social_inputs_file"}],
+            }
+            logger.warning(
+                "⚠️ Social feed file missing (%s). Fail-open mode active for social entry blocking.",
+                self._social_feed_path,
+            )
+            return
+        try:
+            with open(self._social_feed_path, "r", encoding="utf-8") as fh:
+                payload = json.load(fh)
+            payload = payload if isinstance(payload, dict) else {}
+            validation = validate_social_risk_inputs(payload, freshness_sla_seconds=1800)
+            self._social_input_validation = validation.summary()
+            if not validation.valid:
+                logger.warning(
+                    "⚠️ Social feed validation failed (%d errors). Fail-open mode active.",
+                    len(validation.errors),
+                )
+                self._social_inputs_payload = {}
+            else:
+                self._social_inputs_payload = payload
+            if not validation.has_usable_feeds:
+                logger.warning("⚠️ Social feeds unavailable/stale. Fail-open mode active for blocking decisions.")
+        except Exception as exc:
+            logger.warning("⚠️ Social risk input file unreadable (%s): %s", self._social_feed_path, exc)
+            self._social_inputs_payload = {}
+            self._social_input_validation = {
+                "valid": False,
+                "has_usable_feeds": False,
+                "errors": [{"code": "social_file_unreadable", "message": str(exc)}],
+            }
+
+    def _social_platform_signals_for_scope(self, asset_class: str, regime: str) -> Dict[str, Dict[str, float]]:
+        """Resolve platform signals using global -> asset -> regime overrides."""
+        payload = self._social_inputs_payload if isinstance(self._social_inputs_payload, dict) else {}
+        merged: Dict[str, Dict[str, float]] = {}
+        key = (asset_class.upper(), regime.lower())
+        source_map = payload.get("sources", {}) if isinstance(payload.get("sources"), dict) else {}
+        warnings: List[str] = []
+
+        def _source_status(platform: str) -> Tuple[str, List[str]]:
+            source_row = source_map.get(platform, {})
+            if not isinstance(source_row, dict):
+                return "missing", ["source_missing"]
+            quality = source_row.get("quality", {})
+            if not isinstance(quality, dict):
+                return "missing", ["quality_missing"]
+            status = str(quality.get("status", "missing")).lower()
+            flags = quality.get("flags", [])
+            if not isinstance(flags, list):
+                flags = []
+            return status, [str(item) for item in flags]
+
+        def _overlay(raw: Any) -> None:
+            if not isinstance(raw, dict):
+                return
+            for platform, row in raw.items():
+                if not isinstance(row, dict):
+                    continue
+                platform_name = str(platform).upper()
+                source_status, source_flags = _source_status(platform_name)
+                if source_status in {"missing", "stale"}:
+                    warnings.append(f"{platform_name}:{source_status}")
+                    continue
+                try:
+                    confidence = float(row.get("confidence", 1.0) or 1.0)
+                    quality_flags = row.get("quality_flags", [])
+                    if not isinstance(quality_flags, list):
+                        quality_flags = []
+                    all_flags = {str(flag) for flag in quality_flags + source_flags}
+                    if source_status == "degraded":
+                        confidence *= 0.7
+                    if "stale_data" in all_flags:
+                        confidence *= 0.4
+
+                    merged[platform_name] = {
+                        "attention_z": float(row.get("attention_z", 0.0) or 0.0),
+                        "sentiment_score": float(row.get("sentiment_score", 0.0) or 0.0),
+                        "confidence": max(0.0, min(1.0, confidence)),
+                    }
+                except (TypeError, ValueError):
+                    warnings.append(f"{platform_name}:invalid_row")
+                    continue
+
+        _overlay(payload.get("platforms"))
+        asset_block = (payload.get("asset_classes", {}) or {}).get(asset_class.upper(), {})
+        if isinstance(asset_block, dict):
+            _overlay(asset_block.get("platforms"))
+            regime_block = (asset_block.get("regimes", {}) or {}).get(regime, {})
+            if isinstance(regime_block, dict):
+                _overlay(regime_block.get("platforms"))
+
+        if merged:
+            self._social_feed_warning_cache[key] = warnings
+            return merged
+        self._social_feed_warning_cache[key] = list(sorted(set(warnings + ["no_usable_platform_signals"])))
+        return {}
+
+    def _social_policy_for_scope(
+        self,
+        asset_class: str,
+        regime: str,
+    ) -> Tuple[str, SocialShockGovernorConfig, PredictionMarketVerificationConfig]:
+        base_governor = (
+            self.social_shock_governor.config
+            if self.social_shock_governor
+            else SocialShockGovernorConfig()
+        )
+        base_verify = (
+            self.prediction_market_verifier.config
+            if self.prediction_market_verifier
+            else PredictionMarketVerificationConfig()
+        )
+        policy = self._social_policy_repo.resolve(
+            asset_class=asset_class,
+            regime=regime,
+            active_policies=self._social_active_policies,
+        )
+        if not policy:
+            return "runtime-config", base_governor, base_verify
+        return (
+            str(policy.version or self._social_policy_version or "runtime-config"),
+            SocialShockGovernorConfig(
+                reduce_threshold=float(policy.reduce_threshold),
+                block_threshold=float(policy.block_threshold),
+                min_gross_exposure_multiplier=float(base_governor.min_gross_exposure_multiplier),
+                verified_event_weight=float(policy.verified_event_weight),
+                verified_event_probability_floor=float(policy.verified_event_probability_floor),
+            ),
+            PredictionMarketVerificationConfig(
+                min_independent_sources=int(policy.min_independent_sources),
+                max_probability_divergence=float(policy.max_probability_divergence),
+                max_source_disagreement=float(policy.max_source_disagreement),
+                minimum_market_probability=float(policy.minimum_market_probability),
+            ),
+        )
+
+    def _append_social_decision_audit(
+        self,
+        *,
+        asset_class: str,
+        regime: str,
+        policy_version: str,
+        platform_signals: Dict[str, Dict[str, float]],
+        prediction_events: List[PredictionEventInput],
+        prediction_results: List[PredictionVerificationResult],
+        decision: SocialShockDecision,
+    ) -> None:
+        decision_payload = decision.to_dict()
+        decision_hash = hashlib.sha256(
+            json.dumps(decision_payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        ).hexdigest()
+        verified_events = [
+            row.to_dict()
+            for row in prediction_results
+            if bool(row.verified)
+        ]
+        self._social_audit_repo.append_event(
+            {
+                "asset_class": str(asset_class).upper(),
+                "regime": str(regime).lower(),
+                "policy_version": str(policy_version),
+                "decision_hash": decision_hash,
+                "decision": decision_payload,
+                "inputs": {
+                    "platform_signals": platform_signals,
+                    "prediction_events": [event.__dict__ for event in prediction_events],
+                    "input_validation": dict(self._social_input_validation or {}),
+                },
+                "verified_events": verified_events,
+            }
+        )
+
+    def _prediction_events_for_scope(self, asset_class: str, regime: str) -> List[PredictionEventInput]:
+        """Resolve scoped prediction events."""
+        payload = self._social_inputs_payload if isinstance(self._social_inputs_payload, dict) else {}
+        rows: List[Dict[str, Any]] = []
+
+        def _append(raw: Any) -> None:
+            if isinstance(raw, list):
+                for item in raw:
+                    if isinstance(item, dict):
+                        rows.append(item)
+
+        _append(payload.get("prediction_events"))
+        asset_block = (payload.get("asset_classes", {}) or {}).get(asset_class.upper(), {})
+        if isinstance(asset_block, dict):
+            _append(asset_block.get("prediction_events"))
+            regime_block = (asset_block.get("regimes", {}) or {}).get(regime, {})
+            if isinstance(regime_block, dict):
+                _append(regime_block.get("prediction_events"))
+
+        events: List[PredictionEventInput] = []
+        for row in rows:
+            event_id = str(row.get("event_id", "") or "").strip()
+            if not event_id:
+                continue
+            try:
+                events.append(
+                    PredictionEventInput(
+                        event_id=event_id,
+                        market_probability=float(
+                            row.get("market_probability", row.get("polymarket_probability", 0.0)) or 0.0
+                        ),
+                        independent_probability=float(row.get("independent_probability", 0.0) or 0.0),
+                        independent_source_count=int(row.get("independent_source_count", 0) or 0),
+                        max_source_disagreement=float(row.get("max_source_disagreement", 1.0) or 1.0),
+                        direction=str(row.get("direction", "risk_off") or "risk_off").lower(),
+                    )
+                )
+            except (TypeError, ValueError):
+                continue
+        return events
+
+    def _social_decision_for(self, asset_class: str, regime: str) -> Optional[SocialShockDecision]:
+        """Return social shock decision for an asset class + regime key."""
+        if not self.social_risk_factor or not self.social_shock_governor:
+            return None
+
+        key = (asset_class.upper(), regime.lower())
+        if key in self._social_decision_cache:
+            return self._social_decision_cache[key]
+
+        policy_version, governor_cfg, verification_cfg = self._social_policy_for_scope(key[0], key[1])
+        platform_signals = self._social_platform_signals_for_scope(key[0], key[1])
+        snapshot = self.social_risk_factor.evaluate(
+            asset_class=key[0],
+            regime=key[1],
+            platform_signals=platform_signals,
+            observed_at=datetime.now(),
+        )
+        prediction_events = self._prediction_events_for_scope(key[0], key[1])
+        predictions: List[PredictionVerificationResult] = []
+        if self.prediction_market_verifier and prediction_events:
+            verifier = PredictionMarketVerificationGate(config=verification_cfg)
+            for event in prediction_events:
+                predictions.append(verifier.verify(event))
+
+        decision = SocialShockGovernor(config=governor_cfg).evaluate(
+            snapshot,
+            predictions,
+            policy_version=policy_version,
+        )
+        if (not self._social_input_validation.get("has_usable_feeds", False)) and platform_signals == {}:
+            reasons = list(decision.reasons)
+            reasons.append("social_feed_unavailable_fail_open")
+            decision = SocialShockDecision(
+                asset_class=decision.asset_class,
+                regime=decision.regime,
+                policy_version=decision.policy_version,
+                social_risk_score=decision.social_risk_score,
+                combined_risk_score=decision.social_risk_score,
+                gross_exposure_multiplier=1.0,
+                block_new_entries=False,
+                verified_event_probability=0.0,
+                prediction_verification_failures=decision.prediction_verification_failures,
+                reasons=list(dict.fromkeys(reasons)),
+            )
+            logger.warning(
+                "⚠️ %s/%s social decision forced fail-open due to unusable feeds",
+                key[0],
+                key[1],
+            )
+
+        warning_reasons = self._social_feed_warning_cache.get(key, [])
+        if warning_reasons:
+            decision = SocialShockDecision(
+                asset_class=decision.asset_class,
+                regime=decision.regime,
+                policy_version=decision.policy_version,
+                social_risk_score=decision.social_risk_score,
+                combined_risk_score=decision.combined_risk_score,
+                gross_exposure_multiplier=decision.gross_exposure_multiplier,
+                block_new_entries=decision.block_new_entries,
+                verified_event_probability=decision.verified_event_probability,
+                prediction_verification_failures=decision.prediction_verification_failures,
+                reasons=list(dict.fromkeys(decision.reasons + warning_reasons)),
+            )
+        self._social_snapshot_cache[key] = snapshot
+        self._social_decision_cache[key] = decision
+        self._prediction_results_cache[key] = predictions
+        self._append_social_decision_audit(
+            asset_class=key[0],
+            regime=key[1],
+            policy_version=policy_version,
+            platform_signals=platform_signals,
+            prediction_events=prediction_events,
+            prediction_results=predictions,
+            decision=decision,
+        )
+        return decision
+
+    def _apply_social_size_multiplier(
+        self,
+        *,
+        symbol: str,
+        shares: int,
+        decision: Optional[SocialShockDecision],
+        price: Optional[float] = None,
+    ) -> int:
+        """Apply social shock gross-exposure multiplier to requested shares."""
+        if not decision:
+            return shares
+        multiplier = float(decision.gross_exposure_multiplier)
+        if multiplier >= 0.999:
+            return shares
+        adjusted = max(1, int(shares * multiplier))
+        logger.info(
+            "📣 %s: SocialShockGovernor size %.0f%% (%s/%s) -> %d shares",
+            symbol,
+            multiplier * 100.0,
+            decision.asset_class,
+            decision.regime,
+            adjusted,
+        )
+        reduced_notional = max(0.0, float((shares - adjusted) * max(0.0, float(price or 0.0))))
+        if reduced_notional > 0.0:
+            self.performance_attribution.record_social_governor_impact(
+                asset_class=decision.asset_class,
+                regime=decision.regime,
+                blocked_alpha_opportunity=0.0,
+                avoided_drawdown_estimate=reduced_notional * float(decision.combined_risk_score) * 0.012,
+                hedge_cost_drag=reduced_notional * (0.0009 + float(decision.combined_risk_score) * 0.0006),
+                policy_version=decision.policy_version,
+                reason="size_reduction",
+                event_id="",
+            )
+        return adjusted
+
+    def _emit_social_prometheus_metrics(self) -> None:
+        """Publish social risk + verification metrics to Prometheus."""
+        if not self.prometheus_metrics:
+            return
+        for key, decision in self._social_decision_cache.items():
+            snapshot = self._social_snapshot_cache.get(key)
+            if not snapshot:
+                continue
+            self.prometheus_metrics.update_social_risk_state(
+                asset_class=decision.asset_class,
+                regime=decision.regime,
+                social_risk_score=decision.combined_risk_score,
+                attention_z=snapshot.attention_z,
+                sentiment_score=snapshot.sentiment_score,
+                gross_exposure_multiplier=decision.gross_exposure_multiplier,
+                block_new_entries=decision.block_new_entries,
+            )
+            if decision.block_new_entries:
+                result = "block"
+            elif float(decision.gross_exposure_multiplier) < 0.999:
+                result = "reduce"
+            else:
+                result = "normal"
+            self.prometheus_metrics.record_social_decision(
+                asset_class=decision.asset_class,
+                regime=decision.regime,
+                result=result,
+                policy_version=decision.policy_version,
+            )
+            for verification in self._prediction_results_cache.get(key, []):
+                self.prometheus_metrics.update_prediction_verification(
+                    asset_class=decision.asset_class,
+                    regime=decision.regime,
+                    event=verification.event_id,
+                    verified_probability=verification.verified_probability,
+                    verified=verification.verified,
+                    failure_reason=verification.reason,
+                )
 
     def _resolve_governor_controls(
         self,
@@ -1388,39 +2487,65 @@ class ApexTradingSystem:
             requested_by = str(state.get("requested_by") or "unknown")
             request_id = str(state.get("request_id") or "unknown")
             reason = str(state.get("reason") or "")
+            reset_notes: List[str] = []
 
-            if not self.kill_switch:
-                note = "Kill-switch disabled in current runtime"
-                mark_kill_switch_reset_processed(
-                    self._control_commands_file,
-                    processed_by="apex-trader",
-                    note=note,
-                )
-                logger.warning("Control command %s ignored: %s", request_id, note)
-            else:
+            if self.kill_switch:
                 if self.kill_switch.active:
                     self.kill_switch.reset()
-                    note = (
-                        "Kill-switch reset by external command "
-                        f"(requested_by={requested_by}, reason={reason})"
+                    reset_notes.append("kill_switch_reset=applied")
+                    logger.warning(
+                        "🛑 Kill-switch reset by external command (requested_by=%s, reason=%s)",
+                        requested_by,
+                        reason,
                     )
-                    logger.warning("🛑 %s", note)
                 else:
-                    note = f"Kill-switch reset requested while inactive (requested_by={requested_by})"
-                    logger.info("Control command %s: %s", request_id, note)
+                    reset_notes.append("kill_switch_reset=already_inactive")
+            else:
+                reset_notes.append("kill_switch_reset=unavailable")
 
-                mark_kill_switch_reset_processed(
-                    self._control_commands_file,
-                    processed_by="apex-trader",
-                    note=note,
+            cb_reset = False
+            try:
+                cb_reset = self.risk_manager.manual_reset_circuit_breaker(
+                    requested_by=requested_by,
+                    reason=reason or "external_latch_reset",
+                )
+            except Exception as exc:
+                reset_notes.append(f"circuit_breaker_reset=error:{exc}")
+            else:
+                reset_notes.append(
+                    "circuit_breaker_reset=applied" if cb_reset else "circuit_breaker_reset=already_clear"
                 )
 
-                # Keep exported state/metrics consistent immediately.
-                if self.prometheus_metrics:
-                    try:
+            self._rebase_latches_after_reset_for_paper(
+                requested_by=requested_by,
+                reason=reason,
+                reset_notes=reset_notes,
+            )
+
+            note = (
+                "Unified latch reset processed "
+                f"(requested_by={requested_by}, reason={reason}): "
+                + ", ".join(reset_notes)
+            )
+            mark_kill_switch_reset_processed(
+                self._control_commands_file,
+                processed_by="apex-trader",
+                note=note,
+            )
+            self.risk_manager.save_state()
+            logger.warning("Control command %s: %s", request_id, note)
+
+            # Keep exported state/metrics consistent immediately.
+            if self.prometheus_metrics:
+                try:
+                    if self.kill_switch:
                         self.prometheus_metrics.update_kill_switch(active=self.kill_switch.active)
-                    except Exception:
-                        pass
+                    self.prometheus_metrics.update_circuit_breaker(
+                        is_tripped=self.risk_manager.circuit_breaker.is_tripped,
+                    )
+                except Exception:
+                    pass
+            if self.kill_switch:
                 self._kill_switch_last_active = bool(self.kill_switch.active)
 
         if state.get("governor_policy_reload_requested"):
@@ -1448,6 +2573,81 @@ class ApexTradingSystem:
                 processed_by="apex-trader",
                 note=note,
             )
+
+        if state.get("equity_reconciliation_latch_requested"):
+            request_id = str(state.get("equity_reconciliation_latch_request_id") or "unknown")
+            requested_by = str(state.get("equity_reconciliation_latch_requested_by") or "unknown")
+            reason = str(state.get("equity_reconciliation_latch_reason") or "")
+            target_block = bool(state.get("equity_reconciliation_latch_target_block_entries"))
+
+            previous = self._equity_reconciliation_snapshot
+            prev_breached = bool(previous.breached) if previous else False
+
+            if target_block:
+                self.equity_reconciler.block_entries_latch = True
+                self.equity_reconciler.breach_streak = max(
+                    self.equity_reconciler.breach_streak,
+                    self.equity_reconciler.breach_confirmations,
+                )
+                self.equity_reconciler.healthy_streak = 0
+                manual_reason = "manual_force_block"
+            else:
+                self.equity_reconciler.block_entries_latch = False
+                self.equity_reconciler.breach_streak = 0
+                self.equity_reconciler.healthy_streak = max(
+                    self.equity_reconciler.healthy_streak,
+                    self.equity_reconciler.heal_confirmations,
+                )
+                manual_reason = "manual_force_clear"
+
+            base_broker = previous.broker_equity if previous else 0.0
+            base_modeled = previous.modeled_equity if previous else 0.0
+            base_gap_dollars = previous.gap_dollars if previous else 0.0
+            base_gap_pct = previous.gap_pct if previous else 0.0
+            snapshot = EquityReconciliationSnapshot(
+                timestamp=datetime.now(),
+                broker_equity=float(base_broker),
+                modeled_equity=float(base_modeled),
+                gap_dollars=float(base_gap_dollars),
+                gap_pct=float(base_gap_pct),
+                max_gap_dollars=self.equity_reconciler.max_gap_dollars,
+                max_gap_pct=self.equity_reconciler.max_gap_pct,
+                breached=bool(target_block),
+                block_entries=bool(target_block),
+                reason=manual_reason,
+                breach_streak=int(self.equity_reconciler.breach_streak),
+                healthy_streak=int(self.equity_reconciler.healthy_streak),
+            )
+            self.equity_reconciler.last_snapshot = snapshot
+            self._equity_reconciliation_snapshot = snapshot
+            self._equity_reconciliation_block_entries = bool(target_block)
+
+            note = (
+                "Equity reconciliation latch manually set "
+                f"(target_block={target_block}, requested_by={requested_by}, reason={reason})"
+            )
+            logger.warning("🧾 %s", note)
+            mark_equity_reconciliation_latch_processed(
+                self._control_commands_file,
+                processed_by="apex-trader",
+                note=note,
+            )
+            if self.prometheus_metrics:
+                try:
+                    self.prometheus_metrics.update_equity_reconciliation(
+                        broker_equity=snapshot.broker_equity,
+                        modeled_equity=snapshot.modeled_equity,
+                        gap_dollars=snapshot.gap_dollars,
+                        gap_pct=snapshot.gap_pct,
+                        block_entries=snapshot.block_entries,
+                        breach_streak=snapshot.breach_streak,
+                        healthy_streak=snapshot.healthy_streak,
+                        reason=snapshot.reason,
+                        breached=snapshot.breached,
+                        breach_event=bool(snapshot.breached and not prev_breached),
+                    )
+                except Exception as exc:
+                    logger.debug("Failed updating reconciliation metrics for control command %s: %s", request_id, exc)
     
     async def process_symbol(self, symbol: str):
         """Process symbol with all protections including circuit breaker."""
@@ -1481,6 +2681,25 @@ class ApexTradingSystem:
                         reason="kill_switch",
                     )
                 logger.warning("🛑 %s: New entries blocked by kill-switch", symbol)
+                return
+
+        # Equity reconciliation hard block: fail-closed for new entries only.
+        if self._equity_reconciliation_block_entries:
+            existing_qty = self.positions.get(symbol, 0)
+            if existing_qty == 0:
+                if self.prometheus_metrics:
+                    self.prometheus_metrics.record_governor_blocked_entry(
+                        asset_class=asset_class,
+                        regime="default",
+                        reason="equity_reconciliation",
+                    )
+                    reason = (
+                        self._equity_reconciliation_snapshot.reason
+                        if self._equity_reconciliation_snapshot
+                        else "unknown"
+                    )
+                    self.prometheus_metrics.record_equity_reconciliation_entry_block(reason=reason)
+                logger.warning("🧾 %s: New entries blocked by equity reconciliation", symbol)
                 return
 
         # Check 0: Circuit breaker check (use institutional for graduated response)
@@ -1905,12 +3124,56 @@ class ApexTradingSystem:
                         )
 
                         if trade:
+                            exit_fill_price = float(price)
+                            exit_expected_price = float(price)
+                            if isinstance(trade, dict):
+                                exit_fill_price = float(
+                                    trade.get("price", exit_fill_price) or exit_fill_price
+                                )
+                                exit_expected_price = float(
+                                    trade.get("expected_price", exit_expected_price) or exit_expected_price
+                                )
+                            else:
+                                try:
+                                    exit_fill_price = float(
+                                        trade.orderStatus.avgFillPrice or exit_fill_price
+                                    )
+                                except Exception:
+                                    pass
+
                             # ✅ CRITICAL: Force sync after trade
                             await self._sync_positions()
 
                             # Track commission
                             commission = ApexConfig.COMMISSION_PER_TRADE
                             self.total_commissions += commission
+
+                            exit_slippage_bps = self._compute_slippage_bps(
+                                exit_expected_price,
+                                exit_fill_price,
+                            )
+                            side_label = "LONG" if current_pos > 0 else "SHORT"
+                            self._record_exit_attribution(
+                                symbol=symbol,
+                                asset_class=asset_class,
+                                side=side_label,
+                                quantity=abs(current_pos),
+                                entry_price=float(entry_price),
+                                exit_price=float(exit_fill_price),
+                                commissions=float(commission),
+                                exit_reason=exit_reason,
+                                entry_signal=float(entry_signal),
+                                entry_confidence=min(1.0, max(0.0, abs(entry_signal))),
+                                governor_tier=perf_snapshot.tier.value,
+                                governor_regime=self._map_governor_regime(
+                                    asset_class,
+                                    self._current_regime,
+                                ),
+                                entry_time=entry_time,
+                                exit_time=datetime.now(),
+                                exit_slippage_bps=float(exit_slippage_bps),
+                                source="live_exit",
+                            )
 
                             # Clean up tracking
                             if symbol in self.position_entry_prices:
@@ -1956,8 +3219,42 @@ class ApexTradingSystem:
                             if attempts <= 3:
                                 self.last_trade_time[symbol] = datetime.now() - timedelta(seconds=ApexConfig.TRADE_COOLDOWN_SECONDS - 30)
                     else:
+                        if self.ibkr or self.alpaca:
+                            logger.warning(
+                                "⚠️ %s: No eligible connector for exit in broker mode '%s'; keeping position open",
+                                symbol,
+                                str(getattr(ApexConfig, "BROKER_MODE", "ibkr")).lower(),
+                            )
+                            # Allow faster re-check for stuck positions.
+                            self.last_trade_time[symbol] = datetime.now() - timedelta(
+                                seconds=max(30, int(ApexConfig.TRADE_COOLDOWN_SECONDS) - 30)
+                            )
+                            return
+
                         # Simulation mode - close position
                         order_side = 'SELL' if current_pos > 0 else 'BUY'
+                        side_label = "LONG" if current_pos > 0 else "SHORT"
+                        self._record_exit_attribution(
+                            symbol=symbol,
+                            asset_class=asset_class,
+                            side=side_label,
+                            quantity=abs(current_pos),
+                            entry_price=float(entry_price),
+                            exit_price=float(price),
+                            commissions=0.0,
+                            exit_reason=exit_reason,
+                            entry_signal=float(entry_signal),
+                            entry_confidence=min(1.0, max(0.0, abs(entry_signal))),
+                            governor_tier=perf_snapshot.tier.value,
+                            governor_regime=self._map_governor_regime(
+                                asset_class,
+                                self._current_regime,
+                            ),
+                            entry_time=entry_time,
+                            exit_time=datetime.now(),
+                            exit_slippage_bps=0.0,
+                            source="sim_exit",
+                        )
                         if symbol in self.positions:
                             del self.positions[symbol]
                         if symbol in self.position_entry_prices:
@@ -2032,6 +3329,57 @@ class ApexTradingSystem:
                 controls=governor_controls,
                 policy=active_policy,
             )
+            social_decision = self._social_decision_for(asset_class, governor_regime_key)
+            if current_pos == 0 and social_decision and social_decision.block_new_entries:
+                social_block_reason = (
+                    "verified_event_risk"
+                    if social_decision.verified_event_probability > 0
+                    else "social_risk_extreme"
+                )
+                est_notional = float(max(1.0, ApexConfig.POSITION_SIZE_USD))
+                est_alpha_bps = max(0.0, abs(float(signal)) * max(float(confidence), 0.10) * 80.0)
+                blocked_alpha = est_notional * (est_alpha_bps / 10000.0)
+                avoided_dd = est_notional * float(social_decision.combined_risk_score) * 0.015
+                hedge_drag = est_notional * (
+                    0.0006 + float(social_decision.verified_event_probability) * 0.001
+                )
+                event_id = ""
+                for reason in social_decision.reasons:
+                    if str(reason).startswith("prediction_verified:"):
+                        parts = str(reason).split(":")
+                        if len(parts) >= 2:
+                            event_id = parts[1]
+                        break
+                self.performance_attribution.record_social_governor_impact(
+                    asset_class=asset_class,
+                    regime=governor_regime_key,
+                    blocked_alpha_opportunity=blocked_alpha,
+                    avoided_drawdown_estimate=avoided_dd,
+                    hedge_cost_drag=hedge_drag,
+                    policy_version=social_decision.policy_version,
+                    reason=social_block_reason,
+                    event_id=event_id,
+                )
+                if self.prometheus_metrics:
+                    self.prometheus_metrics.record_social_shock_block(
+                        asset_class=asset_class,
+                        regime=governor_regime_key,
+                        reason=social_block_reason,
+                    )
+                    self.prometheus_metrics.record_governor_blocked_entry(
+                        asset_class=asset_class,
+                        regime=governor_regime_key,
+                        reason="social_shock",
+                    )
+                logger.warning(
+                    "📣 %s: Entry blocked by SocialShockGovernor (%s/%s, score=%.2f, reasons=%s)",
+                    symbol,
+                    asset_class,
+                    governor_regime_key,
+                    social_decision.combined_risk_score,
+                    ", ".join(social_decision.reasons[:3]),
+                )
+                return
 
             if current_pos == 0 and governor_controls.halt_new_entries:
                 if self.prometheus_metrics:
@@ -2227,6 +3575,12 @@ class ApexTradingSystem:
                                 f"   🧭 PerformanceGovernor: {governor_controls.size_multiplier:.0%} "
                                 f"size ({perf_snapshot.tier.value}, {governor_regime_key}) → {shares} shares"
                             )
+                        shares = self._apply_social_size_multiplier(
+                            symbol=symbol,
+                            shares=shares,
+                            decision=social_decision,
+                            price=price,
+                        )
 
                         if sizing.constraints:
                             logger.debug(f"   Size constraints: {', '.join(sizing.constraints)}")
@@ -2257,6 +3611,12 @@ class ApexTradingSystem:
                                 f"   🧭 PerformanceGovernor: {governor_controls.size_multiplier:.0%} "
                                 f"size ({perf_snapshot.tier.value}, {governor_regime_key}) → {shares} shares"
                             )
+                        shares = self._apply_social_size_multiplier(
+                            symbol=symbol,
+                            shares=shares,
+                            decision=social_decision,
+                            price=price,
+                        )
 
                         if shares < 1:
                             logger.debug(f"⚠️ {symbol}: Price too high (${price:.2f})")
@@ -2267,13 +3627,143 @@ class ApexTradingSystem:
 
                     # Determine side (long or short)
                     side = 'BUY' if signal > 0 else 'SELL'
+                    entry_connector = self._get_connector_for(symbol)
+
+                    # Institutional pre-trade hard-limit gateway.
+                    reference_price = None
+                    adv_shares = None
+                    try:
+                        if len(prices) > 1:
+                            reference_price = float(prices.iloc[-2])
+                    except Exception:
+                        reference_price = None
+
+                    try:
+                        hist = self.historical_data.get(symbol)
+                        if hist is not None and hasattr(hist, "columns") and "Volume" in hist.columns:
+                            adv_shares = float(pd.to_numeric(hist["Volume"], errors="coerce").tail(20).median())
+                    except Exception:
+                        adv_shares = None
+
+                    try:
+                        positions_for_gate = {
+                            s: q for s, q in self.positions.items()
+                            if s != symbol and q != 0
+                        }
+                        pretrade_decision = self.pretrade_gateway.evaluate_entry(
+                            symbol=symbol,
+                            asset_class=asset_class,
+                            side=side,
+                            quantity=shares,
+                            price=price,
+                            capital=float(self.capital),
+                            current_positions=positions_for_gate,
+                            price_cache=self.price_cache,
+                            reference_price=reference_price,
+                            adv_shares=adv_shares,
+                        )
+                        self.pretrade_gateway.record_decision(
+                            symbol=symbol,
+                            asset_class=asset_class,
+                            side=side,
+                            quantity=shares,
+                            price=price,
+                            decision=pretrade_decision,
+                            actor="apex-trader",
+                        )
+                        if self.prometheus_metrics:
+                            self.prometheus_metrics.record_pretrade_gate_decision(
+                                asset_class=asset_class,
+                                allowed=pretrade_decision.allowed,
+                                reason=pretrade_decision.reason_code,
+                            )
+                        if not pretrade_decision.allowed:
+                            if self.prometheus_metrics:
+                                self.prometheus_metrics.record_governor_blocked_entry(
+                                    asset_class=asset_class,
+                                    regime=governor_regime_key,
+                                    reason=f"pretrade_{pretrade_decision.reason_code}",
+                                )
+                            logger.warning(
+                                "⛔ %s: Pre-trade gateway blocked entry (%s) %s",
+                                symbol,
+                                pretrade_decision.reason_code,
+                                pretrade_decision.message,
+                            )
+                            async with self._position_lock:
+                                if symbol in self.positions:
+                                    del self.positions[symbol]
+                            return
+                    except Exception as pretrade_exc:
+                        logger.error("Pre-trade gateway error for %s: %s", symbol, pretrade_exc)
+                        if self.pretrade_gateway.config.fail_closed:
+                            async with self._position_lock:
+                                if symbol in self.positions:
+                                    del self.positions[symbol]
+                            return
+
+                    # ExecutionShield hard gates: spread gate + slippage budget.
+                    if self.execution_shield:
+                        quote = await self._get_connector_quote(entry_connector, symbol)
+                        bid = float(quote.get("bid", 0.0) or 0.0)
+                        ask = float(quote.get("ask", 0.0) or 0.0)
+                        spread_limit_bps = self._spread_limit_bps_for_asset(asset_class)
+                        slippage_budget_bps = self._slippage_budget_bps_for_asset(asset_class)
+                        edge_buffer_bps = (
+                            self._edge_buffer_bps_for_asset(asset_class)
+                            if ApexConfig.EXECUTION_EDGE_GATE_ENABLED
+                            else 0.0
+                        )
+                        gate_ok, gate_reason = self.execution_shield.can_enter_order(
+                            symbol=symbol,
+                            bid=bid,
+                            ask=ask,
+                            max_spread_bps=spread_limit_bps,
+                            slippage_budget_bps=slippage_budget_bps,
+                            signal_strength=float(signal),
+                            confidence=float(confidence),
+                            min_edge_over_cost_bps=edge_buffer_bps,
+                            signal_to_edge_bps=float(ApexConfig.EXECUTION_SIGNAL_TO_EDGE_BPS),
+                        )
+                        if not gate_ok:
+                            if gate_reason.startswith("spread_gate_blocked"):
+                                block_reason = "execution_spread_gate"
+                            elif gate_reason.startswith("slippage_budget_blocked"):
+                                block_reason = "execution_slippage_budget"
+                            else:
+                                block_reason = "execution_edge_gate"
+                            if self.prometheus_metrics:
+                                self.prometheus_metrics.record_governor_blocked_entry(
+                                    asset_class=asset_class,
+                                    regime=governor_regime_key,
+                                    reason=block_reason,
+                                )
+                                if block_reason == "execution_spread_gate":
+                                    self.prometheus_metrics.record_execution_spread_gate_block(
+                                        asset_class=asset_class,
+                                        regime=governor_regime_key,
+                                    )
+                                elif block_reason == "execution_slippage_budget":
+                                    self.prometheus_metrics.record_execution_slippage_budget_block(
+                                        asset_class=asset_class,
+                                        regime=governor_regime_key,
+                                    )
+                                else:
+                                    self.prometheus_metrics.record_execution_edge_gate_block(
+                                        asset_class=asset_class,
+                                        regime=governor_regime_key,
+                                    )
+                            logger.warning("⛔ %s: Entry blocked by ExecutionShield (%s)", symbol, gate_reason)
+                            async with self._position_lock:
+                                if symbol in self.positions:
+                                    del self.positions[symbol]
+                            return
 
                     logger.info(f"📈 {side} {shares} {symbol} @ ${price:.2f} (${shares*price:,.0f})")
                     logger.info(f"   Signal: {signal:+.3f} | Confidence: {confidence:.3f}")
                     if self.use_institutional:
                         logger.debug(f"   Vol-adjusted: ${sizing.vol_adjusted_size:,.0f} | Corr penalty: {sizing.correlation_penalty:.2f}")
 
-                    entry_connector = self._get_connector_for(symbol)
                     if entry_connector:
                         self.pending_orders.add(symbol)
 
@@ -2308,9 +3798,19 @@ class ApexTradingSystem:
                                 confidence=confidence
                             )
 
+                        fill_price = 0.0
+                        trade_status = "UNKNOWN"
+                        expected_price_for_shield = float(arrival_price)
                         # SOTA: Record execution benchmark if we have a trade
                         if trade:
                             fill_price = trade.get('price', 0) if isinstance(trade, dict) else trade.orderStatus.avgFillPrice
+                            if isinstance(trade, dict):
+                                trade_status = str(trade.get("status", "UNKNOWN")).upper()
+                                expected_price_for_shield = float(
+                                    trade.get("expected_price", expected_price_for_shield) or expected_price_for_shield
+                                )
+                            else:
+                                trade_status = "FILLED"
                             if fill_price > 0:
                                 self.arrival_benchmark.record_execution(
                                     symbol=symbol,
@@ -2325,6 +3825,23 @@ class ApexTradingSystem:
 
                         if trade:
                             trade_success = True
+                            if self.execution_shield and fill_price > 0 and trade_status == "FILLED":
+                                try:
+                                    algo_used = ExecutionAlgo.TWAP if use_advanced else ExecutionAlgo.MARKET
+                                    self.execution_shield.record_execution(
+                                        symbol=symbol,
+                                        expected_price=expected_price_for_shield,
+                                        fill_price=float(fill_price),
+                                        shares=shares,
+                                        algo=algo_used,
+                                        execution_time=(datetime.now() - start_time).total_seconds(),
+                                    )
+                                except Exception as exec_shield_exc:
+                                    logger.debug(
+                                        "ExecutionShield record skipped for %s due to error: %s",
+                                        symbol,
+                                        exec_shield_exc,
+                                    )
                             # ✅ CRITICAL: Force sync after trade
                             await self._sync_positions()
 
@@ -2332,11 +3849,35 @@ class ApexTradingSystem:
                             commission = ApexConfig.COMMISSION_PER_TRADE
                             self.total_commissions += commission
 
+                            entry_ts = datetime.now()
                             self.position_entry_prices[symbol] = price
-                            self.position_entry_times[symbol] = datetime.now()
+                            self.position_entry_times[symbol] = entry_ts
                             self.position_peak_prices[symbol] = price
                             self.position_entry_signals[symbol] = signal  # Track entry signal for dynamic exits
                             self._save_position_metadata()
+
+                            attribution_entry_price = float(fill_price if fill_price > 0 else price)
+                            entry_slippage_bps = self._compute_slippage_bps(
+                                arrival_price,
+                                attribution_entry_price,
+                            )
+                            self._record_entry_attribution(
+                                symbol=symbol,
+                                asset_class=asset_class,
+                                side="LONG" if side == "BUY" else "SHORT",
+                                quantity=abs(float(shares)),
+                                entry_price=attribution_entry_price,
+                                entry_signal=float(signal),
+                                entry_confidence=float(confidence),
+                                governor_tier=perf_snapshot.tier.value,
+                                governor_regime=governor_regime_key,
+                                risk_multiplier=float(self._risk_multiplier),
+                                vix_multiplier=float(self._vix_risk_multiplier),
+                                governor_size_multiplier=float(governor_controls.size_multiplier),
+                                entry_slippage_bps=float(entry_slippage_bps),
+                                entry_time=entry_ts,
+                                source="live_entry",
+                            )
 
                             # ✅ Calculate ATR-based dynamic stops using GodLevelRiskManager
                             if ApexConfig.USE_ATR_STOPS:
@@ -2376,15 +3917,44 @@ class ApexTradingSystem:
                         else:
                             self.pending_orders.discard(symbol)
                     else:
+                        if self.ibkr or self.alpaca:
+                            logger.warning(
+                                "⛔ %s: No eligible connector available in broker mode '%s'; entry blocked",
+                                symbol,
+                                str(getattr(ApexConfig, "BROKER_MODE", "ibkr")).lower(),
+                            )
+                            async with self._position_lock:
+                                if symbol in self.positions:
+                                    del self.positions[symbol]
+                            return
+
                         # Simulation mode - open new position
                         trade_success = True
                         qty = shares if side == 'BUY' else -shares
                         self.positions[symbol] = qty
+                        entry_ts = datetime.now()
                         self.position_entry_prices[symbol] = price
-                        self.position_entry_times[symbol] = datetime.now()
+                        self.position_entry_times[symbol] = entry_ts
                         self.position_peak_prices[symbol] = price
                         self.position_entry_signals[symbol] = signal  # Track entry signal for dynamic exits
                         self._save_position_metadata()
+                        self._record_entry_attribution(
+                            symbol=symbol,
+                            asset_class=asset_class,
+                            side="LONG" if side == "BUY" else "SHORT",
+                            quantity=abs(float(qty)),
+                            entry_price=float(price),
+                            entry_signal=float(signal),
+                            entry_confidence=float(confidence),
+                            governor_tier=perf_snapshot.tier.value,
+                            governor_regime=governor_regime_key,
+                            risk_multiplier=float(self._risk_multiplier),
+                            vix_multiplier=float(self._vix_risk_multiplier),
+                            governor_size_multiplier=float(governor_controls.size_multiplier),
+                            entry_slippage_bps=0.0,
+                            entry_time=entry_ts,
+                            source="sim_entry",
+                        )
 
                         # ✅ Calculate ATR-based dynamic stops using GodLevelRiskManager
                         if ApexConfig.USE_ATR_STOPS:
@@ -2476,14 +4046,68 @@ class ApexTradingSystem:
                 )
 
                 if trade:
+                    try:
+                        asset_class = parse_symbol(symbol).asset_class.value
+                    except Exception:
+                        asset_class = "EQUITY"
+                    side_label = "LONG" if current_pos > 0 else "SHORT"
+                    entry_price = float(self.position_entry_prices.get(symbol, self.price_cache.get(symbol, 0.0)) or 0.0)
+                    if entry_price <= 0:
+                        entry_price = float(self.price_cache.get(symbol, 0.0) or 0.0)
+                    entry_time = self.position_entry_times.get(symbol, datetime.now())
+                    exit_expected_price = float(self.price_cache.get(symbol, entry_price) or entry_price)
+                    exit_fill_price = exit_expected_price
+                    if isinstance(trade, dict):
+                        exit_fill_price = float(
+                            trade.get("price", exit_fill_price) or exit_fill_price
+                        )
+                        exit_expected_price = float(
+                            trade.get("expected_price", exit_expected_price) or exit_expected_price
+                        )
+                    else:
+                        try:
+                            exit_fill_price = float(
+                                trade.orderStatus.avgFillPrice or exit_fill_price
+                            )
+                        except Exception:
+                            pass
+                    exit_slippage_bps = self._compute_slippage_bps(
+                        exit_expected_price,
+                        exit_fill_price,
+                    )
+                    self._record_exit_attribution(
+                        symbol=symbol,
+                        asset_class=asset_class,
+                        side=side_label,
+                        quantity=abs(current_pos),
+                        entry_price=entry_price if entry_price > 0 else exit_fill_price,
+                        exit_price=exit_fill_price,
+                        commissions=float(ApexConfig.COMMISSION_PER_TRADE),
+                        exit_reason=str(info.get("reason", "retry_success")),
+                        entry_signal=float(self.position_entry_signals.get(symbol, 0.0)),
+                        entry_confidence=min(
+                            1.0,
+                            max(0.0, abs(float(self.position_entry_signals.get(symbol, 0.0)))),
+                        ),
+                        governor_tier=self._performance_snapshot.tier.value if self._performance_snapshot else "green",
+                        governor_regime=self._map_governor_regime(asset_class, self._current_regime),
+                        entry_time=entry_time,
+                        exit_time=datetime.now(),
+                        exit_slippage_bps=float(exit_slippage_bps),
+                        source="retry_exit",
+                    )
+
+                    self.total_commissions += ApexConfig.COMMISSION_PER_TRADE
                     await self._sync_positions()
                     logger.info(f"   ✅ {symbol}: Exit retry successful!")
 
                     # Clean up tracking
                     for tracking_dict in [self.position_entry_prices, self.position_entry_times,
-                                          self.position_peak_prices, self.position_stops, self.failed_exits]:
+                                          self.position_peak_prices, self.position_stops,
+                                          self.position_entry_signals, self.failed_exits]:
                         if symbol in tracking_dict:
                             del tracking_dict[symbol]
+                    self._save_position_metadata()
 
                     self.pending_orders.discard(symbol)
                 else:
@@ -2649,6 +4273,10 @@ class ApexTradingSystem:
         try:
             logger.debug("🎯 Checking options opportunities...")
             options_logger.info("event=options_cycle_start positions=%d", len(self.positions))
+            retry_cooldown_seconds = max(
+                60,
+                int(getattr(ApexConfig, "OPTIONS_FAILED_TRADE_RETRY_COOLDOWN_SECONDS", 1800)),
+            )
 
             # Get current stock positions value
             for symbol, qty in self.positions.items():
@@ -2676,35 +4304,49 @@ class ApexTradingSystem:
                     # Check if already hedged
                     hedge_key = f"{symbol}_hedge"
                     if hedge_key not in self.options_positions:
-                        logger.info(f"🛡️ Auto-hedging {symbol}: ${position_value:,.2f} position")
-                        options_logger.info(
-                            "event=options_hedge_attempt symbol=%s qty=%.2f value=%.2f",
-                            symbol,
-                            qty,
-                            position_value,
-                        )
-
-                        result = await self.options_trader.buy_protective_put(
-                            symbol=symbol,
-                            shares=qty,
-                            delta=ApexConfig.OPTIONS_HEDGE_DELTA,
-                            days_to_expiry=ApexConfig.OPTIONS_PREFERRED_DAYS_TO_EXPIRY
-                        )
-
-                        if result:
-                            self.options_positions[hedge_key] = result
-                            logger.info(f"   ✅ Protective put purchased: {result.get('contract', {}).get('strike')} strike")
+                        hedge_retry_key = f"{symbol}:hedge"
+                        hedge_retry_after = self._options_retry_after.get(hedge_retry_key)
+                        if hedge_retry_after and datetime.now() < hedge_retry_after:
                             options_logger.info(
-                                "event=options_hedge_filled symbol=%s qty=%.2f strike=%s",
+                                "event=options_hedge_skip symbol=%s reason=retry_backoff until=%s",
                                 symbol,
-                                qty,
-                                result.get('contract', {}).get('strike'),
+                                hedge_retry_after.isoformat(),
                             )
                         else:
+                            logger.info(f"🛡️ Auto-hedging {symbol}: ${position_value:,.2f} position")
                             options_logger.info(
-                                "event=options_hedge_skip symbol=%s reason=trade_failed",
+                                "event=options_hedge_attempt symbol=%s qty=%.2f value=%.2f",
                                 symbol,
+                                qty,
+                                position_value,
                             )
+
+                            result = await self.options_trader.buy_protective_put(
+                                symbol=symbol,
+                                shares=qty,
+                                delta=ApexConfig.OPTIONS_HEDGE_DELTA,
+                                days_to_expiry=ApexConfig.OPTIONS_PREFERRED_DAYS_TO_EXPIRY
+                            )
+
+                            if result:
+                                self.options_positions[hedge_key] = result
+                                self._options_retry_after.pop(hedge_retry_key, None)
+                                logger.info(f"   ✅ Protective put purchased: {result.get('contract', {}).get('strike')} strike")
+                                options_logger.info(
+                                    "event=options_hedge_filled symbol=%s qty=%.2f strike=%s",
+                                    symbol,
+                                    qty,
+                                    result.get('contract', {}).get('strike'),
+                                )
+                            else:
+                                self._options_retry_after[hedge_retry_key] = datetime.now() + timedelta(
+                                    seconds=retry_cooldown_seconds
+                                )
+                                options_logger.info(
+                                    "event=options_hedge_skip symbol=%s reason=trade_failed retry_after=%s",
+                                    symbol,
+                                    self._options_retry_after[hedge_retry_key].isoformat(),
+                                )
                     else:
                         options_logger.info(
                             "event=options_hedge_skip symbol=%s reason=already_hedged",
@@ -2723,6 +4365,15 @@ class ApexTradingSystem:
                 if ApexConfig.OPTIONS_COVERED_CALLS_ENABLED and qty >= ApexConfig.OPTIONS_MIN_SHARES_FOR_COVERED_CALL:
                     cc_key = f"{symbol}_cc"
                     if cc_key not in self.options_positions:
+                        cc_retry_key = f"{symbol}:covered_call"
+                        cc_retry_after = self._options_retry_after.get(cc_retry_key)
+                        if cc_retry_after and datetime.now() < cc_retry_after:
+                            options_logger.info(
+                                "event=options_cc_skip symbol=%s reason=retry_backoff until=%s",
+                                symbol,
+                                cc_retry_after.isoformat(),
+                            )
+                            continue
                         logger.info(f"💰 Selling covered call on {symbol}: {qty} shares")
                         options_logger.info(
                             "event=options_cc_attempt symbol=%s qty=%.2f",
@@ -2739,6 +4390,7 @@ class ApexTradingSystem:
 
                         if result:
                             self.options_positions[cc_key] = result
+                            self._options_retry_after.pop(cc_retry_key, None)
                             logger.info(f"   ✅ Covered call sold: ${result.get('premium', 0):,.2f} premium")
                             options_logger.info(
                                 "event=options_cc_filled symbol=%s qty=%.2f premium=%.2f",
@@ -2747,9 +4399,13 @@ class ApexTradingSystem:
                                 result.get('premium', 0),
                             )
                         else:
+                            self._options_retry_after[cc_retry_key] = datetime.now() + timedelta(
+                                seconds=retry_cooldown_seconds
+                            )
                             options_logger.info(
-                                "event=options_cc_skip symbol=%s reason=trade_failed",
+                                "event=options_cc_skip symbol=%s reason=trade_failed retry_after=%s",
                                 symbol,
+                                self._options_retry_after[cc_retry_key].isoformat(),
                             )
                     else:
                         options_logger.info(
@@ -2992,6 +4648,57 @@ class ApexTradingSystem:
                         else:  # Short (qty is negative)
                             current_value += float(qty) * float(price)
 
+            equity_decision = self.equity_outlier_guard.evaluate(
+                raw_equity_value=current_value,
+                observed_at=datetime.now(),
+            )
+            if not equity_decision.accepted:
+                logger.warning(
+                    "⚠️ Equity outlier guard rejected sample raw=$%.2f (deviation=%.2f%%, reason=%s, suspect_streak=%d); using filtered=$%.2f",
+                    equity_decision.raw_value,
+                    equity_decision.deviation_pct * 100,
+                    equity_decision.reason,
+                    equity_decision.suspect_count,
+                    equity_decision.filtered_value,
+                )
+            elif equity_decision.reason == "confirmed_large_move":
+                logger.warning(
+                    "✅ Equity outlier guard accepted confirmed large move raw=$%.2f (deviation=%.2f%% after %d confirmations)",
+                    equity_decision.raw_value,
+                    equity_decision.deviation_pct * 100,
+                    equity_decision.suspect_count,
+                )
+            current_value = float(equity_decision.filtered_value)
+
+            previous_recon = self._equity_reconciliation_snapshot
+            recon_snapshot = await self._evaluate_equity_reconciliation(
+                broker_equity=current_value,
+                observed_at=datetime.now(),
+            )
+            self._equity_reconciliation_snapshot = recon_snapshot
+            self._equity_reconciliation_block_entries = bool(recon_snapshot.block_entries)
+
+            previous_block = bool(previous_recon.block_entries) if previous_recon else False
+            if recon_snapshot.block_entries and not previous_block:
+                logger.critical(
+                    "🧾 EQUITY RECONCILIATION BLOCK LATCHED: gap=$%.2f (%.2f%%), reason=%s, breach_streak=%d",
+                    recon_snapshot.gap_dollars,
+                    recon_snapshot.gap_pct * 100,
+                    recon_snapshot.reason,
+                    recon_snapshot.breach_streak,
+                )
+            elif (not recon_snapshot.block_entries) and previous_block:
+                logger.warning(
+                    "✅ Equity reconciliation block cleared: gap=$%.2f (%.2f%%), healthy_streak=%d",
+                    recon_snapshot.gap_dollars,
+                    recon_snapshot.gap_pct * 100,
+                    recon_snapshot.healthy_streak,
+                )
+
+            # Keep baseline/risk state sane when broker APIs temporarily return invalid values.
+            self.risk_manager.heal_baselines(current_capital=current_value, source="check_risk")
+            self.capital = float(current_value)
+
             loss_check = self.risk_manager.check_daily_loss(current_value)
             dd_check = self.risk_manager.check_drawdown(current_value)
             self.performance_tracker.record_equity(current_value)
@@ -3029,6 +4736,12 @@ class ApexTradingSystem:
 
             total_trades = len(self.performance_tracker.trades)
             kill_state = self.kill_switch.update(self.performance_tracker.equity_curve) if self.kill_switch else None
+            attribution_summary = self.performance_attribution.get_summary(lookback_days=30)
+            self._reload_social_inputs()
+            if self.social_shock_governor:
+                for social_asset in ("EQUITY", "FOREX", "CRYPTO"):
+                    social_regime = self._map_governor_regime(social_asset, self._current_regime)
+                    self._social_decision_for(social_asset, social_regime)
 
             # Calculate sector exposure
             sector_exp = self.calculate_sector_exposure()
@@ -3040,6 +4753,13 @@ class ApexTradingSystem:
             logger.info(f"📉 Drawdown: {dd_check['drawdown']*100:.2f}%")
             logger.info(f"📦 Positions: {self.position_count}/{ApexConfig.MAX_POSITIONS}")
             logger.info(f"⏳ Pending: {len(self.pending_orders)}")
+            logger.info(
+                "🧾 Equity Reconciliation: gap=$%.2f (%.2f%%) block_entries=%s reason=%s",
+                recon_snapshot.gap_dollars,
+                recon_snapshot.gap_pct * 100,
+                recon_snapshot.block_entries,
+                recon_snapshot.reason,
+            )
             logger.info(f"💸 Total Commissions: ${self.total_commissions:,.2f}")
             logger.info(f"📈 Sharpe: {sharpe:.2f} | Win Rate: {win_rate*100:.1f}% | Trades: {total_trades}")
             if perf_snapshot:
@@ -3058,6 +4778,17 @@ class ApexTradingSystem:
                     kill_state.historical_mdd * 100,
                     ApexConfig.KILL_SWITCH_SHARPE_WINDOW_DAYS,
                     kill_state.sharpe_rolling,
+                )
+            social_equity = self._social_decision_cache.get(
+                ("EQUITY", self._map_governor_regime("EQUITY", self._current_regime))
+            )
+            if social_equity:
+                logger.info(
+                    "📣 SocialShock: score=%.2f gross_mult=%.0f%% block=%s verified_event=%.2f",
+                    social_equity.combined_risk_score,
+                    social_equity.gross_exposure_multiplier * 100.0,
+                    social_equity.block_new_entries,
+                    social_equity.verified_event_probability,
                 )
 
             # Institutional risk metrics
@@ -3124,6 +4855,31 @@ class ApexTradingSystem:
                     self.prometheus_metrics.update_circuit_breaker(
                         bool(loss_check.get("breached", False) or dd_check.get("breached", False))
                     )
+                    self.prometheus_metrics.update_equity_validation(
+                        accepted=equity_decision.accepted,
+                        reason=equity_decision.reason,
+                        raw_value=equity_decision.raw_value,
+                        filtered_value=equity_decision.filtered_value,
+                        deviation_pct=equity_decision.deviation_pct,
+                        suspect_count=equity_decision.suspect_count,
+                    )
+                    self.prometheus_metrics.update_equity_reconciliation(
+                        broker_equity=recon_snapshot.broker_equity,
+                        modeled_equity=recon_snapshot.modeled_equity,
+                        gap_dollars=recon_snapshot.gap_dollars,
+                        gap_pct=recon_snapshot.gap_pct,
+                        block_entries=recon_snapshot.block_entries,
+                        breach_streak=recon_snapshot.breach_streak,
+                        healthy_streak=recon_snapshot.healthy_streak,
+                        reason=recon_snapshot.reason,
+                        breached=recon_snapshot.breached,
+                        breach_event=(
+                            recon_snapshot.breached
+                            and not (previous_recon.breached if previous_recon else False)
+                        ),
+                    )
+                    self.prometheus_metrics.update_attribution_summary(attribution_summary)
+                    self._emit_social_prometheus_metrics()
                     self.prometheus_metrics.record_heartbeat()
                 except Exception as metrics_exc:
                     logger.debug("Prometheus update error: %s", metrics_exc)
@@ -3321,6 +5077,103 @@ class ApexTradingSystem:
                     pass
             
             current_signals = self.get_current_signals()
+
+            option_leg_map: Dict[Tuple[str, str, float, str], Dict[str, float | int | str]] = {}
+
+            def upsert_option_leg(
+                symbol: str,
+                expiry: str,
+                strike: float,
+                right: str,
+                quantity: float,
+                avg_cost: float,
+            ) -> None:
+                symbol_norm = str(symbol or "").strip().upper()
+                expiry_norm = str(expiry or "").strip()
+                if not symbol_norm or not expiry_norm:
+                    return
+                try:
+                    strike_norm = float(strike or 0.0)
+                except Exception:
+                    strike_norm = 0.0
+                right_norm = str(right or "").strip().upper()
+                if right_norm == "CALL":
+                    right_norm = "C"
+                elif right_norm == "PUT":
+                    right_norm = "P"
+                if right_norm not in {"C", "P"}:
+                    return
+                try:
+                    qty_norm = int(float(quantity or 0.0))
+                except Exception:
+                    qty_norm = 0
+                if qty_norm == 0:
+                    return
+                try:
+                    avg_cost_norm = float(avg_cost or 0.0)
+                except Exception:
+                    avg_cost_norm = 0.0
+
+                key = (symbol_norm, expiry_norm, strike_norm, right_norm)
+                if key not in option_leg_map:
+                    option_leg_map[key] = {
+                        "symbol": symbol_norm,
+                        "expiry": expiry_norm,
+                        "strike": strike_norm,
+                        "right": right_norm,
+                        "quantity": qty_norm,
+                        "side": "LONG" if qty_norm > 0 else "SHORT",
+                        "avg_cost": avg_cost_norm,
+                    }
+                    return
+
+                existing_qty = int(option_leg_map[key].get("quantity", 0))
+                merged_qty = existing_qty + qty_norm
+                option_leg_map[key]["quantity"] = merged_qty
+                option_leg_map[key]["side"] = "LONG" if merged_qty > 0 else "SHORT"
+                if avg_cost_norm > 0:
+                    option_leg_map[key]["avg_cost"] = avg_cost_norm
+
+            if self.ibkr and hasattr(self.ibkr, "ib"):
+                try:
+                    for pos in self.ibkr.ib.positions():
+                        contract = getattr(pos, "contract", None)
+                        if getattr(contract, "secType", "") != "OPT":
+                            continue
+                        upsert_option_leg(
+                            symbol=str(getattr(contract, "symbol", "")),
+                            expiry=str(getattr(contract, "lastTradeDateOrContractMonth", "")),
+                            strike=float(getattr(contract, "strike", 0.0) or 0.0),
+                            right=str(getattr(contract, "right", "")),
+                            quantity=float(getattr(pos, "position", 0.0) or 0.0),
+                            avg_cost=float(getattr(pos, "avgCost", 0.0) or 0.0),
+                        )
+                except Exception:
+                    pass
+
+            for option_row in self.options_positions.values():
+                try:
+                    upsert_option_leg(
+                        symbol=str(option_row.get("symbol", "")),
+                        expiry=str(option_row.get("expiry", "")),
+                        strike=float(option_row.get("strike", 0.0) or 0.0),
+                        right=str(option_row.get("right", "")),
+                        quantity=float(option_row.get("quantity", 0.0) or 0.0),
+                        avg_cost=float(option_row.get("avg_cost", 0.0) or 0.0),
+                    )
+                except Exception:
+                    continue
+
+            option_positions_detail = list(option_leg_map.values())
+            option_positions_detail.sort(
+                key=lambda row: (
+                    str(row.get("symbol", "")),
+                    str(row.get("expiry", "")),
+                    float(row.get("strike", 0.0)),
+                    str(row.get("right", "")),
+                )
+            )
+            option_positions_count = len(option_positions_detail)
             
             state = {
                 'timestamp': datetime.now().isoformat(),
@@ -3337,9 +5190,37 @@ class ApexTradingSystem:
                 'win_rate': float(self.performance_tracker.get_win_rate()) if math.isfinite(self.performance_tracker.get_win_rate()) else 0.0,
                 'total_trades': len(self.performance_tracker.trades),
                 'open_positions': self.position_count,
+                'option_positions': int(option_positions_count),
+                'open_positions_total': int(self.position_count + option_positions_count),
+                'option_positions_detail': option_positions_detail,
                 'sector_exposure': self.calculate_sector_exposure(),
                 'performance_governor': self._performance_snapshot.to_dict() if self._performance_snapshot else None,
                 'kill_switch': self.kill_switch.state().__dict__ if self.kill_switch else None,
+                'equity_reconciliation': (
+                    self._equity_reconciliation_snapshot.to_dict()
+                    if self._equity_reconciliation_snapshot
+                    else {
+                        "block_entries": bool(self._equity_reconciliation_block_entries),
+                        "reason": "not_evaluated",
+                    }
+                ),
+                'performance_attribution': self.performance_attribution.get_summary(lookback_days=30),
+                'social_shock': {
+                    "enabled": bool(self.social_shock_governor is not None),
+                    "policy_version": self._social_policy_version,
+                    "input_validation": dict(self._social_input_validation or {}),
+                    "decisions": [
+                        decision.to_dict() for decision in self._social_decision_cache.values()
+                    ],
+                    "snapshots": [
+                        snapshot.to_dict() for snapshot in self._social_snapshot_cache.values()
+                    ],
+                    "prediction_verification": [
+                        verification.to_dict()
+                        for rows in self._prediction_results_cache.values()
+                        for verification in rows
+                    ],
+                },
             }
             
             for symbol, qty in self.positions.items():
@@ -3550,6 +5431,19 @@ class ApexTradingSystem:
                 'open_positions': self.position_count,
                 'performance_governor': self._performance_snapshot.to_dict() if self._performance_snapshot else None,
                 'kill_switch': self.kill_switch.state().__dict__ if self.kill_switch else None,
+                'equity_reconciliation': {
+                    "block_entries": bool(self._equity_reconciliation_block_entries),
+                    "reason": "not_evaluated",
+                },
+                'performance_attribution': self.performance_attribution.get_summary(lookback_days=30),
+                'social_shock': {
+                    "enabled": bool(self.social_shock_governor is not None),
+                    "policy_version": self._social_policy_version,
+                    "input_validation": dict(self._social_input_validation or {}),
+                    "decisions": [],
+                    "snapshots": [],
+                    "prediction_verification": [],
+                },
             }
             self.live_monitor.update_state(state)
             self.export_dashboard_state()
@@ -3673,7 +5567,7 @@ class ApexTradingSystem:
                     # Update Health Dashboard
                     health_checks = self.health_dashboard.run_all_checks(
                         current_capital=self.capital,
-                        peak_capital=ApexConfig.INITIAL_CAPITAL,  # Approximate
+                        peak_capital=max(float(self.risk_manager.peak_capital or 0.0), float(self.capital or 0.0)),
                         positions=self.positions
                     )
                     health_status = self.health_dashboard.get_overall_status()
@@ -3852,16 +5746,17 @@ class ApexTradingSystem:
                         # Drawdown Cascade: update every cycle
                         if self.drawdown_breaker:
                             try:
-                                # Compute current capital from positions
-                                current_capital = self.capital
-                                for sym, qty in self.positions.items():
-                                    if qty != 0 and sym in self.price_cache:
-                                        entry_price = self.position_entry_prices.get(sym, self.price_cache[sym])
-                                        current_price = self.price_cache[sym]
-                                        pnl = (current_price - entry_price) * qty
-                                        current_capital += pnl
-
-                                dd_state = self.drawdown_breaker.update(current_capital)
+                                # `self.capital` already reflects total equity from broker/quorum reads.
+                                # Re-adding position PnL here double-counts and can falsely escalate tiers.
+                                current_capital = float(self.capital or 0.0)
+                                peak_capital = max(
+                                    float(self.risk_manager.peak_capital or 0.0),
+                                    current_capital,
+                                )
+                                dd_state = self.drawdown_breaker.update(
+                                    current_capital=current_capital,
+                                    peak_capital=peak_capital,
+                                )
                                 if dd_state.tier >= DrawdownTier.CAUTION:
                                     logger.info(f"🛡️ Drawdown Tier {dd_state.tier.name}: "
                                               f"DD={dd_state.current_drawdown:.1%}, size_mult={dd_state.size_multiplier:.0%}")
