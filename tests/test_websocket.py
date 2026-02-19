@@ -4,7 +4,8 @@ import json
 from unittest.mock import patch, MagicMock
 from fastapi.testclient import TestClient
 
-from api.server import app, manager, ConnectionManager
+from api.server import app
+from api.ws_manager import ConnectionManager
 from api.auth import USER_STORE, AUTH_CONFIG
 
 
@@ -21,10 +22,9 @@ class TestConnectionManager:
     """Test the ConnectionManager class."""
 
     @pytest.mark.asyncio
-    async def test_manager_has_lock(self):
-        """Manager should have an asyncio lock for thread safety."""
+    async def test_manager_starts_empty(self):
+        """Manager should start with empty connections list."""
         mgr = ConnectionManager()
-        assert hasattr(mgr, "_lock")
         assert mgr.active_connections == []
 
     @pytest.mark.asyncio
@@ -32,9 +32,9 @@ class TestConnectionManager:
         """Broadcast should clean up dead connections."""
         mgr = ConnectionManager()
         dead_ws = MagicMock()
-        dead_ws.send_json = MagicMock(side_effect=Exception("closed"))
-        async with mgr._lock:
-            mgr.active_connections.append(dead_ws)
+        dead_ws.send_text = MagicMock(side_effect=RuntimeError("closed"))
+        dead_ws.client = "test-client"
+        mgr.active_connections.append(dead_ws)
 
         await mgr.broadcast({"type": "test"})
         assert dead_ws not in mgr.active_connections

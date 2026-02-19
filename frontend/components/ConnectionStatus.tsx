@@ -44,7 +44,7 @@ export default function ConnectionStatus({ wsState, onReconnect }: ConnectionSta
                             }
                         </span>
 
-                        {reconnectAttempt > 0 && (
+                        {reconnectAttempt !== undefined && reconnectAttempt > 0 && (
                             <span className="text-xs opacity-70 font-mono">
                                 Attempt {reconnectAttempt}/10
                             </span>

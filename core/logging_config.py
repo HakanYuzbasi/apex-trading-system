@@ -381,6 +381,9 @@ def setup_logging(
 
         root_logger.addHandler(file_handler)
 
+    # Suppress uvicorn access logs to reduce noise
+    logging.getLogger("uvicorn.access").setLevel(logging.WARNING)
+
     return root_logger
 
 

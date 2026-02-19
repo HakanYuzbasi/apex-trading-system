@@ -34,7 +34,7 @@ KNOWN_CRYPTO_ASSETS = {
     "AAVE", "UNI",
 }
 
-_PAIR_SEPARATORS = ("/",)
+_PAIR_SEPARATORS = ("/", ".")  # "." supports IBKR format: EUR.USD, USD.CHF
 _ALNUM_RE = re.compile(r"^[A-Z0-9]+$")
 
 

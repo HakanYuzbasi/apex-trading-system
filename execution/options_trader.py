@@ -366,7 +366,11 @@ class OptionsTrader:
             options = []
             now = datetime.now()
 
-            for chain in chains:
+            # Prefer SMART-routable chains; fall back to all if none match
+            smart_chains = [c for c in chains if getattr(c, 'exchange', '') == 'SMART']
+            selected_chains = smart_chains if smart_chains else chains
+
+            for chain in selected_chains:
                 for exp_str in chain.expirations[:5]:  # Limit to 5 nearest expiries
                     try:
                         expiry_date = datetime.strptime(exp_str, '%Y%m%d')

@@ -37,6 +37,10 @@ from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials, APIKeyHea
 
 logger = logging.getLogger(__name__)
 
+# Alert aggregator for reducing auth warning noise
+from core.alert_aggregator import get_alert_aggregator
+alert_agg = get_alert_aggregator(logger)
+
 # Try to import JWT library
 try:
     import jwt
@@ -81,7 +85,7 @@ class AuthConfig:
     """Authentication configuration."""
     secret_key: str = os.getenv("APEX_SECRET_KEY", secrets.token_hex(32))
     algorithm: str = "HS256"
-    access_token_expire_minutes: int = 60
+    access_token_expire_minutes: int = ApexConfig.AUTH_ACCESS_TOKEN_EXPIRE_MINUTES
     refresh_token_expire_days: int = 7
     api_key_header: str = "X-API-Key"
     enabled: bool = os.getenv("APEX_AUTH_ENABLED", "true").lower() == "true"
@@ -447,10 +451,10 @@ def verify_token(token: str, expected_token_type: Optional[str] = None) -> Optio
             return None
         return token_data
     except jwt.ExpiredSignatureError:
-        logger.warning("Token expired")
+        alert_agg.add("token_expired", "Authentication token expired")
         return None
     except jwt.InvalidTokenError as e:
-        logger.warning(f"Invalid token: {e}")
+        alert_agg.add("token_invalid", "Invalid authentication token", data={"error": str(e)})
         return None
 
 

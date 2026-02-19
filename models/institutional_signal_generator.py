@@ -29,6 +29,7 @@ import pickle
 from collections import deque
 from models.adaptive_regime_detector import AdaptiveRegimeDetector, RegimeAssessment
 from models.advanced_features import FeatureEngine
+from monitoring.model_tracker import ModelPerformanceTracker
 
 from core.logging_config import setup_logging
 
@@ -282,7 +283,10 @@ class UltimateSignalGenerator:
         self.training_metrics: List[TrainingMetrics] = []
         
         # Drift monitoring
-        self.prediction_history = deque(maxlen=100)
+        self.prediction_history = deque(maxlen=1000)
+        self.tracker = ModelPerformanceTracker()
+        
+        # Initialize sub-components
         self.outcome_history = deque(maxlen=100)
         self.performance_baseline = 0.52
         self.retrain_interval_days = 30
@@ -847,9 +851,12 @@ class UltimateSignalGenerator:
                 prices = data
 
             # Detect regime (🚀 UPGRADED: Using probability-based detector)
-            # Use AdaptiveRegimeDetector for more accurate switches
             assessment: RegimeAssessment = self.adaptive_regime_detector.assess_regime(prices)
             regime = assessment.primary_regime
+            current_price = float(prices.iloc[-1])
+            
+            # Update tracker with latest price (verify past predictions)
+            self.tracker.on_price_update(symbol, current_price)
             
             # Get regime models
             if regime not in self.regime_models or not self.regime_models[regime]:
@@ -994,6 +1001,7 @@ class UltimateSignalGenerator:
             # Track for drift
             if track_for_drift:
                 self.prediction_history.append(output.to_dict())
+                self.tracker.log_prediction(symbol, signal, current_price)
             
             return output
         

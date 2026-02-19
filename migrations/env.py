@@ -16,7 +16,10 @@ from sqlalchemy.ext.asyncio import async_engine_from_config
 from services.common.db import Base
 
 # Import all models so they register with Base.metadata
+# Import all models so they register with Base.metadata
 import services.auth.models  # noqa: F401
+import services.trading.models  # noqa: F401
+import services.audit.models  # noqa: F401
 
 config = context.config
 

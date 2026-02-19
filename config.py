@@ -19,6 +19,13 @@ import logging
 from pathlib import Path
 from typing import Set, Dict, List
 
+# Load .env file automatically (allows overriding any setting without shell exports)
+try:
+    from dotenv import load_dotenv as _load_dotenv
+    _load_dotenv(Path(__file__).parent / ".env", override=False)
+except ImportError:
+    pass  # python-dotenv not installed; rely on shell environment
+
 _config_logger = logging.getLogger(__name__)
 
 
@@ -100,6 +107,8 @@ class ApexConfig:
 
     # IBKR pacing (requests per second, for paper-safe throttling)
     IBKR_MAX_REQ_PER_SEC = float(os.getenv("APEX_IBKR_MAX_REQ_PER_SEC", "6"))
+    # Max concurrent streaming subscriptions (increased for expanded universe)
+    IBKR_MAX_STREAMS = int(os.getenv("APEX_IBKR_MAX_STREAMS", "100"))
 
     # Market hours overrides (set for stress tests)
     MARKET_ALWAYS_OPEN: bool = os.getenv("APEX_MARKET_ALWAYS_OPEN", "false").lower() == "true"
@@ -129,6 +138,13 @@ class ApexConfig:
     ALPACA_ALLOW_OFFLINE: bool = (
         os.getenv("APEX_ALPACA_ALLOW_OFFLINE", "false").lower() == "true"
     )
+
+    # ═══════════════════════════════════════════════════════════════
+    # AUTHENTICATION
+    # ═══════════════════════════════════════════════════════════════
+    AUTH_ACCESS_TOKEN_EXPIRE_MINUTES: int = int(
+        os.getenv("APEX_AUTH_ACCESS_TOKEN_EXPIRE_MINUTES", "1440")
+    )  # Default: 24 hours
 
     # Broker selection: "ibkr" | "alpaca" | "both"
     #   ibkr    = IBKR only
@@ -679,46 +695,51 @@ class ApexConfig:
     # ═══════════════════════════════════════════════════════════════
     UNIVERSE_MODE = "SP500"  # Options: "SP500", "NASDAQ100", "CUSTOM"
     
-    # S&P 500 Top Liquid Stocks (deduplicated)
-    SYMBOLS = [
-        # Technology
-        "AAPL", "MSFT", "NVDA", "GOOGL", "META", "TSLA", "AVGO", "ORCL", "CSCO", "ADBE",
-        "CRM", "ACN", "AMD", "INTC", "IBM", "QCOM", "TXN", "AMAT", "MU", "LRCX",
+    # S&P 500 Top Liquid Stocks & Multi-Asset Universe
+    # ------------------------------------------------
+    # 1. Major Indices
+    INDICES = ["SPY", "QQQ", "IWM", "DIA"]
 
-        # Financials
-        "JPM", "BAC", "WFC", "GS", "MS", "C", "BLK", "AXP", "SCHW", "USB",
-
-        # Healthcare
-        "UNH", "JNJ", "LLY", "ABBV", "MRK", "TMO", "ABT", "DHR", "PFE", "BMY",
-
-        # Consumer
-        "AMZN", "WMT", "HD", "MCD", "NKE", "SBUX", "LOW", "TGT", "DG", "DLTR",
-
-        # Industrials
-        "BA", "CAT", "GE", "HON", "UPS", "RTX", "LMT", "DE", "MMM", "UNP",
-
-        # Energy
-        "XOM", "CVX", "COP", "SLB", "EOG", "MPC", "PSX", "VLO", "OXY", "HAL",
-
-        # Materials
-        "LIN", "APD", "ECL", "SHW", "FCX", "NEM", "DOW", "DD", "ALB", "CE",
-
-        # Communication (removed duplicate GOOGL, META)
-        "NFLX", "DIS", "CMCSA", "T", "TMUS", "VZ", "CHTR", "EA",
-
-        # Real Estate & Utilities
-        "AMT", "PLD", "CCI", "EQIX", "PSA", "NEE", "DUK", "SO", "D", "AEP",
-        
-        # ETFs & Commodities (removed duplicate CRM, AMAT)
-        "SPY", "QQQ", "IWM", "GLD", "SLV", "USO", "UNG", "PALL",
-
-        # FX Majors (IBKR format: BASE.QUOTE for IDEALPRO)
-        "EUR.USD", "GBP.USD", "USD.JPY", "GBP.JPY", "AUD.USD", "USD.CHF",
-
-        # Crypto (BASE/QUOTE)
-        "BTC/USDT", "ETH/USDC", "SOL/USDT", "DOGE/USDT"
+    # 2. Forex Pairs (Major G10)
+    FOREX_PAIRS = [
+        "EUR/USD", "GBP/USD", "USD/JPY", "USD/CHF", "AUD/USD", 
+        "USD/CAD", "NZD/USD"
     ]
-    
+
+    # 3. Crypto Pairs (Top Liquid)
+    CRYPTO_PAIRS = [
+        "BTC/USD", "ETH/USD", "SOL/USD", "DOGE/USD"
+    ]
+
+    # 4. Top 100 S&P 500 Components (aligned with SECTOR_MAP)
+    # Trimmed to exactly 85 to keep total universe at 100 (4 Indices + 7 Forex + 4 Crypto + 85 Stocks)
+    SP500_TOP_100 = [
+        # Technology (Top 15)
+        "AAPL", "MSFT", "NVDA", "GOOGL", "META", "TSLA", "AVGO", "ORCL", "CSCO", "ADBE",
+        "CRM", "ACN", "AMD", "INTC", "IBM", "QCOM", "TXN",
+        # Financials (Top 6)
+        "JPM", "BAC", "WFC", "GS", "MS", "C", "BLK", "AXP",
+        # Healthcare (Top 6)
+        "UNH", "JNJ", "LLY", "ABBV", "MRK", "TMO", "ABT", "DHR",
+        # Consumer (Top 6)
+        "AMZN", "WMT", "HD", "MCD", "NKE", "SBUX", "LOW", "TGT", "DLTR",
+        # Industrials (Top 7)
+        "BA", "CAT", "GE", "HON", "UPS", "RTX", "LMT", "DE",
+        # Energy (Top 5)
+        "XOM", "CVX", "COP", "SLB", "EOG", "MPC",
+        # Materials (Top 5)
+        "LIN", "APD", "ECL", "SHW", "FCX", "NEM", "ALB",
+        # Communication (Top 6)
+        "NFLX", "DIS", "CMCSA", "T", "TMUS", "VZ",
+        # Real Estate & Utilities (Top 5)
+        "AMT", "PLD", "CCI", "EQIX", "NEE",
+        # Commodities (Top 4)
+        "GLD", "SLV", "USO", "UNG"
+    ]
+
+    # Combine all into master universe
+    SYMBOLS = list(set(INDICES + FOREX_PAIRS + CRYPTO_PAIRS + SP500_TOP_100))
+
     # Backtesting-only symbols (kept in universe, excluded from IBKR paper execution)
     BACKTEST_ONLY_SYMBOLS = {"SOL/USDT", "DOGE/USDT"}
 

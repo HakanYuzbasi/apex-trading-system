@@ -10,7 +10,8 @@ import * as authModule from '@/components/auth/AuthProvider';
 
 // Mock the WebSocket hook
 const mockSendMessage = jest.fn();
-const mockLastMessage = { data: JSON.stringify({ type: 'connected' }) };
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+const mockLastMessage = { data: JSON.stringify({ type: 'connected' }) } as any;
 
 jest.mock('@/hooks/useWebSocket');
 const mockUseWebSocket = useWebSocketModule.useWebSocket as jest.MockedFunction<typeof useWebSocketModule.useWebSocket>;
@@ -66,13 +67,13 @@ describe('Dashboard Component', () => {
 
   beforeEach(() => {
     jest.clearAllMocks();
-    
+
     // Mock WebSocket hook
     mockUseWebSocket.mockReturnValue({
       lastMessage: mockLastMessage,
       sendMessage: mockSendMessage,
       readyState: 1
-    });
+    } as any);
 
     // Mock auth context
     mockUseAuth.mockReturnValue({
@@ -81,12 +82,12 @@ describe('Dashboard Component', () => {
       login: jest.fn(),
       logout: jest.fn(),
       loading: false
-    });
+    } as any);
   });
 
   test('renders dashboard with initial state', async () => {
     render(<Dashboard />);
-    
+
     // Check for main dashboard elements
     expect(screen.getByText('APEX Trading System')).toBeInTheDocument();
     expect(screen.getByText('Live Trading Dashboard')).toBeInTheDocument();
@@ -94,7 +95,7 @@ describe('Dashboard Component', () => {
 
   test('displays connection status', async () => {
     render(<Dashboard />);
-    
+
     // Connection status component should be present
     await waitFor(() => {
       expect(screen.getByText(/connection/i)).toBeInTheDocument();
@@ -103,7 +104,7 @@ describe('Dashboard Component', () => {
 
   test('handles WebSocket messages correctly', async () => {
     render(<Dashboard />);
-    
+
     // Simulate receiving trading state
     const tradingStateMessage = {
       data: JSON.stringify({
@@ -117,7 +118,7 @@ describe('Dashboard Component', () => {
       lastMessage: tradingStateMessage,
       sendMessage: mockSendMessage,
       readyState: 1
-    });
+    } as any);
 
     // Re-render with the new message
     render(<Dashboard />);
@@ -139,7 +140,7 @@ describe('Dashboard Component', () => {
       },
       sendMessage: mockSendMessage,
       readyState: 1
-    });
+    } as any);
 
     render(<Dashboard />);
 
@@ -153,7 +154,7 @@ describe('Dashboard Component', () => {
 
   test('handles tab navigation', async () => {
     render(<Dashboard />);
-    
+
     // Find and click the charts tab
     const chartsTab = screen.getByText('Charts');
     fireEvent.click(chartsTab);
@@ -188,7 +189,7 @@ describe('Dashboard Component', () => {
       },
       sendMessage: mockSendMessage,
       readyState: 1
-    });
+    } as any);
 
     render(<Dashboard />);
 
@@ -214,7 +215,7 @@ describe('Dashboard Component', () => {
       },
       sendMessage: mockSendMessage,
       readyState: 1
-    });
+    } as any);
 
     render(<Dashboard />);
 
@@ -229,8 +230,8 @@ describe('Dashboard Component', () => {
 
     await waitFor(() => {
       // Check for sector chart component
-      const sectorChart = screen.getByTestId('sector-chart') || 
-                         screen.getByText('Sector Exposure');
+      const sectorChart = screen.getByTestId('sector-chart') ||
+        screen.getByText('Sector Exposure');
       expect(sectorChart).toBeInTheDocument();
     });
   });
@@ -241,7 +242,7 @@ describe('Dashboard Component', () => {
       lastMessage: null,
       sendMessage: mockSendMessage,
       readyState: 3 // CLOSED state
-    });
+    } as any);
 
     render(<Dashboard />);
 
@@ -261,7 +262,7 @@ describe('Dashboard Component', () => {
       },
       sendMessage: mockSendMessage,
       readyState: 1
-    });
+    } as any);
 
     render(<Dashboard />);
 
@@ -277,7 +278,7 @@ describe('Dashboard Component', () => {
       lastMessage: null,
       sendMessage: mockSendMessage,
       readyState: 1
-    });
+    } as any);
 
     const { rerender } = render(<Dashboard />);
 
@@ -297,7 +298,7 @@ describe('Dashboard Component', () => {
       },
       sendMessage: mockSendMessage,
       readyState: 1
-    });
+    } as any);
 
     rerender(<Dashboard />);
 

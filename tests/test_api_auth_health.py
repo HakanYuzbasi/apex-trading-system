@@ -248,7 +248,7 @@ class TestStateCaching:
 
     def test_read_trading_state_returns_same_object_when_unchanged(self, tmp_path, monkeypatch):
         import json
-        from api import server
+        from api import dependencies as deps
 
         state_file = tmp_path / "trading_state.json"
         price_file = tmp_path / "price_cache.json"
@@ -263,23 +263,23 @@ class TestStateCaching:
         )
         price_file.write_text(json.dumps({"AAPL": 110.0}))
 
-        monkeypatch.setattr(server, "STATE_FILE", state_file)
-        monkeypatch.setattr(server, "PRICE_CACHE_FILE", price_file)
-        monkeypatch.setattr(server, "_price_cache_data", {})
-        monkeypatch.setattr(server, "_price_cache_mtime_ns", None)
-        monkeypatch.setattr(server, "_state_cache_data", server.DEFAULT_STATE)
-        monkeypatch.setattr(server, "_state_cache_mtime_ns", None)
-        monkeypatch.setattr(server, "_state_cache_price_mtime_ns", None)
+        monkeypatch.setattr(deps, "STATE_FILE", state_file)
+        monkeypatch.setattr(deps, "PRICE_CACHE_FILE", price_file)
+        monkeypatch.setattr(deps, "_price_cache_data", {})
+        monkeypatch.setattr(deps, "_price_cache_mtime_ns", None)
+        monkeypatch.setattr(deps, "_state_cache_data", deps.DEFAULT_STATE)
+        monkeypatch.setattr(deps, "_state_cache_mtime_ns", None)
+        monkeypatch.setattr(deps, "_state_cache_price_mtime_ns", None)
 
-        s1 = server.read_trading_state()
-        s2 = server.read_trading_state()
+        s1 = deps.read_trading_state()
+        s2 = deps.read_trading_state()
 
         assert s1 is s2
         assert s1["positions"]["AAPL"]["current_price"] == 110.0
 
     def test_read_trading_state_invalidates_when_price_cache_changes(self, tmp_path, monkeypatch):
         import json
-        from api import server
+        from api import dependencies as deps
 
         state_file = tmp_path / "trading_state.json"
         price_file = tmp_path / "price_cache.json"
@@ -294,18 +294,18 @@ class TestStateCaching:
         )
         price_file.write_text(json.dumps({"AAPL": 100.0}))
 
-        monkeypatch.setattr(server, "STATE_FILE", state_file)
-        monkeypatch.setattr(server, "PRICE_CACHE_FILE", price_file)
-        monkeypatch.setattr(server, "_price_cache_data", {})
-        monkeypatch.setattr(server, "_price_cache_mtime_ns", None)
-        monkeypatch.setattr(server, "_state_cache_data", server.DEFAULT_STATE)
-        monkeypatch.setattr(server, "_state_cache_mtime_ns", None)
-        monkeypatch.setattr(server, "_state_cache_price_mtime_ns", None)
+        monkeypatch.setattr(deps, "STATE_FILE", state_file)
+        monkeypatch.setattr(deps, "PRICE_CACHE_FILE", price_file)
+        monkeypatch.setattr(deps, "_price_cache_data", {})
+        monkeypatch.setattr(deps, "_price_cache_mtime_ns", None)
+        monkeypatch.setattr(deps, "_state_cache_data", deps.DEFAULT_STATE)
+        monkeypatch.setattr(deps, "_state_cache_mtime_ns", None)
+        monkeypatch.setattr(deps, "_state_cache_price_mtime_ns", None)
 
-        s1 = server.read_trading_state()
+        s1 = deps.read_trading_state()
         time.sleep(0.01)
         price_file.write_text(json.dumps({"AAPL": 120.0}))
-        s2 = server.read_trading_state()
+        s2 = deps.read_trading_state()
 
         assert s1 is not s2
         assert s2["positions"]["AAPL"]["current_price"] == 120.0
@@ -319,26 +319,26 @@ class TestParseTimestamp:
     """Timestamp parsing for various ISO formats."""
 
     def test_naive_iso(self):
-        from api.server import _parse_timestamp
+        from api.dependencies import _parse_timestamp
         result = _parse_timestamp("2024-01-15T10:30:00")
         assert result is not None
         assert result.year == 2024
 
     def test_utc_z_suffix(self):
-        from api.server import _parse_timestamp
+        from api.dependencies import _parse_timestamp
         result = _parse_timestamp("2024-01-15T10:30:00Z")
         assert result is not None
 
     def test_none_returns_none(self):
-        from api.server import _parse_timestamp
+        from api.dependencies import _parse_timestamp
         assert _parse_timestamp(None) is None
 
     def test_empty_string_returns_none(self):
-        from api.server import _parse_timestamp
+        from api.dependencies import _parse_timestamp
         assert _parse_timestamp("") is None
 
     def test_garbage_returns_none(self):
-        from api.server import _parse_timestamp
+        from api.dependencies import _parse_timestamp
         assert _parse_timestamp("not-a-date") is None
 
 

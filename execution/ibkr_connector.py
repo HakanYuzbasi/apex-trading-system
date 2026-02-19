@@ -158,7 +158,7 @@ class IBKRConnector:
         # Event-driven streaming state
         self.tickers: Dict[str, Any] = {}
         self.active_streams: int = 0
-        self.MAX_STREAMS = 40  # Safe limit for free account (usually 50-100)
+        self.MAX_STREAMS = getattr(ApexConfig, "IBKR_MAX_STREAMS", 200)
         
         # Callback for data updates (used by Data Watchdog)
         self.data_callback: Optional[Callable[[str], None]] = None
@@ -406,14 +406,15 @@ class IBKRConnector:
             # ✅ Phase 2.2: Configurable market data type
             # Type 1 = Live (requires paid subscription)
             # Type 2 = Frozen (last available)
-            # Type 3 = Delayed (15-20 min delayed, FREE)
-            # Type 4 = Delayed-Frozen
+            # Type 3 = Delayed (15-20 min delayed, FREE, but NO after-hours data)
+            # Type 4 = Delayed-Frozen (delayed + frozen, works after-hours)
             if ApexConfig.USE_LIVE_MARKET_DATA:
                 self.ib.reqMarketDataType(1)
                 logger.info("📊 LIVE market data enabled (requires subscription)")
             else:
-                self.ib.reqMarketDataType(3)
-                logger.info("📊 Delayed market data enabled (free)")
+                # Use Type 4 instead of Type 3 to get frozen prices after-hours
+                self.ib.reqMarketDataType(4)
+                logger.info("📊 Delayed-Frozen market data enabled (free, works after-hours)")
             
             # Get account info
             await asyncio.sleep(1)  # Wait for account sync
@@ -566,7 +567,7 @@ class IBKRConnector:
                     count += 1
             
             self.active_streams = count
-            logger.info(f"✅ Started streaming {count} symbols (Delayed Type 3)")
+            logger.info(f"✅ Started streaming {count} symbols (Delayed-Frozen Type 4)")
             
         except Exception as e:
             logger.error(f"Error starting streams: {e}")
@@ -574,7 +575,8 @@ class IBKRConnector:
     @with_retry(max_retries=3, retryable_exceptions=(ConnectionError, TimeoutError))
     async def get_market_price(self, symbol: str) -> float:
         """
-        Get current market price (Instant from stream, or fallback to snapshot).
+        Get current market price using STREAMING (not snapshots).
+        This works better with IBKR Paper accounts.
         """
         try:
             try:
@@ -598,39 +600,57 @@ class IBKRConnector:
                 price = self._fallback_price(normalized, reason="ibkr_offline")
                 return float(price) if price > 0 else 0.0
 
-            # 1. Check active stream (Instant)
+            # 1. Check if we already have an active stream for this symbol
             if normalized in self.tickers:
                 ticker = self.tickers[normalized]
-                # marketPrice() handles last, close, bid/ask logic intelligently
                 price = ticker.marketPrice()
                 
                 # If marketPrice is invalid (nan/0), try specific fields
                 if pd.isna(price) or price <= 0:
-                    if ticker.last and ticker.last > 0: price = ticker.last
-                    elif ticker.close and ticker.close > 0: price = ticker.close
+                    if ticker.last and ticker.last > 0: 
+                        price = ticker.last
+                    elif ticker.close and ticker.close > 0: 
+                        price = ticker.close
+                    elif ticker.bid and ticker.ask and ticker.bid > 0 and ticker.ask > 0:
+                        price = (ticker.bid + ticker.ask) / 2.0
                     
                 if price > 0:
                     return float(price)
             
-            # 2. Fallback to snapshot (Slower)
+            # 2. No active stream exists - create a temporary STREAMING request (not snapshot)
             contract = await self.get_contract(symbol)
             if not contract:
-                return 0.0
+                price = self._fallback_price(normalized, reason="no_contract")
+                return float(price) if price > 0 else 0.0
             
-            # Request market data snapshot
-            await self._throttle_ibkr("snapshot_mkt_data")
-            ticker = self.ib.reqMktData(contract, '', False, True) # True=Snapshot
+            # Request STREAMING data (snapshot=False) instead of snapshot
+            await self._throttle_ibkr("stream_temp_price")
+            ticker = self.ib.reqMktData(contract, '', False, False)  # False = streaming!
             
-            # Wait for price update (max 2 seconds)
-            for _ in range(20):
+            # Store the stream for future use
+            self.tickers[normalized] = ticker
+            
+            # Wait for price data to arrive (max 3 seconds)
+            for _ in range(30):
                 await asyncio.sleep(0.1)
                 price = ticker.marketPrice()
-                if not pd.isna(price) and price > 0:
+                
+                # Try all available price fields
+                if pd.isna(price) or price <= 0:
+                    if ticker.last and ticker.last > 0:
+                        price = ticker.last
+                    elif ticker.close and ticker.close > 0:
+                        price = ticker.close
+                    elif ticker.bid and ticker.ask and ticker.bid > 0 and ticker.ask > 0:
+                        price = (ticker.bid + ticker.ask) / 2.0
+                
+                if price > 0:
+                    logger.debug(f"✅ Got streaming price for {normalized}: ${price:.2f}")
                     return float(price)
             
-            logger.warning(f"⚠️  No price available for {normalized}")
-            # Optional fallback to data provider (paper-safe)
-            price = self._fallback_price(normalized, reason="ibkr_no_price")
+            # Still no price after 3 seconds - fall back to data provider
+            logger.warning(f"⚠️  No streaming price for {normalized} after 3s")
+            price = self._fallback_price(normalized, reason="ibkr_no_stream_price")
             if price > 0:
                 return float(price)
             return 0.0
@@ -749,6 +769,10 @@ class IBKRConnector:
             positions = self.ib.positions()
             
             for pos in positions:
+                # Ignore options (handled separately)
+                if pos.contract.secType == 'OPT':
+                    continue
+
                 pos_symbol = self._symbol_from_contract(pos.contract)
                 if pos_symbol == broker_parsed.normalized or pos_symbol == normalized:
                     return float(pos.position)
@@ -770,6 +794,11 @@ class IBKRConnector:
             positions = self.ib.positions()
             result = {}
             for pos in positions:
+                # Ignore options (handled separately in get_option_positions)
+                sec_type = str(pos.contract.secType).strip().upper()
+                if 'OPT' in sec_type:
+                    continue
+
                 symbol = self._symbol_from_contract(pos.contract)
                 qty = float(pos.position)
                 if qty != 0:
@@ -1178,23 +1207,54 @@ class IBKRConnector:
     
     async def get_account_cash(self) -> float:
         """
-        Get available cash in account.
-        
-        Returns:
-            Available cash in USD
+        Get TotalCashValue + AccruedCash (Gross Cash) in account.
+        Used for Equity Reconciliation (Cash + Positions = Equity).
         """
         try:
             account_values = self.ib.accountValues()
             
-            for av in account_values:
-                if av.tag == 'AvailableFunds' and av.currency == 'USD':
-                    return float(av.value)
+            total_cash = 0.0
+            accrued = 0.0
             
-            return 0.0
+            for av in account_values:
+                # Prefer TotalCashValue (Gross Cash)
+                if av.tag == 'TotalCashValue' and av.currency == 'USD':
+                    total_cash = float(av.value)
+                elif av.tag == 'AccruedCash' and av.currency == 'USD':
+                    accrued = float(av.value)
+            
+            # Fallback to CashBalance if TotalCashValue not found
+            if total_cash == 0.0:
+                for av in account_values:
+                    if av.tag == 'CashBalance' and av.currency == 'USD':
+                        total_cash = float(av.value)
+
+            return total_cash + accrued
             
         except Exception as e:
             logger.error(f"❌ Error getting account cash: {e}")
             return 0.0
+
+    def get_portfolio_market_values(self) -> Dict[str, float]:
+        """
+        Get market value of all positions from IBKR portfolio updates.
+        Returns dict {key: marketValue} for OPTIONS.
+        Key format matches get_option_positions: Symbol_Expiry_Strike_Right
+        """
+        try:
+            # portfolio() returns list of PortfolioItem
+            items = self.ib.portfolio()
+            result = {}
+            for item in items:
+                contract = item.contract
+                if contract.secType == 'OPT':
+                    key = f"{contract.symbol}_{contract.lastTradeDateOrContractMonth}_{contract.strike}_{contract.right}"
+                    result[key] = item.marketValue
+            
+            return result
+        except Exception as e:
+            logger.error(f"❌ Error getting portfolio values: {e}")
+            return {}
     
     async def get_buying_power(self) -> float:
         """
@@ -1341,33 +1401,39 @@ class IBKRConnector:
             return self.contracts[cache_key]
 
         try:
-            # Create option contract
-            contract = Option(
-                symbol=symbol,
-                lastTradeDateOrContractMonth=expiry,
-                strike=strike,
-                right=right,
-                multiplier=str(multiplier),
-                tradingClass=trading_class,
-                exchange='SMART',
-                currency='USD'
-            )
+            # Try qualification with several fallback strategies
+            attempts = [
+                # 1. Original request with tradingClass + SMART
+                dict(symbol=symbol, lastTradeDateOrContractMonth=expiry,
+                     strike=strike, right=right, multiplier=str(multiplier),
+                     tradingClass=trading_class, exchange='SMART', currency='USD'),
+            ]
+            # 2. Without tradingClass (let IBKR resolve)
+            if trading_class:
+                attempts.append(
+                    dict(symbol=symbol, lastTradeDateOrContractMonth=expiry,
+                         strike=strike, right=right, multiplier=str(multiplier),
+                         tradingClass='', exchange='SMART', currency='USD'))
+            # 3. Without explicit exchange (let IBKR pick)
+            attempts.append(
+                dict(symbol=symbol, lastTradeDateOrContractMonth=expiry,
+                     strike=strike, right=right, multiplier=str(multiplier),
+                     tradingClass='', exchange='', currency='USD'))
 
-            # Qualify contract
-            await self._throttle_ibkr("qualify_option_contract")
-            qualified = await self.ib.qualifyContractsAsync(contract)
+            for i, params in enumerate(attempts):
+                contract = Option(**params)
+                await self._throttle_ibkr("qualify_option_contract")
+                qualified = await self.ib.qualifyContractsAsync(contract)
+                if qualified:
+                    self.contracts[cache_key] = qualified[0]
+                    if i > 0:
+                        logger.debug(f"✅ Qualified option on fallback attempt {i+1}: {symbol} {expiry} {strike} {right}")
+                    else:
+                        logger.debug(f"✅ Qualified option: {symbol} {expiry} {strike} {right}")
+                    return qualified[0]
 
-            if qualified:
-                self.contracts[cache_key] = qualified[0]
-                logger.debug(f"✅ Qualified option: {symbol} {expiry} {strike} {right}")
-                return qualified[0]
-            else:
-                # Qualification failed - log details of the attempt
-                logger.warning(f"⚠️ Could not qualify option contract: {symbol} Exp:{expiry} Strike:{strike} Right:{right}")
-                # Try to see if it's a strike format issue
-                if isinstance(strike, float) and strike.is_integer():
-                     logger.debug(f"   Suggestion: Strike {strike} might need to be integer?")
-                return None
+            logger.warning(f"⚠️ Could not qualify option contract: {symbol} Exp:{expiry} Strike:{strike} Right:{right}")
+            return None
 
         except Exception as e:
             logger.error(f"❌ Error getting option contract: {e}")
@@ -1678,9 +1744,9 @@ class IBKRConnector:
         key = f"{symbol}_{expiry}_{strike}_{right}"
 
         if key not in positions:
-            logger.warning(f"⚠️ No option position found: {key}")
+            logger.warning(f"⚠️  Cannot close {key}: Position not found")
             return None
-
+            
         current_qty = positions[key]['quantity']
 
         # Determine closing action
@@ -1702,6 +1768,27 @@ class IBKRConnector:
             quantity=close_qty
         )
 
+    def get_portfolio_market_values(self) -> Dict[str, float]:
+        """
+        Get market value of all positions from IBKR portfolio updates.
+        Returns dict {key: marketValue} for OPTIONS.
+        Key format matches get_option_positions: Symbol_Expiry_Strike_Right
+        """
+        try:
+            # portfolio() returns list of PortfolioItem
+            # PortfolioItem(contract, position, marketPrice, marketValue, averageCost, unrealizedPNL, realizedPNL, account)
+            items = self.ib.portfolio()
+            result = {}
+            for item in items:
+                contract = item.contract
+                if contract.secType == 'OPT':
+                    key = f"{contract.symbol}_{contract.lastTradeDateOrContractMonth}_{contract.strike}_{contract.right}"
+                    result[key] = item.marketValue
+            
+            return result
+        except Exception as e:
+            logger.error(f"❌ Error getting portfolio values: {e}")
+            return {}
     def __del__(self):
         """Cleanup on deletion."""
         self.disconnect()

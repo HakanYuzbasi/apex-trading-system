@@ -295,46 +295,90 @@ function socialDecisionLabel(row: SocialAuditEvent): string {
   return "NORMAL";
 }
 
-export default function Dashboard() {
-  const { metrics, isLoading: metricsLoading, isError: metricsError, error: metricsFetchError } = useMetrics();
-  const { data: cockpit, isLoading: cockpitLoading, isError: cockpitError, error: cockpitFetchError } = useCockpitData();
-  const { theme, toggleTheme } = useTheme();
-  const router = useRouter();
-  const [themeMounted, setThemeMounted] = useState(false);
+import { useWebSocket } from "@/hooks/useWebSocket";
 
-  const [activeLens, setActiveLens] = useState<LensKey>("performance");
-  const [drawerOpen, setDrawerOpen] = useState(true);
-  const [alertFilter, setAlertFilter] = useState<SeverityFilter>("all");
+// ... existing imports ...
+
+export default function Dashboard({ isPublic = false }: { isPublic?: boolean }) {
+  const router = useRouter();
+  const { isConnected: wsConnected, lastMessage: wsMessage } = useWebSocket(isPublic);
+  const { metrics, isLoading: metricsLoading, isError: metricsError, error: metricsFetchError } = useMetrics(isPublic);
+  const { data: cockpit, isLoading: cockpitLoading, isError: cockpitError, error: cockpitFetchError } = useCockpitData(isPublic);
+  const { theme, toggleTheme } = useTheme();
+
+  // Alert management state
   const [dismissedAlerts, setDismissedAlerts] = useState<Record<string, boolean>>({});
-  const [sortKey, setSortKey] = useState<PositionSortKey>("pnl");
-  const [sortDirection, setSortDirection] = useState<SortDirection>("desc");
-  const [mandateIntent, setMandateIntent] = useState(
-    "I want to make 10% in the next two months by trading in the energy and technology sectors.",
-  );
+  const [alertFilter, setAlertFilter] = useState<SeverityFilter>("all");
+
+  // UI state
+  const [themeMounted, setThemeMounted] = useState(false);
+  const [activeLens, setActiveLens] = useState<LensKey>("performance");
+  const [activeTab, setActiveTab] = useState("positions");
+  const [drawerOpen, setDrawerOpen] = useState(false);
+  const [historyDrawerOpen, setHistoryDrawerOpen] = useState(false);
+
+  // Multi-broker aggregated equity
+  const [aggregatedEquity, setAggregatedEquity] = useState<number | null>(null);
+  const [brokerCount, setBrokerCount] = useState<number>(0);
+
+  // Account selector — broker source list and selected account
+  const [brokerSources, setBrokerSources] = useState<{ id: string; name: string; broker_type: string; environment: string }[]>([]);
+  const [selectedSourceId, setSelectedSourceId] = useState<string | null>(null);
+
+  // Position table sorting state
+  const [sortKey, setSortKey] = useState<PositionSortKey>("symbol");
+  const [sortDirection, setSortDirection] = useState<SortDirection>("asc");
+
+  // Mandate state
+  const [mandateIntent, setMandateIntent] = useState("");
   const [mandateSuitability, setMandateSuitability] = useState<SuitabilityProfile>("balanced");
   const [useProfileDrawdown, setUseProfileDrawdown] = useState(true);
   const [mandateDrawdownCap, setMandateDrawdownCap] = useState(15);
-  const [mandateLoading, setMandateLoading] = useState(false);
-  const [mandateError, setMandateError] = useState("");
-  const [mandateResult, setMandateResult] = useState<MandateEvaluationResult | null>(null);
-  const [historyDrawerOpen, setHistoryDrawerOpen] = useState(false);
   const [mandateHistory, setMandateHistory] = useState<MandateAuditEvent[]>([]);
   const [mandateHistoryLoading, setMandateHistoryLoading] = useState(false);
   const [mandateHistoryError, setMandateHistoryError] = useState("");
+  const [mandateResult, setMandateResult] = useState<MandateEvaluationResult | null>(null);
+  const [mandateLoading, setMandateLoading] = useState(false);
+  const [mandateError, setMandateError] = useState("");
+
+  // Calibration state
   const [calibration, setCalibration] = useState<MandateCalibrationSnapshot | null>(null);
   const [calibrationLoading, setCalibrationLoading] = useState(false);
   const [calibrationError, setCalibrationError] = useState("");
-  const [workflowLoading, setWorkflowLoading] = useState(false);
-  const [workflowError, setWorkflowError] = useState("");
-  const [workflowPack, setWorkflowPack] = useState<MandateWorkflowPack | null>(null);
-  const [workflowList, setWorkflowList] = useState<MandateWorkflowPack[]>([]);
-  const [workflowListLoading, setWorkflowListLoading] = useState(false);
+
+  // Risk report state
   const [monthlyRiskReport, setMonthlyRiskReport] = useState<MonthlyModelRiskReport | null>(null);
   const [riskReportLoading, setRiskReportLoading] = useState(false);
   const [riskReportError, setRiskReportError] = useState("");
 
-  const mergedMetrics = metrics ?? (cockpit
+  // Workflow state
+  const [workflowList, setWorkflowList] = useState<MandateWorkflowPack[]>([]);
+  const [workflowListLoading, setWorkflowListLoading] = useState(false);
+  const [workflowPack, setWorkflowPack] = useState<MandateWorkflowPack | null>(null);
+  const [workflowLoading, setWorkflowLoading] = useState(false);
+  const [workflowError, setWorkflowError] = useState("");
+
+  // ... existing state ...
+
+  // Parse WebSocket message
+  const wsData = wsMessage?.type === "state_update" ? wsMessage : null;
+
+  // Merge Metrics: Prefer WS data, fallback to REST
+  const mergedMetrics = wsData
     ? {
+      status: true,
+      timestamp: wsData.timestamp,
+      capital: wsData.capital,
+      daily_pnl: wsData.daily_pnl,
+      total_pnl: wsData.total_pnl,
+      max_drawdown: wsData.max_drawdown,
+      sharpe_ratio: wsData.sharpe_ratio,
+      win_rate: wsData.win_rate,
+      open_positions: wsData.open_positions,
+      trades_count: wsData.total_trades,
+    }
+    : metrics ?? (cockpit
+      ? {
         status: cockpit.status.state_fresh,
         timestamp: cockpit.status.timestamp,
         capital: cockpit.status.capital,
@@ -346,52 +390,85 @@ export default function Dashboard() {
         open_positions: cockpit.status.open_positions,
         trades_count: cockpit.status.total_trades,
       }
-    : undefined);
+      : undefined);
+
+  // Fetch aggregated equity from multi-broker balance endpoint
+  useEffect(() => {
+    const fetchAggregated = async () => {
+      try {
+        const base = (process.env.NEXT_PUBLIC_API_URL || "http://127.0.0.1:8000").replace(/\/+$/, "");
+        const res = await fetch(`${base}/portfolio/balance`, { cache: "no-store" });
+        if (res.ok) {
+          const data = await res.json() as { total_equity: number; breakdown?: { source: string }[] };
+          setAggregatedEquity(data.total_equity);
+          setBrokerCount(data.breakdown?.length ?? 1);
+        }
+      } catch {
+        // silently skip — not critical
+      }
+    };
+    void fetchAggregated();
+    const interval = setInterval(() => void fetchAggregated(), 30000);
+    return () => clearInterval(interval);
+  }, []);
+
+  // Fetch broker sources for account selector
+  useEffect(() => {
+    const fetchSources = async () => {
+      try {
+        const base = (process.env.NEXT_PUBLIC_API_URL || "http://127.0.0.1:8000").replace(/\/+$/, "");
+        const res = await fetch(`${base}/portfolio/sources`, { cache: "no-store" });
+        if (res.ok) {
+          const data = await res.json() as { id: string; name: string; broker_type: string; environment: string }[];
+          setBrokerSources(data);
+        }
+      } catch {
+        // silently skip
+      }
+    };
+    void fetchSources();
+  }, []);
 
   const errorText = `${String((cockpitFetchError as Error | undefined)?.message ?? "")} ${String((metricsFetchError as Error | undefined)?.message ?? "")}`.toLowerCase();
   const authExpired = errorText.includes("not authenticated")
     || errorText.includes("session expired")
     || errorText.includes("401");
 
-  useEffect(() => {
-    setThemeMounted(true);
-  }, []);
-
-  useEffect(() => {
-    if (!authExpired) return;
-    document.cookie = "token=; path=/; expires=Thu, 01 Jan 1970 00:00:01 GMT";
-    router.replace("/login?reason=session_expired");
-  }, [authExpired, router]);
-
-  useEffect(() => {
-    if (authExpired) return;
-    void fetchMandateCalibration();
-    void fetchWorkflowList();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [authExpired]);
-
-  useEffect(() => {
-    if (!historyDrawerOpen) return;
-    if (mandateHistory.length > 0) return;
-    void fetchMandateHistory();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [historyDrawerOpen]);
+  // ... effects ...
 
   const showLoading = (metricsLoading || cockpitLoading) && !mergedMetrics;
-  const apiReachable = cockpit?.status.api_reachable ?? (!cockpitError || !metricsError);
-  const stateFresh = cockpit?.status.state_fresh ?? Boolean(mergedMetrics?.status);
+  const apiReachable = wsConnected || (cockpit?.status.api_reachable ?? (!cockpitError || !metricsError));
+  const stateFresh = wsConnected || (cockpit?.status.state_fresh ?? Boolean(mergedMetrics?.status));
   const isDisconnected = !showLoading && !apiReachable;
   const isStale = apiReachable && !stateFresh;
-  const capital = mergedMetrics?.capital ?? 0;
-  const dailyPnl = mergedMetrics?.daily_pnl ?? 0;
-  const totalPnl = mergedMetrics?.total_pnl ?? 0;
-  const sharpe = mergedMetrics?.sharpe_ratio ?? 0;
-  const winRate = mergedMetrics?.win_rate ?? 0;
-  const openPositions = mergedMetrics?.open_positions ?? 0;
-  const tradesCount = mergedMetrics?.trades_count ?? 0;
-  const drawdownPct = normalizeDrawdownPct(mergedMetrics?.max_drawdown ?? 0);
+  const capital = Number((wsData ? (wsData.total_equity ?? wsData.capital) : mergedMetrics?.capital) ?? 0);
+  const dailyPnl = Number(mergedMetrics?.daily_pnl ?? 0);
+  const totalPnl = Number(mergedMetrics?.total_pnl ?? 0);
+  const sharpe = Number(mergedMetrics?.sharpe_ratio ?? 0);
+  const winRate = Number(mergedMetrics?.win_rate ?? 0);
+  const openPositions = Number(mergedMetrics?.open_positions ?? 0);
+  const tradesCount = Number(mergedMetrics?.trades_count ?? 0);
+  const drawdownPct = normalizeDrawdownPct(Number(mergedMetrics?.max_drawdown ?? 0));
 
-  const positions = useMemo(() => cockpit?.positions ?? [], [cockpit?.positions]);
+
+  // Parse WS positions to match CockpitPosition interface
+  const wsPositions = useMemo(() => {
+    if (!wsData?.positions) return null;
+    return Object.entries(wsData.positions).map(([symbol, data]: [string, any]) => ({
+      symbol,
+      qty: data.qty || 0,
+      side: data.qty > 0 ? "LONG" : "SHORT", // Simple inference
+      entry: data.avg_price || 0,
+      current: data.current_price || 0,
+      pnl: data.pnl || 0,
+      pnl_pct: data.pnl_pct || 0,
+      signal: data.current_signal || 0,
+      signal_direction: data.signal_direction || "UNKNOWN",
+      source_id: data.source_id || "",
+    }));
+  }, [wsData]);
+
+  const positions = useMemo(() => wsPositions ?? cockpit?.positions ?? [], [wsPositions, cockpit?.positions]);
   const derivatives = useMemo(() => cockpit?.derivatives ?? [], [cockpit?.derivatives]);
   const sleeves = useMemo(() => cockpit?.attribution?.sleeves ?? [], [cockpit?.attribution?.sleeves]);
   const socialAudit = cockpit?.social_audit;
@@ -405,7 +482,7 @@ export default function Dashboard() {
   const returnPct = totalPnl / startingCapital;
   const pnlPerTrade = tradesCount > 0 ? totalPnl / tradesCount : 0;
   const avgPositionSize = openPositions > 0 ? capital / openPositions : 0;
-  const nowLabel = mergedMetrics?.timestamp ?? "--";
+  const nowLabel = String(mergedMetrics?.timestamp ?? "--");
 
   const activeAlerts = useMemo(() => {
     const source = cockpit?.alerts ?? [];
@@ -418,13 +495,16 @@ export default function Dashboard() {
   }, [activeAlerts, alertFilter]);
 
   const sortedPositions = useMemo(() => {
-    const copy = [...positions];
+    let copy = [...positions];
+    if (selectedSourceId) {
+      copy = copy.filter(p => p.source_id === selectedSourceId);
+    }
     copy.sort((a, b) => {
       const cmp = comparePositions(a, b, sortKey);
       return sortDirection === "asc" ? cmp : -cmp;
     });
     return copy;
-  }, [positions, sortDirection, sortKey]);
+  }, [positions, sortDirection, sortKey, selectedSourceId]);
 
   const lensModel = useMemo<Record<LensKey, LensModel>>(() => {
     return {
@@ -922,11 +1002,10 @@ export default function Dashboard() {
                     key={filter}
                     type="button"
                     onClick={() => setAlertFilter(filter)}
-                    className={`rounded-full px-2.5 py-1 text-xs font-semibold transition ${
-                      alertFilter === filter
-                        ? "bg-primary text-primary-foreground"
-                        : "bg-secondary text-secondary-foreground hover:bg-secondary/70"
-                    }`}
+                    className={`rounded-full px-2.5 py-1 text-xs font-semibold transition ${alertFilter === filter
+                      ? "bg-primary text-primary-foreground"
+                      : "bg-secondary text-secondary-foreground hover:bg-secondary/70"
+                      }`}
                   >
                     {filter}
                   </button>
@@ -977,17 +1056,22 @@ export default function Dashboard() {
               <h1 className="text-3xl font-semibold tracking-tight text-foreground">Apex Dashboard</h1>
               <p className="text-sm text-muted-foreground">Real-time execution monitoring.</p>
               <p className="text-xs text-muted-foreground">Desk sync: {nowLabel}</p>
+              {aggregatedEquity !== null && (
+                <p className="inline-flex items-center gap-1.5 text-xs font-medium text-emerald-600 dark:text-emerald-400">
+                  <span className="inline-block h-1.5 w-1.5 rounded-full bg-emerald-500" />
+                  Total Equity ({brokerCount} broker{brokerCount !== 1 ? "s" : ""}): {formatCurrency(aggregatedEquity)}
+                </p>
+              )}
             </div>
 
             <div className="flex flex-wrap items-center gap-2">
               <span
-                className={`inline-flex items-center gap-2 rounded-full px-3 py-1 text-xs font-semibold ${
-                  isDisconnected
-                    ? "bg-destructive/15 text-destructive"
-                    : isStale
-                      ? "bg-amber-100 text-amber-700 dark:bg-amber-900/50 dark:text-amber-300"
+                className={`inline-flex items-center gap-2 rounded-full px-3 py-1 text-xs font-semibold ${isDisconnected
+                  ? "bg-destructive/15 text-destructive"
+                  : isStale
+                    ? "bg-amber-100 text-amber-700 dark:bg-amber-900/50 dark:text-amber-300"
                     : "bg-emerald-100 text-emerald-700 dark:bg-emerald-900/50 dark:text-emerald-300"
-                }`}
+                  }`}
               >
                 {isDisconnected ? <WifiOff className="h-3.5 w-3.5" /> : <Wifi className="h-3.5 w-3.5" />}
                 {isDisconnected ? "Disconnected" : isStale ? "Connected (Stale)" : "Connected"}
@@ -1011,16 +1095,26 @@ export default function Dashboard() {
                 {!themeMounted ? <Moon className="h-4 w-4" /> : theme === "dark" ? <Sun className="h-4 w-4" /> : <Moon className="h-4 w-4" />}
                 {!themeMounted ? "Theme" : theme === "dark" ? "Light" : "Dark"}
               </Button>
-              <Button variant="outline" className="rounded-xl" onClick={handleLogout}>
-                <LogOut className="h-4 w-4" />
-                Logout
-              </Button>
-              <Link
-                href="/pricing"
-                className="inline-flex h-9 items-center justify-center rounded-xl border border-border bg-background px-3 text-sm font-medium text-foreground transition hover:bg-secondary/50"
-              >
-                Pricing
-              </Link>
+              {isPublic ? null : (
+                <>
+                  <Button variant="outline" className="rounded-xl" onClick={handleLogout}>
+                    <LogOut className="h-4 w-4" />
+                    Logout
+                  </Button>
+                  <Link
+                    href="/settings"
+                    className="inline-flex h-9 items-center justify-center rounded-xl border border-border bg-background px-3 text-sm font-medium text-foreground transition hover:bg-secondary/50"
+                  >
+                    Settings
+                  </Link>
+                  <Link
+                    href="/pricing"
+                    className="inline-flex h-9 items-center justify-center rounded-xl border border-border bg-background px-3 text-sm font-medium text-foreground transition hover:bg-secondary/50"
+                  >
+                    Pricing
+                  </Link>
+                </>
+              )}
             </div>
           </div>
         </header>
@@ -1735,13 +1829,12 @@ export default function Dashboard() {
                 <p className="text-xs text-muted-foreground">Immutable decision trail from live social-risk gating.</p>
               </div>
               <div className="flex flex-wrap items-center gap-2">
-                <span className={`rounded-full px-2 py-0.5 text-[11px] font-semibold uppercase ${
-                  socialAudit?.available
-                    ? "bg-emerald-100 text-emerald-700 dark:bg-emerald-900/60 dark:text-emerald-300"
-                    : socialAudit?.unauthorized
-                      ? "bg-amber-100 text-amber-700 dark:bg-amber-900/50 dark:text-amber-300"
-                      : "bg-rose-100 text-rose-700 dark:bg-rose-900/60 dark:text-rose-300"
-                }`}>
+                <span className={`rounded-full px-2 py-0.5 text-[11px] font-semibold uppercase ${socialAudit?.available
+                  ? "bg-emerald-100 text-emerald-700 dark:bg-emerald-900/60 dark:text-emerald-300"
+                  : socialAudit?.unauthorized
+                    ? "bg-amber-100 text-amber-700 dark:bg-amber-900/50 dark:text-amber-300"
+                    : "bg-rose-100 text-rose-700 dark:bg-rose-900/60 dark:text-rose-300"
+                  }`}>
                   {socialAudit?.available ? "live" : socialAudit?.unauthorized ? "restricted" : "degraded"}
                 </span>
                 <span className="rounded-full bg-secondary px-2 py-0.5 text-[11px] font-semibold text-secondary-foreground">
@@ -1857,9 +1950,27 @@ export default function Dashboard() {
           <article className="apex-panel apex-fade-up rounded-2xl p-5">
             <div className="mb-4 flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
               <h2 className="text-lg font-semibold text-foreground">Position Book (Sortable)</h2>
-              <span className="text-xs text-muted-foreground">
-                {openPositions} equity + {optionPositions} options = {totalLines} lines
-              </span>
+              <div className="flex flex-wrap items-center gap-2">
+                {!isPublic && brokerSources.length > 0 && (
+                  <select
+                    id="account-selector"
+                    value={selectedSourceId ?? ""}
+                    onChange={(e) => setSelectedSourceId(e.target.value || null)}
+                    className="h-8 rounded-lg border border-border bg-background px-2 text-xs font-medium text-foreground focus:outline-none focus:ring-1 focus:ring-primary"
+                    aria-label="Filter by account"
+                  >
+                    <option value="">All Accounts</option>
+                    {brokerSources.map((src) => (
+                      <option key={src.id} value={src.id}>
+                        {src.name} ({src.environment})
+                      </option>
+                    ))}
+                  </select>
+                )}
+                <span className="text-xs text-muted-foreground">
+                  {openPositions} equity + {optionPositions} options = {totalLines} lines
+                </span>
+              </div>
             </div>
 
             {notes.map((note) => (
@@ -1867,6 +1978,15 @@ export default function Dashboard() {
                 {note}
               </p>
             ))}
+
+            {selectedSourceId && brokerSources.length > 0 && (() => {
+              const src = brokerSources.find(s => s.id === selectedSourceId);
+              return src ? (
+                <p className="mb-2 rounded-lg border border-emerald-300/50 bg-emerald-50/60 px-3 py-2 text-xs font-medium text-emerald-700 dark:border-emerald-700/40 dark:bg-emerald-950/40 dark:text-emerald-300">
+                  📂 Viewing: <strong>{src.name}</strong> ({src.broker_type.toUpperCase()} · {src.environment}) — positions scope active
+                </p>
+              ) : null;
+            })()}
 
             <div className="max-h-[420px] overflow-auto rounded-xl border border-border/80">
               <table className="min-w-full text-xs">

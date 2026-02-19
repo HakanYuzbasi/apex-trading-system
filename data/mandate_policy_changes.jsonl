@@ -1,3 +1,4 @@
 {"timestamp":"2026-02-16T21:41:32.603978+00:00","workflow_id":"mwf-7ce258c3ff60","actor":"admin","from_status":"none","to_status":"draft","note":"Initiated from dashboard mandate copilot card."}
 {"timestamp":"2026-02-16T21:41:39.005209+00:00","workflow_id":"mwf-7ce258c3ff60","actor":"admin","from_status":"draft","to_status":"retired","note":"Retired from cockpit review."}
 {"timestamp":"2026-02-16T21:51:14.663139+00:00","workflow_id":"mwf-9d0d5be310bb","actor":"admin","from_status":"none","to_status":"draft","note":"preflight workflow initiation check"}
+{"timestamp":"2026-02-17T20:03:00.324805+00:00","workflow_id":"mwf-9d0d5be310bb","actor":"admin","from_status":"draft","to_status":"retired","note":"Retired from cockpit review."}

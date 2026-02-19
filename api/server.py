@@ -11,6 +11,7 @@ import logging
 import os
 import threading
 import time
+from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 from uuid import uuid4
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Depends, Request, HTTPException
@@ -39,6 +40,8 @@ from risk.social_decision_audit import SocialDecisionAuditRepository
 
 logger = logging.getLogger("api")
 from api.auth import authenticate_websocket, require_user, require_role
+from api.ws_manager import manager
+from api.dependencies import read_trading_state, _state_is_fresh, STATE_FILE, _sanitize_floats, CONTROL_COMMAND_FILE, GOVERNOR_POLICY_DIR, SOCIAL_DECISION_AUDIT_FILE, _mtime_ns
 
 try:
     from prometheus_client import Counter, Gauge, Histogram, generate_latest, CONTENT_TYPE_LATEST
@@ -56,84 +59,20 @@ setup_logging(
     backup_count=ApexConfig.LOG_BACKUP_COUNT,
 )
 
-def _sanitize_floats(obj):
-    """Replace NaN/Inf float values with JSON-safe defaults."""
-    if isinstance(obj, float):
-        if math.isnan(obj) or math.isinf(obj):
-            return 0.0
-        return obj
-    elif isinstance(obj, dict):
-        return {k: _sanitize_floats(v) for k, v in obj.items()}
-    elif isinstance(obj, list):
-        return [_sanitize_floats(v) for v in obj]
-    return obj
+try:
+    from core.cache import get_cache_stats, clear_all_caches
+    CACHE_AVAILABLE = True
+except ImportError:
+    CACHE_AVAILABLE = False
 
-# Path to trading state file
-STATE_FILE = ApexConfig.DATA_DIR / "trading_state.json"
-PRICE_CACHE_FILE = ApexConfig.DATA_DIR / "price_cache.json"
-CONTROL_COMMAND_FILE = ApexConfig.DATA_DIR / "trading_control_commands.json"
-GOVERNOR_POLICY_DIR = ApexConfig.DATA_DIR / "governor_policies"
+# Alert aggregator for reducing log noise
+from core.alert_aggregator import get_alert_aggregator
+alert_agg = get_alert_aggregator(logger)
+
 PREFLIGHT_STATUS_FILE = ApexConfig.DATA_DIR / "preflight_status.json"
-SOCIAL_DECISION_AUDIT_FILE = ApexConfig.DATA_DIR / "audit" / "social_governor_decisions.jsonl"
-
-DEFAULT_STATE = {
-    "timestamp": None,
-    "capital": 0,
-    "positions": {},
-    "signals": {},
-    "daily_pnl": 0,
-    "total_pnl": 0,
-    "sector_exposure": {},
-}
-
-_price_cache_lock = threading.Lock()
-_price_cache_data: Dict[str, float] = {}
-_price_cache_mtime_ns: Optional[int] = None
-
-_state_cache_lock = threading.Lock()
-_state_cache_data: Dict = DEFAULT_STATE
-_state_cache_mtime_ns: Optional[int] = None
-_state_cache_price_mtime_ns: Optional[int] = None
 
 _preflight_metrics_lock = threading.Lock()
 _preflight_metrics_mtime_ns: Optional[int] = None
-
-
-def _mtime_ns(path) -> Optional[int]:
-    try:
-        return path.stat().st_mtime_ns
-    except OSError:
-        return None
-
-
-def read_price_cache() -> Tuple[Dict[str, float], Optional[int]]:
-    """Read current price cache from file with mtime-based caching."""
-    global _price_cache_data, _price_cache_mtime_ns
-
-    mtime_ns = _mtime_ns(PRICE_CACHE_FILE)
-    with _price_cache_lock:
-        if _price_cache_mtime_ns == mtime_ns:
-            return _price_cache_data, _price_cache_mtime_ns
-
-    if mtime_ns is None:
-        with _price_cache_lock:
-            _price_cache_data = {}
-            _price_cache_mtime_ns = None
-            return _price_cache_data, _price_cache_mtime_ns
-
-    try:
-        with open(PRICE_CACHE_FILE, "r") as f:
-            loaded = json.load(f)
-            if not isinstance(loaded, dict):
-                loaded = {}
-    except Exception as e:
-        logger.debug(f"Error reading price cache: {e}")
-        loaded = {}
-
-    with _price_cache_lock:
-        _price_cache_data = loaded
-        _price_cache_mtime_ns = mtime_ns
-        return _price_cache_data, _price_cache_mtime_ns
 
 
 def _update_preflight_metrics_from_file() -> None:
@@ -192,6 +131,9 @@ def _update_preflight_metrics_from_file() -> None:
         _preflight_metrics_mtime_ns = mtime_ns
 
 app = FastAPI(title="APEX Trading API", version="2.0.0")
+
+from api.routers.public import router as public_router
+app.include_router(public_router)
 
 if PROMETHEUS_AVAILABLE:
     HTTP_REQUESTS_TOTAL = Counter(
@@ -303,16 +245,39 @@ async def request_context_and_metrics_middleware(request: Request, call_next):
             raise
         finally:
             elapsed = time.perf_counter() - start
-            logger.info(
-                "HTTP request completed",
-                extra={
-                    "method": method,
-                    "path": path,
-                    "status_code": status_code,
-                    "duration_ms": round(elapsed * 1000, 3),
-                    "request_id": request_id,
-                },
-            )
+            
+            # Improved logging: only log errors, slow requests, or sample successful requests
+            should_log = False
+            log_level = logging.INFO
+            
+            if status_code >= 500:
+                should_log = True
+                log_level = logging.ERROR
+            elif status_code >= 400:
+                should_log = True
+                log_level = logging.WARNING
+            elif elapsed > 1.0:  # Slow request
+                should_log = True
+                log_level = logging.WARNING
+            elif status_code < 400:
+                # Sample 1% of successful requests to reduce noise
+                import random
+                should_log = random.random() < 0.01
+                log_level = logging.DEBUG
+            
+            if should_log:
+                logger.log(
+                    log_level,
+                    "HTTP request completed" if status_code < 400 else "HTTP request slow/failed",
+                    extra={
+                        "method": method,
+                        "path": path,
+                        "status_code": status_code,
+                        "duration_ms": round(elapsed * 1000, 3),
+                        "request_id": request_id,
+                    },
+                )
+            
             if PROMETHEUS_AVAILABLE and metric_labels is not None:
                 HTTP_REQUEST_DURATION.labels(**metric_labels).observe(elapsed)
                 HTTP_REQUESTS_TOTAL.labels(
@@ -343,7 +308,7 @@ try:
     from services.backtest_validator.router import router as backtest_validator_router
     app.include_router(backtest_validator_router)
 except Exception as e:
-    logging.getLogger("api").warning("Backtest validator router not loaded: %s", e)
+    alert_agg.add("router_load_failed", "Backtest validator router not loaded", data={"service": "backtest_validator", "error": str(e)})
 
 try:
     from services.execution_simulator.router import router as execution_sim_router
@@ -355,189 +320,47 @@ try:
     from services.drift_monitor.router import router as drift_monitor_router
     app.include_router(drift_monitor_router)
 except Exception as e:
-    logging.getLogger("api").warning("Drift monitor router not loaded: %s", e)
+    alert_agg.add("router_load_failed", "Drift monitor router not loaded", data={"service": "drift_monitor", "error": str(e)})
 
 try:
     from services.compliance_copilot.router import router as compliance_copilot_router
     app.include_router(compliance_copilot_router)
 except Exception as e:
-    logging.getLogger("api").warning("Compliance copilot router not loaded: %s", e)
+    alert_agg.add("router_load_failed", "Compliance copilot router not loaded", data={"service": "compliance_copilot", "error": str(e)})
 
 try:
     from services.portfolio_allocator.router import router as portfolio_allocator_router
     app.include_router(portfolio_allocator_router)
 except Exception as e:
-    logging.getLogger("api").warning("Portfolio allocator router not loaded: %s", e)
+    alert_agg.add("router_load_failed", "Portfolio allocator router not loaded", data={"service": "portfolio_allocator", "error": str(e)})
 
 try:
     from services.mandate_copilot.router import router as mandate_copilot_router
     app.include_router(mandate_copilot_router)
 except Exception as e:
-    logging.getLogger("api").warning("Mandate copilot router not loaded: %s", e)
+    alert_agg.add("router_load_failed", "Mandate copilot router not loaded", data={"service": "mandate_copilot", "error": str(e)})
 
 # Health check endpoints
 try:
     from api.health import router as health_router
     app.include_router(health_router)
 except Exception as e:
-    logging.getLogger("api").warning("Health router not loaded: %s", e)
+    alert_agg.add("router_load_failed", "Health router not loaded", data={"service": "health", "error": str(e)})
 
 try:
     from services.tca.router import router as tca_router
     app.include_router(tca_router)
 except Exception as e:
-    logging.getLogger("api").warning("Could not load TCA router: %s", e)
+    alert_agg.add("router_load_failed", "TCA router not loaded", data={"service": "tca", "error": str(e)})
 
-# --------------------------------------------------------------------------------
-# WebSocket Manager
-# --------------------------------------------------------------------------------
+# Broker Service Routers
+try:
+    from services.broker.router import router as broker_router, portfolio_router
+    app.include_router(broker_router)
+    app.include_router(portfolio_router)
+except Exception as e:
+    alert_agg.add("router_load_failed", "Broker router not loaded", data={"service": "broker", "error": str(e)})
 
-class ConnectionManager:
-    def __init__(self):
-        self.active_connections: List[WebSocket] = []
-        self._lock = asyncio.Lock()
-
-    async def connect(self, websocket: WebSocket):
-        await websocket.accept()
-        async with self._lock:
-            self.active_connections.append(websocket)
-        if PROMETHEUS_AVAILABLE and WEBSOCKET_CONNECTIONS is not None:
-            WEBSOCKET_CONNECTIONS.inc()
-        logger.info("Client connected via WebSocket")
-
-    async def disconnect(self, websocket: WebSocket):
-        disconnected = False
-        async with self._lock:
-            if websocket in self.active_connections:
-                self.active_connections.remove(websocket)
-                disconnected = True
-        if disconnected:
-            if PROMETHEUS_AVAILABLE and WEBSOCKET_CONNECTIONS is not None:
-                WEBSOCKET_CONNECTIONS.dec()
-            logger.info("Client disconnected")
-        else:
-            logger.warning("Attempted to disconnect unknown websocket")
-
-    async def broadcast(self, message: Dict):
-        """Send message to all connected clients."""
-        async with self._lock:
-            connections = tuple(self.active_connections)
-        if not connections:
-            return
-
-        async def _send(connection: WebSocket):
-            try:
-                await connection.send_json(message)
-                if PROMETHEUS_AVAILABLE and WEBSOCKET_MESSAGES_TOTAL is not None:
-                    WEBSOCKET_MESSAGES_TOTAL.labels(direction="outbound").inc()
-                return None
-            except Exception as exc:
-                return exc
-
-        results = await asyncio.gather(*(_send(connection) for connection in connections))
-        dead: List[WebSocket] = []
-        for connection, result in zip(connections, results):
-            if result is not None:
-                logger.error(f"Error broadcasting: {result}")
-                dead.append(connection)
-
-        if dead:
-            async with self._lock:
-                for ws in dead:
-                    if ws in self.active_connections:
-                        self.active_connections.remove(ws)
-                        if PROMETHEUS_AVAILABLE and WEBSOCKET_CONNECTIONS is not None:
-                            WEBSOCKET_CONNECTIONS.dec()
-
-manager = ConnectionManager()
-
-# --------------------------------------------------------------------------------
-# State Reader (From trading_state.json)
-# --------------------------------------------------------------------------------
-
-def read_trading_state() -> Dict:
-    """Read current trading state with mtime-aware caching."""
-    global _state_cache_data, _state_cache_mtime_ns, _state_cache_price_mtime_ns
-
-    state_mtime_ns = _mtime_ns(STATE_FILE)
-    price_cache, price_mtime_ns = read_price_cache()
-
-    with _state_cache_lock:
-        if (
-            _state_cache_data is not None
-            and _state_cache_mtime_ns == state_mtime_ns
-            and _state_cache_price_mtime_ns == price_mtime_ns
-        ):
-            return _state_cache_data
-
-    if state_mtime_ns is None:
-        with _state_cache_lock:
-            _state_cache_data = DEFAULT_STATE
-            _state_cache_mtime_ns = None
-            _state_cache_price_mtime_ns = price_mtime_ns
-            return _state_cache_data
-
-    try:
-        with open(STATE_FILE, "r") as f:
-            data = json.load(f)
-    except Exception as e:
-        logger.error(f"Error reading state file: {e}")
-        with _state_cache_lock:
-            _state_cache_data = DEFAULT_STATE
-            _state_cache_mtime_ns = None
-            _state_cache_price_mtime_ns = price_mtime_ns
-            return _state_cache_data
-
-    # Enrich positions with live prices from cache
-    positions = data.get("positions", {})
-    total_position_pnl = 0.0
-
-    for symbol, pos in positions.items():
-        live_price = price_cache.get(symbol, 0)
-        avg_price = pos.get("avg_price", 0)
-        qty = pos.get("qty", 0)
-
-        if live_price > 0 and avg_price > 0:
-            pos["current_price"] = live_price
-            if qty > 0:  # Long
-                pnl = (live_price - avg_price) * qty
-                pnl_pct = (live_price / avg_price - 1) * 100
-            else:  # Short
-                pnl = (avg_price - live_price) * abs(qty)
-                pnl_pct = (avg_price / live_price - 1) * 100 if live_price > 0 else 0
-            pos["pnl"] = round(pnl, 2)
-            pos["pnl_pct"] = round(pnl_pct, 2)
-            total_position_pnl += pnl
-
-    # Update total_pnl if we have position P&L data
-    if total_position_pnl != 0:
-        starting_capital = data.get("starting_capital", data.get("capital", 0))
-        if starting_capital > 0:
-            data["total_pnl"] = round(total_position_pnl, 2)
-            data["daily_pnl"] = round(total_position_pnl, 2)  # Approximate as daily
-
-    sanitized = _sanitize_floats(data)
-    with _state_cache_lock:
-        _state_cache_data = sanitized
-        _state_cache_mtime_ns = state_mtime_ns
-        _state_cache_price_mtime_ns = price_mtime_ns
-        return _state_cache_data
-
-def _parse_timestamp(ts: Optional[str]) -> Optional[datetime]:
-    if not ts:
-        return None
-    try:
-        return datetime.fromisoformat(ts.replace("Z", "+00:00"))
-    except Exception:
-        return None
-
-def _state_is_fresh(state: Dict, threshold_seconds: int) -> bool:
-    ts = _parse_timestamp(state.get("timestamp"))
-    if not ts:
-        return False
-    now = datetime.now(ts.tzinfo) if ts.tzinfo else datetime.utcnow()
-    age = (now - ts).total_seconds()
-    return age <= threshold_seconds
 
 
 class KillSwitchResetRequest(BaseModel):
@@ -584,12 +407,59 @@ def _social_audit_repo() -> SocialDecisionAuditRepository:
 async def stream_trading_state():
     """Stream real trading state to connected clients."""
     last_state = None
+    last_equity_update_time = 0
+    cached_equity_data = None
+
     while True:
         try:
             current_state = read_trading_state()
+            
+            # Periodically fetch aggregated equity (every ~15 seconds to avoid API limits)
+            now_ts = time.time()
+            if now_ts - last_equity_update_time > 15:
+                # We need to compute it across all users or the main system.
+                # Since the backend is single-tenant, we fetch for the default or first available user
+                # from the broker_service. Let's just aggregate everything. 
+                from services.broker.service import broker_service
+                from models.broker import BrokerType
+                from alpaca.trading.client import TradingClient
+                
+                total_eq = 0.0
+                breakdown = []
+                try:
+                    # We have to bypass user_id check since the background task has no request context.
+                    # As a shortcut for single-tenant MVP, we can iterate all loaded users or load them all.
+                    users_dir = Path("data") / "users"
+                    if users_dir.exists():
+                        for user_d in users_dir.iterdir():
+                            if user_d.is_dir():
+                                conns = await broker_service.list_connections(user_d.name)
+                                for c in conns:
+                                    if c.is_active:
+                                        try:
+                                            creds = broker_service._decrypt_credentials(c.credentials["data"])
+                                            if c.broker_type == BrokerType.ALPACA:
+                                                client = TradingClient(creds["api_key"], creds["secret_key"], paper=(c.environment=="paper"))
+                                                acc = client.get_account()
+                                                eq = float(acc.equity)
+                                                total_eq += eq
+                                                breakdown.append({"source": c.name, "source_id": c.id, "equity": eq})
+                                            elif c.broker_type == BrokerType.IBKR:
+                                                pass # IBKR equity pooling to be added
+                                        except Exception as err:
+                                            logger.debug(f"WS eq poll err for {c.id}: {err}")
+                    
+                    if breakdown:
+                        cached_equity_data = {
+                            "total_equity": total_eq,
+                            "breakdown": breakdown
+                        }
+                    last_equity_update_time = now_ts
+                except Exception as e:
+                    logger.debug(f"Aggregated equity background task failed: {e}")
 
-            # Only broadcast if state changed
-            if current_state is not last_state:
+            if current_state != last_state or cached_equity_data:
+                # Basic state extraction
                 update = {
                     "type": "state_update",
                     "timestamp": current_state.get("timestamp", datetime.now().isoformat()),
@@ -604,16 +474,25 @@ async def stream_trading_state():
                     "win_rate": current_state.get("win_rate", 0),
                     "sector_exposure": current_state.get("sector_exposure", {}),
                     "open_positions": current_state.get("open_positions", 0),
-                    "max_positions": current_state.get("max_positions", ApexConfig.MAX_POSITIONS),
                     "total_trades": current_state.get("total_trades", 0)
                 }
-                await manager.broadcast(update)
+
+                # Overlay live equity data if available
+                if cached_equity_data:
+                    update["aggregated_equity"] = cached_equity_data["total_equity"]
+                    update["equity_breakdown"] = cached_equity_data["breakdown"]
+
+                def increment_metrics():
+                    if PROMETHEUS_AVAILABLE and WEBSOCKET_MESSAGES_TOTAL is not None:
+                        WEBSOCKET_MESSAGES_TOTAL.labels(direction="outbound").inc()
+                        
+                await manager.broadcast(update, increment_metrics)
                 last_state = current_state
 
         except Exception as e:
-            logger.error(f"Error streaming state: {e}")
-
-        await asyncio.sleep(2)  # Poll every 2 seconds
+            logger.error(f"Error in broadcast loop: {e}")
+            
+        await asyncio.sleep(getattr(ApexConfig, "POLL_INTERVAL_SECONDS", 1.0))
 
 @app.on_event("startup")
 async def startup_event():
@@ -1006,6 +885,8 @@ async def websocket_endpoint(websocket: WebSocket):
         await websocket.close(code=1008)
         return
     await manager.connect(websocket)
+    if PROMETHEUS_AVAILABLE and WEBSOCKET_CONNECTIONS is not None:
+        WEBSOCKET_CONNECTIONS.inc()
     try:
         # Send current state immediately on connect
         current_state = read_trading_state()
@@ -1033,3 +914,5 @@ async def websocket_endpoint(websocket: WebSocket):
             logger.info(f"Received command: {data}")
     except WebSocketDisconnect:
         await manager.disconnect(websocket)
+        if PROMETHEUS_AVAILABLE and WEBSOCKET_CONNECTIONS is not None:
+            WEBSOCKET_CONNECTIONS.dec()
