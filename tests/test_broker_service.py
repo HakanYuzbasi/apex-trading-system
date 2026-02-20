@@ -16,8 +16,11 @@ async def test_encryption():
 async def test_create_connection_alpaca():
     service = BrokerService()
     
-    # Mock validation
-    with patch.object(service, 'validate_credentials', return_value=True) as mock_validate:
+    # Mock validation and DB routines
+    with patch.object(service, 'validate_credentials', return_value=True), \
+         patch.object(service, '_save_user', return_value=None), \
+         patch.object(service, '_load_user', return_value=None):
+         
         conn = await service.create_connection(
             user_id="user123",
             broker_type=BrokerType.ALPACA,
@@ -31,8 +34,8 @@ async def test_create_connection_alpaca():
         assert conn.environment == "paper"
         assert "data" in conn.credentials
         
-        # Verify stored
-        stored = await service.get_connection(conn.id)
+        # Verify stored in memory cache
+        stored = await service.get_connection(conn.id, "user123")
         assert stored == conn
 
 @pytest.mark.asyncio

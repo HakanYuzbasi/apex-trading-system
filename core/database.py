@@ -161,11 +161,13 @@ class SQLiteBackend(DatabaseBackend):
     """SQLite database backend."""
 
     def __init__(self, db_path: str = None):
-        self.db_path = db_path or str(ApexConfig.DATA_DIR / "apex_trading.db")
+        if db_path is None:
+            raise ValueError("db_path must not be None")
+        self.db_path = db_path
         self.connection: Optional[aiosqlite.Connection] = None
 
         # Ensure directory exists
-        Path(db_path).parent.mkdir(parents=True, exist_ok=True)
+        Path(self.db_path).parent.mkdir(parents=True, exist_ok=True)
 
     async def connect(self):
         """Connect to SQLite database."""
@@ -510,7 +512,8 @@ class Database:
         self.db_type = db_type
 
         if db_type == DatabaseType.SQLITE:
-            self.backend = SQLiteBackend(db_path)
+            resolved_db_path = db_path or str(ApexConfig.DATA_DIR / "apex_trading.db")
+            self.backend = SQLiteBackend(resolved_db_path)
         else:
             raise NotImplementedError(f"Database type {db_type} not implemented")
 

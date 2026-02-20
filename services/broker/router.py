@@ -5,6 +5,7 @@ from datetime import datetime, timezone
 import logging
 
 from api.auth import require_user, User
+from core.exceptions import ApexBrokerError
 from models.broker import BrokerConnection, BrokerType
 from services.broker.service import broker_service
 
@@ -73,7 +74,7 @@ async def connect_broker(
             client_id=request.client_id
         )
         return connection
-    except ValueError as e:
+    except ApexBrokerError as e:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
     except Exception as e:
         logger.error(f"Failed to connect broker: {e}")
@@ -90,10 +91,10 @@ async def delete_broker(
     user: User = Depends(require_user)
 ):
     """Delete a broker connection."""
-    conn = await broker_service.get_connection(connection_id)
-    if not conn or conn.user_id != user.user_id:
+    conn = await broker_service.get_connection(connection_id, user.user_id)
+    if not conn:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Connection not found")
-    deleted = await broker_service.delete_connection(connection_id)
+    deleted = await broker_service.delete_connection(connection_id, user.user_id)
     if not deleted:
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Failed to delete connection")
 
@@ -103,10 +104,10 @@ async def toggle_broker(
     user: User = Depends(require_user)
 ):
     """Toggle a broker connection active/inactive (persisted to disk)."""
-    conn = await broker_service.get_connection(connection_id)
-    if not conn or conn.user_id != user.user_id:
+    conn = await broker_service.get_connection(connection_id, user.user_id)
+    if not conn:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Connection not found")
-    updated = await broker_service.toggle_connection(connection_id)
+    updated = await broker_service.toggle_connection(connection_id, user.user_id)
     if updated is None:
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Toggle failed")
     return updated
@@ -115,32 +116,12 @@ async def toggle_broker(
 async def get_portfolio_balance(user: User = Depends(require_user)):
     """Get aggregated portfolio balance with per-source breakdown."""
     try:
-        from alpaca.trading.client import TradingClient as _TC
-        from models.broker import BrokerType as _BT
-
-        connections = await broker_service.list_connections(user.user_id)
-        breakdown = []
-        total_equity = 0.0
-
-        for conn in connections:
-            if not conn.is_active:
-                continue
-            try:
-                creds = broker_service._decrypt_credentials(conn.credentials["data"])
-                if conn.broker_type == _BT.ALPACA:
-                    client = _TC(creds["api_key"], creds["secret_key"], paper=(conn.environment == "paper"))
-                    account = client.get_account()
-                    equity = float(account.equity)
-                    total_equity += equity
-                    breakdown.append({"source": conn.name, "source_id": conn.id, "equity": equity})
-            except Exception as e:
-                logger.error(f"Balance fetch failed for {conn.id}: {e}")
-                breakdown.append({"source": conn.name, "source_id": conn.id, "equity": 0.0, "error": str(e)})
+        snapshot = await broker_service.get_tenant_equity_snapshot(user.user_id)
 
         return {
-            "total_equity": total_equity,
+            "total_equity": snapshot["total_equity"],
             "last_updated": datetime.now(timezone.utc),
-            "breakdown": breakdown,
+            "breakdown": snapshot["breakdown"],
         }
     except Exception as e:
         logger.error(f"Failed to get portfolio balance: {e}")

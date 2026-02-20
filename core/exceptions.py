@@ -17,6 +17,43 @@ from typing import Optional, Dict, Any
 from enum import Enum
 
 
+@dataclass
+class ApexBaseException(Exception):
+    """Base exception for standardized APEX error propagation."""
+
+    code: str
+    message: str
+    context: Dict[str, Any] = field(default_factory=dict)
+
+    def __str__(self) -> str:
+        return f"{self.code}: {self.message}"
+
+
+@dataclass
+class ApexTradingError(ApexBaseException):
+    """Execution and order placement error."""
+
+
+@dataclass
+class ApexRiskError(ApexBaseException):
+    """Risk management violation or policy failure."""
+
+
+@dataclass
+class ApexBrokerError(ApexBaseException):
+    """Broker connectivity, account, or routing error."""
+
+
+@dataclass
+class ApexDataError(ApexBaseException):
+    """Market data and pipeline error."""
+
+
+@dataclass
+class ApexAuthError(ApexBaseException):
+    """Authentication and authorization error."""
+
+
 class ErrorCode(Enum):
     """Standard error codes for trading operations."""
     # Connection errors (1xx)

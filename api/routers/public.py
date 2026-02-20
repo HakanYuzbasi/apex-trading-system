@@ -79,7 +79,7 @@ async def public_websocket_endpoint(websocket: WebSocket):
     Public WebSocket endpoint. Streams state updates without authentication.
     Does NOT accept incoming commands from the client.
     """
-    await manager.connect(websocket)
+    await manager.connect(websocket, tenant_id="public")
     try:
         # Send current state immediately on connect
         current_state = read_trading_state()

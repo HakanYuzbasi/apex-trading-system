@@ -20,10 +20,16 @@ from sqlalchemy.orm import DeclarativeBase
 
 logger = logging.getLogger(__name__)
 
-DATABASE_URL = os.getenv(
-    "DATABASE_URL",
-    "postgresql+asyncpg://apex:apex_dev_password@localhost:5432/apex_saas",
-)
+# Try PostgreSQL first, but allow falling back to local SQLite if Docker isn't running
+_raw_url = os.getenv("DATABASE_URL", "")
+
+if not _raw_url:
+    # Default to local SQLite fallback if absolutely nothing is provided
+    db_path = os.path.join(os.getcwd(), "data", "apex_saas.db")
+    os.makedirs(os.path.dirname(db_path), exist_ok=True)
+    DATABASE_URL = f"sqlite+aiosqlite:///{db_path}"
+else:
+    DATABASE_URL = _raw_url
 
 # ---------------------------------------------------------------------------
 # ORM Base

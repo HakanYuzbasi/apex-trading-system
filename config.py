@@ -47,7 +47,11 @@ class ApexConfig:
     # ═══════════════════════════════════════════════════════════════
     LIVE_TRADING: bool = os.getenv(
         "APEX_LIVE_TRADING",
-        os.getenv("LIVE_TRADING", "true"),
+        os.getenv("LIVE_TRADING", "false"),
+    ).lower() == "true"
+    LIVE_TRADING_CONFIRMED: bool = os.getenv(
+        "APEX_LIVE_TRADING_CONFIRMED",
+        os.getenv("LIVE_TRADING_CONFIRMED", "false"),
     ).lower() == "true"
 
     # ═══════════════════════════════════════════════════════════════
@@ -876,6 +880,12 @@ def validate_config() -> bool:
     warnings: List[str] = []
 
     # Critical errors
+    if ApexConfig.LIVE_TRADING and not ApexConfig.LIVE_TRADING_CONFIRMED:
+        errors.append(
+            "❌ Live trading requested without confirmation. "
+            "Set APEX_LIVE_TRADING_CONFIRMED=true to explicitly opt in."
+        )
+
     if ApexConfig.MAX_POSITIONS * ApexConfig.POSITION_SIZE_USD > ApexConfig.INITIAL_CAPITAL:
         errors.append(
             f"❌ Max exposure ({ApexConfig.MAX_POSITIONS} × ${ApexConfig.POSITION_SIZE_USD:,}) "
@@ -965,6 +975,15 @@ def validate_config() -> bool:
         return False
 
     return True
+
+
+def assert_live_trading_confirmation() -> None:
+    """Raise when live trading is enabled without explicit confirmation."""
+    if ApexConfig.LIVE_TRADING and not ApexConfig.LIVE_TRADING_CONFIRMED:
+        raise RuntimeError(
+            "Unsafe startup blocked: APEX_LIVE_TRADING=true requires "
+            "APEX_LIVE_TRADING_CONFIRMED=true."
+        )
 
 
 if __name__ == "__main__":

@@ -57,12 +57,23 @@ except ImportError:
 
 import os
 
+def _runtime_env() -> str:
+    """Return normalized runtime environment."""
+    return (os.getenv("APEX_ENV") or os.getenv("APEX_ENVIRONMENT") or "development").strip().lower()
+
+
+def _is_development_env() -> bool:
+    """Return True when development-only auth fallbacks are allowed."""
+    return _runtime_env() == "development"
+
+
 def _get_shared_secret() -> str:
     """Share the same secret key with api/auth.py to ensure token compatibility."""
     try:
         from api.auth import AUTH_CONFIG
         return AUTH_CONFIG.secret_key
-    except Exception:
+    except Exception:  # SWALLOW: circular-import/env fallback for shared secret
+        logger.exception("Falling back to environment secret after AUTH_CONFIG import failure")
         return os.getenv("APEX_SECRET_KEY", secrets.token_hex(32))
 
 SECRET_KEY = _get_shared_secret()
@@ -96,7 +107,9 @@ def verify_password(plain: str, hashed: str) -> bool:
 
 def create_access_token(user_id: str, username: str, roles: List[str]) -> str:
     if not _JOSE_AVAILABLE:
-        return f"mock-token-{user_id}"
+        if _is_development_env():
+            return f"mock-token-{user_id}"
+        raise RuntimeError("Mock access tokens are only allowed in development")
     expire = datetime.utcnow() + timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
     payload = {
         "sub": user_id,
@@ -111,7 +124,9 @@ def create_access_token(user_id: str, username: str, roles: List[str]) -> str:
 
 def create_refresh_token(user_id: str) -> str:
     if not _JOSE_AVAILABLE:
-        return f"mock-refresh-{user_id}"
+        if _is_development_env():
+            return f"mock-refresh-{user_id}"
+        raise RuntimeError("Mock refresh tokens are only allowed in development")
     expire = datetime.utcnow() + timedelta(days=REFRESH_TOKEN_EXPIRE_DAYS)
     payload = {
         "sub": user_id,
@@ -133,13 +148,15 @@ def decode_token(token: str) -> Optional[dict]:
     try:
         import jwt
         return jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
-    except Exception:
-        pass
+    except Exception:  # SWALLOW: fallback decoder chain continues to mock-token gate
+        logger.exception("PyJWT decode failed; evaluating development mock-token fallback")
 
     # Mock tokens (dev fallback)
-    if token.startswith("mock-token-") or token.startswith("mock-refresh-"):
+    if _is_development_env() and (token.startswith("mock-token-") or token.startswith("mock-refresh-")):
         uid = token.split("-", 2)[-1]
         return {"sub": uid, "type": "access", "roles": ["user"]}
+    if token.startswith("mock-token-") or token.startswith("mock-refresh-"):
+        raise RuntimeError("Mock token decode is only allowed in development")
 
     return None
 

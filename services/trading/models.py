@@ -3,7 +3,7 @@ import uuid
 import enum
 from datetime import datetime
 from sqlalchemy import (
-    Column, String, Boolean, DateTime, Float, ForeignKey, Enum, JSON, Numeric
+    Column, String, Boolean, DateTime, Float, ForeignKey, Enum, JSON, Numeric, Integer
 )
 from sqlalchemy.orm import relationship
 from services.common.db import Base
@@ -46,6 +46,24 @@ class PortfolioModel(Base):
     # For now, we rely on the FK.
     positions = relationship("PositionModel", back_populates="portfolio", cascade="all, delete-orphan")
     orders = relationship("OrderModel", back_populates="portfolio", cascade="all, delete-orphan")
+
+
+class BrokerConnectionModel(Base):
+    __tablename__ = "broker_connections"
+
+    id = Column(String(36), primary_key=True, default=_uuid)
+    user_id = Column(String(36), ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
+    broker_type = Column(String(20), nullable=False)  # 'ibkr', 'alpaca'
+    name = Column(String(100), nullable=False)
+    environment = Column(String(20), default="paper")  # 'paper', 'live'
+    client_id = Column(Integer, nullable=True)  # For IBKR
+    credentials_encrypted_json = Column(String(1000), nullable=False)  # AES Fernet encrypted JSON string
+    is_active = Column(Boolean, default=True, nullable=False)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    # Optional relationship linking a Portfolio exclusively to one Broker Connection
+    # portfolio = relationship("PortfolioModel", back_populates="broker_connection")
 
 
 class PositionModel(Base):

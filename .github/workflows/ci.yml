@@ -35,6 +35,39 @@ jobs:
           pip install -r requirements.txt
           pip install pytest pytest-cov pytest-asyncio
 
+      - name: Verify dependency graph
+        run: pip check
+
+      - name: Import smoke test
+        env:
+          APEX_ENV: production
+          APEX_AUTH_ENABLED: "false"
+          APEX_SECRET_KEY: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+          POSTGRES_PASSWORD: "strong_ci_password_123"
+          GRAFANA_ADMIN_PASSWORD: "strong_ci_grafana_password_123"
+        run: |
+          python - <<'PY'
+          import importlib
+          modules = [
+              "config",
+              "core.database",
+              "api.server",
+              "api.auth",
+              "services.auth.service",
+              "services.broker.service",
+              "risk.pretrade_risk_gateway",
+              "execution.ibkr_connector",
+              "models.institutional_signal_generator",
+              "portfolio.portfolio_optimizer",
+          ]
+          for name in modules:
+              importlib.import_module(name)
+          import aiosqlite
+          from scripts.check_secrets import validate_secrets
+          validate_secrets(runtime_env="production")
+          print("import smoke test passed")
+          PY
+
       - name: Run tests with coverage
         env:
           APEX_AUTH_ENABLED: "false"
@@ -44,9 +77,10 @@ jobs:
             --tb=short \
             --cov=. \
             --cov-report=term-missing \
-            --cov-fail-under=30 \
+            --cov-fail-under=45 \
             -x \
             --ignore=tests/test_stress_scenarios.py
+        # target: raise to 60% next sprint
 
       - name: Upload coverage report
         if: matrix.python-version == '3.11'
@@ -71,7 +105,10 @@ jobs:
           pip install ruff
 
       - name: Run ruff check
-        run: ruff check . --select=E9,F63,F7,F82 --exit-zero
+        run: ruff check . --select=E9,F63,F7,F82
+
+      - name: Enforce exception policy tags
+        run: python scripts/check_exception_policy.py
 
   frontend:
     runs-on: ubuntu-latest
@@ -92,7 +129,7 @@ jobs:
         run: npm ci
 
       - name: Type check
-        run: npx tsc --noEmit || true
+        run: npx tsc --noEmit
 
       - name: Build
         run: npm run build
@@ -128,6 +165,9 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
+
+      - name: Verify backend dependency graph
+        run: pip check
 
       - name: Install frontend dependencies
         working-directory: frontend

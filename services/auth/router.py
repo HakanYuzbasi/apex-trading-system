@@ -33,13 +33,13 @@ async def _rate_limit_auth(request: Request):
 
 
 async def _safe_rollback(db: Optional[AsyncSession]) -> None:
-    """Rollback failed DB transactions without masking fallback auth paths."""
+    """Rollback failed DB transactions without masking original auth errors."""
     if db is None:
         return
     try:
         await db.rollback()
     except Exception as exc:
-        logger.debug("DB rollback skipped/failed during auth fallback: %s", exc)
+        logger.debug("DB rollback skipped/failed during auth error handling: %s", exc)
 
 
 # ---------------------------------------------------------------------------
@@ -97,12 +97,11 @@ class ApiKeyResponse(BaseModel):
 
 @router.post("/register", response_model=TokenResponse, dependencies=[Depends(_rate_limit_auth)])
 async def register(body: RegisterRequest, db: Optional[AsyncSession] = Depends(get_db)):
-    # Try DB-backed registration first
+    if db is None:
+        raise HTTPException(status_code=503, detail="Database unavailable")
     try:
-        if db is None:
-            raise RuntimeError("DB session unavailable")
         svc = AuthService(db)
-        user, access, refresh = await svc.register(
+        _user, access, refresh = await svc.register(
             username=body.username,
             email=body.email,
             password=body.password,
@@ -113,61 +112,32 @@ async def register(body: RegisterRequest, db: Optional[AsyncSession] = Depends(g
         raise HTTPException(status_code=409, detail=str(e))
     except Exception as exc:
         await _safe_rollback(db)
-        logger.debug("DB register failed, trying legacy: %s", exc)
-
-    # Fall back to legacy in-memory user creation
-    try:
-        from api.auth import USER_STORE, create_access_token, create_refresh_token
-        new_user = USER_STORE.create_user(
-            username=body.username,
-            email=body.email,
-            roles=["user"],
-            password=body.password,
-        )
-        access = create_access_token(new_user)
-        refresh = create_refresh_token(new_user)
-        return TokenResponse(access_token=access, refresh_token=refresh)
-    except Exception as exc:
-        logger.error("Legacy register failed: %s", exc)
+        logger.error("Register failed: %s", exc)
         raise HTTPException(status_code=500, detail="Registration unavailable")
 
 
 @router.post("/login", response_model=TokenResponse, dependencies=[Depends(_rate_limit_auth)])
 async def login(body: LoginRequest, db: Optional[AsyncSession] = Depends(get_db)):
-    # Try DB-backed auth first
+    if db is None:
+        raise HTTPException(status_code=503, detail="Database unavailable")
     try:
-        if db is None:
-            raise RuntimeError("DB session unavailable")
         svc = AuthService(db)
         result = await svc.login(body.username, body.password)
         if result:
-            user, access, refresh = result
+            _user, access, refresh = result
             return TokenResponse(access_token=access, refresh_token=refresh)
     except Exception as exc:
         await _safe_rollback(db)
-        logger.debug("DB login failed, trying legacy auth: %s", exc)
-
-    # Fall back to legacy in-memory auth (works without PostgreSQL)
-    try:
-        from api.auth import login as legacy_login
-        legacy_result = await legacy_login(body.username, body.password)
-        if legacy_result:
-            return TokenResponse(
-                access_token=legacy_result["access_token"],
-                refresh_token=legacy_result["refresh_token"],
-            )
-    except Exception as exc:
-        logger.debug("Legacy login also failed: %s", exc)
+        logger.error("Login failed: %s", exc)
 
     raise HTTPException(status_code=401, detail="Invalid credentials")
 
 
 @router.post("/refresh", response_model=TokenResponse, dependencies=[Depends(_rate_limit_auth)])
 async def refresh(body: RefreshRequest, db: Optional[AsyncSession] = Depends(get_db)):
-    # Try DB first
+    if db is None:
+        raise HTTPException(status_code=503, detail="Database unavailable")
     try:
-        if db is None:
-            raise RuntimeError("DB session unavailable")
         svc = AuthService(db)
         result = await svc.refresh_tokens(body.refresh_token)
         if result:
@@ -175,21 +145,7 @@ async def refresh(body: RefreshRequest, db: Optional[AsyncSession] = Depends(get
             return TokenResponse(access_token=access, refresh_token=new_refresh)
     except Exception as exc:
         await _safe_rollback(db)
-        logger.debug("DB refresh failed, trying legacy: %s", exc)
-
-    # Fall back to legacy token verification + re-issue
-    try:
-        from api.auth import verify_token, USER_STORE, create_access_token, create_refresh_token
-        token_data = verify_token(body.refresh_token, expected_token_type="refresh")
-        if token_data:
-            user = USER_STORE.get_user(token_data.user_id)
-            if user:
-                return TokenResponse(
-                    access_token=create_access_token(user),
-                    refresh_token=create_refresh_token(user),
-                )
-    except Exception as exc:
-        logger.debug("Legacy refresh also failed: %s", exc)
+        logger.error("Refresh failed: %s", exc)
 
     raise HTTPException(status_code=401, detail="Invalid or expired refresh token")
 
@@ -210,11 +166,10 @@ async def get_me(request: Request, db: Optional[AsyncSession] = Depends(get_db))
     user_id = _get_user_id(request)
     if not user_id:
         raise HTTPException(status_code=401, detail="Not authenticated")
+    if db is None:
+        raise HTTPException(status_code=503, detail="Database unavailable")
 
-    # Try DB first
     try:
-        if db is None:
-            raise RuntimeError("DB session unavailable")
         svc = AuthService(db)
         info = await svc.get_user_with_subscription(user_id)
         if info:
@@ -228,22 +183,7 @@ async def get_me(request: Request, db: Optional[AsyncSession] = Depends(get_db))
             )
     except Exception as exc:
         await _safe_rollback(db)
-        logger.debug("DB /me lookup failed, trying legacy: %s", exc)
-
-    # Fall back to legacy in-memory user store
-    try:
-        from api.auth import USER_STORE
-        legacy_user = USER_STORE.get_user(user_id)
-        if legacy_user:
-            return UserPublic(
-                user_id=legacy_user.user_id,
-                username=legacy_user.username,
-                email=legacy_user.email,
-                roles=legacy_user.roles,
-                tier="enterprise" if "admin" in legacy_user.roles else "free",
-            )
-    except Exception as exc:
-        logger.debug("Legacy /me also failed: %s", exc)
+        logger.error("User lookup failed: %s", exc)
 
     raise HTTPException(status_code=404, detail="User not found")
 
@@ -253,9 +193,9 @@ async def get_subscription(request: Request, db: Optional[AsyncSession] = Depend
     user_id = _get_user_id(request)
     if not user_id:
         raise HTTPException(status_code=401, detail="Not authenticated")
+    if db is None:
+        raise HTTPException(status_code=503, detail="Database unavailable")
     try:
-        if db is None:
-            raise RuntimeError("DB session unavailable")
         svc = AuthService(db)
         info = await svc.get_user_with_subscription(user_id)
         if not info:
@@ -275,27 +215,7 @@ async def get_subscription(request: Request, db: Optional[AsyncSession] = Depend
         raise
     except Exception as exc:
         await _safe_rollback(db)
-        logger.debug("DB /me/subscription lookup failed, trying legacy: %s", exc)
-
-    # Legacy fallback: map admin->enterprise, others->free
-    try:
-        from api.auth import USER_STORE
-        legacy_user = USER_STORE.get_user(user_id)
-        if not legacy_user:
-            raise HTTPException(status_code=404, detail="User not found")
-        tier = SubscriptionTier.ENTERPRISE if "admin" in legacy_user.roles else SubscriptionTier.FREE
-        return SubscriptionInfo(
-            tier=tier,
-            status="active",
-            current_period_start=None,
-            current_period_end=None,
-            stripe_subscription_id=None,
-            features=get_features_for_tier(tier),
-        )
-    except HTTPException:
-        raise
-    except Exception as exc:
-        logger.debug("Legacy /me/subscription also failed: %s", exc)
+        logger.error("Subscription lookup failed: %s", exc)
         raise HTTPException(status_code=500, detail="Subscription lookup unavailable")
 
 

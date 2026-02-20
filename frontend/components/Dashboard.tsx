@@ -31,6 +31,10 @@ import {
 import { useTheme } from "@/components/theme/ThemeProvider";
 import { Button } from "@/components/ui/button";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
+import AlertsFeed from "@/components/dashboard/AlertsFeed";
+import ControlsPanel from "@/components/dashboard/ControlsPanel";
+import EquityPanel from "@/components/dashboard/EquityPanel";
+import PositionsTable from "@/components/dashboard/PositionsTable";
 
 type LensKey = "performance" | "risk" | "execution";
 type SortDirection = "asc" | "desc";
@@ -986,7 +990,7 @@ export default function Dashboard({ isPublic = false }: { isPublic?: boolean }) 
   return (
     <main className="apex-shell min-h-screen px-4 py-6 sm:px-6 lg:px-10">
       <div className="mx-auto flex w-full max-w-7xl flex-col gap-4 lg:gap-5">
-        <section className="sticky top-2 z-30">
+        <AlertsFeed>
           <div className="apex-panel rounded-2xl border border-border/80 px-4 py-3">
             <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
               <div className="flex items-center gap-2 text-sm">
@@ -1044,7 +1048,7 @@ export default function Dashboard({ isPublic = false }: { isPublic?: boolean }) 
               </div>
             ) : null}
           </div>
-        </section>
+        </AlertsFeed>
 
         <header className="apex-panel apex-fade-up rounded-3xl p-5 sm:p-6">
           <div className="flex flex-col gap-4 xl:flex-row xl:items-start xl:justify-between">
@@ -1064,7 +1068,7 @@ export default function Dashboard({ isPublic = false }: { isPublic?: boolean }) 
               )}
             </div>
 
-            <div className="flex flex-wrap items-center gap-2">
+            <ControlsPanel>
               <span
                 className={`inline-flex items-center gap-2 rounded-full px-3 py-1 text-xs font-semibold ${isDisconnected
                   ? "bg-destructive/15 text-destructive"
@@ -1115,7 +1119,7 @@ export default function Dashboard({ isPublic = false }: { isPublic?: boolean }) 
                   </Link>
                 </>
               )}
-            </div>
+            </ControlsPanel>
           </div>
         </header>
 
@@ -1155,7 +1159,7 @@ export default function Dashboard({ isPublic = false }: { isPublic?: boolean }) 
           </div>
         </section>
 
-        <section className="apex-density-grid apex-stagger grid grid-cols-2 gap-3 lg:grid-cols-4 xl:grid-cols-7">
+        <EquityPanel>
           <button type="button" className="apex-panel apex-interactive rounded-2xl p-4 text-left" onClick={() => setActiveLens("performance")}>
             <div className="flex items-center justify-between">
               <p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">Capital</p>
@@ -1224,10 +1228,10 @@ export default function Dashboard({ isPublic = false }: { isPublic?: boolean }) 
               {showLoading ? "..." : (usp?.band ?? "stabilize").replaceAll("_", " ")}
             </p>
           </button>
-        </section>
+        </EquityPanel>
 
         <section className="grid grid-cols-1 gap-4 xl:grid-cols-[1.25fr_0.75fr]">
-          <article className="apex-panel apex-fade-up rounded-2xl p-5">
+          <PositionsTable>
             <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
               <div>
                 <h2 className="text-lg font-semibold text-foreground">KPI Drilldown</h2>
@@ -1279,7 +1283,7 @@ export default function Dashboard({ isPublic = false }: { isPublic?: boolean }) 
                 ))}
               </div>
             </div>
-          </article>
+          </PositionsTable>
 
           <article className="apex-panel apex-fade-up rounded-2xl p-5">
             <div className="flex items-center justify-between">
@@ -1947,7 +1951,7 @@ export default function Dashboard({ isPublic = false }: { isPublic?: boolean }) 
             </div>
           </article>
 
-          <article className="apex-panel apex-fade-up rounded-2xl p-5">
+          <PositionsTable>
             <div className="mb-4 flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
               <h2 className="text-lg font-semibold text-foreground">Position Book (Sortable)</h2>
               <div className="flex flex-wrap items-center gap-2">
@@ -2084,7 +2088,7 @@ export default function Dashboard({ isPublic = false }: { isPublic?: boolean }) 
                 </table>
               </div>
             </div>
-          </article>
+          </PositionsTable>
         </section>
       </div>
     </main>

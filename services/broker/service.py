@@ -1,10 +1,8 @@
 import os
 import json
-import base64
-import tempfile
 import logging
 import asyncio
-from pathlib import Path
+from dataclasses import dataclass
 from typing import Optional, Dict, List, Any
 from datetime import datetime
 
@@ -14,11 +12,23 @@ from alpaca.common.exceptions import APIError
 from ib_insync import IB
 
 from models.broker import BrokerConnection, BrokerType
+from core.exceptions import ApexBrokerError
+from services.common.db import db_session
+from services.trading.models import BrokerConnectionModel
 
 logger = logging.getLogger(__name__)
 
-# Root directory for user data  (relative to CWD when backend starts)
-DATA_ROOT = Path(os.getenv("APEX_DATA_DIR", "data"))
+
+@dataclass
+class BrokerEquitySnapshot:
+    """Normalized equity payload used by API/dashboard surfaces."""
+
+    value: float
+    broker: str
+    stale: bool
+    as_of: str
+    source: str
+    source_id: str
 
 
 class BrokerService:
@@ -36,69 +46,68 @@ class BrokerService:
         # In-memory cache; populated lazily per user_id from disk
         self._connections: Dict[str, BrokerConnection] = {}
         self._loaded_users: set[str] = set()
+        self._equity_cache: Dict[str, BrokerEquitySnapshot] = {}
 
     # ─────────────────────────────────────────
     # Disk persistence helpers
     # ─────────────────────────────────────────
 
-    def _user_store_path(self, user_id: str) -> Path:
-        """Returns the JSON file path for a given user's broker connections."""
-        path = DATA_ROOT / "users" / user_id
-        path.mkdir(parents=True, exist_ok=True)
-        return path / "brokers.json"
-
-    def _load_user(self, user_id: str) -> None:
-        """Loads broker connections for a user from disk into the in-memory cache (idempotent)."""
+    async def _load_user(self, user_id: str) -> None:
+        """Loads broker connections for a user from Postgres into the in-memory cache."""
         if user_id in self._loaded_users:
             return
         self._loaded_users.add(user_id)
 
-        store = self._user_store_path(user_id)
-        if not store.exists():
-            return
-
         try:
-            raw = store.read_text(encoding="utf-8")
-            records: List[dict] = json.loads(raw)
-            for rec in records:
-                # Deserialise ISO datetime strings back to datetime objects
-                for dt_field in ("created_at", "updated_at"):
-                    if dt_field in rec and isinstance(rec[dt_field], str):
-                        rec[dt_field] = datetime.fromisoformat(rec[dt_field])
-                conn = BrokerConnection.model_validate(rec)
-                self._connections[conn.id] = conn
-            logger.info(f"Loaded {len(records)} broker connection(s) for user '{user_id}' from disk.")
-        except Exception as e:
-            logger.error(f"Failed to load broker connections for user '{user_id}': {e}")
+            async with db_session() as session:
+                from sqlalchemy import select
+                stmt = select(BrokerConnectionModel).filter(BrokerConnectionModel.user_id == user_id)
+                result = await session.execute(stmt)
+                records = result.scalars().all()
 
-    def _save_user(self, user_id: str) -> None:
-        """Atomically writes all broker connections for a user to disk."""
-        store = self._user_store_path(user_id)
+                for row in records:
+                    conn = BrokerConnection(
+                        id=row.id,
+                        user_id=row.user_id,
+                        broker_type=BrokerType(row.broker_type),
+                        name=row.name,
+                        environment=row.environment,
+                        client_id=row.client_id,
+                        credentials={"data": row.credentials_encrypted_json},
+                        is_active=row.is_active,
+                        created_at=row.created_at,
+                        updated_at=row.updated_at
+                    )
+                    self._connections[conn.id] = conn
+                logger.info(f"Loaded {len(records)} broker connection(s) for user '{user_id}' from database.")
+        except Exception as e:  # SWALLOW: startup should continue even if one tenant load fails
+            logger.exception("Failed to load broker connections for user '%s': %s", user_id, e)
+
+    async def _save_user(self, user_id: str) -> None:
+        """Atomically upserts all broker connections for a user to Postgres."""
         connections = [c for c in self._connections.values() if c.user_id == user_id]
 
         try:
-            records = []
-            for conn in connections:
-                rec = conn.model_dump()
-                # Serialise datetime objects to ISO strings for JSON
-                for dt_field in ("created_at", "updated_at"):
-                    if isinstance(rec.get(dt_field), datetime):
-                        rec[dt_field] = rec[dt_field].isoformat()
-                records.append(rec)
-
-            # Atomic write: write to temp file then rename to avoid partial writes
-            tmp_fd, tmp_path = tempfile.mkstemp(dir=store.parent, suffix=".tmp")
-            try:
-                with os.fdopen(tmp_fd, "w", encoding="utf-8") as f:
-                    json.dump(records, f, indent=2)
-                os.replace(tmp_path, store)
-            except Exception:
-                os.unlink(tmp_path)
-                raise
-
-            logger.debug(f"Saved {len(records)} broker connection(s) for user '{user_id}' to {store}.")
-        except Exception as e:
-            logger.error(f"Failed to save broker connections for user '{user_id}': {e}")
+            async with db_session() as session:
+                # Merge each connection
+                for conn in connections:
+                    db_model = BrokerConnectionModel(
+                        id=conn.id,
+                        user_id=conn.user_id,
+                        broker_type=conn.broker_type.value,
+                        name=conn.name,
+                        environment=conn.environment,
+                        client_id=conn.client_id,
+                        credentials_encrypted_json=conn.credentials.get("data", ""),
+                        is_active=conn.is_active,
+                        created_at=conn.created_at,
+                        updated_at=conn.updated_at
+                    )
+                    await session.merge(db_model)
+                await session.commit()
+            logger.debug(f"Saved {len(connections)} broker connection(s) for user '{user_id}' to database.")
+        except Exception as e:  # SWALLOW: persist failure is logged; caller receives in-memory state
+            logger.exception("Failed to save broker connections for user '%s': %s", user_id, e)
 
     # ─────────────────────────────────────────
     # Credential encryption helpers
@@ -124,7 +133,11 @@ class BrokerService:
             return client
         except Exception as e:
             logger.error(f"Alpaca connection failed: {e}")
-            raise ValueError(f"Failed to connect to Alpaca: {e}")
+            raise ApexBrokerError(
+                code="ALPACA_CONNECT_FAILED",
+                message="Failed to connect to Alpaca",
+                context={"environment": environment, "error": str(e)},
+            ) from e
 
     async def connect_ibkr(self, host: str, port: int, client_id: int) -> IB:
         """Establishes and validates an IBKR connection."""
@@ -137,7 +150,11 @@ class BrokerService:
             return ib
         except Exception as e:
             logger.error(f"IBKR connection failed: {e}")
-            raise ValueError(f"Failed to connect to IBKR at {host}:{port} (Client ID: {client_id}): {e}")
+            raise ApexBrokerError(
+                code="IBKR_CONNECT_FAILED",
+                message="Failed to connect to IBKR",
+                context={"host": host, "port": port, "client_id": client_id, "error": str(e)},
+            ) from e
 
     async def validate_credentials(self, broker_type: BrokerType, credentials: Dict[str, Any], environment: str = "paper") -> bool:
         """Validates credentials by attempting a connection."""
@@ -152,6 +169,12 @@ class BrokerService:
                 credentials.get("host", "127.0.0.1"),
                 credentials.get("port", 7497),
                 credentials.get("client_id"),
+            )
+        else:
+            raise ApexBrokerError(
+                code="BROKER_CREDENTIAL_VALIDATION_UNSUPPORTED",
+                message=f"Unsupported broker type: {broker_type}",
+                context={"broker_type": str(broker_type)},
             )
         return True
 
@@ -170,7 +193,7 @@ class BrokerService:
     ) -> BrokerConnection:
         """Creates and saves a new broker connection after validation."""
         # Ensure existing connections for this user are loaded first
-        self._load_user(user_id)
+        await self._load_user(user_id)
 
         # 1. Validate credentials against the broker
         await self.validate_credentials(broker_type, credentials, environment)
@@ -191,32 +214,47 @@ class BrokerService:
 
         # 4. Write to in-memory cache and persist
         self._connections[connection.id] = connection
-        self._save_user(user_id)
+        await self._save_user(user_id)
         return connection
 
-    async def get_connection(self, connection_id: str) -> Optional[BrokerConnection]:
-        return self._connections.get(connection_id)
+    async def get_connection(self, connection_id: str, user_id: str) -> Optional[BrokerConnection]:
+        await self._load_user(user_id)
+        conn = self._connections.get(connection_id)
+        if conn and conn.user_id == user_id:
+            return conn
+        return None
 
     async def list_connections(self, user_id: str) -> List[BrokerConnection]:
-        self._load_user(user_id)
+        await self._load_user(user_id)
         return [c for c in self._connections.values() if c.user_id == user_id]
 
-    async def delete_connection(self, connection_id: str) -> bool:
-        conn = self._connections.get(connection_id)
+    async def delete_connection(self, connection_id: str, user_id: str) -> bool:
+        conn = await self.get_connection(connection_id, user_id)
         if not conn:
             return False
+        
+        # Delete from Postgres
+        try:
+            async with db_session() as session:
+                from sqlalchemy import delete
+                stmt = delete(BrokerConnectionModel).where(BrokerConnectionModel.id == connection_id)
+                await session.execute(stmt)
+                await session.commit()
+        except Exception as e:  # SWALLOW: delete failure returns False to endpoint for 500 mapping
+            logger.exception("Failed to delete broker connection %s from DB: %s", connection_id, e)
+            return False
+
         del self._connections[connection_id]
-        self._save_user(conn.user_id)
         return True
 
-    async def toggle_connection(self, connection_id: str) -> Optional[BrokerConnection]:
+    async def toggle_connection(self, connection_id: str, user_id: str) -> Optional[BrokerConnection]:
         """Toggles is_active and persists the change."""
-        conn = self._connections.get(connection_id)
+        conn = await self.get_connection(connection_id, user_id)
         if not conn:
             return None
         conn.is_active = not conn.is_active
         conn.updated_at = datetime.utcnow()
-        self._save_user(conn.user_id)
+        await self._save_user(conn.user_id)
         return conn
 
     # ─────────────────────────────────────────
@@ -225,28 +263,8 @@ class BrokerService:
 
     async def get_total_equity(self, user_id: str) -> float:
         """Aggregates equity across all active connections."""
-        connections = await self.list_connections(user_id)
-        total_equity = 0.0
-
-        for conn in connections:
-            if not conn.is_active:
-                continue
-            try:
-                creds = self._decrypt_credentials(conn.credentials["data"])
-                if conn.broker_type == BrokerType.ALPACA:
-                    client = TradingClient(
-                        creds["api_key"],
-                        creds["secret_key"],
-                        paper=(conn.environment == "paper"),
-                    )
-                    account = client.get_account()
-                    total_equity += float(account.equity)
-                elif conn.broker_type == BrokerType.IBKR:
-                    logger.debug(f"IBKR equity not yet supported for connection {conn.id}")
-            except Exception as e:
-                logger.error(f"Failed to fetch equity for {conn.id}: {e}")
-
-        return total_equity
+        snapshot = await self.get_tenant_equity_snapshot(user_id)
+        return float(snapshot["total_equity"])
 
     async def get_positions(self, user_id: str) -> List[Dict[str, Any]]:
         """Aggregates open positions across all active broker connections."""
@@ -281,8 +299,8 @@ class BrokerService:
                         })
                 elif conn.broker_type == BrokerType.IBKR:
                     logger.debug(f"IBKR positions not yet supported for connection {conn.id}")
-            except Exception as e:
-                logger.error(f"Failed to fetch positions for connection {conn.id} ({conn.name}): {e}")
+            except Exception as e:  # SWALLOW: isolate one broker failure from global positions view
+                logger.exception("Failed to fetch positions for connection %s (%s): %s", conn.id, conn.name, e)
 
         return all_positions
 
@@ -294,6 +312,156 @@ class BrokerService:
             for c in connections
             if c.is_active
         ]
+
+    async def list_tenant_ids(self) -> List[str]:
+        """Return distinct tenant IDs with active broker connections."""
+        async with db_session() as session:
+            from sqlalchemy import distinct, select
+
+            result = await session.execute(
+                select(distinct(BrokerConnectionModel.user_id)).where(
+                    BrokerConnectionModel.is_active == True
+                )
+            )
+            return [row[0] for row in result.all() if row[0]]
+
+    async def get_tenant_equity_snapshot(self, tenant_id: str) -> Dict[str, Any]:
+        """Aggregate tenant equity with per-source normalized snapshots."""
+        snapshots = await self._collect_equity_snapshots_for_user(tenant_id)
+        total_value = sum(snapshot.value for snapshot in snapshots)
+        return {
+            "tenant_id": tenant_id,
+            "total_equity": float(total_value),
+            "breakdown": [snapshot.__dict__ for snapshot in snapshots],
+            "as_of": datetime.utcnow().isoformat(),
+        }
+
+    async def _collect_equity_snapshots_for_user(self, user_id: str) -> List[BrokerEquitySnapshot]:
+        """Collect per-connection equity snapshots with error isolation."""
+        connections = await self.list_connections(user_id)
+        active_connections = [conn for conn in connections if conn.is_active]
+
+        tasks = [
+            self._fetch_equity_with_fallback(connection=connection)
+            for connection in active_connections
+        ]
+        if not tasks:
+            return []
+
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        snapshots: List[BrokerEquitySnapshot] = []
+        for index, result in enumerate(results):
+            if isinstance(result, Exception):
+                connection = active_connections[index]
+                logger.error(
+                    "Equity collection failed for %s (%s): %s",
+                    connection.id,
+                    connection.name,
+                    result,
+                )
+                continue
+            snapshots.append(result)
+        return snapshots
+
+    async def _fetch_equity_with_fallback(self, connection: BrokerConnection) -> BrokerEquitySnapshot:
+        """Fetch connection equity and fall back to last known value on failures."""
+        try:
+            raw_creds = connection.credentials.get("data", "")
+            credentials = self._decrypt_credentials(raw_creds)
+            snapshot = await self._fetch_connection_equity(connection, credentials)
+            self._equity_cache[connection.id] = snapshot
+            return snapshot
+        except Exception as exc:  # SWALLOW: use last-known cached equity snapshot when broker is unavailable
+            cached = self._equity_cache.get(connection.id)
+            if cached is not None:
+                return BrokerEquitySnapshot(
+                    value=cached.value,
+                    broker=cached.broker,
+                    stale=True,
+                    as_of=cached.as_of,
+                    source=cached.source,
+                    source_id=cached.source_id,
+                )
+            raise ApexBrokerError(
+                code="BROKER_EQUITY_FETCH_FAILED",
+                message=f"Unable to fetch equity for connection {connection.id}",
+                context={"connection_id": connection.id, "broker_type": connection.broker_type.value, "error": str(exc)},
+            ) from exc
+
+    async def _fetch_connection_equity(
+        self,
+        connection: BrokerConnection,
+        credentials: Dict[str, Any],
+    ) -> BrokerEquitySnapshot:
+        """Fetch normalized equity snapshot for a single broker connection."""
+        if connection.broker_type == BrokerType.ALPACA:
+            equity = await asyncio.to_thread(
+                self._fetch_alpaca_equity_blocking,
+                credentials,
+                connection.environment,
+            )
+            return BrokerEquitySnapshot(
+                value=float(equity),
+                broker="alpaca",
+                stale=False,
+                as_of=datetime.utcnow().isoformat(),
+                source=connection.name,
+                source_id=connection.id,
+            )
+
+        if connection.broker_type == BrokerType.IBKR:
+            equity = await asyncio.to_thread(
+                self._fetch_ibkr_equity_blocking,
+                credentials,
+                connection.client_id,
+            )
+            return BrokerEquitySnapshot(
+                value=float(equity),
+                broker="ibkr",
+                stale=False,
+                as_of=datetime.utcnow().isoformat(),
+                source=connection.name,
+                source_id=connection.id,
+            )
+
+        raise ApexBrokerError(
+            code="BROKER_UNSUPPORTED",
+            message=f"Unsupported broker type: {connection.broker_type}",
+            context={"broker_type": str(connection.broker_type)},
+        )
+
+    @staticmethod
+    def _fetch_alpaca_equity_blocking(credentials: Dict[str, Any], environment: str) -> float:
+        """Blocking Alpaca account equity call (run in worker thread)."""
+        client = TradingClient(
+            credentials["api_key"],
+            credentials["secret_key"],
+            paper=(environment == "paper"),
+        )
+        account = client.get_account()
+        return float(account.equity)
+
+    @staticmethod
+    def _fetch_ibkr_equity_blocking(credentials: Dict[str, Any], client_id: Optional[int]) -> float:
+        """Blocking IBKR equity fetch using NetLiquidation summary tag."""
+        host = credentials.get("host", "127.0.0.1")
+        port = int(credentials.get("port", 7497))
+        ib_client_id = int(credentials.get("client_id") or client_id or 1)
+        ib = IB()
+        try:
+            ib.connect(host, port, clientId=ib_client_id, timeout=5, readonly=True)
+            summary_rows = ib.accountSummary()
+            for row in summary_rows:
+                if getattr(row, "tag", "") == "NetLiquidation":
+                    return float(row.value)
+            raise ApexBrokerError(
+                code="IBKR_EQUITY_MISSING",
+                message="NetLiquidation tag not found in IBKR account summary",
+                context={"host": host, "port": port, "client_id": ib_client_id},
+            )
+        finally:
+            if ib.isConnected():
+                ib.disconnect()
 
 
 # Singleton instance

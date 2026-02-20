@@ -4,7 +4,6 @@ services/auth/middleware.py - Auth middleware bridging services/auth/ to api/aut
 This middleware:
 1. Intercepts requests and resolves the user from JWT or API key
 2. Attaches user + tier info to request.state for downstream dependencies
-3. Falls back to the existing api/auth.py in-memory auth when DB is unavailable
 """
 
 import logging
@@ -27,7 +26,6 @@ class SaaSAuthMiddleware(BaseHTTPMiddleware):
     Checks (in order):
     1. Bearer JWT token → decode → load user from PostgreSQL
     2. X-API-Key header → verify hash against PostgreSQL
-    3. Fall back to api/auth.py in-memory UserStore
 
     Sets on ``request.state``:
     - ``user``: User object (ORM or dataclass)
@@ -52,13 +50,6 @@ class SaaSAuthMiddleware(BaseHTTPMiddleware):
             user, tier, roles, user_id = await self._resolve_from_db(request)
         except Exception as e:
             logger.debug("DB auth resolution failed: %s", e)
-
-        # Fallback to legacy in-memory auth
-        if user is None:
-            try:
-                user, tier, roles, user_id = await self._resolve_from_legacy(request)
-            except Exception as e:
-                logger.debug("Legacy auth resolution failed: %s", e)
 
         # Attach to request state
         request.state.user = user
@@ -110,32 +101,6 @@ class SaaSAuthMiddleware(BaseHTTPMiddleware):
                     info = await svc.get_user_with_subscription(user.id)
                     if info:
                         return user, info["tier"], info["roles"], user.id
-
-        return None, SubscriptionTier.FREE, ["user"], None
-
-    async def _resolve_from_legacy(self, request: Request):
-        """Fall back to api/auth.py in-memory auth."""
-        from api.auth import get_current_user, security, api_key_header, AUTH_CONFIG
-
-        if not AUTH_CONFIG.enabled:
-            # Auth disabled — return a least-privilege default user.
-            from api.auth import User
-            user = User(
-                user_id="default",
-                username="default",
-                roles=["user"],
-                permissions=["read"],
-            )
-            return user, SubscriptionTier.FREE, ["user"], "default"
-
-        credentials = await security(request)
-        api_key = request.headers.get("X-API-Key")
-        user = await get_current_user(credentials=credentials, api_key=api_key, request=request)
-        if user:
-            roles = getattr(user, "roles", ["user"])
-            tier = SubscriptionTier.ENTERPRISE if "admin" in roles else SubscriptionTier.FREE
-            uid = getattr(user, "user_id", None)
-            return user, tier, roles, uid
 
         return None, SubscriptionTier.FREE, ["user"], None
 

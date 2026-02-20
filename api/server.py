@@ -39,7 +39,12 @@ from risk.governor_policy import (
 from risk.social_decision_audit import SocialDecisionAuditRepository
 
 logger = logging.getLogger("api")
-from api.auth import authenticate_websocket, require_user, require_role
+from api.auth import (
+    authenticate_websocket,
+    require_role,
+    require_user,
+    verify_auth_runtime_prerequisites,
+)
 from api.ws_manager import manager
 from api.dependencies import read_trading_state, _state_is_fresh, STATE_FILE, _sanitize_floats, CONTROL_COMMAND_FILE, GOVERNOR_POLICY_DIR, SOCIAL_DECISION_AUDIT_FILE, _mtime_ns
 
@@ -405,10 +410,10 @@ def _social_audit_repo() -> SocialDecisionAuditRepository:
 # --------------------------------------------------------------------------------
 
 async def stream_trading_state():
-    """Stream real trading state to connected clients."""
+    """Stream tenant-scoped trading state to connected websocket clients."""
     last_state = None
     last_equity_update_time = 0
-    cached_equity_data = None
+    cached_equity_data_by_tenant: Dict[str, Dict] = {}
 
     while True:
         try:
@@ -417,76 +422,50 @@ async def stream_trading_state():
             # Periodically fetch aggregated equity (every ~15 seconds to avoid API limits)
             now_ts = time.time()
             if now_ts - last_equity_update_time > 15:
-                # We need to compute it across all users or the main system.
-                # Since the backend is single-tenant, we fetch for the default or first available user
-                # from the broker_service. Let's just aggregate everything. 
                 from services.broker.service import broker_service
-                from models.broker import BrokerType
-                from alpaca.trading.client import TradingClient
-                
-                total_eq = 0.0
-                breakdown = []
                 try:
-                    # We have to bypass user_id check since the background task has no request context.
-                    # As a shortcut for single-tenant MVP, we can iterate all loaded users or load them all.
-                    users_dir = Path("data") / "users"
-                    if users_dir.exists():
-                        for user_d in users_dir.iterdir():
-                            if user_d.is_dir():
-                                conns = await broker_service.list_connections(user_d.name)
-                                for c in conns:
-                                    if c.is_active:
-                                        try:
-                                            creds = broker_service._decrypt_credentials(c.credentials["data"])
-                                            if c.broker_type == BrokerType.ALPACA:
-                                                client = TradingClient(creds["api_key"], creds["secret_key"], paper=(c.environment=="paper"))
-                                                acc = client.get_account()
-                                                eq = float(acc.equity)
-                                                total_eq += eq
-                                                breakdown.append({"source": c.name, "source_id": c.id, "equity": eq})
-                                            elif c.broker_type == BrokerType.IBKR:
-                                                pass # IBKR equity pooling to be added
-                                        except Exception as err:
-                                            logger.debug(f"WS eq poll err for {c.id}: {err}")
-                    
-                    if breakdown:
-                        cached_equity_data = {
-                            "total_equity": total_eq,
-                            "breakdown": breakdown
-                        }
+                    tenant_ids = await broker_service.list_tenant_ids()
+                    results = await asyncio.gather(
+                        *[broker_service.get_tenant_equity_snapshot(tenant_id) for tenant_id in tenant_ids],
+                        return_exceptions=True,
+                    )
+                    for tenant_id, result in zip(tenant_ids, results):
+                        if isinstance(result, Exception):
+                            logger.debug("Tenant equity snapshot failed for %s: %s", tenant_id, result)
+                            continue
+                        cached_equity_data_by_tenant[tenant_id] = result
                     last_equity_update_time = now_ts
                 except Exception as e:
                     logger.debug(f"Aggregated equity background task failed: {e}")
 
-            if current_state != last_state or cached_equity_data:
-                # Basic state extraction
-                update = {
-                    "type": "state_update",
-                    "timestamp": current_state.get("timestamp", datetime.now().isoformat()),
-                    "capital": current_state.get("capital", 0),
-                    "initial_capital": current_state.get("initial_capital", 0),
-                    "starting_capital": current_state.get("starting_capital", 0),
-                    "positions": current_state.get("positions", {}),
-                    "daily_pnl": current_state.get("daily_pnl", 0),
-                    "total_pnl": current_state.get("total_pnl", 0),
-                    "max_drawdown": current_state.get("max_drawdown", 0),
-                    "sharpe_ratio": current_state.get("sharpe_ratio", 0),
-                    "win_rate": current_state.get("win_rate", 0),
-                    "sector_exposure": current_state.get("sector_exposure", {}),
-                    "open_positions": current_state.get("open_positions", 0),
-                    "total_trades": current_state.get("total_trades", 0)
-                }
+            if current_state != last_state or cached_equity_data_by_tenant:
+                for tenant_id in manager.connected_tenants():
+                    update = {
+                        "type": "state_update",
+                        "timestamp": current_state.get("timestamp", datetime.now().isoformat()),
+                        "capital": current_state.get("capital", 0),
+                        "initial_capital": current_state.get("initial_capital", 0),
+                        "starting_capital": current_state.get("starting_capital", 0),
+                        "positions": current_state.get("positions", {}),
+                        "daily_pnl": current_state.get("daily_pnl", 0),
+                        "total_pnl": current_state.get("total_pnl", 0),
+                        "max_drawdown": current_state.get("max_drawdown", 0),
+                        "sharpe_ratio": current_state.get("sharpe_ratio", 0),
+                        "win_rate": current_state.get("win_rate", 0),
+                        "sector_exposure": current_state.get("sector_exposure", {}),
+                        "open_positions": current_state.get("open_positions", 0),
+                        "total_trades": current_state.get("total_trades", 0),
+                    }
+                    tenant_equity = cached_equity_data_by_tenant.get(tenant_id)
+                    if tenant_equity:
+                        update["aggregated_equity"] = tenant_equity.get("total_equity", 0.0)
+                        update["equity_breakdown"] = tenant_equity.get("breakdown", [])
 
-                # Overlay live equity data if available
-                if cached_equity_data:
-                    update["aggregated_equity"] = cached_equity_data["total_equity"]
-                    update["equity_breakdown"] = cached_equity_data["breakdown"]
+                    def increment_metrics():
+                        if PROMETHEUS_AVAILABLE and WEBSOCKET_MESSAGES_TOTAL is not None:
+                            WEBSOCKET_MESSAGES_TOTAL.labels(direction="outbound").inc()
 
-                def increment_metrics():
-                    if PROMETHEUS_AVAILABLE and WEBSOCKET_MESSAGES_TOTAL is not None:
-                        WEBSOCKET_MESSAGES_TOTAL.labels(direction="outbound").inc()
-                        
-                await manager.broadcast(update, increment_metrics)
+                    await manager.broadcast_to_tenant(tenant_id, update, increment_metrics)
                 last_state = current_state
 
         except Exception as e:
@@ -498,6 +477,7 @@ async def stream_trading_state():
 async def startup_event():
     logger.info("APEX API Server Starting...")
     logger.info(f"Reading state from: {STATE_FILE}")
+    await verify_auth_runtime_prerequisites()
     asyncio.create_task(stream_trading_state())
 
 
@@ -884,14 +864,18 @@ async def websocket_endpoint(websocket: WebSocket):
     if not user:
         await websocket.close(code=1008)
         return
-    await manager.connect(websocket)
+    tenant_id = str(getattr(user, "user_id", getattr(user, "id", "default")))
+    await manager.connect(websocket, tenant_id=tenant_id)
     if PROMETHEUS_AVAILABLE and WEBSOCKET_CONNECTIONS is not None:
         WEBSOCKET_CONNECTIONS.inc()
     try:
         # Send current state immediately on connect
         current_state = read_trading_state()
+        from services.broker.service import broker_service
+        tenant_equity_snapshot = await broker_service.get_tenant_equity_snapshot(tenant_id)
         await websocket.send_json({
             "type": "state_update",
+            "tenant_id": tenant_id,
             "timestamp": current_state.get("timestamp", datetime.now().isoformat()),
             "capital": current_state.get("capital", 0),
             "initial_capital": current_state.get("initial_capital", 0),
@@ -905,7 +889,9 @@ async def websocket_endpoint(websocket: WebSocket):
             "sector_exposure": current_state.get("sector_exposure", {}),
             "open_positions": current_state.get("open_positions", 0),
             "max_positions": current_state.get("max_positions", ApexConfig.MAX_POSITIONS),
-            "total_trades": current_state.get("total_trades", 0)
+            "total_trades": current_state.get("total_trades", 0),
+            "aggregated_equity": tenant_equity_snapshot.get("total_equity", 0.0),
+            "equity_breakdown": tenant_equity_snapshot.get("breakdown", []),
         })
         while True:
             data = await websocket.receive_text()

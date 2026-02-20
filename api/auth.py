@@ -28,18 +28,34 @@ from dataclasses import dataclass
 from functools import wraps
 from collections import defaultdict, deque
 import asyncio
-import json
-from pathlib import Path
 from config import ApexConfig
 
 from fastapi import HTTPException, Depends, Request, WebSocket
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials, APIKeyHeader
+from sqlalchemy import select
 
 logger = logging.getLogger(__name__)
 
 # Alert aggregator for reducing auth warning noise
 from core.alert_aggregator import get_alert_aggregator
 alert_agg = get_alert_aggregator(logger)
+from services.auth.models import ApiKeyModel, UserModel, UserRoleModel
+from services.common.db import db_session
+from services.common.redis_client import get_redis
+
+
+def _runtime_env() -> str:
+    """Return normalized runtime environment."""
+    return (
+        os.getenv("APEX_ENV")
+        or os.getenv("APEX_ENVIRONMENT")
+        or "development"
+    ).strip().lower()
+
+
+def _is_development_env() -> bool:
+    """Return True when mock auth behavior is allowed."""
+    return _runtime_env() == "development"
 
 # Try to import JWT library
 try:
@@ -172,191 +188,139 @@ class TokenData:
     token_type: str = "access"
 
 
-# In-memory user store (replace with database in production)
-class UserStore:
-    """Simple in-memory user storage."""
+class DatabaseUserStore:
+    """Database-backed user and API key access for auth dependencies."""
 
-    def __init__(self):
-        self.users: Dict[str, User] = {}
-        self.api_keys: Dict[str, str] = {}  # api_key -> user_id
-        self.password_hashes: Dict[str, str] = {}  # user_id -> password hash
-
-        # Create default admin user
-        self._create_default_admin()
-
-    def _create_default_admin(self):
-        """Create default admin user if not exists."""
-        admin_key = os.getenv("APEX_ADMIN_API_KEY")
-        if not admin_key:
-            admin_key = f"apex-{secrets.token_hex(16)}"
-            logger.warning(
-                "APEX_ADMIN_API_KEY not set — generated ephemeral key. "
-                "Set APEX_ADMIN_API_KEY env var for persistent admin access."
+    @staticmethod
+    async def _get_roles(user_id: str) -> List[str]:
+        async with db_session() as session:
+            result = await session.execute(
+                select(UserRoleModel.role).where(UserRoleModel.user_id == user_id)
             )
-        admin = User(
-            user_id="admin",
-            username="admin",
-            email="admin@apex.local",
-            roles=["admin", "user"],
-            permissions=["read", "write", "trade", "admin"],
-            api_key=admin_key
-        )
-        self.users["admin"] = admin
-        self.api_keys[admin_key] = "admin"
-        admin_password = os.getenv("APEX_ADMIN_PASSWORD")
-        if admin_password:
-            self.password_hashes["admin"] = hash_password(admin_password)
+            roles = [role for (role,) in result.all()]
+            return roles or ["user"]
 
-    def get_user(self, user_id: str) -> Optional[User]:
-        """Get user by ID."""
-        return self.users.get(user_id)
-
-    def get_user_by_api_key(self, api_key: str) -> Optional[User]:
-        """Get user by API key."""
-        user_id = self.api_keys.get(api_key)
-        if user_id:
-            return self.users.get(user_id)
-        return None
-
-    def create_user(
-        self,
-        username: str,
-        email: Optional[str] = None,
-        roles: List[str] = None,
-        password: Optional[str] = None,
-    ) -> User:
-        """Create a new user."""
-        user_id = secrets.token_hex(8)
-        api_key = f"apex-{secrets.token_hex(16)}"
-
-        user = User(
-            user_id=user_id,
-            username=username,
-            email=email,
-            roles=roles or ["user"],
-            permissions=["read"],
-            api_key=api_key,
-            created_at=datetime.utcnow()
+    @staticmethod
+    async def get_user(user_id: str) -> Optional[User]:
+        """Load a user by ID from the database."""
+        async with db_session() as session:
+            model = await session.get(UserModel, user_id)
+            if model is None or not model.is_active:
+                return None
+        roles = await DatabaseUserStore._get_roles(user_id)
+        return User(
+            user_id=model.id,
+            username=model.username,
+            email=model.email,
+            roles=roles,
+            permissions=["read", "write"] if "admin" not in roles else ["read", "write", "trade", "admin"],
+            created_at=model.created_at,
         )
 
-        self.users[user_id] = user
-        self.api_keys[api_key] = user_id
-        if password:
-            self.password_hashes[user_id] = hash_password(password)
-
-        return user
-
-    def validate_credentials(self, username: str, password: str) -> Optional[User]:
-        """Validate legacy in-memory credentials."""
-        user = next(
-            (u for u in self.users.values() if u.username == username),
-            None
+    @staticmethod
+    async def get_user_by_api_key(api_key: str) -> Optional[User]:
+        """Load a user from a raw API key."""
+        key_hash = hashlib.sha256(api_key.encode()).hexdigest()
+        async with db_session() as session:
+            key_result = await session.execute(
+                select(ApiKeyModel).where(
+                    ApiKeyModel.key_hash == key_hash,
+                    ApiKeyModel.is_active == True,
+                )
+            )
+            key = key_result.scalar_one_or_none()
+            if key is None:
+                return None
+            user_model = await session.get(UserModel, key.user_id)
+            if user_model is None or not user_model.is_active:
+                return None
+            key.last_used_at = datetime.utcnow()
+        roles = await DatabaseUserStore._get_roles(user_model.id)
+        return User(
+            user_id=user_model.id,
+            username=user_model.username,
+            email=user_model.email,
+            roles=roles,
+            permissions=["read", "write"] if "admin" not in roles else ["read", "write", "trade", "admin"],
+            created_at=user_model.created_at,
         )
-        if not user:
-            return None
-        stored_hash = self.password_hashes.get(user.user_id)
-        if not stored_hash:
-            return None
-        if not verify_password(password, stored_hash):
-            return None
-        return user
+
+    @staticmethod
+    async def validate_credentials(username: str, password: str) -> Optional[User]:
+        """Validate username/email + password against DB hash."""
+        async with db_session() as session:
+            result = await session.execute(
+                select(UserModel).where(
+                    (UserModel.username == username) | (UserModel.email == username)
+                )
+            )
+            model = result.scalar_one_or_none()
+            if model is None or not model.is_active or not model.password_hash:
+                return None
+            if not verify_password(password, model.password_hash):
+                return None
+        roles = await DatabaseUserStore._get_roles(model.id)
+        return User(
+            user_id=model.id,
+            username=model.username,
+            email=model.email,
+            roles=roles,
+            permissions=["read", "write"] if "admin" not in roles else ["read", "write", "trade", "admin"],
+            created_at=model.created_at,
+        )
 
 
-# Global user store
-# Persistent User Store
-class JSONFileUserStore(UserStore):
-    """File-based persistent user storage."""
-
-    def __init__(self, file_path: Path):
-        self.file_path = file_path
-        super().__init__()  # This creates default admin in memory
-        self._load()        # This acts as overlay/merge
-
-    def _load(self):
-        """Load users from JSON file."""
-        if not self.file_path.exists():
-            return
-
-        try:
-            with open(self.file_path, "r") as f:
-                data = json.load(f)
-            
-            for user_data in data.get("users", []):
-                user = User.from_dict(user_data)
-                self.users[user.user_id] = user
-                if user.api_key:
-                    self.api_keys[user.api_key] = user.user_id
-                
-                # Restore password hash if available
-                if "password_hash" in user_data:
-                    self.password_hashes[user.user_id] = user_data["password_hash"]
-            
-            logger.info(f"Loaded {len(self.users)} users from {self.file_path}")
-
-        except Exception as e:
-            logger.error(f"Failed to load users from {self.file_path}: {e}")
-
-    def save(self):
-        """Save users to JSON file."""
-        data = {
-            "users": []
-        }
-        
-        for user in self.users.values():
-            user_dict = user.to_dict()
-            # Include password hash in serialization (security note: ensure file is protected)
-            if user.user_id in self.password_hashes:
-                user_dict["password_hash"] = self.password_hashes[user.user_id]
-            data["users"].append(user_dict)
-            
-        try:
-            with open(self.file_path, "w") as f:
-                json.dump(data, f, indent=2)
-        except Exception as e:
-            logger.error(f"Failed to save users to {self.file_path}: {e}")
-
-    def create_user(self, *args, **kwargs) -> User:
-        """Create user and save."""
-        user = super().create_user(*args, **kwargs)
-        self.save()
-        return user
-        
-    def _create_default_admin(self):
-        """Create default admin only if not exists."""
-        # We don't want to overwrite if loaded from file, 
-        # but super().__init__ calls this before _load().
-        # So we let super() create it, and _load() will overwrite if exists.
-        super()._create_default_admin()
+USER_STORE = DatabaseUserStore()
 
 
-# Global user store
-USER_STORE = JSONFileUserStore(ApexConfig.DATA_DIR / "users.json")
-
-
-# Token Blacklist (in-memory; production should use Redis)
 class TokenBlacklist:
-    """In-memory token blacklist for logout/revocation.
+    """Redis-backed token blacklist for logout/revocation."""
 
-    A production deployment should replace this with a Redis-backed store
-    for persistence and cross-process sharing.
-    """
-
-    def __init__(self):
-        self._revoked: Dict[str, float] = {}  # token_jti_or_raw -> expiry_ts
+    def __init__(self) -> None:
+        self._fallback_revoked: Dict[str, float] = {}
         self._lock = asyncio.Lock()
+        self._prefix = "auth:blacklist:"
+        self._strict_envs = {"staging", "production", "prod"}
+
+    async def _require_redis_if_strict(self) -> None:
+        env = _runtime_env()
+        if env in self._strict_envs:
+            redis_client = await get_redis()
+            if redis_client is None:
+                raise RuntimeError(
+                    f"Redis is required for token revocation in {env} environment."
+                )
+
+    async def _get_redis_or_none(self):
+        await self._require_redis_if_strict()
+        return await get_redis()
 
     async def revoke(self, token: str, expires_at: Optional[datetime] = None):
         """Add a token to the blacklist."""
         exp_ts = (expires_at or datetime.utcnow() + timedelta(hours=24)).timestamp()
+        redis_client = await self._get_redis_or_none()
+        if redis_client is not None:
+            ttl = max(1, int(exp_ts - time.time()))
+            await redis_client.setex(f"{self._prefix}{token}", ttl, "1")
+            return
         async with self._lock:
-            self._revoked[token] = exp_ts
-            # Prune expired entries
+            self._fallback_revoked[token] = exp_ts
             now = time.time()
-            self._revoked = {k: v for k, v in self._revoked.items() if v > now}
+            self._fallback_revoked = {
+                k: v for k, v in self._fallback_revoked.items() if v > now
+            }
 
-    def is_revoked(self, token: str) -> bool:
+    async def is_revoked(self, token: str) -> bool:
         """Check if a token has been revoked."""
-        return token in self._revoked and self._revoked[token] > time.time()
+        redis_client = await self._get_redis_or_none()
+        if redis_client is not None:
+            return await redis_client.exists(f"{self._prefix}{token}") == 1
+        async with self._lock:
+            return token in self._fallback_revoked and self._fallback_revoked[token] > time.time()
+
+    async def verify_runtime_requirements(self) -> None:
+        """Ensure strict environments have Redis connectivity."""
+        await self._require_redis_if_strict()
 
 
 TOKEN_BLACKLIST = TokenBlacklist()
@@ -366,7 +330,9 @@ TOKEN_BLACKLIST = TokenBlacklist()
 def create_access_token(user: User, expires_delta: Optional[timedelta] = None) -> str:
     """Create a JWT access token."""
     if not JWT_AVAILABLE:
-        return f"mock-token-{user.user_id}"
+        if _is_development_env():
+            return f"mock-token-{user.user_id}"
+        raise RuntimeError("Mock access tokens are only allowed in development")
 
     expire = datetime.utcnow() + (
         expires_delta or timedelta(minutes=AUTH_CONFIG.access_token_expire_minutes)
@@ -387,7 +353,9 @@ def create_access_token(user: User, expires_delta: Optional[timedelta] = None) -
 def create_refresh_token(user: User) -> str:
     """Create a JWT refresh token."""
     if not JWT_AVAILABLE:
-        return f"mock-refresh-{user.user_id}"
+        if _is_development_env():
+            return f"mock-refresh-{user.user_id}"
+        raise RuntimeError("Mock refresh tokens are only allowed in development")
 
     expire = datetime.utcnow() + timedelta(days=AUTH_CONFIG.refresh_token_expire_days)
 
@@ -401,17 +369,21 @@ def create_refresh_token(user: User) -> str:
     return jwt.encode(payload, AUTH_CONFIG.secret_key, algorithm=AUTH_CONFIG.algorithm)
 
 
-def verify_token(token: str, expected_token_type: Optional[str] = None) -> Optional[TokenData]:
+async def verify_token_async(token: str, expected_token_type: Optional[str] = None) -> Optional[TokenData]:
     """Verify and decode a JWT token, optionally enforcing token type."""
-    if TOKEN_BLACKLIST.is_revoked(token):
+    if await TOKEN_BLACKLIST.is_revoked(token):
         logger.warning("Rejected revoked token")
         return None
 
     if not JWT_AVAILABLE:
         # Mock verification — only allowed when auth is explicitly disabled
-        if not AUTH_CONFIG.enabled and token.startswith("mock-token-"):
+        if (
+            _is_development_env()
+            and not AUTH_CONFIG.enabled
+            and token.startswith("mock-token-")
+        ):
             user_id = token.replace("mock-token-", "")
-            user = USER_STORE.get_user(user_id)
+            user = await USER_STORE.get_user(user_id)
             if user:
                 token_data = TokenData(
                     user_id=user.user_id,
@@ -423,9 +395,9 @@ def verify_token(token: str, expected_token_type: Optional[str] = None) -> Optio
                 if expected_token_type and token_data.token_type != expected_token_type:
                     return None
                 return token_data
-        if AUTH_CONFIG.enabled:
-            logger.error("JWT verification requested but PyJWT is not installed")
-        return None
+        raise RuntimeError(
+            "JWT verification requested while PyJWT is unavailable outside development"
+        )
 
     try:
         payload = jwt.decode(
@@ -458,6 +430,17 @@ def verify_token(token: str, expected_token_type: Optional[str] = None) -> Optio
         return None
 
 
+def verify_token(token: str, expected_token_type: Optional[str] = None) -> Optional[TokenData]:
+    """Synchronous token verification wrapper for compatibility paths/tests."""
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        loop = None
+    if loop and loop.is_running():
+        raise RuntimeError("verify_token() cannot run inside an active event loop; use verify_token_async().")
+    return asyncio.run(verify_token_async(token, expected_token_type=expected_token_type))
+
+
 # FastAPI Dependencies
 security = HTTPBearer(auto_error=False)
 api_key_header = APIKeyHeader(name=AUTH_CONFIG.api_key_header, auto_error=False)
@@ -472,7 +455,7 @@ async def get_current_user(
     Get current authenticated user.
 
     If SaaSAuthMiddleware set request.state.user (PostgreSQL/OAuth), use that.
-    Otherwise supports JWT bearer tokens and API keys via in-memory store.
+    Otherwise supports JWT bearer tokens and API keys via DB-backed user store.
     """
     if not AUTH_CONFIG.enabled:
         # Return default user when auth is disabled (read-only, non-admin)
@@ -502,15 +485,23 @@ async def get_current_user(
 
     # Try API key first
     if api_key:
-        user = USER_STORE.get_user_by_api_key(api_key)
-        if user:
-            return user
+        try:
+            user = await USER_STORE.get_user_by_api_key(api_key)
+            if user:
+                return user
+        except Exception as exc:  # SWALLOW: lookup failure should degrade to anonymous user
+            logger.exception("API key auth lookup failed: %s", exc)
+            return None
 
     # Try JWT token
     if credentials:
-        token_data = verify_token(credentials.credentials, expected_token_type="access")
+        token_data = await verify_token_async(credentials.credentials, expected_token_type="access")
         if token_data:
-            user = USER_STORE.get_user(token_data.user_id)
+            try:
+                user = await USER_STORE.get_user(token_data.user_id)
+            except Exception as exc:  # SWALLOW: lookup failure should degrade to anonymous user
+                logger.exception("Token user lookup failed: %s", exc)
+                return None
             if user:
                 return user
 
@@ -715,16 +706,16 @@ async def authenticate_websocket(websocket: WebSocket) -> Optional[User]:
     # Check query params for API key
     api_key = websocket.query_params.get("api_key")
     if api_key:
-        user = USER_STORE.get_user_by_api_key(api_key)
+        user = await USER_STORE.get_user_by_api_key(api_key)
         if user:
             return user
 
     # Check query params for token
     token = websocket.query_params.get("token")
     if token:
-        token_data = verify_token(token, expected_token_type="access")
+        token_data = await verify_token_async(token, expected_token_type="access")
         if token_data:
-            return USER_STORE.get_user(token_data.user_id)
+            return await USER_STORE.get_user(token_data.user_id)
 
     return None
 
@@ -752,6 +743,13 @@ def configure_auth(
     logger.info(f"Auth configured: enabled={AUTH_CONFIG.enabled}")
 
 
+async def verify_auth_runtime_prerequisites() -> None:
+    """Validate auth runtime dependencies for current environment."""
+    if AUTH_CONFIG.enabled and not JWT_AVAILABLE and not _is_development_env():
+        raise RuntimeError("PyJWT is required when authentication is enabled outside development")
+    await TOKEN_BLACKLIST.verify_runtime_requirements()
+
+
 # Login endpoint helper
 async def login(username: str, password: str) -> Optional[Dict[str, str]]:
     """
@@ -760,7 +758,7 @@ async def login(username: str, password: str) -> Optional[Dict[str, str]]:
     Returns:
         Dict with access_token and refresh_token, or None if auth fails
     """
-    user = USER_STORE.validate_credentials(username, password)
+    user = await USER_STORE.validate_credentials(username, password)
 
     if not user:
         return None

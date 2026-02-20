@@ -12,10 +12,8 @@ from alembic import context
 from sqlalchemy import pool
 from sqlalchemy.ext.asyncio import async_engine_from_config
 
-# Import the ORM Base so Alembic can detect table metadata
-from services.common.db import Base
+from services.common.db import Base, DATABASE_URL
 
-# Import all models so they register with Base.metadata
 # Import all models so they register with Base.metadata
 import services.auth.models  # noqa: F401
 import services.trading.models  # noqa: F401
@@ -23,11 +21,8 @@ import services.audit.models  # noqa: F401
 
 config = context.config
 
-# Override sqlalchemy.url from environment if set
-db_url = os.getenv(
-    "DATABASE_URL",
-    "postgresql+asyncpg://apex:apex_dev_password@localhost:5432/apex_saas",
-)
+# Use the centralized DATABASE_URL which has SQLite fallback logic
+db_url = DATABASE_URL
 config.set_main_option("sqlalchemy.url", db_url)
 
 if config.config_file_name is not None:
@@ -44,13 +39,18 @@ def run_migrations_offline() -> None:
         target_metadata=target_metadata,
         literal_binds=True,
         dialect_opts={"paramstyle": "named"},
+        render_as_batch=True,
     )
     with context.begin_transaction():
         context.run_migrations()
 
 
 def do_run_migrations(connection):
-    context.configure(connection=connection, target_metadata=target_metadata)
+    context.configure(
+        connection=connection, 
+        target_metadata=target_metadata,
+        render_as_batch=True,
+    )
     with context.begin_transaction():
         context.run_migrations()
 
