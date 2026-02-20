@@ -24,11 +24,12 @@ class ConnectionManager:
         self.active_connections: List[WebSocket] = []
         self.connections_by_tenant: DefaultDict[str, List[WebSocket]] = defaultdict(list)
 
-    async def connect(self, websocket: WebSocket, tenant_id: str):
+    async def connect(self, websocket: WebSocket, tenant_id: str, is_admin: bool = False):
         await websocket.accept()
         self.active_connections.append(websocket)
         self.connections_by_tenant[tenant_id].append(websocket)
         setattr(websocket.state, "tenant_id", tenant_id)
+        setattr(websocket.state, "is_admin", is_admin)
         # We handle metrics externally now or via a broader callback
 
     async def disconnect(self, websocket: WebSocket):
@@ -70,5 +71,12 @@ class ConnectionManager:
     def connected_tenants(self) -> List[str]:
         """Return currently connected tenant IDs."""
         return list(self.connections_by_tenant.keys())
+
+    def is_tenant_admin(self, tenant_id: str) -> bool:
+        """Check if any active WS connection for this tenant has the admin role."""
+        for ws in self.connections_by_tenant.get(tenant_id, []):
+            if getattr(ws.state, "is_admin", False):
+                return True
+        return False
 
 manager = ConnectionManager()

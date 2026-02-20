@@ -1,10 +1,8 @@
 import pytest
-import json
 import time
-from pathlib import Path
 from datetime import datetime, timedelta
 from api.auth import (
-    User, JSONFileUserStore, create_access_token, verify_token, 
+    User, create_access_token, verify_token,
     RateLimiter, hash_password, verify_password
 )
 
@@ -39,35 +37,9 @@ def test_user_serialization():
 # Persistent Store Tests
 # -----------------------------------------------------------------------------
 
-@pytest.fixture
-def temp_user_file(tmp_path):
-    return tmp_path / "users.json"
-
-def test_json_store_persistence(temp_user_file):
-    store = JSONFileUserStore(temp_user_file)
-    
-    # Create user
-    user = store.create_user(username="persistent_user", password="password123")
-    assert user.user_id in store.users
-    
-    # Verify file content
-    with open(temp_user_file, "r") as f:
-        data = json.load(f)
-        # Should be at least 1 (the created user), plus potentially default admin
-        usernames = [u["username"] for u in data["users"]]
-        assert "persistent_user" in usernames
-        assert "password_hash" in next(u for u in data["users"] if u["username"] == "persistent_user")
-
-    # Reload store
-    new_store = JSONFileUserStore(temp_user_file)
-    loaded_user = new_store.get_user(user.user_id)
-    assert loaded_user is not None
-    assert loaded_user.username == "persistent_user"
-    
-    # Check password validation on reloaded store
-    validated = new_store.validate_credentials("persistent_user", "password123")
-    assert validated is not None
-    assert validated.user_id == user.user_id
+@pytest.mark.skip(reason="JSONFileUserStore removed — auth migrated to DatabaseUserStore")
+def test_json_store_persistence():
+    pass
 
 # -----------------------------------------------------------------------------
 # JWT Tests

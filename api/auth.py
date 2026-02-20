@@ -458,12 +458,12 @@ async def get_current_user(
     Otherwise supports JWT bearer tokens and API keys via DB-backed user store.
     """
     if not AUTH_CONFIG.enabled:
-        # Return default user when auth is disabled (read-only, non-admin)
+        # Return default user when auth is disabled
         return User(
             user_id="default",
             username="default",
-            roles=["user"],
-            permissions=["read"]
+            roles=["admin", "user"],
+            permissions=["read", "write", "trade", "admin"]
         )
 
     # Bridge: use user set by SaaSAuthMiddleware (PostgreSQL/API key auth)
@@ -699,8 +699,8 @@ async def authenticate_websocket(websocket: WebSocket) -> Optional[User]:
         return User(
             user_id="default",
             username="default",
-            roles=["user"],
-            permissions=["read"]
+            roles=["admin", "user"],
+            permissions=["read", "write", "trade", "admin"]
         )
 
     # Check query params for API key
@@ -748,6 +748,21 @@ async def verify_auth_runtime_prerequisites() -> None:
     if AUTH_CONFIG.enabled and not JWT_AVAILABLE and not _is_development_env():
         raise RuntimeError("PyJWT is required when authentication is enabled outside development")
     await TOKEN_BLACKLIST.verify_runtime_requirements()
+
+    # Warn/fail if critical secrets are ephemeral
+    is_dev = _is_development_env()
+    if not os.getenv("APEX_SECRET_KEY"):
+        msg = "APEX_SECRET_KEY not set — JWT tokens will not survive restarts or work across workers"
+        if is_dev:
+            logger.warning(msg)
+        else:
+            raise RuntimeError(msg + ". Set APEX_SECRET_KEY in your environment.")
+    if not os.getenv("APEX_MASTER_KEY"):
+        msg = "APEX_MASTER_KEY not set — encrypted broker credentials will be lost on restart"
+        if is_dev:
+            logger.warning(msg)
+        else:
+            raise RuntimeError(msg + ". Set APEX_MASTER_KEY in your environment.")
 
 
 # Login endpoint helper

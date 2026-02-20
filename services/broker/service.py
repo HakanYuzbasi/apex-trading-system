@@ -8,7 +8,6 @@ from datetime import datetime
 
 from cryptography.fernet import Fernet
 from alpaca.trading.client import TradingClient
-from alpaca.common.exceptions import APIError
 from ib_insync import IB
 
 from models.broker import BrokerConnection, BrokerType
@@ -115,11 +114,25 @@ class BrokerService:
 
     def _encrypt_credentials(self, credentials: Dict[str, Any]) -> str:
         json_str = json.dumps(credentials)
-        return self._cipher.encrypt(json_str.encode()).decode()
+        ciphertext = self._cipher.encrypt(json_str.encode()).decode()
+        return f"v1:{ciphertext}"
 
     def _decrypt_credentials(self, encrypted_credentials: str) -> Dict[str, Any]:
-        params = self._cipher.decrypt(encrypted_credentials.encode()).decode()
-        return json.loads(params)
+        try:
+            if encrypted_credentials.startswith("v1:"):
+                payload = encrypted_credentials[3:]
+            else:
+                payload = encrypted_credentials # Legacy unversioned
+                
+            params = self._cipher.decrypt(payload.encode()).decode()
+            return json.loads(params)
+        except Exception as exc:
+            logger.error("Credential decryption failed (key mismatch or corrupted data): %s", exc)
+            raise ApexBrokerError(
+                code="CREDENTIAL_DECRYPT_FAILED",
+                message="Failed to decrypt stored credentials — was APEX_MASTER_KEY changed?",
+                context={"error": str(exc)},
+            ) from exc
 
     # ─────────────────────────────────────────
     # Connection validation
@@ -296,6 +309,9 @@ class BrokerService:
                             "market_value": float(pos.market_value or 0),
                             "unrealized_pl": float(pos.unrealized_pl or 0),
                             "unrealized_plpc": float(pos.unrealized_plpc or 0),
+                            "stale": False,
+                            "as_of": datetime.utcnow().isoformat(),
+                            "source_status": "ok",
                         })
                 elif conn.broker_type == BrokerType.IBKR:
                     logger.debug(f"IBKR positions not yet supported for connection {conn.id}")
@@ -388,6 +404,8 @@ class BrokerService:
                 context={"connection_id": connection.id, "broker_type": connection.broker_type.value, "error": str(exc)},
             ) from exc
 
+    _EQUITY_FETCH_TIMEOUT_SECONDS = 10
+
     async def _fetch_connection_equity(
         self,
         connection: BrokerConnection,
@@ -395,10 +413,13 @@ class BrokerService:
     ) -> BrokerEquitySnapshot:
         """Fetch normalized equity snapshot for a single broker connection."""
         if connection.broker_type == BrokerType.ALPACA:
-            equity = await asyncio.to_thread(
-                self._fetch_alpaca_equity_blocking,
-                credentials,
-                connection.environment,
+            equity = await asyncio.wait_for(
+                asyncio.to_thread(
+                    self._fetch_alpaca_equity_blocking,
+                    credentials,
+                    connection.environment,
+                ),
+                timeout=self._EQUITY_FETCH_TIMEOUT_SECONDS,
             )
             return BrokerEquitySnapshot(
                 value=float(equity),
@@ -410,10 +431,13 @@ class BrokerService:
             )
 
         if connection.broker_type == BrokerType.IBKR:
-            equity = await asyncio.to_thread(
-                self._fetch_ibkr_equity_blocking,
-                credentials,
-                connection.client_id,
+            equity = await asyncio.wait_for(
+                asyncio.to_thread(
+                    self._fetch_ibkr_equity_blocking,
+                    credentials,
+                    connection.client_id,
+                ),
+                timeout=self._EQUITY_FETCH_TIMEOUT_SECONDS,
             )
             return BrokerEquitySnapshot(
                 value=float(equity),

@@ -34,24 +34,26 @@ class RiskManager:
     to maintain backward compatibility with the existing trading engine.
     """
 
-    def __init__(self, max_daily_loss: float = 0.02, max_drawdown: float = 0.10):
+    def __init__(self, max_daily_loss: float = 0.02, max_drawdown: float = 0.10, user_id: str = "default"):
         """
         Initialize risk manager.
 
         Args:
             max_daily_loss: Max daily loss as fraction of capital (e.g., 0.02 = 2%)
             max_drawdown: Max drawdown from peak as fraction (e.g., 0.10 = 10%)
+            user_id: The tenant ID this manager represents by default.
         """
+        self.default_user_id = user_id
         self.default_max_daily_loss = max_daily_loss
         self.default_max_drawdown = max_drawdown
         
         # Session storage: user_id -> RiskSession
         self.sessions: Dict[str, RiskSession] = {}
         
-        # Initialize default session for backward compatibility
-        self._get_or_create_session("default")
+        # Initialize default session
+        self._get_or_create_session(self.default_user_id)
 
-        logger.info(f"🛡️  Risk Manager initialized (Multi-Session Mode)")
+        logger.info(f"🛡️  Risk Manager initialized (Multi-Session Mode, default={self.default_user_id})")
 
     def _get_or_create_session(self, user_id: str) -> RiskSession:
         """Get existing session or create a new one."""
@@ -72,59 +74,59 @@ class RiskManager:
     @property
     def circuit_breaker(self) -> CircuitBreaker:
         """Access default session's circuit breaker."""
-        return self.sessions["default"].circuit_breaker
+        return self.sessions[self.default_user_id].circuit_breaker
 
     @property
     def starting_capital(self) -> float:
-        return self.sessions["default"].starting_capital
+        return self.sessions[self.default_user_id].starting_capital
     
     @starting_capital.setter
     def starting_capital(self, value: float):
-        self.sessions["default"].set_starting_capital(value)
+        self.sessions[self.default_user_id].set_starting_capital(value)
 
     @property
     def peak_capital(self) -> float:
-        return self.sessions["default"].peak_capital
+        return self.sessions[self.default_user_id].peak_capital
 
     @property
     def day_start_capital(self) -> float:
-        return self.sessions["default"].day_start_capital
+        return self.sessions[self.default_user_id].day_start_capital
     
     @day_start_capital.setter
     def day_start_capital(self, value: float):
         # We allow direct setting for backward compat, but ideally should use set_starting_capital
-        self.sessions["default"].day_start_capital = value
+        self.sessions[self.default_user_id].day_start_capital = value
 
     @property
     def current_day(self) -> str:
-        return self.sessions["default"].current_day
+        return self.sessions[self.default_user_id].current_day
 
     def heal_baselines(self, current_capital: float, source: str = "runtime") -> bool:
-        return self.sessions["default"].heal_baselines(current_capital, source)
+        return self.sessions[self.default_user_id].heal_baselines(current_capital, source)
 
     def save_state(self):
-        self.sessions["default"].save_state()
+        self.sessions[self.default_user_id].save_state()
 
     def load_state(self):
-        self.sessions["default"].load_state()
+        self.sessions[self.default_user_id].load_state()
 
-    def can_trade(self, user_id: str = "default") -> Tuple[bool, str]:
-        return self._get_or_create_session(user_id).can_trade()
+    def can_trade(self, user_id: str = None) -> Tuple[bool, str]:
+        return self._get_or_create_session(user_id or self.default_user_id).can_trade()
 
-    def record_trade_result(self, pnl: float, user_id: str = "default"):
-        self._get_or_create_session(user_id).record_trade_result(pnl)
+    def record_trade_result(self, pnl: float, user_id: str = None):
+        self._get_or_create_session(user_id or self.default_user_id).record_trade_result(pnl)
 
-    def set_starting_capital(self, capital: float, user_id: str = "default"):
-         self._get_or_create_session(user_id).set_starting_capital(capital)
+    def set_starting_capital(self, capital: float, user_id: str = None):
+         self._get_or_create_session(user_id or self.default_user_id).set_starting_capital(capital)
 
-    def check_daily_loss(self, current_value: float, user_id: str = "default") -> Dict:
-        return self._get_or_create_session(user_id).check_daily_loss(current_value)
+    def check_daily_loss(self, current_value: float, user_id: str = None) -> Dict:
+        return self._get_or_create_session(user_id or self.default_user_id).check_daily_loss(current_value)
 
-    def check_drawdown(self, current_value: float, user_id: str = "default") -> Dict:
-        return self._get_or_create_session(user_id).check_drawdown(current_value)
+    def check_drawdown(self, current_value: float, user_id: str = None) -> Dict:
+        return self._get_or_create_session(user_id or self.default_user_id).check_drawdown(current_value)
 
-    def get_circuit_breaker_status(self, user_id: str = "default") -> Dict:
-        return self._get_or_create_session(user_id).circuit_breaker.get_status()
+    def get_circuit_breaker_status(self, user_id: str = None) -> Dict:
+        return self._get_or_create_session(user_id or self.default_user_id).circuit_breaker.get_status()
 
     # ----------------------------------------------------------------
     # Shared Logic (Stateless)

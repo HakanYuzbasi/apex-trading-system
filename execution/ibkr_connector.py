@@ -379,26 +379,46 @@ class IBKRConnector:
         logger.info(f"🔌 Connecting to IBKR at {self.host}:{self.port}...")
         
         try:
-            # Try connecting with the specified client ID first
-            # If it fails with "clientId already in use", we'll retry with a random one
+            from execution.ibkr_lease_manager import lease_manager
+            
+            # Allocate a guaranteed unique client ID across cluster
             max_id_retries = 3
             current_client_id = self.client_id
             
             for id_attempt in range(max_id_retries):
                 try:
+                    current_client_id = await lease_manager.allocate(self.client_id if id_attempt == 0 else None)
+                    self._active_client_id = current_client_id
+                    
                     await self.ib.connectAsync(self.host, self.port, clientId=current_client_id)
+                    
+                    # Start heartbeat task to keep lease alive
+                    if getattr(self, "_heartbeat_task", None) is None:
+                        async def _heartbeat():
+                            while True:
+                                try:
+                                    await asyncio.sleep(60) # Renew every 60s
+                                    if getattr(self, "_active_client_id", None):
+                                        await lease_manager.heartbeat(self._active_client_id)
+                                except asyncio.CancelledError:
+                                    break
+                                except Exception as e:
+                                    logger.error(f"IBKR heartbeat failed: {e}")
+                        
+                        self._heartbeat_task = asyncio.create_task(_heartbeat())
                     break
+
                 except (Exception, asyncio.TimeoutError) as conn_err:
-                    # ib_insync often raises TimeoutError when the clientId is in use
-                    # because the peer closes the connection immediately.
+                    # Release the failed lease immediately
+                    if getattr(self, "_active_client_id", None):
+                        await lease_manager.release(self._active_client_id)
+                        self._active_client_id = None
+                        
                     is_collision = "clientId" in str(conn_err) and "already in use" in str(conn_err)
                     is_timeout = isinstance(conn_err, asyncio.TimeoutError) or "TimeoutError" in str(conn_err)
                     
                     if (is_collision or is_timeout) and id_attempt < max_id_retries - 1:
-                        old_id = current_client_id
-                        current_client_id = random.randint(100, 999)
-                        logger.warning(f"⚠️  Connection failed with clientId {old_id} (possible collision), retrying with {current_client_id}...")
-                        # Wait a bit before retrying with a new ID
+                        logger.warning(f"⚠️  Connection failed with clientId {current_client_id} (collision/timeout), retrying allocation...")
                         await asyncio.sleep(1)
                         continue
                     raise
@@ -441,6 +461,27 @@ class IBKRConnector:
         if self.ib.isConnected():
             self.ib.disconnect()
             logger.info("🔌 Disconnected from IBKR")
+            
+        # Stop lease heartbeat
+        if getattr(self, "_heartbeat_task", None):
+            self._heartbeat_task.cancel()
+            self._heartbeat_task = None
+            
+        # Release the client_id lease
+        if getattr(self, "_active_client_id", None):
+            try:
+                from execution.ibkr_lease_manager import lease_manager
+                # Create a background task for the release since disconnect might be called sync
+                try:
+                    loop = asyncio.get_running_loop()
+                    loop.create_task(lease_manager.release(self._active_client_id))
+                except RuntimeError:
+                    # No running loop, just execute it directly in a new one if possible or ignore
+                    asyncio.run(lease_manager.release(self._active_client_id))
+            except Exception as e:
+                logger.debug(f"Failed to release IBKR lease gracefully: {e}")
+            finally:
+                self._active_client_id = None
     
     async def get_contract(self, symbol: str) -> Optional[Contract]:
         """

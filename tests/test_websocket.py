@@ -6,7 +6,7 @@ from fastapi.testclient import TestClient
 
 from api.server import app
 from api.ws_manager import ConnectionManager
-from api.auth import USER_STORE, AUTH_CONFIG
+from api.auth import AUTH_CONFIG
 
 
 @pytest.fixture(autouse=True)
@@ -74,26 +74,23 @@ class TestRESTEndpoints:
     """Smoke tests for REST endpoints (complementary to WebSocket tests)."""
 
     def test_status_endpoint(self):
-        """GET /status should return valid status."""
+        """GET /status should return valid status (auth disabled by fixture)."""
         client = TestClient(app)
-        admin = USER_STORE.get_user("admin")
-        resp = client.get("/status", headers={"X-API-Key": admin.api_key})
+        resp = client.get("/status")
         assert resp.status_code == 200
         body = resp.json()
         assert "status" in body
         assert "capital" in body
 
     def test_positions_endpoint(self):
-        """GET /positions should return a list."""
+        """GET /positions should return a list (auth disabled by fixture)."""
         client = TestClient(app)
-        admin = USER_STORE.get_user("admin")
-        resp = client.get("/positions", headers={"X-API-Key": admin.api_key})
+        resp = client.get("/positions")
         assert resp.status_code == 200
         assert isinstance(resp.json(), list)
 
     def test_sectors_endpoint(self):
-        """GET /sectors should return sector data."""
+        """GET /sectors should return sector data (auth disabled by fixture)."""
         client = TestClient(app)
-        admin = USER_STORE.get_user("admin")
-        resp = client.get("/sectors", headers={"X-API-Key": admin.api_key})
+        resp = client.get("/sectors")
         assert resp.status_code == 200

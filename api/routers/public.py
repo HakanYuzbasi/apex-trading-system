@@ -8,10 +8,12 @@ from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 from config import ApexConfig
 from api.ws_manager import manager
 from api.dependencies import read_trading_state
+from api.auth import rate_limit
 
 router = APIRouter(prefix="/public", tags=["Public"])
 
 @router.get("/metrics")
+@rate_limit(requests=60, window=60)
 async def get_public_metrics():
     """
     Returns public-facing top-level KPI metrics.
@@ -35,6 +37,7 @@ async def get_public_metrics():
     }
 
 @router.get("/cockpit")
+@rate_limit(requests=60, window=60)
 async def get_public_cockpit():
     """
     Returns a read-only snapshot of the trading state for the public dashboard.
@@ -77,34 +80,51 @@ async def get_public_cockpit():
 async def public_websocket_endpoint(websocket: WebSocket):
     """
     Public WebSocket endpoint. Streams state updates without authentication.
-    Does NOT accept incoming commands from the client.
+    Runs a dedicated projection loop to ensure sensitive data is stripped.
     """
-    await manager.connect(websocket, tenant_id="public")
+    await websocket.accept()
+    
+    # We do NOT register with `manager.connect` to avoid receiving 
+    # the un-sanitized global `broadcast_to_tenant` payloads.
+    
+    async def _send_sanitized_state():
+        last_timestamp = None
+        while True:
+            try:
+                current_state = read_trading_state()
+                current_timestamp = current_state.get("timestamp")
+                
+                # Only push if the state timestamp changed
+                if current_timestamp != last_timestamp:
+                    update = {
+                        "type": "state_update",
+                        "timestamp": current_timestamp or datetime.now().isoformat(),
+                        "capital": current_state.get("capital", 0),
+                        "positions": current_state.get("positions", {}),
+                        "daily_pnl": current_state.get("daily_pnl", 0),
+                        "total_pnl": current_state.get("total_pnl", 0),
+                        "max_drawdown": current_state.get("max_drawdown", 0),
+                        "sharpe_ratio": current_state.get("sharpe_ratio", 0),
+                        "win_rate": current_state.get("win_rate", 0),
+                        "open_positions": current_state.get("open_positions", 0),
+                        "total_trades": current_state.get("total_trades", 0)
+                    }
+                    await websocket.send_json(update)
+                    last_timestamp = current_timestamp
+            except Exception:
+                pass # Swallow errors to prevent crashing the loop
+            
+            await asyncio.sleep(1.0)
+            
+    # Run the sender loop as a task
+    sender_task = asyncio.create_task(_send_sanitized_state())
+    
     try:
-        # Send current state immediately on connect
-        current_state = read_trading_state()
-        
-        # Formulate initial push
-        update = {
-            "type": "state_update",
-            "timestamp": current_state.get("timestamp", datetime.now().isoformat()),
-            "capital": current_state.get("capital", 0),
-            "positions": current_state.get("positions", {}),
-            "daily_pnl": current_state.get("daily_pnl", 0),
-            "total_pnl": current_state.get("total_pnl", 0),
-            "max_drawdown": current_state.get("max_drawdown", 0),
-            "sharpe_ratio": current_state.get("sharpe_ratio", 0),
-            "win_rate": current_state.get("win_rate", 0),
-            "open_positions": current_state.get("open_positions", 0),
-            "total_trades": current_state.get("total_trades", 0)
-        }
-        await websocket.send_json(update)
-        
         while True:
             # We must wait for messages to know when client disconnects
             # but we ignore any commands sent by unauthenticated users.
-            data = await websocket.receive_text()
-            pass
-            
+            await websocket.receive_text()
     except WebSocketDisconnect:
-        await manager.disconnect(websocket)
+        pass
+    finally:
+        sender_task.cancel()

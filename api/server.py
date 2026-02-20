@@ -46,7 +46,17 @@ from api.auth import (
     verify_auth_runtime_prerequisites,
 )
 from api.ws_manager import manager
-from api.dependencies import read_trading_state, _state_is_fresh, STATE_FILE, _sanitize_floats, CONTROL_COMMAND_FILE, GOVERNOR_POLICY_DIR, SOCIAL_DECISION_AUDIT_FILE, _mtime_ns
+from api.dependencies import (
+    CONTROL_COMMAND_FILE,
+    GOVERNOR_POLICY_DIR,
+    SOCIAL_DECISION_AUDIT_FILE,
+    SOCIAL_DECISION_AUDIT_LEGACY_FILE,
+    STATE_FILE,
+    _mtime_ns,
+    _sanitize_floats,
+    _state_is_fresh,
+    read_trading_state,
+)
 
 try:
     from prometheus_client import Counter, Gauge, Histogram, generate_latest, CONTENT_TYPE_LATEST
@@ -403,7 +413,13 @@ def _governor_service(repo: GovernorPolicyRepository) -> PolicyPromotionService:
 
 
 def _social_audit_repo() -> SocialDecisionAuditRepository:
-    return SocialDecisionAuditRepository(SOCIAL_DECISION_AUDIT_FILE)
+    fallback_filepaths: List[Path] = []
+    if SOCIAL_DECISION_AUDIT_LEGACY_FILE != SOCIAL_DECISION_AUDIT_FILE:
+        fallback_filepaths.append(SOCIAL_DECISION_AUDIT_LEGACY_FILE)
+    return SocialDecisionAuditRepository(
+        SOCIAL_DECISION_AUDIT_FILE,
+        fallback_filepaths=fallback_filepaths,
+    )
 
 # --------------------------------------------------------------------------------
 # Real-time State Streaming
@@ -440,22 +456,50 @@ async def stream_trading_state():
 
             if current_state != last_state or cached_equity_data_by_tenant:
                 for tenant_id in manager.connected_tenants():
+                    if tenant_id == "public":
+                        continue  # Handled by a dedicated sanitized loop in public router
+
+                    is_admin = manager.is_tenant_admin(tenant_id)
                     update = {
                         "type": "state_update",
-                        "timestamp": current_state.get("timestamp", datetime.now().isoformat()),
-                        "capital": current_state.get("capital", 0),
-                        "initial_capital": current_state.get("initial_capital", 0),
-                        "starting_capital": current_state.get("starting_capital", 0),
-                        "positions": current_state.get("positions", {}),
-                        "daily_pnl": current_state.get("daily_pnl", 0),
-                        "total_pnl": current_state.get("total_pnl", 0),
-                        "max_drawdown": current_state.get("max_drawdown", 0),
-                        "sharpe_ratio": current_state.get("sharpe_ratio", 0),
-                        "win_rate": current_state.get("win_rate", 0),
-                        "sector_exposure": current_state.get("sector_exposure", {}),
-                        "open_positions": current_state.get("open_positions", 0),
-                        "total_trades": current_state.get("total_trades", 0),
+                        "tenant_id": tenant_id
                     }
+
+                    if is_admin:
+                        update.update({
+                            "timestamp": current_state.get("timestamp", datetime.now().isoformat()),
+                            "capital": current_state.get("capital", 0),
+                            "initial_capital": current_state.get("initial_capital", 0),
+                            "starting_capital": current_state.get("starting_capital", 0),
+                            "positions": current_state.get("positions", {}),
+                            "daily_pnl": current_state.get("daily_pnl", 0),
+                            "total_pnl": current_state.get("total_pnl", 0),
+                            "max_drawdown": current_state.get("max_drawdown", 0),
+                            "sharpe_ratio": current_state.get("sharpe_ratio", 0),
+                            "win_rate": current_state.get("win_rate", 0),
+                            "sector_exposure": current_state.get("sector_exposure", {}),
+                            "open_positions": current_state.get("open_positions", 0),
+                            "max_positions": current_state.get("max_positions", ApexConfig.MAX_POSITIONS),
+                            "total_trades": current_state.get("total_trades", 0),
+                        })
+                    else:
+                        update.update({
+                            "timestamp": datetime.now().isoformat(),
+                            "capital": 0,
+                            "initial_capital": 0,
+                            "starting_capital": 0,
+                            "positions": {},
+                            "daily_pnl": 0,
+                            "total_pnl": 0,
+                            "max_drawdown": 0,
+                            "sharpe_ratio": 0,
+                            "win_rate": 0,
+                            "sector_exposure": {},
+                            "open_positions": 0,
+                            "max_positions": ApexConfig.MAX_POSITIONS,
+                            "total_trades": 0,
+                        })
+
                     tenant_equity = cached_equity_data_by_tenant.get(tenant_id)
                     if tenant_equity:
                         update["aggregated_equity"] = tenant_equity.get("total_equity", 0.0)
@@ -489,7 +533,7 @@ async def get_metrics(request: Request):
 
     token = os.getenv("APEX_METRICS_TOKEN", "").strip()
     if token:
-        supplied = request.headers.get("X-Metrics-Token") or request.query_params.get("token")
+        supplied = request.headers.get("X-Metrics-Token")
         if supplied != token:
             return PlainTextResponse("forbidden\n", status_code=403)
 
@@ -502,6 +546,16 @@ async def get_metrics(request: Request):
 
 @app.get("/status")
 async def get_status(user=Depends(require_user)):
+    """Get daemon execution status. Only populated for admins until Phase 9 execution split."""
+    if not user.has_role("admin"):
+        return {
+            "status": "online",
+            "timestamp": datetime.now().isoformat(),
+            "capital": 0, "starting_capital": 0,
+            "daily_pnl": 0, "total_pnl": 0, "max_drawdown": 0, 
+            "sharpe_ratio": 0, "win_rate": 0, "open_positions": 0, 
+            "option_positions": 0, "open_positions_total": 0, "total_trades": 0
+        }
     state = read_trading_state()
     return {
         "status": "online" if _state_is_fresh(state, ApexConfig.HEALTH_STALENESS_SECONDS) else "offline",
@@ -521,6 +575,9 @@ async def get_status(user=Depends(require_user)):
 
 @app.get("/positions")
 async def get_positions(user=Depends(require_user)):
+    """Get daemon active positions. Only populated for admins until Phase 9 execution split."""
+    if not user.has_role("admin"):
+        return []
     state = read_trading_state()
     positions = state.get("positions", {})
 
@@ -542,7 +599,9 @@ async def get_positions(user=Depends(require_user)):
 
 @app.get("/state")
 async def get_full_state(user=Depends(require_user)):
-    """Get complete trading state."""
+    """Get complete daemon trading state."""
+    if not user.has_role("admin"):
+        return {}
     return read_trading_state()
 
 @app.get("/health")
@@ -558,7 +617,9 @@ async def get_health(user=Depends(require_user)):
 
 @app.get("/sectors")
 async def get_sector_exposure(user=Depends(require_user)):
-    """Get sector exposure breakdown."""
+    """Get daemon sector exposure breakdown."""
+    if not user.has_role("admin"):
+        return {}
     state = read_trading_state()
     return state.get("sector_exposure", {})
 
@@ -865,7 +926,7 @@ async def websocket_endpoint(websocket: WebSocket):
         await websocket.close(code=1008)
         return
     tenant_id = str(getattr(user, "user_id", getattr(user, "id", "default")))
-    await manager.connect(websocket, tenant_id=tenant_id)
+    await manager.connect(websocket, tenant_id=tenant_id, is_admin=user.has_role("admin"))
     if PROMETHEUS_AVAILABLE and WEBSOCKET_CONNECTIONS is not None:
         WEBSOCKET_CONNECTIONS.inc()
     try:

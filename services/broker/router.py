@@ -38,6 +38,9 @@ class PortfolioBalanceResponse(BaseModel):
     total_equity: float
     last_updated: datetime
     breakdown: List[dict] = []
+    stale: bool = False
+    as_of: datetime
+    source_status: str = "ok"
 
 class AggregatedPositionItem(BaseModel):
     source: str
@@ -51,6 +54,9 @@ class AggregatedPositionItem(BaseModel):
     market_value: float
     unrealized_pl: float
     unrealized_plpc: float
+    stale: bool = False
+    as_of: str
+    source_status: str = "ok"
 
 class PortfolioSourceItem(BaseModel):
     id: str
@@ -117,11 +123,21 @@ async def get_portfolio_balance(user: User = Depends(require_user)):
     """Get aggregated portfolio balance with per-source breakdown."""
     try:
         snapshot = await broker_service.get_tenant_equity_snapshot(user.user_id)
+        
+        # Calculate aggregate freshness across all data sources
+        breakdown = snapshot.get("breakdown", [])
+        is_stale = any(b.get("stale", False) for b in breakdown)
+        source_status = "degraded" if is_stale else "ok"
+        if not breakdown:
+            source_status = "empty"
 
         return {
             "total_equity": snapshot["total_equity"],
             "last_updated": datetime.now(timezone.utc),
-            "breakdown": snapshot["breakdown"],
+            "breakdown": breakdown,
+            "stale": is_stale,
+            "as_of": datetime.fromisoformat(snapshot.get("as_of", datetime.now(timezone.utc).isoformat())),
+            "source_status": source_status
         }
     except Exception as e:
         logger.error(f"Failed to get portfolio balance: {e}")

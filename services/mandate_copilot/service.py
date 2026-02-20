@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import re
 import threading
 from collections import defaultdict
@@ -11,6 +12,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, Iterable, List, Tuple
 from uuid import uuid4
+
+logger = logging.getLogger(__name__)
 
 from config import ApexConfig
 from services.mandate_copilot.schemas import (
@@ -218,7 +221,8 @@ class MandateCopilotService:
         for row in scoped:
             try:
                 result.append(MandateWorkflowPack.model_validate(row))
-            except Exception:
+            except Exception as exc:
+                logger.warning("Skipping malformed workflow row: %s", exc)
                 continue
         return result
 
@@ -340,8 +344,8 @@ class MandateCopilotService:
                         net_pnl = float(metrics.get("net_pnl", 0) or 0)
                         realized_hit_by_sleeve[str(sleeve)] = 1.0 if net_pnl >= 0 else 0.0
                         data_quality_by_sleeve[str(sleeve)] = "limited_sample" if trades < 20 else "ok"
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.warning("Failed to load sleeve calibration data: %s", exc)
 
         sleeves = sorted(set(by_sleeve_prediction_count) | set(realized_hit_by_sleeve))
         rows: List[SleeveCalibrationRow] = []
@@ -442,7 +446,8 @@ class MandateCopilotService:
                 continue
             try:
                 events.append(PolicyChangeEvent.model_validate(payload))
-            except Exception:
+            except Exception as exc:
+                logger.warning("Skipping malformed policy change event: %s", exc)
                 continue
         return events
 
@@ -724,7 +729,8 @@ class MandateCopilotService:
         with _WORKFLOW_LOCK:
             try:
                 payload = json.loads(WORKFLOW_FILE.read_text(encoding="utf-8"))
-            except Exception:
+            except Exception as exc:
+                logger.error("Failed to load workflow file %s: %s", WORKFLOW_FILE, exc)
                 return []
         return payload if isinstance(payload, list) else []
 
@@ -750,7 +756,8 @@ class MandateCopilotService:
             if str(row.get("request_id", "")) == str(request_id):
                 try:
                     return MandateWorkflowPack.model_validate(row)
-                except Exception:
+                except Exception as exc:
+                    logger.warning("Failed to validate workflow for request %s: %s", request_id, exc)
                     return None
         return None
 

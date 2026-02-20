@@ -1,8 +1,10 @@
 import json
 import logging
 import math
+import os
 import threading
 from datetime import datetime
+from pathlib import Path
 from typing import Dict, Optional, Tuple
 
 from config import ApexConfig
@@ -15,7 +17,18 @@ PRICE_CACHE_FILE = ApexConfig.DATA_DIR / "price_cache.json"
 CONTROL_COMMAND_FILE = ApexConfig.DATA_DIR / "trading_control_commands.json"
 GOVERNOR_POLICY_DIR = ApexConfig.DATA_DIR / "governor_policies"
 PREFLIGHT_STATUS_FILE = ApexConfig.DATA_DIR / "preflight_status.json"
-SOCIAL_DECISION_AUDIT_FILE = ApexConfig.DATA_DIR / "audit" / "social_governor_decisions.jsonl"
+SOCIAL_DECISION_AUDIT_FILE = Path(
+    os.getenv(
+        "APEX_SOCIAL_DECISION_AUDIT_FILE",
+        str(ApexConfig.DATA_DIR / "runtime" / "social_governor_decisions.jsonl"),
+    )
+)
+SOCIAL_DECISION_AUDIT_LEGACY_FILE = Path(
+    os.getenv(
+        "APEX_SOCIAL_DECISION_AUDIT_LEGACY_FILE",
+        str(ApexConfig.DATA_DIR / "audit" / "social_governor_decisions.jsonl"),
+    )
+)
 
 DEFAULT_STATE = {
     "timestamp": None,
@@ -63,22 +76,20 @@ def read_price_cache() -> Tuple[Dict[str, float], Optional[int]]:
         if _price_cache_mtime_ns == mtime_ns:
             return _price_cache_data, _price_cache_mtime_ns
 
-    if mtime_ns is None:
-        with _price_cache_lock:
+        if mtime_ns is None:
             _price_cache_data = {}
             _price_cache_mtime_ns = None
             return _price_cache_data, _price_cache_mtime_ns
 
-    try:
-        with open(PRICE_CACHE_FILE, "r") as f:
-            loaded = json.load(f)
-            if not isinstance(loaded, dict):
-                loaded = {}
-    except Exception as e:
-        logger.debug(f"Error reading price cache: {e}")
-        loaded = {}
+        try:
+            with open(PRICE_CACHE_FILE, "r") as f:
+                loaded = json.load(f)
+                if not isinstance(loaded, dict):
+                    loaded = {}
+        except Exception as e:
+            logger.debug(f"Error reading price cache: {e}")
+            loaded = {}
 
-    with _price_cache_lock:
         _price_cache_data = loaded
         _price_cache_mtime_ns = mtime_ns
         return _price_cache_data, _price_cache_mtime_ns
@@ -98,54 +109,51 @@ def read_trading_state() -> Dict:
         ):
             return _state_cache_data
 
-    if state_mtime_ns is None:
-        with _state_cache_lock:
+        if state_mtime_ns is None:
             _state_cache_data = DEFAULT_STATE
             _state_cache_mtime_ns = None
             _state_cache_price_mtime_ns = price_mtime_ns
             return _state_cache_data
 
-    try:
-        with open(STATE_FILE, "r") as f:
-            data = json.load(f)
-    except Exception as e:
-        logger.error(f"Error reading state file: {e}")
-        with _state_cache_lock:
+        try:
+            with open(STATE_FILE, "r") as f:
+                data = json.load(f)
+        except Exception as e:
+            logger.error(f"Error reading state file: {e}")
             _state_cache_data = DEFAULT_STATE
             _state_cache_mtime_ns = None
             _state_cache_price_mtime_ns = price_mtime_ns
             return _state_cache_data
 
-    # Enrich positions with live prices from cache
-    positions = data.get("positions", {})
-    total_position_pnl = 0.0
+        # Enrich positions with live prices from cache
+        positions = data.get("positions", {})
+        total_position_pnl = 0.0
 
-    for symbol, pos in positions.items():
-        live_price = price_cache.get(symbol, 0)
-        avg_price = pos.get("avg_price", 0)
-        qty = pos.get("qty", 0)
+        for symbol, pos in positions.items():
+            live_price = price_cache.get(symbol, 0)
+            avg_price = pos.get("avg_price", 0)
+            qty = pos.get("qty", 0)
 
-        if live_price > 0 and avg_price > 0:
-            pos["current_price"] = live_price
-            if qty > 0:  # Long
-                pnl = (live_price - avg_price) * qty
-                pnl_pct = (live_price / avg_price - 1) * 100
-            else:  # Short
-                pnl = (avg_price - live_price) * abs(qty)
-                pnl_pct = (avg_price / live_price - 1) * 100 if live_price > 0 else 0
-            pos["pnl"] = round(pnl, 2)
-            pos["pnl_pct"] = round(pnl_pct, 2)
-            total_position_pnl += pnl
+            if live_price > 0 and avg_price > 0:
+                pos["current_price"] = live_price
+                if qty > 0:  # Long
+                    pnl = (live_price - avg_price) * qty
+                    pnl_pct = (live_price / avg_price - 1) * 100
+                else:  # Short
+                    pnl = (avg_price - live_price) * abs(qty)
+                    pnl_pct = (avg_price / live_price - 1) * 100 if live_price > 0 else 0
+                pos["pnl"] = round(pnl, 2)
+                pos["pnl_pct"] = round(pnl_pct, 2)
+                total_position_pnl += pnl
 
-    # Update total_pnl if we have position P&L data
-    if total_position_pnl != 0:
-        starting_capital = data.get("starting_capital", data.get("capital", 0))
-        if starting_capital > 0:
-            data["total_pnl"] = round(total_position_pnl, 2)
-            data["daily_pnl"] = round(total_position_pnl, 2)  # Approximate as daily
+        # Update total_pnl if we have position P&L data
+        if total_position_pnl != 0:
+            starting_capital = data.get("starting_capital", data.get("capital", 0))
+            if starting_capital > 0:
+                data["total_pnl"] = round(total_position_pnl, 2)
+                data["daily_pnl"] = round(total_position_pnl, 2)  # Approximate as daily
 
-    sanitized = _sanitize_floats(data)
-    with _state_cache_lock:
+        sanitized = _sanitize_floats(data)
         _state_cache_data = sanitized
         _state_cache_mtime_ns = state_mtime_ns
         _state_cache_price_mtime_ns = price_mtime_ns

@@ -26,8 +26,18 @@ def run_startup_guards() -> None:
 async def main() -> None:
     """Main async entrypoint for the APEX trading runtime."""
     run_startup_guards()
-    system = ApexTradingSystem()
-    await system.run()
+    
+    from core.orchestrator import execution_manager
+    await execution_manager.start()
+    
+    try:
+        # Keep the main process alive while orchestrator manages background tasks
+        while True:
+            await asyncio.sleep(3600)
+    except asyncio.CancelledError:
+        logger.info("Main execution loop cancelled, gracefully shutting down orchestrator...")
+    finally:
+        await execution_manager.stop()
 
 
 def _run() -> Optional[int]:

@@ -194,50 +194,91 @@ class ApexTradingSystem:
     - Sector exposure limits
     """
     
-    def __init__(self):
+    def __init__(self, tenant_id: str = "default", broker_service=None):
+        self.tenant_id = tenant_id
+        if self.tenant_id == "default":
+            self.user_data_dir = ApexConfig.DATA_DIR
+        else:
+            self.user_data_dir = ApexConfig.DATA_DIR / "users" / self.tenant_id
+            self.user_data_dir.mkdir(parents=True, exist_ok=True)
+
         self.print_banner()
         logger.info("=" * 80)
-        logger.info(f"🚀 {ApexConfig.SYSTEM_NAME} V{ApexConfig.VERSION}")
+        logger.info(f"🚀 {ApexConfig.SYSTEM_NAME} V{ApexConfig.VERSION} [Tenant: {self.tenant_id}]")
         logger.info("=" * 80)
         
-        # Initialize broker connectors based on BROKER_MODE
+        self.ibkr: Optional[IBKRConnector] = None
         self.alpaca = None
-        broker_mode = getattr(ApexConfig, "BROKER_MODE", "ibkr").lower()
+        self.advanced_executor: Optional[AdvancedOrderExecutor] = None
 
         if ApexConfig.LIVE_TRADING:
-            if broker_mode in ("ibkr", "both"):
-                mode = "PAPER" if ApexConfig.IBKR_PORT == 7497 else "LIVE"
-                logger.info(f"Mode: {mode} TRADING (IBKR)")
-                self.ibkr = IBKRConnector(
-                    host=ApexConfig.IBKR_HOST,
-                    port=ApexConfig.IBKR_PORT,
-                    client_id=ApexConfig.IBKR_CLIENT_ID
-                )
-                if ApexConfig.USE_ADVANCED_EXECUTION:
-                    self.advanced_executor = AdvancedOrderExecutor(self.ibkr)
-                    logger.info("Advanced execution (TWAP/VWAP) enabled")
-            else:
-                self.ibkr = None
+            if broker_service and self.tenant_id != "default":
+                # Multi-tenant dynamic broker configuration
+                active_conns = [c for c in broker_service._connections.values() 
+                                if c.user_id == self.tenant_id and c.is_active]
+                
+                for conn in active_conns:
+                    from models.broker import BrokerType
+                    try:
+                        creds = broker_service._decrypt_credentials(conn.credentials.get("data", ""))
+                    except Exception as e:
+                        logger.error(f"[{self.tenant_id}] Failed to decrypt credentials for conn {conn.id}: {e}")
+                        continue
 
-            if broker_mode in ("alpaca", "both"):
-                from execution.alpaca_connector import AlpacaConnector
-                logger.info("Mode: PAPER TRADING (Alpaca Crypto)")
-                self.alpaca = AlpacaConnector(
-                    api_key=getattr(ApexConfig, "ALPACA_API_KEY", ""),
-                    secret_key=getattr(ApexConfig, "ALPACA_SECRET_KEY", ""),
-                    base_url=getattr(ApexConfig, "ALPACA_BASE_URL", ""),
-                )
+                    if conn.broker_type == BrokerType.IBKR:
+                        logger.info(f"[{self.tenant_id}] Mode: {conn.environment.upper()} TRADING (IBKR)")
+                        self.ibkr = IBKRConnector(
+                            host=creds.get("host", ApexConfig.IBKR_HOST),
+                            port=creds.get("port", ApexConfig.IBKR_PORT),
+                            client_id=conn.client_id or ApexConfig.IBKR_CLIENT_ID
+                        )
+                        if ApexConfig.USE_ADVANCED_EXECUTION:
+                            self.advanced_executor = AdvancedOrderExecutor(self.ibkr)
+                            logger.info(f"[{self.tenant_id}] Advanced execution (TWAP/VWAP) enabled")
+                    
+                    elif conn.broker_type == BrokerType.ALPACA:
+                        logger.info(f"[{self.tenant_id}] Mode: {conn.environment.upper()} TRADING (Alpaca Crypto)")
+                        from execution.alpaca_connector import AlpacaConnector
+                        self.alpaca = AlpacaConnector(
+                            api_key=creds.get("api_key", ""),
+                            secret_key=creds.get("secret_key", ""),
+                            base_url=creds.get("base_url", "https://paper-api.alpaca.markets")
+                        )
+            else:
+                # Legacy single-tenant configuration
+                broker_mode = getattr(ApexConfig, "BROKER_MODE", "ibkr").lower()
+                if broker_mode in ("ibkr", "both"):
+                    mode = "PAPER" if ApexConfig.IBKR_PORT == 7497 else "LIVE"
+                    logger.info(f"Mode: {mode} TRADING (IBKR)")
+                    self.ibkr = IBKRConnector(
+                        host=ApexConfig.IBKR_HOST,
+                        port=ApexConfig.IBKR_PORT,
+                        client_id=ApexConfig.IBKR_CLIENT_ID
+                    )
+                    if ApexConfig.USE_ADVANCED_EXECUTION:
+                        self.advanced_executor = AdvancedOrderExecutor(self.ibkr)
+                        logger.info("Advanced execution (TWAP/VWAP) enabled")
+    
+                if broker_mode in ("alpaca", "both"):
+                    from execution.alpaca_connector import AlpacaConnector
+                    logger.info("Mode: PAPER TRADING (Alpaca Crypto)")
+                    self.alpaca = AlpacaConnector(
+                        api_key=getattr(ApexConfig, "ALPACA_API_KEY", ""),
+                        secret_key=getattr(ApexConfig, "ALPACA_SECRET_KEY", ""),
+                        base_url=getattr(ApexConfig, "ALPACA_BASE_URL", ""),
+                    )
         else:
             logger.info("Mode: SIMULATION")
-            self.ibkr = None
+            
         self.broker_dispatch = BrokerDispatch(self.ibkr, self.alpaca)
-        self.state_sync = StateSync(ApexConfig.DATA_DIR / "trading_state.json")
+        self.state_sync = StateSync(self.user_data_dir / "trading_state.json")
         
         # Initialize modules
         self.signal_generator = AdvancedSignalGenerator()
         self.risk_manager = RiskManager(
             max_daily_loss=ApexConfig.MAX_DAILY_LOSS,
-            max_drawdown=ApexConfig.MAX_DRAWDOWN
+            max_drawdown=ApexConfig.MAX_DRAWDOWN,
+            user_id=self.tenant_id
         )
         self.portfolio_optimizer = PortfolioOptimizer()
         self.market_data = MarketDataFetcher()
@@ -273,7 +314,7 @@ class ApexTradingSystem:
             )
 
         # Governor policy repository/resolver (asset-class + regime scope)
-        self.governor_policy_repo = GovernorPolicyRepository(ApexConfig.DATA_DIR / "governor_policies")
+        self.governor_policy_repo = GovernorPolicyRepository(self.user_data_dir / "governor_policies")
         active_policies = self.governor_policy_repo.load_active()
         if not active_policies:
             bootstrap = [
@@ -293,10 +334,10 @@ class ApexTradingSystem:
             live_trading=ApexConfig.LIVE_TRADING,
             auto_promote_non_prod=ApexConfig.GOVERNOR_AUTO_PROMOTE_NON_PROD,
         )
-        self._governor_tune_state_file = ApexConfig.DATA_DIR / "governor_policies" / "tuning_state.json"
+        self._governor_tune_state_file = self.user_data_dir / "governor_policies" / "tuning_state.json"
         self._governor_last_tune_at: Dict[str, datetime] = {}
         self._load_governor_tuning_state()
-        self._control_commands_file = ApexConfig.DATA_DIR / "trading_control_commands.json"
+        self._control_commands_file = self.user_data_dir / "trading_control_commands.json"
 
         # Hard kill-switch (DD + Sharpe decay)
         self.kill_switch: Optional[RiskKillSwitch] = None
@@ -331,7 +372,7 @@ class ApexTradingSystem:
                 max_participation_rate=ApexConfig.PRETRADE_MAX_PARTICIPATION_RATE,
                 max_gross_exposure_ratio=ApexConfig.PRETRADE_MAX_GROSS_EXPOSURE_RATIO,
             ),
-            audit_dir=ApexConfig.DATA_DIR / "audit" / "pretrade_gateway",
+            audit_dir=self.user_data_dir / "audit" / "pretrade_gateway",
         )
         logger.info(
             "🧱 Pre-trade gateway %s (notional<=%s, shares<=%s, price_band<=%.0fbps, adv<=%.1f%%, gross<=%.2fx, fail_closed=%s)",
@@ -353,16 +394,32 @@ class ApexTradingSystem:
         self.social_shock_governor: Optional[SocialShockGovernor] = None
         self.prediction_market_verifier: Optional[PredictionMarketVerificationGate] = None
         self._social_policy_repo = SocialGovernorPolicyRepository(
-            ApexConfig.DATA_DIR / "governor_policies"
+            self.user_data_dir / "governor_policies"
         )
         self._social_policy_version: str = "runtime-default"
         self._social_active_policies: Dict[Tuple[str, str], object] = {}
+        social_audit_runtime_file = Path(
+            os.getenv(
+                "APEX_SOCIAL_DECISION_AUDIT_FILE",
+                str(self.user_data_dir / "runtime" / "social_governor_decisions.jsonl"),
+            )
+        )
+        social_audit_legacy_file = Path(
+            os.getenv(
+                "APEX_SOCIAL_DECISION_AUDIT_LEGACY_FILE",
+                str(self.user_data_dir / "audit" / "social_governor_decisions.jsonl"),
+            )
+        )
+        social_audit_fallbacks: List[Path] = []
+        if social_audit_legacy_file != social_audit_runtime_file:
+            social_audit_fallbacks.append(social_audit_legacy_file)
         self._social_audit_repo = SocialDecisionAuditRepository(
-            ApexConfig.DATA_DIR / "audit" / "social_governor_decisions.jsonl"
+            social_audit_runtime_file,
+            fallback_filepaths=social_audit_fallbacks,
         )
         self._social_input_validation: Dict[str, object] = {}
         self._social_feed_warning_cache: Dict[Tuple[str, str], List[str]] = {}
-        self._social_feed_path = ApexConfig.DATA_DIR / "social_risk_inputs.json"
+        self._social_feed_path = self.user_data_dir / "social_risk_inputs.json"
         self._social_inputs_payload: Dict[str, object] = {}
         self._social_snapshot_cache: Dict[Tuple[str, str], SocialRiskSnapshot] = {}
         self._social_decision_cache: Dict[Tuple[str, str], SocialShockDecision] = {}
@@ -497,7 +554,7 @@ class ApexTradingSystem:
         self.arrival_benchmark = ArrivalPriceBenchmark(max_history=1000)
         
         # Health monitoring dashboard
-        self.health_dashboard = HealthDashboard(data_dir=str(ApexConfig.DATA_DIR))
+        self.health_dashboard = HealthDashboard(data_dir=str(self.user_data_dir))
 
         # Data quality monitoring
         self.data_quality_monitor = DataQualityMonitor(
@@ -507,12 +564,12 @@ class ApexTradingSystem:
 
         # Signal outcome tracker for forward-looking performance analysis
         self.signal_outcome_tracker = SignalOutcomeTracker(
-            data_dir=str(ApexConfig.DATA_DIR),
+            data_dir=str(self.user_data_dir),
             lookback_windows=[1, 5, 10, 20],
             target_returns=[0.02, 0.05, 0.10]
         )
         self.performance_attribution = PerformanceAttributionTracker(
-            data_dir=ApexConfig.DATA_DIR,
+            data_dir=self.user_data_dir,
             max_closed_trades=10_000,
         )
 
@@ -902,17 +959,8 @@ class ApexTradingSystem:
                 self.risk_manager.day_start_capital,
                 mismatch_ratio * 100.0,
             )
-            session_map = getattr(self.risk_manager, "sessions", {})
-            default_session = session_map.get("default") if isinstance(session_map, dict) else None
-            if default_session is not None:
-                default_session.starting_capital = capital
-                default_session.peak_capital = capital
-                default_session.day_start_capital = capital
-                default_session.current_day = datetime.now().strftime('%Y-%m-%d')
-            else:
-                self.risk_manager.starting_capital = capital
-                self.risk_manager.peak_capital = capital
-                self.risk_manager.day_start_capital = capital
+            # Automatically targets the tenant session within RiskManager
+            self.risk_manager.set_starting_capital(capital)
             self._last_good_total_equity = float(capital)
             drawdown_breaker = getattr(self, "drawdown_breaker", None)
             if drawdown_breaker:
@@ -1079,11 +1127,11 @@ class ApexTradingSystem:
             except Exception as ibkr_exc:
                 if self.prometheus_metrics:
                     self.prometheus_metrics.update_ibkr_status(False)
-                broker_mode = str(getattr(ApexConfig, "BROKER_MODE", "ibkr") or "ibkr").lower()
-                if broker_mode == "both" and self.alpaca:
-                    logger.error("❌ IBKR unavailable in BOTH mode: %s", ibkr_exc)
+                
+                if self.alpaca:
+                    logger.error(f"❌ IBKR unavailable: {ibkr_exc}")
                     logger.warning(
-                        "⚠️ Degrading to Alpaca-only session; IBKR symbols will be skipped until IBKR recovers"
+                        f"⚠️ Degrading to Alpaca-only session for {self.tenant_id}; IBKR symbols will be skipped until IBKR recovers"
                     )
                     self.ibkr = None
                 else:
