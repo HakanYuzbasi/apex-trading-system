@@ -1504,19 +1504,30 @@ class ApexTradingSystem:
             logger.debug(traceback.format_exc())
 
     async def sync_positions_with_alpaca(self):
-        """Sync positions from Alpaca into self.positions with metadata."""
+        """Sync crypto positions from Alpaca into self.positions with metadata.
+
+        Only crypto symbols are synced from Alpaca to avoid overwriting
+        IBKR equity positions (e.g. COP, HAL) with stale Alpaca data.
+        """
         if not self.alpaca:
             return
         try:
             detailed_positions = await self.alpaca.get_detailed_positions()
             actual_positions = {s: d['qty'] for s, d in detailed_positions.items()}
-            
-            # Sync quantities
+
+            # Only sync crypto positions — equities are managed by IBKR
             for sym, qty in actual_positions.items():
-                if qty != 0:
-                    self.positions[sym] = int(qty) if qty == int(qty) else qty
-                    
-            # Remove Alpaca symbols that are no longer held
+                if qty == 0:
+                    continue
+                try:
+                    parsed = parse_symbol(sym)
+                    if parsed.asset_class != AssetClass.CRYPTO:
+                        continue
+                except ValueError:
+                    continue
+                self.positions[sym] = int(qty) if qty == int(qty) else qty
+
+            # Remove crypto symbols that are no longer held on Alpaca
             for sym in list(self.positions.keys()):
                 try:
                     parsed = parse_symbol(sym)
@@ -1525,16 +1536,21 @@ class ApexTradingSystem:
                 except ValueError:
                     pass
                     
-            # Populate price cache and entry prices so Modeled Equity can value them correctly
+            # Populate price cache and entry prices for crypto positions
             for sym, data in detailed_positions.items():
                 qty = data['qty']
                 if qty == 0:
                     continue
-                
-                # Update local caches with Alpaca's reality
+                try:
+                    parsed = parse_symbol(sym)
+                    if parsed.asset_class != AssetClass.CRYPTO:
+                        continue
+                except ValueError:
+                    continue
+
                 if data.get('current_price', 0) > 0:
                     self.price_cache[sym] = data['current_price']
-                
+
                 if sym not in self.position_entry_prices or self.position_entry_prices[sym] == 0:
                     self.position_entry_prices[sym] = data.get('avg_cost', 0)
                     if sym not in self.position_entry_times:

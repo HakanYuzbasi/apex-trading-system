@@ -61,15 +61,22 @@ class DatabasePool:
             return
 
         try:
+            kwargs = {
+                "echo": self.echo,
+                "future": True,
+            }
+            if not self.database_url.startswith("sqlite"):
+                kwargs["poolclass"] = QueuePool
+                kwargs["pool_size"] = self.pool_size
+                kwargs["max_overflow"] = self.max_overflow
+                kwargs["pool_timeout"] = self.pool_timeout
+                kwargs["pool_recycle"] = self.pool_recycle
+            else:
+                kwargs["poolclass"] = NullPool
+
             self._engine = create_async_engine(
                 self.database_url,
-                poolclass=QueuePool,
-                pool_size=self.pool_size,
-                max_overflow=self.max_overflow,
-                pool_timeout=self.pool_timeout,
-                pool_recycle=self.pool_recycle,
-                echo=self.echo,
-                future=True,
+                **kwargs
             )
 
             self._session_factory = async_sessionmaker(

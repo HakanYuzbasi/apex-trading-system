@@ -12,17 +12,15 @@ from alembic import context
 from sqlalchemy import pool
 from sqlalchemy.ext.asyncio import async_engine_from_config
 
-from services.common.db import Base, DATABASE_URL
-
-# Import all models so they register with Base.metadata
+from services.common.db import Base, get_database_url
 import services.auth.models  # noqa: F401
 import services.trading.models  # noqa: F401
 import services.audit.models  # noqa: F401
 
 config = context.config
 
-# Use the centralized DATABASE_URL which has SQLite fallback logic
-db_url = DATABASE_URL
+# Use the centralized get_database_url which has SQLite fallback logic
+db_url = get_database_url()
 config.set_main_option("sqlalchemy.url", db_url)
 
 if config.config_file_name is not None:

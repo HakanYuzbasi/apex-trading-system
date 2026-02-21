@@ -3,7 +3,7 @@ import json
 from datetime import datetime
 from pathlib import Path
 
-from fastapi import APIRouter, WebSocket, WebSocketDisconnect
+from fastapi import APIRouter, WebSocket, WebSocketDisconnect, Request
 
 from config import ApexConfig
 from api.ws_manager import manager
@@ -14,7 +14,7 @@ router = APIRouter(prefix="/public", tags=["Public"])
 
 @router.get("/metrics")
 @rate_limit(requests=60, window=60)
-async def get_public_metrics():
+async def get_public_metrics(request: Request = None):
     """
     Returns public-facing top-level KPI metrics.
     No authentication required.
@@ -38,7 +38,7 @@ async def get_public_metrics():
 
 @router.get("/cockpit")
 @rate_limit(requests=60, window=60)
-async def get_public_cockpit():
+async def get_public_cockpit(request: Request = None):
     """
     Returns a read-only snapshot of the trading state for the public dashboard.
     No authentication required. Sensitive keys (if any) are omitted.
@@ -50,6 +50,7 @@ async def get_public_cockpit():
             "state_fresh": True,
             "timestamp": state.get("timestamp", datetime.now().isoformat()),
             "capital": state.get("capital", 0),
+            "starting_capital": state.get("starting_capital", 0),
             "daily_pnl": state.get("daily_pnl", 0),
             "total_pnl": state.get("total_pnl", 0),
             "max_drawdown": state.get("max_drawdown", 0),

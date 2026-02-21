@@ -22,6 +22,7 @@ import secrets
 import hashlib
 import time
 import logging
+import json
 from datetime import datetime, timedelta
 from typing import Optional, Dict, List, Callable, Any, Deque
 from dataclasses import dataclass
@@ -192,6 +193,50 @@ class DatabaseUserStore:
     """Database-backed user and API key access for auth dependencies."""
 
     @staticmethod
+    def _legacy_users() -> List[Dict[str, Any]]:
+        """Load legacy file-backed users for compatibility fallback paths."""
+        users_file = ApexConfig.DATA_DIR / "users.json"
+        try:
+            if not users_file.exists():
+                return []
+            payload = json.loads(users_file.read_text(encoding="utf-8"))
+            users = payload.get("users", []) if isinstance(payload, dict) else []
+            return users if isinstance(users, list) else []
+        except Exception as exc:
+            logger.debug("Legacy users fallback unavailable: %s", exc)
+            return []
+
+    @staticmethod
+    def _legacy_user_to_model(entry: Dict[str, Any]) -> User:
+        """Convert legacy user record into auth User object."""
+        created_at = entry.get("created_at")
+        created_dt: Optional[datetime] = None
+        if isinstance(created_at, str):
+            try:
+                created_dt = datetime.fromisoformat(created_at)
+            except ValueError:
+                created_dt = None
+
+        roles_raw = entry.get("roles", [])
+        roles = roles_raw if isinstance(roles_raw, list) and roles_raw else ["user"]
+        permissions_raw = entry.get("permissions", [])
+        if isinstance(permissions_raw, list) and permissions_raw:
+            permissions = permissions_raw
+        else:
+            permissions = ["read", "write"] if "admin" not in roles else ["read", "write", "trade", "admin"]
+
+        return User(
+            user_id=str(entry.get("user_id") or entry.get("username") or "unknown"),
+            username=str(entry.get("username") or "unknown"),
+            email=entry.get("email"),
+            roles=roles,
+            permissions=permissions,
+            api_key=entry.get("api_key"),
+            created_at=created_dt,
+            tier=entry.get("tier"),
+        )
+
+    @staticmethod
     async def _get_roles(user_id: str) -> List[str]:
         async with db_session() as session:
             result = await session.execute(
@@ -203,71 +248,101 @@ class DatabaseUserStore:
     @staticmethod
     async def get_user(user_id: str) -> Optional[User]:
         """Load a user by ID from the database."""
-        async with db_session() as session:
-            model = await session.get(UserModel, user_id)
-            if model is None or not model.is_active:
-                return None
-        roles = await DatabaseUserStore._get_roles(user_id)
-        return User(
-            user_id=model.id,
-            username=model.username,
-            email=model.email,
-            roles=roles,
-            permissions=["read", "write"] if "admin" not in roles else ["read", "write", "trade", "admin"],
-            created_at=model.created_at,
-        )
+        try:
+            async with db_session() as session:
+                model = await session.get(UserModel, user_id)
+                if model is not None and model.is_active:
+                    roles = await DatabaseUserStore._get_roles(user_id)
+                    return User(
+                        user_id=model.id,
+                        username=model.username,
+                        email=model.email,
+                        roles=roles,
+                        permissions=["read", "write"] if "admin" not in roles else ["read", "write", "trade", "admin"],
+                        created_at=model.created_at,
+                    )
+        except Exception as exc:
+            logger.debug("DB get_user fallback for %s: %s", user_id, exc)
+
+        for entry in DatabaseUserStore._legacy_users():
+            if str(entry.get("user_id")) == user_id:
+                return DatabaseUserStore._legacy_user_to_model(entry)
+        return None
 
     @staticmethod
     async def get_user_by_api_key(api_key: str) -> Optional[User]:
         """Load a user from a raw API key."""
         key_hash = hashlib.sha256(api_key.encode()).hexdigest()
-        async with db_session() as session:
-            key_result = await session.execute(
-                select(ApiKeyModel).where(
-                    ApiKeyModel.key_hash == key_hash,
-                    ApiKeyModel.is_active == True,
+        try:
+            async with db_session() as session:
+                key_result = await session.execute(
+                    select(ApiKeyModel).where(
+                        ApiKeyModel.key_hash == key_hash,
+                        ApiKeyModel.is_active == True,
+                    )
                 )
-            )
-            key = key_result.scalar_one_or_none()
-            if key is None:
-                return None
-            user_model = await session.get(UserModel, key.user_id)
-            if user_model is None or not user_model.is_active:
-                return None
-            key.last_used_at = datetime.utcnow()
-        roles = await DatabaseUserStore._get_roles(user_model.id)
-        return User(
-            user_id=user_model.id,
-            username=user_model.username,
-            email=user_model.email,
-            roles=roles,
-            permissions=["read", "write"] if "admin" not in roles else ["read", "write", "trade", "admin"],
-            created_at=user_model.created_at,
-        )
+                key = key_result.scalar_one_or_none()
+                if key is not None:
+                    user_model = await session.get(UserModel, key.user_id)
+                    if user_model is not None and user_model.is_active:
+                        key.last_used_at = datetime.utcnow()
+                        roles = await DatabaseUserStore._get_roles(user_model.id)
+                        return User(
+                            user_id=user_model.id,
+                            username=user_model.username,
+                            email=user_model.email,
+                            roles=roles,
+                            permissions=["read", "write"] if "admin" not in roles else ["read", "write", "trade", "admin"],
+                            created_at=user_model.created_at,
+                        )
+        except Exception as exc:
+            logger.debug("DB api-key lookup fallback: %s", exc)
+
+        for entry in DatabaseUserStore._legacy_users():
+            if entry.get("api_key") == api_key:
+                return DatabaseUserStore._legacy_user_to_model(entry)
+        return None
 
     @staticmethod
     async def validate_credentials(username: str, password: str) -> Optional[User]:
         """Validate username/email + password against DB hash."""
-        async with db_session() as session:
-            result = await session.execute(
-                select(UserModel).where(
-                    (UserModel.username == username) | (UserModel.email == username)
+        try:
+            async with db_session() as session:
+                result = await session.execute(
+                    select(UserModel).where(
+                        (UserModel.username == username) | (UserModel.email == username)
+                    )
                 )
-            )
-            model = result.scalar_one_or_none()
-            if model is None or not model.is_active or not model.password_hash:
+                model = result.scalar_one_or_none()
+                if (
+                    model is not None
+                    and model.is_active
+                    and model.password_hash
+                    and verify_password(password, model.password_hash)
+                ):
+                    roles = await DatabaseUserStore._get_roles(model.id)
+                    return User(
+                        user_id=model.id,
+                        username=model.username,
+                        email=model.email,
+                        roles=roles,
+                        permissions=["read", "write"] if "admin" not in roles else ["read", "write", "trade", "admin"],
+                        created_at=model.created_at,
+                    )
+        except Exception as exc:
+            logger.debug("DB credential lookup fallback for %s: %s", username, exc)
+
+        username_norm = (username or "").strip().lower()
+        for entry in DatabaseUserStore._legacy_users():
+            entry_username = str(entry.get("username") or "").strip().lower()
+            entry_email = str(entry.get("email") or "").strip().lower()
+            if username_norm not in {entry_username, entry_email}:
+                continue
+            password_hash = entry.get("password_hash")
+            if not isinstance(password_hash, str) or not verify_password(password, password_hash):
                 return None
-            if not verify_password(password, model.password_hash):
-                return None
-        roles = await DatabaseUserStore._get_roles(model.id)
-        return User(
-            user_id=model.id,
-            username=model.username,
-            email=model.email,
-            roles=roles,
-            permissions=["read", "write"] if "admin" not in roles else ["read", "write", "trade", "admin"],
-            created_at=model.created_at,
-        )
+            return DatabaseUserStore._legacy_user_to_model(entry)
+        return None
 
 
 USER_STORE = DatabaseUserStore()

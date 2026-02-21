@@ -118,17 +118,35 @@ async def register(body: RegisterRequest, db: Optional[AsyncSession] = Depends(g
 
 @router.post("/login", response_model=TokenResponse, dependencies=[Depends(_rate_limit_auth)])
 async def login(body: LoginRequest, db: Optional[AsyncSession] = Depends(get_db)):
+    db_error = False
     if db is None:
-        raise HTTPException(status_code=503, detail="Database unavailable")
+        db_error = True
+    else:
+        try:
+            svc = AuthService(db)
+            result = await svc.login(body.username, body.password)
+            if result:
+                _user, access, refresh = result
+                return TokenResponse(access_token=access, refresh_token=refresh)
+        except Exception as exc:
+            db_error = True
+            await _safe_rollback(db)
+            logger.error("Login failed: %s", exc)
+
+    # Backward-compatibility fallback: allow legacy auth provider when DB path fails.
     try:
-        svc = AuthService(db)
-        result = await svc.login(body.username, body.password)
-        if result:
-            _user, access, refresh = result
-            return TokenResponse(access_token=access, refresh_token=refresh)
+        from api import auth as legacy_auth
+        legacy = await legacy_auth.login(body.username, body.password)
+        if legacy:
+            return TokenResponse(
+                access_token=legacy["access_token"],
+                refresh_token=legacy["refresh_token"],
+                token_type=legacy.get("token_type", "bearer"),
+                expires_in=legacy.get("expires_in", 3600),
+            )
     except Exception as exc:
-        await _safe_rollback(db)
-        logger.error("Login failed: %s", exc)
+        if db_error:
+            logger.error("Legacy login fallback failed: %s", exc)
 
     raise HTTPException(status_code=401, detail="Invalid credentials")
 
@@ -166,24 +184,39 @@ async def get_me(request: Request, db: Optional[AsyncSession] = Depends(get_db))
     user_id = _get_user_id(request)
     if not user_id:
         raise HTTPException(status_code=401, detail="Not authenticated")
-    if db is None:
-        raise HTTPException(status_code=503, detail="Database unavailable")
+    if db is not None:
+        try:
+            svc = AuthService(db)
+            info = await svc.get_user_with_subscription(user_id)
+            if info:
+                user = info["user"]
+                return UserPublic(
+                    user_id=user.id,
+                    username=user.username,
+                    email=user.email,
+                    roles=info["roles"],
+                    tier=info["tier"],
+                )
+        except Exception as exc:
+            await _safe_rollback(db)
+            logger.error("User lookup failed: %s", exc)
 
+    # Backward compatibility fallback when SaaS DB profile is unavailable.
     try:
-        svc = AuthService(db)
-        info = await svc.get_user_with_subscription(user_id)
-        if info:
-            user = info["user"]
+        from api.auth import USER_STORE
+        fallback_user = await USER_STORE.get_user(user_id)
+        if fallback_user:
+            raw_tier = str(fallback_user.tier or SubscriptionTier.ENTERPRISE.value).lower()
+            tier = SubscriptionTier(raw_tier) if raw_tier in {t.value for t in SubscriptionTier} else SubscriptionTier.ENTERPRISE
             return UserPublic(
-                user_id=user.id,
-                username=user.username,
-                email=user.email,
-                roles=info["roles"],
-                tier=info["tier"],
+                user_id=fallback_user.user_id,
+                username=fallback_user.username,
+                email=fallback_user.email,
+                roles=fallback_user.roles or ["user"],
+                tier=tier,
             )
     except Exception as exc:
-        await _safe_rollback(db)
-        logger.error("User lookup failed: %s", exc)
+        logger.error("Legacy user fallback failed: %s", exc)
 
     raise HTTPException(status_code=404, detail="User not found")
 

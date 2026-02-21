@@ -1,0 +1,166 @@
+
+======================================================================
+STARTING GOD LEVEL BACKTEST
+======================================================================
+2026-02-20 12:40:51 - [32mINFO    [0m - models.god_level_signal_generator - God Level Signal Generator initialized
+2026-02-20 12:40:51 - [32mINFO    [0m - models.god_level_signal_generator -   ML Libraries: sklearn=True, xgboost=True, lightgbm=True
+2026-02-20 12:40:51 - [32mINFO    [0m - risk.god_level_risk_manager - God Level Risk Manager initialized
+2026-02-20 12:40:51 - [32mINFO    [0m - __main__ - God Level Backtester initialized with $100,000
+2026-02-20 12:40:51 - [32mINFO    [0m - __main__ -   God Level modules: True
+2026-02-20 12:40:51 - [32mINFO    [0m - __main__ - ======================================================================
+2026-02-20 12:40:51 - [32mINFO    [0m - __main__ - GOD LEVEL BACKTEST
+2026-02-20 12:40:51 - [32mINFO    [0m - __main__ - ======================================================================
+2026-02-20 12:40:51 - [32mINFO    [0m - __main__ - Symbols: 40
+2026-02-20 12:40:51 - [32mINFO    [0m - __main__ - Walk-forward: True
+2026-02-20 12:40:51 - [32mINFO    [0m - __main__ - 
+Fetching historical data...
+2026-02-20 12:40:53 - [32mINFO    [0m - __main__ -   Fetched 10/40 symbols...
+2026-02-20 12:40:54 - [32mINFO    [0m - __main__ -   Fetched 20/40 symbols...
+2026-02-20 12:40:56 - [32mINFO    [0m - __main__ -   Fetched 30/40 symbols...
+2026-02-20 12:40:57 - [32mINFO    [0m - __main__ -   Fetched 40/40 symbols...
+2026-02-20 12:40:57 - [32mINFO    [0m - __main__ - Loaded data for 40 symbols
+2026-02-20 12:40:57 - [32mINFO    [0m - __main__ - 
+Running walk-forward optimization...
+2026-02-20 12:40:57 - [32mINFO    [0m - __main__ - 
+  Period 1: Train 2024-02-20 -> Test 2024-08-08
+2026-02-20 12:40:57 - [32mINFO    [0m - models.god_level_signal_generator - Training God Level ML models...
+2026-02-20 12:40:57 - [33mWARNING [0m - models.god_level_signal_generator - Not enough training data (0 samples)
+2026-02-20 12:41:06 - [32mINFO    [0m - __main__ - 
+  Period 2: Train 2024-02-20 -> Test 2024-11-05
+2026-02-20 12:41:06 - [32mINFO    [0m - models.god_level_signal_generator - Training God Level ML models...
+2026-02-20 12:41:13 - [32mINFO    [0m - models.god_level_signal_generator -   Training on 2172 samples with 48 features...
+2026-02-20 12:41:13 - [32mINFO    [0m - models.god_level_signal_generator -   RF trained successfully
+2026-02-20 12:41:17 - [32mINFO    [0m - models.god_level_signal_generator -   GB trained successfully
+2026-02-20 12:41:17 - [32mINFO    [0m - models.god_level_signal_generator -   XGB trained successfully
+2026-02-20 12:41:18 - [32mINFO    [0m - models.god_level_signal_generator -   LGB trained successfully
+2026-02-20 12:41:18 - [32mINFO    [0m - models.god_level_signal_generator - ✅ God Level models saved to models/saved/god_level_models.pkl
+2026-02-20 12:41:18 - [32mINFO    [0m - models.god_level_signal_generator - God Level models trained with 4 active models and saved to models/saved
+2026-02-20 12:42:01 - [32mINFO    [0m - __main__ - 
+  Period 3: Train 2024-02-20 -> Test 2025-02-03
+2026-02-20 12:42:01 - [32mINFO    [0m - models.god_level_signal_generator - Training God Level ML models...
+2026-02-20 12:42:16 - [32mINFO    [0m - models.god_level_signal_generator -   Training on 4655 samples with 48 features...
+2026-02-20 12:42:17 - [32mINFO    [0m - models.god_level_signal_generator -   RF trained successfully
+2026-02-20 12:42:25 - [32mINFO    [0m - models.god_level_signal_generator -   GB trained successfully
+2026-02-20 12:42:25 - [32mINFO    [0m - models.god_level_signal_generator -   XGB trained successfully
+2026-02-20 12:42:26 - [32mINFO    [0m - models.god_level_signal_generator -   LGB trained successfully
+2026-02-20 12:42:26 - [32mINFO    [0m - models.god_level_signal_generator - ✅ God Level models saved to models/saved/god_level_models.pkl
+2026-02-20 12:42:26 - [32mINFO    [0m - models.god_level_signal_generator - God Level models trained with 4 active models and saved to models/saved
+2026-02-20 12:43:09 - [32mINFO    [0m - __main__ - 
+  Period 4: Train 2024-02-20 -> Test 2025-05-02
+2026-02-20 12:43:09 - [32mINFO    [0m - models.god_level_signal_generator - Training God Level ML models...
+2026-02-20 12:43:32 - [32mINFO    [0m - models.god_level_signal_generator -   Training on 7027 samples with 48 features...
+2026-02-20 12:43:32 - [32mINFO    [0m - models.god_level_signal_generator -   RF trained successfully
+2026-02-20 12:43:44 - [32mINFO    [0m - models.god_level_signal_generator -   GB trained successfully
+2026-02-20 12:43:45 - [32mINFO    [0m - models.god_level_signal_generator -   XGB trained successfully
+2026-02-20 12:43:46 - [32mINFO    [0m - models.god_level_signal_generator -   LGB trained successfully
+2026-02-20 12:43:46 - [32mINFO    [0m - models.god_level_signal_generator - ✅ God Level models saved to models/saved/god_level_models.pkl
+2026-02-20 12:43:46 - [32mINFO    [0m - models.god_level_signal_generator - God Level models trained with 4 active models and saved to models/saved
+2026-02-20 12:44:31 - [32mINFO    [0m - __main__ - 
+  Period 5: Train 2024-05-14 -> Test 2025-07-30
+2026-02-20 12:44:31 - [32mINFO    [0m - models.god_level_signal_generator - Training God Level ML models...
+2026-02-20 12:44:54 - [32mINFO    [0m - models.god_level_signal_generator -   Training on 7144 samples with 48 features...
+2026-02-20 12:44:55 - [32mINFO    [0m - models.god_level_signal_generator -   RF trained successfully
+2026-02-20 12:45:07 - [32mINFO    [0m - models.god_level_signal_generator -   GB trained successfully
+2026-02-20 12:45:08 - [32mINFO    [0m - models.god_level_signal_generator -   XGB trained successfully
+2026-02-20 12:45:09 - [32mINFO    [0m - models.god_level_signal_generator -   LGB trained successfully
+2026-02-20 12:45:09 - [32mINFO    [0m - models.god_level_signal_generator - ✅ God Level models saved to models/saved/god_level_models.pkl
+2026-02-20 12:45:09 - [32mINFO    [0m - models.god_level_signal_generator - God Level models trained with 4 active models and saved to models/saved
+2026-02-20 12:45:51 - [32mINFO    [0m - __main__ - 
+  Period 6: Train 2024-08-09 -> Test 2025-10-27
+2026-02-20 12:45:51 - [32mINFO    [0m - models.god_level_signal_generator - Training God Level ML models...
+2026-02-20 12:46:14 - [32mINFO    [0m - models.god_level_signal_generator -   Training on 7144 samples with 48 features...
+2026-02-20 12:46:15 - [32mINFO    [0m - models.god_level_signal_generator -   RF trained successfully
+2026-02-20 12:46:28 - [32mINFO    [0m - models.god_level_signal_generator -   GB trained successfully
+2026-02-20 12:46:28 - [32mINFO    [0m - models.god_level_signal_generator -   XGB trained successfully
+2026-02-20 12:46:29 - [32mINFO    [0m - models.god_level_signal_generator -   LGB trained successfully
+2026-02-20 12:46:29 - [32mINFO    [0m - models.god_level_signal_generator - ✅ God Level models saved to models/saved/god_level_models.pkl
+2026-02-20 12:46:29 - [32mINFO    [0m - models.god_level_signal_generator - God Level models trained with 4 active models and saved to models/saved
+2026-02-20 12:47:18 - [32mINFO    [0m - __main__ - 
+  Period 7: Train 2024-11-06 -> Test 2026-01-26
+2026-02-20 12:47:18 - [32mINFO    [0m - models.god_level_signal_generator - Training God Level ML models...
+2026-02-20 12:47:44 - [32mINFO    [0m - models.god_level_signal_generator -   Training on 7144 samples with 48 features...
+2026-02-20 12:47:45 - [32mINFO    [0m - models.god_level_signal_generator -   RF trained successfully
+2026-02-20 12:47:57 - [32mINFO    [0m - models.god_level_signal_generator -   GB trained successfully
+2026-02-20 12:47:57 - [32mINFO    [0m - models.god_level_signal_generator -   XGB trained successfully
+2026-02-20 12:47:58 - [32mINFO    [0m - models.god_level_signal_generator -   LGB trained successfully
+2026-02-20 12:47:58 - [32mINFO    [0m - models.god_level_signal_generator - ✅ God Level models saved to models/saved/god_level_models.pkl
+2026-02-20 12:47:58 - [32mINFO    [0m - models.god_level_signal_generator - God Level models trained with 4 active models and saved to models/saved
+2026-02-20 12:48:41 - [32mINFO    [0m - __main__ - 
+======================================================================
+2026-02-20 12:48:41 - [32mINFO    [0m - __main__ - CALCULATING RESULTS
+2026-02-20 12:48:41 - [32mINFO    [0m - __main__ - ======================================================================
+2026-02-20 12:48:41 - [32mINFO    [0m - __main__ - 
+Total Return: 4.06%
+2026-02-20 12:48:41 - [32mINFO    [0m - __main__ - Sharpe Ratio: 0.42
+2026-02-20 12:48:41 - [32mINFO    [0m - __main__ - Win Rate: 42.4%
+2026-02-20 12:48:41 - [32mINFO    [0m - __main__ - Max Drawdown: 43.72%
+2026-02-20 12:48:41 - [32mINFO    [0m - __main__ - Total Trades: 210
+2026-02-20 12:48:41 - [32mINFO    [0m - __main__ - 
+Running Monte Carlo simulation (1000 iterations)...
+2026-02-20 12:48:41 - [32mINFO    [0m - __main__ -   Monte Carlo Results:
+2026-02-20 12:48:41 - [32mINFO    [0m - __main__ -     Expected Return: -2.4% (5th-95th: -2.4% to -2.4%)
+2026-02-20 12:48:41 - [32mINFO    [0m - __main__ -     Expected Max DD: 4.1% (95th percentile: 5.5%)
+2026-02-20 12:48:41 - [32mINFO    [0m - __main__ -     Probability of Profit: 0.0%
+
+======================================================================
+GOD LEVEL BACKTEST RESULTS
+======================================================================
+
+📈 RETURNS
+----------------------------------------
+  Total Return:             4.06%
+  Annualized Return:        2.30%
+  Benchmark (SPY):          0.00%
+  Alpha:                    4.06%
+
+⚖️  RISK METRICS
+----------------------------------------
+  Sharpe Ratio:             0.42
+  Sortino Ratio:            0.49
+  Calmar Ratio:             0.05
+  Max Drawdown:            43.72%
+  Avg Drawdown:             0.98%
+  Max DD Duration:           167 days
+  Ulcer Index:              3.13
+
+🎯 TRADE METRICS
+----------------------------------------
+  Total Trades:              210
+  Win Rate:                 42.4%
+  Profit Factor:            0.87
+  Avg Win:            $   180.13
+  Avg Loss:           $  -152.21
+  Avg Trade:          $   -11.36
+  Largest Win:        $   650.16
+  Largest Loss:       $  -547.80
+  Avg Hold Days:             1.0
+
+🧠 ADVANCED METRICS
+----------------------------------------
+  Expectancy:         $   -11.36
+  SQN:                     -0.86
+  Recovery Factor:          0.09
+
+📊 REGIME PERFORMANCE
+----------------------------------------
+  bear                 | Trades:   8 | Win Rate:   0.0% | P&L: $-1,484
+  bull                 | Trades:  35 | Win Rate:  34.3% | P&L: $-1,527
+  high_volatility      | Trades:   9 | Win Rate:   0.0% | P&L: $-643
+  neutral              | Trades:  10 | Win Rate:  50.0% | P&L: $598
+  strong_bear          | Trades:  10 | Win Rate:  20.0% | P&L: $-1,155
+  strong_bull          | Trades: 138 | Win Rate:  50.7% | P&L: $1,824
+
+🎲 MONTE CARLO SIMULATION
+----------------------------------------
+  Expected Return:          -2.4%
+  Return Range (90%):   -2.4% to -2.4%
+  Expected Max DD:           4.1%
+  Prob of Profit:            0.0%
+
+======================================================================
+SYSTEM QUALITY ASSESSMENT
+======================================================================
+
+  TOTAL SCORE: 0/100
+  ⚠️  SIGNIFICANT WORK NEEDED
+======================================================================

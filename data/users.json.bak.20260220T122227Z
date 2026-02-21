@@ -1,0 +1,338 @@
+{
+  "users": [
+    {
+      "user_id": "admin",
+      "username": "admin",
+      "email": "admin@apex.local",
+      "roles": [
+        "admin",
+        "user"
+      ],
+      "permissions": [
+        "admin",
+        "read",
+        "trade",
+        "write"
+      ],
+      "api_key": "apex-25f620c3052ff601e0cac8442de8f704",
+      "created_at": null,
+      "tier": null,
+      "password_hash": "$2b$12$P7Drudhp0zWg2DeQpXQ9B.RYN0gV3WhNIVaPYplviSJzMMg2gahHu"
+    },
+    {
+      "user_id": "72ebed1b91654393",
+      "username": "e2e_d914a8ea",
+      "email": "e2e_d914a8ea@example.com",
+      "roles": [
+        "user"
+      ],
+      "permissions": [
+        "read"
+      ],
+      "api_key": "apex-1112d41cb4859e59b0df10df2c03670c",
+      "created_at": "2026-02-12T23:03:13.987075",
+      "tier": null,
+      "password_hash": "a10666a19569634330e38923b29f81b9a5150d858c0675ac8a85dfa85086eac7"
+    },
+    {
+      "user_id": "71f1f9e1403f6b39",
+      "username": "e2e_33d8a45e",
+      "email": "e2e_33d8a45e@example.com",
+      "roles": [
+        "user"
+      ],
+      "permissions": [
+        "read"
+      ],
+      "api_key": "apex-29d0f830cb49e1328ecb9fa0383337d0",
+      "created_at": "2026-02-12T23:03:14.004167",
+      "tier": null,
+      "password_hash": "a10666a19569634330e38923b29f81b9a5150d858c0675ac8a85dfa85086eac7"
+    },
+    {
+      "user_id": "08b282ae4c6a75cf",
+      "username": "e2e_7af1f1af",
+      "email": "e2e_7af1f1af@example.com",
+      "roles": [
+        "user"
+      ],
+      "permissions": [
+        "read"
+      ],
+      "api_key": "apex-09cb2520510bb27eb4cbbe7b5b9dd457",
+      "created_at": "2026-02-12T23:03:14.021016",
+      "tier": null,
+      "password_hash": "a10666a19569634330e38923b29f81b9a5150d858c0675ac8a85dfa85086eac7"
+    },
+    {
+      "user_id": "16d69df7f1fd5aa3",
+      "username": "e2e_afd7d667",
+      "email": "e2e_afd7d667@example.com",
+      "roles": [
+        "user"
+      ],
+      "permissions": [
+        "read"
+      ],
+      "api_key": "apex-73615938e915fbcb569bea1e9c43fee7",
+      "created_at": "2026-02-12T23:03:14.041899",
+      "tier": null,
+      "password_hash": "a10666a19569634330e38923b29f81b9a5150d858c0675ac8a85dfa85086eac7"
+    },
+    {
+      "user_id": "f68226984ec41c62",
+      "username": "e2e_e7636755",
+      "email": "e2e_e7636755@example.com",
+      "roles": [
+        "user"
+      ],
+      "permissions": [
+        "read"
+      ],
+      "api_key": "apex-b8edfb2993a2c6f60629f20c64b87bc4",
+      "created_at": "2026-02-12T23:22:50.902505",
+      "tier": null,
+      "password_hash": "a10666a19569634330e38923b29f81b9a5150d858c0675ac8a85dfa85086eac7"
+    },
+    {
+      "user_id": "bab5b2804020edfa",
+      "username": "e2e_58292d32",
+      "email": "e2e_58292d32@example.com",
+      "roles": [
+        "user"
+      ],
+      "permissions": [
+        "read"
+      ],
+      "api_key": "apex-1f9e7c452003d0fed41de84f2380ec86",
+      "created_at": "2026-02-12T23:22:50.928905",
+      "tier": null,
+      "password_hash": "a10666a19569634330e38923b29f81b9a5150d858c0675ac8a85dfa85086eac7"
+    },
+    {
+      "user_id": "36846bdaa872fb11",
+      "username": "e2e_a1e7d607",
+      "email": "e2e_a1e7d607@example.com",
+      "roles": [
+        "user"
+      ],
+      "permissions": [
+        "read"
+      ],
+      "api_key": "apex-a8d7d9110d41c61ec5906dc649fc7d9a",
+      "created_at": "2026-02-12T23:22:50.948799",
+      "tier": null,
+      "password_hash": "a10666a19569634330e38923b29f81b9a5150d858c0675ac8a85dfa85086eac7"
+    },
+    {
+      "user_id": "8664d1e7eeff6c39",
+      "username": "e2e_000fbf14",
+      "email": "e2e_000fbf14@example.com",
+      "roles": [
+        "user"
+      ],
+      "permissions": [
+        "read"
+      ],
+      "api_key": "apex-fcf18b388d524912c78c3146ef6d2d1e",
+      "created_at": "2026-02-12T23:22:50.968400",
+      "tier": null,
+      "password_hash": "a10666a19569634330e38923b29f81b9a5150d858c0675ac8a85dfa85086eac7"
+    },
+    {
+      "user_id": "b94ae60b71e94262",
+      "username": "e2e_fdf5110c",
+      "email": "e2e_fdf5110c@example.com",
+      "roles": [
+        "user"
+      ],
+      "permissions": [
+        "read"
+      ],
+      "api_key": "apex-37c581bbad338d8a5fe4e7e1c86e3097",
+      "created_at": "2026-02-12T23:23:05.016716",
+      "tier": null,
+      "password_hash": "a10666a19569634330e38923b29f81b9a5150d858c0675ac8a85dfa85086eac7"
+    },
+    {
+      "user_id": "01e281ff15872dd1",
+      "username": "e2e_01e975d7",
+      "email": "e2e_01e975d7@example.com",
+      "roles": [
+        "user"
+      ],
+      "permissions": [
+        "read"
+      ],
+      "api_key": "apex-1eab69085c4464b31455c6e52ea89e87",
+      "created_at": "2026-02-12T23:23:05.037675",
+      "tier": null,
+      "password_hash": "a10666a19569634330e38923b29f81b9a5150d858c0675ac8a85dfa85086eac7"
+    },
+    {
+      "user_id": "910b309ee14ba6e8",
+      "username": "e2e_f3beea95",
+      "email": "e2e_f3beea95@example.com",
+      "roles": [
+        "user"
+      ],
+      "permissions": [
+        "read"
+      ],
+      "api_key": "apex-ff4ce61b1865402e0433fa22a2924873",
+      "created_at": "2026-02-12T23:23:05.072891",
+      "tier": null,
+      "password_hash": "a10666a19569634330e38923b29f81b9a5150d858c0675ac8a85dfa85086eac7"
+    },
+    {
+      "user_id": "44f19d4f0a8b733a",
+      "username": "e2e_350e9cbc",
+      "email": "e2e_350e9cbc@example.com",
+      "roles": [
+        "user"
+      ],
+      "permissions": [
+        "read"
+      ],
+      "api_key": "apex-15e6208cc6db5ce6e0d9bff31b62b16e",
+      "created_at": "2026-02-12T23:23:05.103564",
+      "tier": null,
+      "password_hash": "a10666a19569634330e38923b29f81b9a5150d858c0675ac8a85dfa85086eac7"
+    },
+    {
+      "user_id": "da58e6a78bdb2460",
+      "username": "e2e_0cb70dc8",
+      "email": "e2e_0cb70dc8@example.com",
+      "roles": [
+        "user"
+      ],
+      "permissions": [
+        "read"
+      ],
+      "api_key": "apex-1efa1d48d578267469fcce47e7fc3c91",
+      "created_at": "2026-02-17T08:14:01.000496",
+      "tier": null,
+      "password_hash": "$2b$12$xPyHHxw3/dMACCdjxEp98Oj7Cnw4ZzXT7IBFS9mHMAvUSWbvJVEkC"
+    },
+    {
+      "user_id": "b434f298bd34cdcd",
+      "username": "e2e_6ea3c20c",
+      "email": "e2e_6ea3c20c@example.com",
+      "roles": [
+        "user"
+      ],
+      "permissions": [
+        "read"
+      ],
+      "api_key": "apex-fce4438cfb5483da3f815b1fc6b3ec19",
+      "created_at": "2026-02-17T08:29:16.188844",
+      "tier": null,
+      "password_hash": "$2b$12$eYZ8XauJz8F9H2eFLDG9MOjrRADjOATvjHo5ZwAcW8H7.g47qLgVW"
+    },
+    {
+      "user_id": "c71ddce105fdd1ba",
+      "username": "e2e_ceb60623",
+      "email": "e2e_ceb60623@example.com",
+      "roles": [
+        "user"
+      ],
+      "permissions": [
+        "read"
+      ],
+      "api_key": "apex-1f5df1f6b4ad621741862148eb0d7649",
+      "created_at": "2026-02-17T08:29:17.062969",
+      "tier": null,
+      "password_hash": "$2b$12$9DgfYB1olkBfrdc1y/R8Q.94.4gOINcgfM49dKS4fT6WBjF/uyHwq"
+    },
+    {
+      "user_id": "fdf8a4b5f245cb4d",
+      "username": "e2e_24df38a5",
+      "email": "e2e_24df38a5@example.com",
+      "roles": [
+        "user"
+      ],
+      "permissions": [
+        "read"
+      ],
+      "api_key": "apex-d3bdf197df0f93a232d3072ab795aed3",
+      "created_at": "2026-02-17T08:29:17.798084",
+      "tier": null,
+      "password_hash": "$2b$12$DWM9DHk7ql59pMkBvDYd7eHT8QmE1wT.NBGS1F5PipA9b5oQat5LC"
+    },
+    {
+      "user_id": "3a88546c87aed6b4",
+      "username": "e2e_ad558256",
+      "email": "e2e_ad558256@example.com",
+      "roles": [
+        "user"
+      ],
+      "permissions": [
+        "read"
+      ],
+      "api_key": "apex-af7039dfe4fa1e7a3c50442a927c6672",
+      "created_at": "2026-02-17T08:29:18.529320",
+      "tier": null,
+      "password_hash": "$2b$12$hr.SX1eZpat50q5RXjfTX.ZisCH60iDcowxN69CnBq5fl19djORme"
+    },
+    {
+      "user_id": "c0f9bf968e425a7f",
+      "username": "e2e_6db3aebb",
+      "email": "e2e_6db3aebb@example.com",
+      "roles": [
+        "user"
+      ],
+      "permissions": [
+        "read"
+      ],
+      "api_key": "apex-a38987d847b6dabf5a2fc0817f4f08ff",
+      "created_at": "2026-02-19T22:58:58.648809",
+      "tier": null,
+      "password_hash": "$2b$12$8dVOJhhWpld8U9fczo1vyuZ5kqjHPHHUKCfeFstbW4rnMlHTMoW2C"
+    },
+    {
+      "user_id": "8be3fc62e7065070",
+      "username": "e2e_1d29d9f4",
+      "email": "e2e_1d29d9f4@example.com",
+      "roles": [
+        "user"
+      ],
+      "permissions": [
+        "read"
+      ],
+      "api_key": "apex-4f54a86ef56b2657b2027e67fbf7760a",
+      "created_at": "2026-02-19T22:58:59.590304",
+      "tier": null,
+      "password_hash": "$2b$12$2RIItr80/WkoeqccEZXeFOc7D8gGfuUNc1V1g97zQboeZ3OXyn0RK"
+    },
+    {
+      "user_id": "5ed115c6625bb23b",
+      "username": "e2e_3b193085",
+      "email": "e2e_3b193085@example.com",
+      "roles": [
+        "user"
+      ],
+      "permissions": [
+        "read"
+      ],
+      "api_key": "apex-d7ff26b89c0ff5b3620341a72d7d59e7",
+      "created_at": "2026-02-19T22:59:00.540980",
+      "tier": null,
+      "password_hash": "$2b$12$txqMAN0QzsEBzOVk/y40Xetw6jdAtSAMok4Kat9eKHPzoFbNTMp9W"
+    },
+    {
+      "user_id": "daf644d2efb03574",
+      "username": "e2e_2b0f273e",
+      "email": "e2e_2b0f273e@example.com",
+      "roles": [
+        "user"
+      ],
+      "permissions": [
+        "read"
+      ],
+      "api_key": "apex-5029abd9c31eb417cb9e25607b579371",
+      "created_at": "2026-02-19T22:59:01.489134",
+      "tier": null,
+      "password_hash": "$2b$12$BUdtJ7SBPKDCuRIbfEhCWuRE/u9mNM8jdUuDaeN76nWQ9KWPjA1f6"
+    }
+  ]
+}

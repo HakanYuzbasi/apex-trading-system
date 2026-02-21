@@ -1,0 +1,102 @@
+2026-02-20 13:19:43 - [33mWARNING [0m - matplotlib - /Users/hakanyuzbasioglu/.matplotlib is not a writable directory
+2026-02-20 13:19:43 - [33mWARNING [0m - matplotlib - Matplotlib created a temporary cache directory at /var/folders/fd/vpdjlcws15ncwjvqrcdk8y640000gn/T/matplotlib-zei35h9g because there was an issue with the default path (/Users/hakanyuzbasioglu/.matplotlib); it is highly recommended to set the MPLCONFIGDIR environment variable to a writable directory, in particular to speed up the import of Matplotlib and to better support multiprocessing.
+
+======================================================================
+STARTING GOD LEVEL BACKTEST
+======================================================================
+2026-02-20 13:19:43 - [32mINFO    [0m - models.god_level_signal_generator - ✅ God Level models loaded from disk (trained at: 2026-02-20 13:17:50.791751)
+2026-02-20 13:19:43 - [32mINFO    [0m - models.god_level_signal_generator - God Level Signal Generator initialized
+2026-02-20 13:19:43 - [32mINFO    [0m - models.god_level_signal_generator -   ML Libraries: sklearn=True, xgboost=True, lightgbm=True
+2026-02-20 13:19:43 - [32mINFO    [0m - risk.god_level_risk_manager - God Level Risk Manager initialized
+2026-02-20 13:19:43 - [32mINFO    [0m - __main__ - God Level Backtester initialized with $100,000
+2026-02-20 13:19:43 - [32mINFO    [0m - __main__ -   God Level modules: True
+2026-02-20 13:19:43 - [32mINFO    [0m - __main__ - ======================================================================
+2026-02-20 13:19:43 - [32mINFO    [0m - __main__ - GOD LEVEL BACKTEST
+2026-02-20 13:19:43 - [32mINFO    [0m - __main__ - ======================================================================
+2026-02-20 13:19:43 - [32mINFO    [0m - __main__ - Symbols: 40
+2026-02-20 13:19:43 - [32mINFO    [0m - __main__ - Walk-forward: True
+2026-02-20 13:19:43 - [32mINFO    [0m - __main__ - 
+Fetching historical data...
+2026-02-20 13:19:43 - [32mINFO    [0m - yfinance - Failed to create TzCache, reason: Cannot read and write in TzCache folder: '/Users/hakanyuzbasioglu/Library/Caches/py-yfinance'. TzCache will not be used. Tip: You can direct cache to use a different location with 'set_tz_cache_location(mylocation)'
+2026-02-20 13:19:43 - [32mINFO    [0m - yfinance - Failed to create CookieCache, reason: Cannot read and write in CookieCache folder: '/Users/hakanyuzbasioglu/Library/Caches/py-yfinance'. CookieCache will not be used. Tip: You can direct cache to use a different location with 'set_tz_cache_location(mylocation)'
+2026-02-20 13:19:43 - [31mERROR   [0m - yfinance - Failed to get ticker 'CMCSA' reason: Failed to perform, curl: (6) Could not resolve host: guce.yahoo.com. See https://curl.se/libcurl/c/libcurl-errors.html first for more details.
+2026-02-20 13:19:43 - [31mERROR   [0m - data.market_data - Error fetching historical data for CMCSA: Failed to perform, curl: (6) Could not resolve host: guce.yahoo.com. See https://curl.se/libcurl/c/libcurl-errors.html first for more details.
+2026-02-20 13:19:43 - [31mERROR   [0m - yfinance - Failed to get ticker 'COP' reason: Failed to perform, curl: (6) Could not resolve host: guce.yahoo.com. See https://curl.se/libcurl/c/libcurl-errors.html first for more details.
+2026-02-20 13:19:43 - [31mERROR   [0m - data.market_data - Error fetching historical data for COP: Failed to perform, curl: (6) Could not resolve host: guce.yahoo.com. See https://curl.se/libcurl/c/libcurl-errors.html first for more details.
+2026-02-20 13:19:43 - [31mERROR   [0m - yfinance - Failed to get ticker 'IWM' reason: Failed to perform, curl: (6) Could not resolve host: guce.yahoo.com. See https://curl.se/libcurl/c/libcurl-errors.html first for more details.
+2026-02-20 13:19:43 - [31mERROR   [0m - data.market_data - Error fetching historical data for IWM: 'NoneType' object is not subscriptable
+2026-02-20 13:19:43 - [31mERROR   [0m - yfinance - Failed to get ticker 'TSLA' reason: Failed to perform, curl: (6) Could not resolve host: guce.yahoo.com. See https://curl.se/libcurl/c/libcurl-errors.html first for more details.
+2026-02-20 13:19:43 - [31mERROR   [0m - data.market_data - Error fetching historical data for TSLA: 'NoneType' object is not subscriptable
+2026-02-20 13:19:43 - [31mERROR   [0m - yfinance - Failed to get ticker 'QQQ' reason: Failed to perform, curl: (6) Could not resolve host: guce.yahoo.com. See https://curl.se/libcurl/c/libcurl-errors.html first for more details.
+2026-02-20 13:19:43 - [31mERROR   [0m - data.market_data - Error fetching historical data for QQQ: 'NoneType' object is not subscriptable
+2026-02-20 13:19:43 - [31mERROR   [0m - yfinance - Failed to get ticker 'LMT' reason: Failed to perform, curl: (6) Could not resolve host: guce.yahoo.com. See https://curl.se/libcurl/c/libcurl-errors.html first for more details.
+2026-02-20 13:19:43 - [31mERROR   [0m - data.market_data - Error fetching historical data for LMT: 'NoneType' object is not subscriptable
+2026-02-20 13:19:44 - [31mERROR   [0m - yfinance - Failed to get ticker 'XOM' reason: Failed to perform, curl: (6) Could not resolve host: guce.yahoo.com. See https://curl.se/libcurl/c/libcurl-errors.html first for more details.
+2026-02-20 13:19:44 - [31mERROR   [0m - data.market_data - Error fetching historical data for XOM: 'NoneType' object is not subscriptable
+2026-02-20 13:19:44 - [31mERROR   [0m - yfinance - Failed to get ticker 'UNG' reason: Failed to perform, curl: (6) Could not resolve host: guce.yahoo.com. See https://curl.se/libcurl/c/libcurl-errors.html first for more details.
+2026-02-20 13:19:44 - [31mERROR   [0m - data.market_data - Error fetching historical data for UNG: 'NoneType' object is not subscriptable
+2026-02-20 13:19:44 - [31mERROR   [0m - yfinance - Failed to get ticker 'BTC-USD' reason: Failed to perform, curl: (6) Could not resolve host: guce.yahoo.com. See https://curl.se/libcurl/c/libcurl-errors.html first for more details.
+2026-02-20 13:19:44 - [31mERROR   [0m - data.market_data - Error fetching historical data for CRYPTO:BTC/USD: 'NoneType' object is not subscriptable
+2026-02-20 13:19:44 - [31mERROR   [0m - yfinance - Failed to get ticker 'UPS' reason: Failed to perform, curl: (6) Could not resolve host: guce.yahoo.com. See https://curl.se/libcurl/c/libcurl-errors.html first for more details.
+2026-02-20 13:19:44 - [31mERROR   [0m - data.market_data - Error fetching historical data for UPS: 'NoneType' object is not subscriptable
+2026-02-20 13:19:44 - [31mERROR   [0m - yfinance - Failed to get ticker 'CRM' reason: Failed to perform, curl: (6) Could not resolve host: guce.yahoo.com. See https://curl.se/libcurl/c/libcurl-errors.html first for more details.
+2026-02-20 13:19:44 - [31mERROR   [0m - data.market_data - Error fetching historical data for CRM: 'NoneType' object is not subscriptable
+2026-02-20 13:19:44 - [31mERROR   [0m - yfinance - Failed to get ticker 'EOG' reason: Failed to perform, curl: (6) Could not resolve host: guce.yahoo.com. See https://curl.se/libcurl/c/libcurl-errors.html first for more details.
+2026-02-20 13:19:44 - [31mERROR   [0m - data.market_data - Error fetching historical data for EOG: 'NoneType' object is not subscriptable
+2026-02-20 13:19:44 - [31mERROR   [0m - yfinance - Failed to get ticker 'USDJPY=X' reason: Failed to perform, curl: (6) Could not resolve host: guce.yahoo.com. See https://curl.se/libcurl/c/libcurl-errors.html first for more details.
+2026-02-20 13:19:44 - [31mERROR   [0m - data.market_data - Error fetching historical data for FX:USD/JPY: 'NoneType' object is not subscriptable
+2026-02-20 13:19:44 - [31mERROR   [0m - yfinance - Failed to get ticker 'ETH-USD' reason: Failed to perform, curl: (6) Could not resolve host: guce.yahoo.com. See https://curl.se/libcurl/c/libcurl-errors.html first for more details.
+2026-02-20 13:19:44 - [31mERROR   [0m - data.market_data - Error fetching historical data for CRYPTO:ETH/USD: 'NoneType' object is not subscriptable
+2026-02-20 13:19:44 - [31mERROR   [0m - yfinance - Failed to get ticker 'SLV' reason: Failed to perform, curl: (6) Could not resolve host: guce.yahoo.com. See https://curl.se/libcurl/c/libcurl-errors.html first for more details.
+2026-02-20 13:19:44 - [31mERROR   [0m - data.market_data - Error fetching historical data for SLV: 'NoneType' object is not subscriptable
+2026-02-20 13:19:44 - [31mERROR   [0m - yfinance - Failed to get ticker 'APD' reason: Failed to perform, curl: (6) Could not resolve host: guce.yahoo.com. See https://curl.se/libcurl/c/libcurl-errors.html first for more details.
+2026-02-20 13:19:44 - [31mERROR   [0m - data.market_data - Error fetching historical data for APD: 'NoneType' object is not subscriptable
+2026-02-20 13:19:45 - [31mERROR   [0m - yfinance - Failed to get ticker 'NEE' reason: Failed to perform, curl: (6) Could not resolve host: guce.yahoo.com. See https://curl.se/libcurl/c/libcurl-errors.html first for more details.
+2026-02-20 13:19:45 - [31mERROR   [0m - data.market_data - Error fetching historical data for NEE: 'NoneType' object is not subscriptable
+2026-02-20 13:19:45 - [31mERROR   [0m - yfinance - Failed to get ticker 'LIN' reason: Failed to perform, curl: (6) Could not resolve host: guce.yahoo.com. See https://curl.se/libcurl/c/libcurl-errors.html first for more details.
+2026-02-20 13:19:45 - [31mERROR   [0m - data.market_data - Error fetching historical data for LIN: 'NoneType' object is not subscriptable
+2026-02-20 13:19:45 - [31mERROR   [0m - yfinance - Failed to get ticker 'EQIX' reason: Failed to perform, curl: (6) Could not resolve host: guce.yahoo.com. See https://curl.se/libcurl/c/libcurl-errors.html first for more details.
+2026-02-20 13:19:45 - [31mERROR   [0m - data.market_data - Error fetching historical data for EQIX: 'NoneType' object is not subscriptable
+2026-02-20 13:19:45 - [31mERROR   [0m - yfinance - Failed to get ticker 'WMT' reason: Failed to perform, curl: (6) Could not resolve host: guce.yahoo.com. See https://curl.se/libcurl/c/libcurl-errors.html first for more details.
+2026-02-20 13:19:45 - [31mERROR   [0m - data.market_data - Error fetching historical data for WMT: 'NoneType' object is not subscriptable
+2026-02-20 13:19:45 - [31mERROR   [0m - yfinance - Failed to get ticker 'TMO' reason: Failed to perform, curl: (6) Could not resolve host: guce.yahoo.com. See https://curl.se/libcurl/c/libcurl-errors.html first for more details.
+2026-02-20 13:19:45 - [31mERROR   [0m - data.market_data - Error fetching historical data for TMO: 'NoneType' object is not subscriptable
+2026-02-20 13:19:45 - [31mERROR   [0m - yfinance - Failed to get ticker 'GLD' reason: Failed to perform, curl: (6) Could not resolve host: guce.yahoo.com. See https://curl.se/libcurl/c/libcurl-errors.html first for more details.
+2026-02-20 13:19:45 - [31mERROR   [0m - data.market_data - Error fetching historical data for GLD: 'NoneType' object is not subscriptable
+2026-02-20 13:19:45 - [31mERROR   [0m - yfinance - Failed to get ticker 'SPY' reason: Failed to perform, curl: (6) Could not resolve host: guce.yahoo.com. See https://curl.se/libcurl/c/libcurl-errors.html first for more details.
+2026-02-20 13:19:45 - [31mERROR   [0m - data.market_data - Error fetching historical data for SPY: 'NoneType' object is not subscriptable
+2026-02-20 13:19:45 - [31mERROR   [0m - yfinance - Failed to get ticker 'ECL' reason: Failed to perform, curl: (6) Could not resolve host: guce.yahoo.com. See https://curl.se/libcurl/c/libcurl-errors.html first for more details.
+2026-02-20 13:19:45 - [31mERROR   [0m - data.market_data - Error fetching historical data for ECL: 'NoneType' object is not subscriptable
+2026-02-20 13:19:45 - [31mERROR   [0m - yfinance - Failed to get ticker 'AUDUSD=X' reason: Failed to perform, curl: (6) Could not resolve host: guce.yahoo.com. See https://curl.se/libcurl/c/libcurl-errors.html first for more details.
+2026-02-20 13:19:45 - [31mERROR   [0m - data.market_data - Error fetching historical data for FX:AUD/USD: 'NoneType' object is not subscriptable
+2026-02-20 13:19:46 - [31mERROR   [0m - yfinance - Failed to get ticker 'INTC' reason: Failed to perform, curl: (6) Could not resolve host: guce.yahoo.com. See https://curl.se/libcurl/c/libcurl-errors.html first for more details.
+2026-02-20 13:19:46 - [31mERROR   [0m - data.market_data - Error fetching historical data for INTC: 'NoneType' object is not subscriptable
+2026-02-20 13:19:46 - [31mERROR   [0m - yfinance - Failed to get ticker 'MSFT' reason: Failed to perform, curl: (6) Could not resolve host: guce.yahoo.com. See https://curl.se/libcurl/c/libcurl-errors.html first for more details.
+2026-02-20 13:19:46 - [31mERROR   [0m - data.market_data - Error fetching historical data for MSFT: 'NoneType' object is not subscriptable
+2026-02-20 13:19:46 - [31mERROR   [0m - yfinance - Failed to get ticker 'SBUX' reason: Failed to perform, curl: (6) Could not resolve host: guce.yahoo.com. See https://curl.se/libcurl/c/libcurl-errors.html first for more details.
+2026-02-20 13:19:46 - [31mERROR   [0m - data.market_data - Error fetching historical data for SBUX: 'NoneType' object is not subscriptable
+2026-02-20 13:19:46 - [31mERROR   [0m - yfinance - Failed to get ticker 'GOOGL' reason: Failed to perform, curl: (6) Could not resolve host: guce.yahoo.com. See https://curl.se/libcurl/c/libcurl-errors.html first for more details.
+2026-02-20 13:19:46 - [31mERROR   [0m - data.market_data - Error fetching historical data for GOOGL: 'NoneType' object is not subscriptable
+2026-02-20 13:19:46 - [31mERROR   [0m - yfinance - Failed to get ticker 'JNJ' reason: Failed to perform, curl: (6) Could not resolve host: guce.yahoo.com. See https://curl.se/libcurl/c/libcurl-errors.html first for more details.
+2026-02-20 13:19:46 - [31mERROR   [0m - data.market_data - Error fetching historical data for JNJ: 'NoneType' object is not subscriptable
+2026-02-20 13:19:46 - [31mERROR   [0m - yfinance - Failed to get ticker 'T' reason: Failed to perform, curl: (6) Could not resolve host: guce.yahoo.com. See https://curl.se/libcurl/c/libcurl-errors.html first for more details.
+2026-02-20 13:19:46 - [31mERROR   [0m - data.market_data - Error fetching historical data for T: 'NoneType' object is not subscriptable
+2026-02-20 13:19:46 - [31mERROR   [0m - yfinance - Failed to get ticker 'USDCHF=X' reason: Failed to perform, curl: (6) Could not resolve host: guce.yahoo.com. See https://curl.se/libcurl/c/libcurl-errors.html first for more details.
+2026-02-20 13:19:46 - [31mERROR   [0m - data.market_data - Error fetching historical data for FX:USD/CHF: 'NoneType' object is not subscriptable
+2026-02-20 13:19:46 - [31mERROR   [0m - yfinance - Failed to get ticker 'HON' reason: Failed to perform, curl: (6) Could not resolve host: guce.yahoo.com. See https://curl.se/libcurl/c/libcurl-errors.html first for more details.
+2026-02-20 13:19:46 - [31mERROR   [0m - data.market_data - Error fetching historical data for HON: 'NoneType' object is not subscriptable
+2026-02-20 13:19:46 - [31mERROR   [0m - yfinance - Failed to get ticker 'USDCAD=X' reason: Failed to perform, curl: (6) Could not resolve host: guce.yahoo.com. See https://curl.se/libcurl/c/libcurl-errors.html first for more details.
+2026-02-20 13:19:46 - [31mERROR   [0m - data.market_data - Error fetching historical data for FX:USD/CAD: 'NoneType' object is not subscriptable
+2026-02-20 13:19:46 - [31mERROR   [0m - yfinance - Failed to get ticker 'ACN' reason: Failed to perform, curl: (6) Could not resolve host: guce.yahoo.com. See https://curl.se/libcurl/c/libcurl-errors.html first for more details.
+2026-02-20 13:19:46 - [31mERROR   [0m - data.market_data - Error fetching historical data for ACN: 'NoneType' object is not subscriptable
+2026-02-20 13:19:47 - [31mERROR   [0m - yfinance - Failed to get ticker 'AMT' reason: Failed to perform, curl: (6) Could not resolve host: guce.yahoo.com. See https://curl.se/libcurl/c/libcurl-errors.html first for more details.
+2026-02-20 13:19:47 - [31mERROR   [0m - data.market_data - Error fetching historical data for AMT: 'NoneType' object is not subscriptable
+2026-02-20 13:19:47 - [31mERROR   [0m - yfinance - Failed to get ticker 'ORCL' reason: Failed to perform, curl: (6) Could not resolve host: guce.yahoo.com. See https://curl.se/libcurl/c/libcurl-errors.html first for more details.
+2026-02-20 13:19:47 - [31mERROR   [0m - data.market_data - Error fetching historical data for ORCL: 'NoneType' object is not subscriptable
+2026-02-20 13:19:47 - [31mERROR   [0m - yfinance - Failed to get ticker 'MRK' reason: Failed to perform, curl: (6) Could not resolve host: guce.yahoo.com. See https://curl.se/libcurl/c/libcurl-errors.html first for more details.
+2026-02-20 13:19:47 - [31mERROR   [0m - data.market_data - Error fetching historical data for MRK: 'NoneType' object is not subscriptable
+2026-02-20 13:19:47 - [31mERROR   [0m - yfinance - Failed to get ticker 'GBPUSD=X' reason: Failed to perform, curl: (6) Could not resolve host: guce.yahoo.com. See https://curl.se/libcurl/c/libcurl-errors.html first for more details.
+2026-02-20 13:19:47 - [31mERROR   [0m - data.market_data - Error fetching historical data for FX:GBP/USD: 'NoneType' object is not subscriptable
+2026-02-20 13:19:47 - [31mERROR   [0m - yfinance - Failed to get ticker 'GE' reason: Failed to perform, curl: (6) Could not resolve host: guce.yahoo.com. See https://curl.se/libcurl/c/libcurl-errors.html first for more details.
+2026-02-20 13:19:47 - [31mERROR   [0m - data.market_data - Error fetching historical data for GE: 'NoneType' object is not subscriptable
+2026-02-20 13:19:47 - [31mERROR   [0m - __main__ - No data fetched!

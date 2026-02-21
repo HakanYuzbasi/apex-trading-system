@@ -20,16 +20,13 @@ from sqlalchemy.orm import DeclarativeBase
 
 logger = logging.getLogger(__name__)
 
-# Try PostgreSQL first, but allow falling back to local SQLite if Docker isn't running
-_raw_url = os.getenv("DATABASE_URL", "")
-
-if not _raw_url:
-    # Default to local SQLite fallback if absolutely nothing is provided
-    db_path = os.path.join(os.getcwd(), "data", "apex_saas.db")
-    os.makedirs(os.path.dirname(db_path), exist_ok=True)
-    DATABASE_URL = f"sqlite+aiosqlite:///{db_path}"
-else:
-    DATABASE_URL = _raw_url
+def get_database_url() -> str:
+    _raw_url = os.getenv("DATABASE_URL", "")
+    if not _raw_url:
+        db_path = os.path.join(os.getcwd(), "data", "apex_saas.db")
+        os.makedirs(os.path.dirname(db_path), exist_ok=True)
+        return f"sqlite+aiosqlite:///{db_path}"
+    return _raw_url
 
 # ---------------------------------------------------------------------------
 # ORM Base
@@ -52,14 +49,17 @@ def get_engine() -> AsyncEngine:
     """Return the global async engine (creates on first call)."""
     global _engine
     if _engine is None:
-        _engine = create_async_engine(
-            DATABASE_URL,
-            echo=os.getenv("SQL_ECHO", "false").lower() == "true",
-            pool_size=10,
-            max_overflow=20,
-            pool_pre_ping=True,
-        )
-        logger.info("PostgreSQL engine created: %s", DATABASE_URL.split("@")[-1])
+        db_url = get_database_url()
+        kwargs = {
+            "echo": os.getenv("SQL_ECHO", "false").lower() == "true",
+            "pool_pre_ping": True,
+        }
+        if not db_url.startswith("sqlite"):
+            kwargs["pool_size"] = 10
+            kwargs["max_overflow"] = 20
+            
+        _engine = create_async_engine(db_url, **kwargs)
+        logger.info("Database engine created: %s", db_url.split("@")[-1])
     return _engine
 
 
@@ -81,16 +81,21 @@ def get_session_factory() -> async_sessionmaker[AsyncSession]:
 
 async def get_db() -> AsyncGenerator[Optional[AsyncSession], None]:
     """FastAPI dependency that yields an async DB session, or None if unavailable."""
+    yielded_session = False
     try:
         factory = get_session_factory()
         async with factory() as session:
             try:
+                yielded_session = True
                 yield session
                 await session.commit()
             except Exception:
                 await session.rollback()
                 raise
     except Exception as exc:
+        # If an endpoint error occurred after we yielded a session, propagate it.
+        if yielded_session:
+            raise
         logger.debug("Database unavailable, yielding None: %s", exc)
         yield None
 

@@ -36,6 +36,7 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
       status: String(data.status || "").toLowerCase() === "online",
       timestamp: (data.timestamp as string | null) ?? null,
       capital: asNumber(data.capital),
+      starting_capital: asNumber(data.starting_capital),
       daily_pnl: asNumber(data.daily_pnl),
       total_pnl: asNumber(data.total_pnl),
       max_drawdown: asNumber(data.max_drawdown),

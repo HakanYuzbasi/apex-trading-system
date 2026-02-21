@@ -563,14 +563,23 @@ class AdvancedBacktester:
             daily_vol = np.std(self.daily_returns)
             annual_vol = daily_vol * np.sqrt(ann_factor)
             sharpe_ratio = (annual_return - 0.02) / annual_vol if annual_vol > 0 else 0
+            
+            # Sortino
+            downside_returns = [r for r in self.daily_returns if r < 0]
+            downside_vol = np.std(downside_returns) * np.sqrt(ann_factor) if downside_returns else 0
+            sortino_ratio = (annual_return - 0.02) / downside_vol if downside_vol > 0 else 0
         else:
             annual_vol = 0
             sharpe_ratio = 0
+            sortino_ratio = 0
         
         # Max Drawdown
         peak = equity_df['equity'].expanding().max()
         drawdown = (equity_df['equity'] - peak) / peak
         max_drawdown = drawdown.min()
+        
+        # Calmar Ratio
+        calmar_ratio = annual_return / abs(max_drawdown) if abs(max_drawdown) > 0 else 0
         
         # Trade statistics
         trades_df = pd.DataFrame(self.trades)
@@ -583,6 +592,8 @@ class AdvancedBacktester:
             # Calculate P&L per trade (simplified)
             winning_trades = 0
             total_pnl = 0
+            gross_profit = 0
+            gross_loss = 0
             
             # Match buys and sells
             positions = defaultdict(list)
@@ -605,10 +616,14 @@ class AdvancedBacktester:
                     total_pnl += pnl
                     if pnl > 0:
                         winning_trades += 1
+                        gross_profit += pnl
+                    else:
+                        gross_loss += abs(pnl)
             
             completed_trades = len(trades_df[trades_df['side'] == 'SELL'])
             win_rate = winning_trades / completed_trades if completed_trades > 0 else 0
             avg_trade_pnl = total_pnl / completed_trades if completed_trades > 0 else 0
+            profit_factor = gross_profit / gross_loss if gross_loss > 0 else (float('inf') if gross_profit > 0 else 0)
         
         else:
             total_trades = 0
@@ -616,6 +631,7 @@ class AdvancedBacktester:
             total_slippage = 0
             win_rate = 0
             avg_trade_pnl = 0
+            profit_factor = 0
         
         return {
             'initial_capital': self.initial_capital,
@@ -624,10 +640,13 @@ class AdvancedBacktester:
             'annual_return': annual_return,
             'annual_volatility': annual_vol,
             'sharpe_ratio': sharpe_ratio,
+            'sortino_ratio': sortino_ratio,
+            'calmar_ratio': calmar_ratio,
             'max_drawdown': max_drawdown,
             'total_trades': total_trades,
             'win_rate': win_rate,
             'avg_trade_pnl': avg_trade_pnl,
+            'profit_factor': profit_factor,
             'total_commissions': total_commissions,
             'total_slippage': total_slippage,
             'equity_curve': equity_df,
@@ -666,6 +685,36 @@ class AdvancedBacktester:
             
         except ImportError:
             logger.warning("Matplotlib not available for plotting")
+
+    def generate_tear_sheet(self, results: Dict, output_filename: str) -> bool:
+        """Generate static HTML tear sheet using quantstats."""
+        try:
+            import quantstats as qs
+            
+            equity_df = results.get('equity_curve')
+            if equity_df is None or equity_df.empty:
+                logger.warning("No equity curve available to generate tear sheet.")
+                return False
+                
+            # Ensure we have a datetime index mapped to daily returns
+            df_copy = equity_df.copy()
+            df_copy = df_copy.set_index('date')
+            
+            # Calculate daily returns from equity
+            returns = df_copy['equity'].pct_change().dropna()
+            
+            # Generate the report
+            # Note: quantstats relies on matplotlib, seaborn, etc.
+            # Output generates a standalone HTML file.
+            qs.reports.html(returns, output=output_filename, title="Apex Trading Backtest Report")
+            logger.info(f"📄 Static HTML tear sheet generated: {output_filename}")
+            return True
+        except ImportError:
+            logger.error("quantstats is not installed. Run `pip install quantstats`.")
+            return False
+        except Exception as e:
+            logger.error(f"Failed to generate tear sheet: {e}")
+            return False
 
 
 if __name__ == "__main__":

@@ -51,6 +51,16 @@ function setStored(token: string | null, refresh: string | null, user: AuthUser 
   else localStorage.removeItem(STORAGE_REFRESH);
   if (user) localStorage.setItem(STORAGE_USER, JSON.stringify(user));
   else localStorage.removeItem(STORAGE_USER);
+
+  // Keep server-side middleware/auth routes aligned with client auth state.
+  if (typeof document !== "undefined") {
+    const secure = window.location.protocol === "https:" ? "; secure" : "";
+    if (token) {
+      document.cookie = `token=${encodeURIComponent(token)}; path=/; max-age=1800; samesite=lax${secure}`;
+    } else {
+      document.cookie = `token=; path=/; max-age=0; samesite=lax${secure}`;
+    }
+  }
 }
 
 export function useAuth() {
@@ -73,8 +83,7 @@ export function useAuth() {
 
   const login = useCallback(async (username: string, password: string): Promise<{ ok: boolean; error?: string }> => {
     try {
-      const base = (process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000").replace(/\/+$/, "");
-      const res = await fetch(`${base}/auth/login`, {
+      const res = await fetch(`/api/auth/login`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ username, password }),
@@ -85,7 +94,7 @@ export function useAuth() {
       }
       const access = (data as { access_token: string }).access_token;
       const refresh = (data as { refresh_token: string }).refresh_token;
-      const meRes = await fetch(`${base}/auth/me`, {
+      const meRes = await fetch(`/api/auth/me`, {
         headers: { Authorization: `Bearer ${access}` },
       });
       const me = meRes.ok ? (await meRes.json()) as AuthUser : null;
@@ -112,8 +121,7 @@ export function useAuth() {
 
   const register = useCallback(async (username: string, email: string, password: string): Promise<{ ok: boolean; error?: string }> => {
     try {
-      const base = (process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000").replace(/\/+$/, "");
-      const res = await fetch(`${base}/auth/register`, {
+      const res = await fetch(`/api/auth/register`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ username, email, password }),
@@ -131,7 +139,7 @@ export function useAuth() {
         roles: ["user"],
         tier: "free",
       };
-      const meRes = await fetch(`${base}/auth/me`, { headers: { Authorization: `Bearer ${access}` } });
+      const meRes = await fetch(`/api/auth/me`, { headers: { Authorization: `Bearer ${access}` } });
       if (meRes.ok) {
         const me = (await meRes.json()) as AuthUser;
         user.user_id = me.user_id;
@@ -157,8 +165,7 @@ export function useAuth() {
       return;
     }
     try {
-      const base = (process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000").replace(/\/+$/, "");
-      const res = await fetch(`${base}/auth/me`, { headers: { Authorization: `Bearer ${token}` } });
+      const res = await fetch(`/api/auth/me`, { headers: { Authorization: `Bearer ${token}` } });
       if (res.ok) {
         const user = (await res.json()) as AuthUser;
         setState((s) => ({
@@ -172,14 +179,14 @@ export function useAuth() {
       } else {
         const refresh = getStoredRefresh();
         if (refresh) {
-          const rRes = await fetch(`${base}/auth/refresh`, {
+          const rRes = await fetch(`/api/auth/refresh`, {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ refresh_token: refresh }),
           });
           const rData = rRes.ok ? (await rRes.json()) as { access_token: string; refresh_token: string } : null;
           if (rData) {
-            const meRes = await fetch(`${base}/auth/me`, {
+            const meRes = await fetch(`/api/auth/me`, {
               headers: { Authorization: `Bearer ${rData.access_token}` },
             });
             const user = meRes.ok ? ((await meRes.json()) as AuthUser) : null;

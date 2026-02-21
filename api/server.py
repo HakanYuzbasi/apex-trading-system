@@ -150,6 +150,12 @@ app = FastAPI(title="APEX Trading API", version="2.0.0")
 from api.routers.public import router as public_router
 app.include_router(public_router)
 
+try:
+    from api.routers.backtest import router as backtest_router
+    app.include_router(backtest_router)
+except Exception as e:
+    logging.getLogger("api").warning("Backtest router not loaded: %s", e)
+
 if PROMETHEUS_AVAILABLE:
     HTTP_REQUESTS_TOTAL = Counter(
         "apex_api_http_requests_total",

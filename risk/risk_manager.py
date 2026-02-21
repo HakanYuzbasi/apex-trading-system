@@ -88,6 +88,10 @@ class RiskManager:
     def peak_capital(self) -> float:
         return self.sessions[self.default_user_id].peak_capital
 
+    @peak_capital.setter
+    def peak_capital(self, value: float):
+        self.sessions[self.default_user_id].peak_capital = value
+
     @property
     def day_start_capital(self) -> float:
         return self.sessions[self.default_user_id].day_start_capital

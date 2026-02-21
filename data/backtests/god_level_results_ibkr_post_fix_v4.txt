@@ -1,0 +1,157 @@
+
+======================================================================
+STARTING GOD LEVEL BACKTEST
+======================================================================
+2026-02-20 19:43:25 - [32mINFO    [0m - models.god_level_signal_generator - ✅ God Level models loaded from disk (trained at: 2026-02-20 17:07:54.318421)
+2026-02-20 19:43:25 - [32mINFO    [0m - models.god_level_signal_generator - God Level Signal Generator initialized
+2026-02-20 19:43:25 - [32mINFO    [0m - models.god_level_signal_generator -   ML Libraries: sklearn=True, xgboost=True, lightgbm=True
+2026-02-20 19:43:25 - [32mINFO    [0m - risk.god_level_risk_manager - God Level Risk Manager initialized
+2026-02-20 19:43:25 - [32mINFO    [0m - __main__ - God Level Backtester initialized with $100,000
+2026-02-20 19:43:25 - [32mINFO    [0m - __main__ -   God Level modules: True
+2026-02-20 19:43:25 - [32mINFO    [0m - __main__ - ======================================================================
+2026-02-20 19:43:25 - [32mINFO    [0m - __main__ - GOD LEVEL BACKTEST
+2026-02-20 19:43:25 - [32mINFO    [0m - __main__ - ======================================================================
+2026-02-20 19:43:25 - [32mINFO    [0m - __main__ - Symbols: 40
+2026-02-20 19:43:25 - [32mINFO    [0m - __main__ - Walk-forward: True
+2026-02-20 19:43:25 - [32mINFO    [0m - __main__ - 
+Fetching historical data...
+2026-02-20 19:43:29 - [32mINFO    [0m - __main__ -   Fetched 10/40 symbols...
+2026-02-20 19:43:31 - [32mINFO    [0m - __main__ -   Fetched 20/40 symbols...
+2026-02-20 19:43:32 - [32mINFO    [0m - __main__ -   Fetched 30/40 symbols...
+2026-02-20 19:43:34 - [32mINFO    [0m - __main__ -   Fetched 40/40 symbols...
+2026-02-20 19:43:34 - [32mINFO    [0m - __main__ - Loaded data for 40 symbols
+2026-02-20 19:43:34 - [32mINFO    [0m - __main__ - 
+Running walk-forward optimization...
+2026-02-20 19:43:34 - [32mINFO    [0m - __main__ - 
+  Period 1: Train 2024-02-20 -> Test 2024-08-23
+2026-02-20 19:43:34 - [32mINFO    [0m - models.god_level_signal_generator - Training God Level ML models...
+2026-02-20 19:43:34 - [33mWARNING [0m - models.god_level_signal_generator - Not enough training data (0 samples)
+2026-02-20 19:43:34 - [32mINFO    [0m - risk.god_level_risk_manager - Updated correlation matrix for 2 symbols
+2026-02-20 19:45:49 - [32mINFO    [0m - __main__ -   Period 1 produced 8 trades
+2026-02-20 19:45:49 - [32mINFO    [0m - __main__ - 
+  Period 2: Train 2024-02-20 -> Test 2024-12-27
+2026-02-20 19:45:49 - [32mINFO    [0m - models.god_level_signal_generator - Training God Level ML models...
+2026-02-20 19:46:06 - [32mINFO    [0m - models.god_level_signal_generator -   Training on 2732 samples with 48 features...
+2026-02-20 19:46:07 - [32mINFO    [0m - models.god_level_signal_generator -   RF trained successfully
+2026-02-20 19:46:14 - [32mINFO    [0m - models.god_level_signal_generator -   GB trained successfully
+2026-02-20 19:46:16 - [32mINFO    [0m - models.god_level_signal_generator -   XGB trained successfully
+2026-02-20 19:46:17 - [32mINFO    [0m - models.god_level_signal_generator -   LGB trained successfully
+2026-02-20 19:46:17 - [32mINFO    [0m - models.god_level_signal_generator - ✅ God Level models saved to models/saved/god_level_models.pkl
+2026-02-20 19:46:17 - [32mINFO    [0m - models.god_level_signal_generator - God Level models trained with 4 active models and saved to models/saved
+2026-02-20 19:46:17 - [32mINFO    [0m - risk.god_level_risk_manager - Updated correlation matrix for 40 symbols
+2026-02-20 19:48:38 - [32mINFO    [0m - __main__ -   Period 2 produced 64 trades
+2026-02-20 19:48:38 - [32mINFO    [0m - __main__ - 
+  Period 3: Train 2024-04-20 -> Test 2025-05-02
+2026-02-20 19:48:38 - [32mINFO    [0m - models.god_level_signal_generator - Training God Level ML models...
+2026-02-20 19:49:13 - [32mINFO    [0m - models.god_level_signal_generator -   Training on 4546 samples with 48 features...
+2026-02-20 19:49:14 - [32mINFO    [0m - models.god_level_signal_generator -   RF trained successfully
+2026-02-20 19:49:27 - [32mINFO    [0m - models.god_level_signal_generator -   GB trained successfully
+2026-02-20 19:49:31 - [32mINFO    [0m - models.god_level_signal_generator -   XGB trained successfully
+2026-02-20 19:49:32 - [32mINFO    [0m - models.god_level_signal_generator -   LGB trained successfully
+2026-02-20 19:49:32 - [32mINFO    [0m - models.god_level_signal_generator - ✅ God Level models saved to models/saved/god_level_models.pkl
+2026-02-20 19:49:32 - [32mINFO    [0m - models.god_level_signal_generator - God Level models trained with 4 active models and saved to models/saved
+2026-02-20 19:49:32 - [32mINFO    [0m - risk.god_level_risk_manager - Updated correlation matrix for 40 symbols
+2026-02-20 19:54:16 - [32mINFO    [0m - __main__ -   Period 3 produced 12 trades
+2026-02-20 19:54:16 - [32mINFO    [0m - __main__ - 
+  Period 4: Train 2024-08-24 -> Test 2025-09-05
+2026-02-20 19:54:17 - [32mINFO    [0m - models.god_level_signal_generator - Training God Level ML models...
+2026-02-20 19:55:52 - [32mINFO    [0m - models.god_level_signal_generator -   Training on 4465 samples with 48 features...
+2026-02-20 19:55:54 - [32mINFO    [0m - models.god_level_signal_generator -   RF trained successfully
+2026-02-20 19:56:21 - [32mINFO    [0m - models.god_level_signal_generator -   GB trained successfully
+2026-02-20 19:56:28 - [32mINFO    [0m - models.god_level_signal_generator -   XGB trained successfully
+2026-02-20 19:56:31 - [32mINFO    [0m - models.god_level_signal_generator -   LGB trained successfully
+2026-02-20 19:56:32 - [32mINFO    [0m - models.god_level_signal_generator - ✅ God Level models saved to models/saved/god_level_models.pkl
+2026-02-20 19:56:32 - [32mINFO    [0m - models.god_level_signal_generator - God Level models trained with 4 active models and saved to models/saved
+2026-02-20 19:56:32 - [32mINFO    [0m - risk.god_level_risk_manager - Updated correlation matrix for 40 symbols
+2026-02-20 20:02:04 - [32mINFO    [0m - __main__ -   Period 4 produced 54 trades
+2026-02-20 20:02:04 - [32mINFO    [0m - __main__ - 
+  Period 5: Train 2024-12-28 -> Test 2026-01-09
+2026-02-20 20:02:04 - [32mINFO    [0m - models.god_level_signal_generator - Training God Level ML models...
+2026-02-20 20:03:21 - [32mINFO    [0m - models.god_level_signal_generator -   Training on 4432 samples with 48 features...
+2026-02-20 20:03:22 - [32mINFO    [0m - models.god_level_signal_generator -   RF trained successfully
+2026-02-20 20:03:40 - [32mINFO    [0m - models.god_level_signal_generator -   GB trained successfully
+2026-02-20 20:03:52 - [32mINFO    [0m - models.god_level_signal_generator -   XGB trained successfully
+2026-02-20 20:03:58 - [32mINFO    [0m - models.god_level_signal_generator -   LGB trained successfully
+2026-02-20 20:03:58 - [32mINFO    [0m - models.god_level_signal_generator - ✅ God Level models saved to models/saved/god_level_models.pkl
+2026-02-20 20:03:58 - [32mINFO    [0m - models.god_level_signal_generator - God Level models trained with 4 active models and saved to models/saved
+2026-02-20 20:03:58 - [32mINFO    [0m - risk.god_level_risk_manager - Updated correlation matrix for 40 symbols
+2026-02-20 20:07:39 - [32mINFO    [0m - __main__ -   Period 5 produced 66 trades
+2026-02-20 20:07:39 - [32mINFO    [0m - __main__ - 
+======================================================================
+2026-02-20 20:07:39 - [32mINFO    [0m - __main__ - CALCULATING RESULTS
+2026-02-20 20:07:39 - [32mINFO    [0m - __main__ - ======================================================================
+2026-02-20 20:07:39 - [32mINFO    [0m - __main__ - 
+Total Return: 4.79%
+2026-02-20 20:07:39 - [32mINFO    [0m - __main__ - Sharpe Ratio: 0.55
+2026-02-20 20:07:39 - [32mINFO    [0m - __main__ - Win Rate: 56.9%
+2026-02-20 20:07:39 - [32mINFO    [0m - __main__ - Max Drawdown: 2.42%
+2026-02-20 20:07:39 - [32mINFO    [0m - __main__ - Total Trades: 204
+2026-02-20 20:07:39 - [32mINFO    [0m - __main__ - 
+Running Monte Carlo simulation (1000 iterations)...
+2026-02-20 20:07:39 - [32mINFO    [0m - __main__ -   Monte Carlo Results:
+2026-02-20 20:07:39 - [32mINFO    [0m - __main__ -     Expected Return: 4.8% (5th-95th: 0.3% to 9.5%)
+2026-02-20 20:07:39 - [32mINFO    [0m - __main__ -     Expected Max DD: 1.9% (95th percentile: 3.3%)
+2026-02-20 20:07:39 - [32mINFO    [0m - __main__ -     Probability of Profit: 96.0%
+
+======================================================================
+GOD LEVEL BACKTEST RESULTS
+======================================================================
+
+📈 RETURNS
+----------------------------------------
+  Total Return:             4.79%
+  Annualized Return:        1.88%
+  Benchmark (SPY):         41.88%
+  Alpha:                  -37.09%
+
+⚖️  RISK METRICS
+----------------------------------------
+  Sharpe Ratio:             0.55
+  Sortino Ratio:            0.56
+  Calmar Ratio:             0.78
+  Max Drawdown:             2.42%
+  Avg Drawdown:             0.99%
+  Max DD Duration:           252 days
+  Ulcer Index:              1.12
+
+🎯 TRADE METRICS
+----------------------------------------
+  Total Trades:              204
+  Win Rate:                 56.9%
+  Profit Factor:            1.32
+  Avg Win:            $   171.58
+  Avg Loss:           $  -171.71
+  Avg Trade:          $    23.50
+  Largest Win:        $   558.31
+  Largest Loss:       $  -631.00
+  Avg Hold Days:             7.7
+
+🧠 ADVANCED METRICS
+----------------------------------------
+  Expectancy:         $    23.50
+  SQN:                      1.70
+  Recovery Factor:          1.98
+
+📊 REGIME PERFORMANCE
+----------------------------------------
+  bear                 | Trades:   1 | Win Rate:   0.0% | P&L: $-143
+  bull                 | Trades:  38 | Win Rate:  50.0% | P&L: $-143
+  strong_bull          | Trades: 165 | Win Rate:  58.8% | P&L: $5,080
+
+🎲 MONTE CARLO SIMULATION
+----------------------------------------
+  Expected Return:           4.8%
+  Return Range (90%):    0.3% to 9.5%
+  Expected Max DD:           1.9%
+  Prob of Profit:           96.0%
+
+======================================================================
+SYSTEM QUALITY ASSESSMENT
+======================================================================
+  ✓ Great win rate (>= 55%)
+  ✓ Excellent drawdown control (<= 10%)
+  ✓ Decent profit factor (>= 1.2)
+
+  TOTAL SCORE: 60/100
+  👍 GOOD SYSTEM
+======================================================================

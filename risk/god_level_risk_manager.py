@@ -127,7 +127,7 @@ class GodLevelRiskManager:
 
         # 1. ATR-based stop loss (adaptive to volatility)
         atr_multiplier = self._get_atr_multiplier(regime, signal_strength)
-        stop_distance_pct = min(atr_pct * atr_multiplier, 0.08)  # Max 8% stop
+        stop_distance_pct = min(atr_pct * atr_multiplier, 0.05)  # Max 5% stop
 
         # 2. Calculate risk per share
         stop_loss = entry_price * (1 - stop_distance_pct) if signal_strength > 0 else entry_price * (1 + stop_distance_pct)
@@ -175,9 +175,9 @@ class GodLevelRiskManager:
         min_shares = 1
         shares = max(shares, min_shares) if shares > 0 else 0
 
-        # Calculate take profit (risk-reward based)
-        risk_reward_ratio = self._calculate_risk_reward(signal_strength, confidence, regime)
-        profit_distance_pct = stop_distance_pct * risk_reward_ratio
+        # Calculate take profit (fixed at 15% target size)
+        profit_distance_pct = 0.15
+        risk_reward_ratio = profit_distance_pct / stop_distance_pct if stop_distance_pct > 0 else 3.0
 
         if signal_strength > 0:
             take_profit = entry_price * (1 + profit_distance_pct)
@@ -248,7 +248,7 @@ class GodLevelRiskManager:
 
         # Use conservative ATR multiplier for existing positions (we don't know original signal)
         atr_multiplier = self._get_atr_multiplier(regime, 0.5)  # Assume moderate signal
-        stop_distance_pct = min(atr_pct * atr_multiplier, 0.08)  # Max 8% stop
+        stop_distance_pct = min(atr_pct * atr_multiplier, 0.05)  # Max 5% stop
 
         # Calculate stop loss based on position direction
         if is_long:
@@ -269,9 +269,8 @@ class GodLevelRiskManager:
             else:
                 stop_loss = base_stop
 
-        # Calculate take profit (1.5x risk-reward for existing positions)
-        risk_reward_ratio = 1.5
-        profit_distance_pct = stop_distance_pct * risk_reward_ratio
+        # Calculate take profit (fixed 15%)
+        profit_distance_pct = 0.15
 
         if is_long:
             take_profit = entry_price * (1 + profit_distance_pct)
@@ -370,11 +369,11 @@ class GodLevelRiskManager:
         if current_drawdown <= 0.05:
             return 1.0
         elif current_drawdown <= 0.10:
-            return 0.75
-        elif current_drawdown <= 0.15:
             return 0.50
+        elif current_drawdown <= 0.15:
+            return 0.25
         else:
-            return 0.25  # Severely reduce during large drawdowns
+            return 0.10  # Severely reduce during large drawdowns
 
     def _get_regime_multiplier(self, regime: str) -> float:
         """Adjust position size based on market regime."""

@@ -1,0 +1,230 @@
+
+======================================================================
+STARTING GOD LEVEL BACKTEST (IBKR DATA V3)
+======================================================================
+2026-02-20 17:01:56 - [32mINFO    [0m - execution.ibkr_connector - 🔌 Connecting to IBKR at 127.0.0.1:7497...
+2026-02-20 17:01:56 - [33mWARNING [0m - services.common.redis_client - Redis connection failed (Error connecting to localhost:6379. Multiple exceptions: [Errno 61] Connect call failed ('::1', 6379, 0, 0), [Errno 61] Connect call failed ('127.0.0.1', 6379).) - caching disabled
+2026-02-20 17:01:56 - [32mINFO    [0m - ib_insync.client - Connecting to 127.0.0.1:7497 with clientId 711...
+2026-02-20 17:01:56 - [32mINFO    [0m - ib_insync.client - Connected
+2026-02-20 17:01:56 - [32mINFO    [0m - ib_insync.client - Logged on to server version 176
+2026-02-20 17:01:56 - [32mINFO    [0m - ib_insync.client - API connection ready
+2026-02-20 17:01:56 - [32mINFO    [0m - ib_insync.wrapper - Warning 2104, reqId -1: Market data farm connection is OK:usfarm.nj
+2026-02-20 17:01:56 - [32mINFO    [0m - ib_insync.wrapper - Warning 2104, reqId -1: Market data farm connection is OK:cashfarm
+2026-02-20 17:01:56 - [32mINFO    [0m - ib_insync.wrapper - Warning 2104, reqId -1: Market data farm connection is OK:usopt
+2026-02-20 17:01:56 - [32mINFO    [0m - ib_insync.wrapper - Warning 2104, reqId -1: Market data farm connection is OK:usfarm
+2026-02-20 17:01:56 - [32mINFO    [0m - ib_insync.wrapper - Warning 2106, reqId -1: HMDS data farm connection is OK:cashhmds
+2026-02-20 17:01:56 - [32mINFO    [0m - ib_insync.wrapper - Warning 2106, reqId -1: HMDS data farm connection is OK:ushmds
+2026-02-20 17:01:56 - [32mINFO    [0m - ib_insync.wrapper - Warning 2158, reqId -1: Sec-def data farm connection is OK:secdefil
+2026-02-20 17:01:56 - [32mINFO    [0m - ib_insync.wrapper - position: Position(account='DU6863071', contract=Stock(conId=732440574, symbol='LRCX', exchange='NASDAQ', currency='USD', localSymbol='LRCX', tradingClass='NMS'), position=39.0, avgCost=213.49564105)
+2026-02-20 17:01:56 - [32mINFO    [0m - ib_insync.wrapper - position: Position(account='DU6863071', contract=Option(conId=843596574, symbol='SLB', lastTradeDateOrContractMonth='20260320', strike=52.5, right='C', multiplier='100', currency='USD', localSymbol='SLB   260320C00052500', tradingClass='SLB'), position=-2.0, avgCost=135.54795)
+2026-02-20 17:01:56 - [32mINFO    [0m - ib_insync.wrapper - position: Position(account='DU6863071', contract=Stock(conId=10885, symbol='COP', exchange='NYSE', currency='USD', localSymbol='COP', tradingClass='COP'), position=113.0, avgCost=105.13884955)
+2026-02-20 17:01:56 - [32mINFO    [0m - ib_insync.wrapper - position: Position(account='DU6863071', contract=Stock(conId=13497, symbol='VLO', exchange='NYSE', currency='USD', localSymbol='VLO', tradingClass='VLO'), position=60.0, avgCost=194.17666665)
+2026-02-20 17:01:56 - [32mINFO    [0m - ib_insync.wrapper - position: Position(account='DU6863071', contract=Stock(conId=4347, symbol='ALB', exchange='NYSE', currency='USD', localSymbol='ALB', tradingClass='ALB'), position=55.0, avgCost=157.0281818)
+2026-02-20 17:01:56 - [32mINFO    [0m - ib_insync.wrapper - position: Position(account='DU6863071', contract=Stock(conId=5437, symbol='CAT', exchange='NYSE', currency='USD', localSymbol='CAT', tradingClass='CAT'), position=17.0, avgCost=679.32882355)
+2026-02-20 17:01:56 - [32mINFO    [0m - ib_insync.wrapper - position: Position(account='DU6863071', contract=Stock(conId=10174, symbol='NEM', exchange='NYSE', currency='USD', localSymbol='NEM', tradingClass='NEM'), position=83.0, avgCost=108.6220482)
+2026-02-20 17:01:56 - [32mINFO    [0m - ib_insync.wrapper - position: Position(account='DU6863071', contract=Stock(conId=611191, symbol='LMT', exchange='NYSE', currency='USD', localSymbol='LMT', tradingClass='LMT'), position=19.0, avgCost=611.1126316)
+2026-02-20 17:01:56 - [32mINFO    [0m - ib_insync.wrapper - position: Position(account='DU6863071', contract=Stock(conId=4627828, symbol='GS', exchange='NYSE', currency='USD', localSymbol='GS', tradingClass='GS'), position=13.0, avgCost=895.0269231)
+2026-02-20 17:01:56 - [32mINFO    [0m - ib_insync.wrapper - position: Position(account='DU6863071', contract=Option(conId=850500612, symbol='SLB', lastTradeDateOrContractMonth='20260313', strike=54.0, right='C', multiplier='100', currency='USD', localSymbol='SLB   260313C00054000', tradingClass='SLB'), position=-4.0, avgCost=68.29795)
+2026-02-20 17:01:56 - [32mINFO    [0m - ib_insync.wrapper - position: Position(account='DU6863071', contract=Stock(conId=5684, symbol='CVX', exchange='NYSE', currency='USD', localSymbol='CVX', tradingClass='CVX'), position=66.0, avgCost=179.6151515)
+2026-02-20 17:01:56 - [32mINFO    [0m - ib_insync.wrapper - position: Position(account='DU6863071', contract=Option(conId=850469895, symbol='HAL', lastTradeDateOrContractMonth='20260313', strike=36.0, right='C', multiplier='100', currency='USD', localSymbol='HAL   260313C00036000', tradingClass='HAL'), position=-6.0, avgCost=75.29796665)
+2026-02-20 17:01:56 - [32mINFO    [0m - ib_insync.wrapper - position: Position(account='DU6863071', contract=Stock(conId=12200, symbol='SLB', exchange='NYSE', currency='USD', localSymbol='SLB', tradingClass='SLB'), position=280.0, avgCost=49.755)
+2026-02-20 17:01:56 - [32mINFO    [0m - ib_insync.wrapper - position: Position(account='DU6863071', contract=Option(conId=756943860, symbol='COP', lastTradeDateOrContractMonth='20260320', strike=115.0, right='C', multiplier='100', currency='USD', localSymbol='COP   260320C00115000', tradingClass='COP'), position=-6.0, avgCost=211.89796665)
+2026-02-20 17:01:56 - [32mINFO    [0m - ib_insync.wrapper - position: Position(account='DU6863071', contract=Stock(conId=49388062, symbol='DLTR', exchange='NASDAQ', currency='USD', localSymbol='DLTR', tradingClass='NMS'), position=98.0, avgCost=120.1102041)
+2026-02-20 17:01:56 - [32mINFO    [0m - ib_insync.wrapper - position: Position(account='DU6863071', contract=Stock(conId=272800, symbol='ORCL', exchange='NYSE', currency='USD', localSymbol='ORCL', tradingClass='ORCL'), position=82.0, avgCost=137.4021951)
+2026-02-20 17:01:56 - [32mINFO    [0m - ib_insync.wrapper - position: Position(account='DU6863071', contract=Option(conId=850435606, symbol='COP', lastTradeDateOrContractMonth='20260313', strike=114.0, right='C', multiplier='100', currency='USD', localSymbol='COP   260313C00114000', tradingClass='COP'), position=-2.0, avgCost=96.94795)
+2026-02-20 17:01:56 - [32mINFO    [0m - ib_insync.wrapper - updatePortfolio: PortfolioItem(contract=Stock(conId=4347, symbol='ALB', right='0', primaryExchange='NYSE', currency='USD', localSymbol='ALB', tradingClass='ALB'), position=55.0, marketPrice=168.76820375, marketValue=9282.25, averageCost=157.0281818, unrealizedPNL=645.7, realizedPNL=0.0, account='DU6863071')
+2026-02-20 17:01:56 - [32mINFO    [0m - ib_insync.wrapper - updatePortfolio: PortfolioItem(contract=Stock(conId=5437, symbol='CAT', right='0', primaryExchange='NYSE', currency='USD', localSymbol='CAT', tradingClass='CAT'), position=17.0, marketPrice=764.18395995, marketValue=12991.13, averageCost=679.32882355, unrealizedPNL=1442.54, realizedPNL=0.0, account='DU6863071')
+2026-02-20 17:01:56 - [32mINFO    [0m - ib_insync.wrapper - updatePortfolio: PortfolioItem(contract=Stock(conId=10885, symbol='COP', right='0', primaryExchange='NYSE', currency='USD', localSymbol='COP', tradingClass='COP'), position=113.0, marketPrice=109.6444702, marketValue=12389.83, averageCost=105.13884955, unrealizedPNL=509.14, realizedPNL=0.0, account='DU6863071')
+2026-02-20 17:01:56 - [32mINFO    [0m - ib_insync.wrapper - updatePortfolio: PortfolioItem(contract=Option(conId=850435606, symbol='COP', lastTradeDateOrContractMonth='20260313', strike=114.0, right='C', multiplier='100', primaryExchange='AMEX', currency='USD', localSymbol='COP   260313C00114000', tradingClass='COP'), position=-2.0, marketPrice=1.8294811, marketValue=-365.9, averageCost=96.94795, unrealizedPNL=-172.0, realizedPNL=0.0, account='DU6863071')
+2026-02-20 17:01:56 - [32mINFO    [0m - ib_insync.wrapper - updatePortfolio: PortfolioItem(contract=Option(conId=756943860, symbol='COP', lastTradeDateOrContractMonth='20260320', strike=115.0, right='C', multiplier='100', primaryExchange='AMEX', currency='USD', localSymbol='COP   260320C00115000', tradingClass='COP'), position=-6.0, marketPrice=2.07853915, marketValue=-1247.12, averageCost=211.89796665, unrealizedPNL=24.26, realizedPNL=0.0, account='DU6863071')
+2026-02-20 17:01:56 - [32mINFO    [0m - ib_insync.wrapper - updatePortfolio: PortfolioItem(contract=Stock(conId=5684, symbol='CVX', right='0', primaryExchange='NYSE', currency='USD', localSymbol='CVX', tradingClass='CVX'), position=66.0, marketPrice=182.3444977, marketValue=12034.74, averageCost=179.6151515, unrealizedPNL=180.14, realizedPNL=0.0, account='DU6863071')
+2026-02-20 17:01:56 - [32mINFO    [0m - ib_insync.wrapper - updatePortfolio: PortfolioItem(contract=Stock(conId=49388062, symbol='DLTR', right='0', primaryExchange='NASDAQ', currency='USD', localSymbol='DLTR', tradingClass='NMS'), position=98.0, marketPrice=133.62794495, marketValue=13095.54, averageCost=120.1102041, unrealizedPNL=1324.74, realizedPNL=0.0, account='DU6863071')
+2026-02-20 17:01:56 - [32mINFO    [0m - ib_insync.wrapper - updatePortfolio: PortfolioItem(contract=Stock(conId=4627828, symbol='GS', right='0', primaryExchange='NYSE', currency='USD', localSymbol='GS', tradingClass='GS'), position=13.0, marketPrice=916.1967163, marketValue=11910.56, averageCost=895.0269231, unrealizedPNL=275.21, realizedPNL=0.0, account='DU6863071')
+2026-02-20 17:01:56 - [32mINFO    [0m - ib_insync.wrapper - updatePortfolio: PortfolioItem(contract=Option(conId=850469895, symbol='HAL', lastTradeDateOrContractMonth='20260313', strike=36.0, right='C', multiplier='100', primaryExchange='AMEX', currency='USD', localSymbol='HAL   260313C00036000', tradingClass='HAL'), position=-6.0, marketPrice=0.8369294, marketValue=-502.16, averageCost=75.29796665, unrealizedPNL=-50.37, realizedPNL=0.0, account='DU6863071')
+2026-02-20 17:01:56 - [32mINFO    [0m - ib_insync.wrapper - updatePortfolio: PortfolioItem(contract=Stock(conId=611191, symbol='LMT', right='0', primaryExchange='NYSE', currency='USD', localSymbol='LMT', tradingClass='LMT'), position=19.0, marketPrice=658.90270995, marketValue=12519.15, averageCost=611.1126316, unrealizedPNL=908.01, realizedPNL=0.0, account='DU6863071')
+2026-02-20 17:01:56 - [32mINFO    [0m - ib_insync.wrapper - updatePortfolio: PortfolioItem(contract=Stock(conId=732440574, symbol='LRCX', right='0', primaryExchange='NASDAQ', currency='USD', localSymbol='LRCX', tradingClass='NMS'), position=39.0, marketPrice=244.4755707, marketValue=9534.55, averageCost=213.49564105, unrealizedPNL=1208.22, realizedPNL=0.0, account='DU6863071')
+2026-02-20 17:01:56 - [32mINFO    [0m - ib_insync.wrapper - updatePortfolio: PortfolioItem(contract=Stock(conId=10174, symbol='NEM', right='0', primaryExchange='NYSE', currency='USD', localSymbol='NEM', tradingClass='NEM'), position=83.0, marketPrice=119.9246979, marketValue=9953.75, averageCost=108.6220482, unrealizedPNL=938.12, realizedPNL=0.0, account='DU6863071')
+2026-02-20 17:01:56 - [32mINFO    [0m - ib_insync.wrapper - updatePortfolio: PortfolioItem(contract=Stock(conId=272800, symbol='ORCL', right='0', primaryExchange='NYSE', currency='USD', localSymbol='ORCL', tradingClass='ORCL'), position=82.0, marketPrice=152.8913574, marketValue=12537.09, averageCost=137.4021951, unrealizedPNL=1270.11, realizedPNL=0.0, account='DU6863071')
+2026-02-20 17:01:56 - [32mINFO    [0m - ib_insync.wrapper - updatePortfolio: PortfolioItem(contract=Stock(conId=12200, symbol='SLB', right='0', primaryExchange='NYSE', currency='USD', localSymbol='SLB', tradingClass='SLB'), position=280.0, marketPrice=50.84609605, marketValue=14236.91, averageCost=49.755, unrealizedPNL=305.51, realizedPNL=0.0, account='DU6863071')
+2026-02-20 17:01:56 - [32mINFO    [0m - ib_insync.wrapper - updatePortfolio: PortfolioItem(contract=Option(conId=850500612, symbol='SLB', lastTradeDateOrContractMonth='20260313', strike=54.0, right='C', multiplier='100', primaryExchange='AMEX', currency='USD', localSymbol='SLB   260313C00054000', tradingClass='SLB'), position=-4.0, marketPrice=0.6536349, marketValue=-261.45, averageCost=68.29795, unrealizedPNL=11.74, realizedPNL=0.0, account='DU6863071')
+2026-02-20 17:01:56 - [32mINFO    [0m - ib_insync.wrapper - updatePortfolio: PortfolioItem(contract=Option(conId=843596574, symbol='SLB', lastTradeDateOrContractMonth='20260320', strike=52.5, right='C', multiplier='100', primaryExchange='AMEX', currency='USD', localSymbol='SLB   260320C00052500', tradingClass='SLB'), position=-2.0, marketPrice=1.38819765, marketValue=-277.64, averageCost=135.54795, unrealizedPNL=-6.54, realizedPNL=0.0, account='DU6863071')
+2026-02-20 17:01:56 - [32mINFO    [0m - ib_insync.wrapper - updatePortfolio: PortfolioItem(contract=Stock(conId=13497, symbol='VLO', right='0', primaryExchange='NYSE', currency='USD', localSymbol='VLO', tradingClass='VLO'), position=60.0, marketPrice=199.39630125, marketValue=11963.78, averageCost=194.17666665, unrealizedPNL=313.18, realizedPNL=0.0, account='DU6863071')
+2026-02-20 17:01:57 - [32mINFO    [0m - ib_insync.ib - Synchronization complete
+2026-02-20 17:01:57 - [32mINFO    [0m - execution.ibkr_connector - 📊 Delayed-Frozen market data enabled (free, works after-hours)
+2026-02-20 17:01:58 - [32mINFO    [0m - execution.ibkr_connector - ✅ Connected to Interactive Brokers (clientId=711)!
+2026-02-20 17:01:58 - [32mINFO    [0m - execution.ibkr_connector - 📋 Account: DU6863071
+2026-02-20 17:01:58 - [32mINFO    [0m - models.god_level_signal_generator - ✅ God Level models loaded from disk (trained at: 2026-02-20 13:44:20.932046)
+2026-02-20 17:01:58 - [32mINFO    [0m - models.god_level_signal_generator - God Level Signal Generator initialized
+2026-02-20 17:01:58 - [32mINFO    [0m - models.god_level_signal_generator -   ML Libraries: sklearn=True, xgboost=True, lightgbm=True
+2026-02-20 17:01:58 - [32mINFO    [0m - risk.god_level_risk_manager - God Level Risk Manager initialized
+2026-02-20 17:01:58 - [32mINFO    [0m - scripts.god_level_backtest - God Level Backtester initialized with $100,000
+2026-02-20 17:01:58 - [32mINFO    [0m - scripts.god_level_backtest -   God Level modules: True
+2026-02-20 17:01:58 - [32mINFO    [0m - scripts.god_level_backtest - ======================================================================
+2026-02-20 17:01:58 - [32mINFO    [0m - scripts.god_level_backtest - GOD LEVEL BACKTEST
+2026-02-20 17:01:58 - [32mINFO    [0m - scripts.god_level_backtest - ======================================================================
+2026-02-20 17:01:58 - [32mINFO    [0m - scripts.god_level_backtest - Symbols: 40
+2026-02-20 17:01:58 - [32mINFO    [0m - scripts.god_level_backtest - Walk-forward: True
+2026-02-20 17:01:58 - [32mINFO    [0m - scripts.god_level_backtest - 
+Fetching historical data...
+2026-02-20 17:01:58 - [32mINFO    [0m - execution.ibkr_connector - event=symbol_normalization input=USD/CAD normalized=FX:USD/CAD broker=FX:USD/CAD
+2026-02-20 17:01:58 - [32mINFO    [0m - execution.ibkr_connector - event=symbol_normalization input=C normalized=C broker=C
+2026-02-20 17:02:00 - [32mINFO    [0m - execution.ibkr_connector - event=symbol_normalization input=AAPL normalized=AAPL broker=AAPL
+2026-02-20 17:02:00 - [32mINFO    [0m - execution.ibkr_connector - event=symbol_normalization input=APD normalized=APD broker=APD
+2026-02-20 17:02:01 - [32mINFO    [0m - execution.ibkr_connector - event=symbol_normalization input=SHW normalized=SHW broker=SHW
+2026-02-20 17:02:02 - [32mINFO    [0m - execution.ibkr_connector - event=symbol_normalization input=AXP normalized=AXP broker=AXP
+2026-02-20 17:02:03 - [32mINFO    [0m - execution.ibkr_connector - event=symbol_normalization input=TSLA normalized=TSLA broker=TSLA
+2026-02-20 17:02:04 - [32mINFO    [0m - execution.ibkr_connector - event=symbol_normalization input=JNJ normalized=JNJ broker=JNJ
+2026-02-20 17:02:05 - [32mINFO    [0m - execution.ibkr_connector - event=symbol_normalization input=GS normalized=GS broker=GS
+2026-02-20 17:02:05 - [32mINFO    [0m - execution.ibkr_connector - event=symbol_normalization input=XOM normalized=XOM broker=XOM
+2026-02-20 17:02:06 - [32mINFO    [0m - scripts.god_level_backtest -   Fetched 10/40 symbols...
+2026-02-20 17:02:06 - [32mINFO    [0m - execution.ibkr_connector - event=symbol_normalization input=PLD normalized=PLD broker=PLD
+2026-02-20 17:02:06 - [32mINFO    [0m - execution.ibkr_connector - event=symbol_normalization input=CAT normalized=CAT broker=CAT
+2026-02-20 17:02:07 - [32mINFO    [0m - execution.ibkr_connector - event=symbol_normalization input=CCI normalized=CCI broker=CCI
+2026-02-20 17:02:07 - [32mINFO    [0m - execution.ibkr_connector - event=symbol_normalization input=USD/CHF normalized=FX:USD/CHF broker=FX:USD/CHF
+2026-02-20 17:02:08 - [32mINFO    [0m - execution.ibkr_connector - event=symbol_normalization input=QQQ normalized=QQQ broker=QQQ
+2026-02-20 17:02:08 - [32mINFO    [0m - execution.ibkr_connector - event=symbol_normalization input=TGT normalized=TGT broker=TGT
+2026-02-20 17:02:09 - [32mINFO    [0m - execution.ibkr_connector - event=symbol_normalization input=IWM normalized=IWM broker=IWM
+2026-02-20 17:02:10 - [32mINFO    [0m - execution.ibkr_connector - event=symbol_normalization input=MSFT normalized=MSFT broker=MSFT
+2026-02-20 17:02:10 - [32mINFO    [0m - execution.ibkr_connector - event=symbol_normalization input=ABT normalized=ABT broker=ABT
+2026-02-20 17:02:11 - [32mINFO    [0m - execution.ibkr_connector - event=symbol_normalization input=EOG normalized=EOG broker=EOG
+2026-02-20 17:02:11 - [32mINFO    [0m - scripts.god_level_backtest -   Fetched 20/40 symbols...
+2026-02-20 17:02:11 - [32mINFO    [0m - execution.ibkr_connector - event=symbol_normalization input=SPY normalized=SPY broker=SPY
+2026-02-20 17:02:12 - [32mINFO    [0m - execution.ibkr_connector - event=symbol_normalization input=JPM normalized=JPM broker=JPM
+2026-02-20 17:02:12 - [32mINFO    [0m - execution.ibkr_connector - event=symbol_normalization input=BAC normalized=BAC broker=BAC
+2026-02-20 17:02:13 - [32mINFO    [0m - execution.ibkr_connector - event=symbol_normalization input=UNH normalized=UNH broker=UNH
+2026-02-20 17:02:14 - [32mINFO    [0m - execution.ibkr_connector - event=symbol_normalization input=DIA normalized=DIA broker=DIA
+2026-02-20 17:02:15 - [32mINFO    [0m - execution.ibkr_connector - event=symbol_normalization input=DLTR normalized=DLTR broker=DLTR
+2026-02-20 17:02:15 - [32mINFO    [0m - execution.ibkr_connector - event=symbol_normalization input=GE normalized=GE broker=GE
+2026-02-20 17:02:16 - [32mINFO    [0m - execution.ibkr_connector - event=symbol_normalization input=IBM normalized=IBM broker=IBM
+2026-02-20 17:02:17 - [32mINFO    [0m - execution.ibkr_connector - event=symbol_normalization input=MCD normalized=MCD broker=MCD
+2026-02-20 17:02:18 - [32mINFO    [0m - execution.ibkr_connector - event=symbol_normalization input=USD/JPY normalized=FX:USD/JPY broker=FX:USD/JPY
+2026-02-20 17:02:19 - [32mINFO    [0m - scripts.god_level_backtest -   Fetched 30/40 symbols...
+2026-02-20 17:02:19 - [32mINFO    [0m - execution.ibkr_connector - event=symbol_normalization input=MRK normalized=MRK broker=MRK
+2026-02-20 17:02:19 - [32mINFO    [0m - execution.ibkr_connector - event=symbol_normalization input=NKE normalized=NKE broker=NKE
+2026-02-20 17:02:20 - [32mINFO    [0m - execution.ibkr_connector - event=symbol_normalization input=ECL normalized=ECL broker=ECL
+2026-02-20 17:02:21 - [32mINFO    [0m - execution.ibkr_connector - event=symbol_normalization input=SBUX normalized=SBUX broker=SBUX
+2026-02-20 17:02:21 - [32mINFO    [0m - execution.ibkr_connector - event=symbol_normalization input=EUR/USD normalized=FX:EUR/USD broker=FX:EUR/USD
+2026-02-20 17:02:22 - [32mINFO    [0m - execution.ibkr_connector - event=symbol_normalization input=ABBV normalized=ABBV broker=ABBV
+2026-02-20 17:02:22 - [32mINFO    [0m - execution.ibkr_connector - event=symbol_normalization input=USO normalized=USO broker=USO
+2026-02-20 17:02:23 - [32mINFO    [0m - execution.ibkr_connector - event=symbol_normalization input=NEE normalized=NEE broker=NEE
+2026-02-20 17:02:24 - [32mINFO    [0m - execution.ibkr_connector - event=symbol_normalization input=AMZN normalized=AMZN broker=AMZN
+2026-02-20 17:02:24 - [32mINFO    [0m - execution.ibkr_connector - event=symbol_normalization input=GOOGL normalized=GOOGL broker=GOOGL
+2026-02-20 17:02:25 - [32mINFO    [0m - scripts.god_level_backtest -   Fetched 40/40 symbols...
+2026-02-20 17:02:25 - [32mINFO    [0m - scripts.god_level_backtest - Loaded data for 40 symbols
+2026-02-20 17:02:25 - [32mINFO    [0m - scripts.god_level_backtest - 
+Running walk-forward optimization...
+2026-02-20 17:02:25 - [32mINFO    [0m - scripts.god_level_backtest - 
+  Period 1: Train 2024-02-22 -> Test 2024-11-07
+2026-02-20 17:02:25 - [32mINFO    [0m - models.god_level_signal_generator - Training God Level ML models...
+2026-02-20 17:02:25 - [33mWARNING [0m - models.god_level_signal_generator - Not enough training data (0 samples)
+2026-02-20 17:02:25 - [32mINFO    [0m - risk.god_level_risk_manager - Updated correlation matrix for 4 symbols
+2026-02-20 17:04:09 - [32mINFO    [0m - scripts.god_level_backtest -   Period 1 produced 24 trades
+2026-02-20 17:04:09 - [32mINFO    [0m - scripts.god_level_backtest - 
+  Period 2: Train 2024-02-22 -> Test 2025-05-06
+2026-02-20 17:04:09 - [32mINFO    [0m - models.god_level_signal_generator - Training God Level ML models...
+2026-02-20 17:04:30 - [32mINFO    [0m - models.god_level_signal_generator -   Training on 4660 samples with 48 features...
+2026-02-20 17:04:31 - [32mINFO    [0m - models.god_level_signal_generator -   RF trained successfully
+2026-02-20 17:04:40 - [32mINFO    [0m - models.god_level_signal_generator -   GB trained successfully
+2026-02-20 17:04:40 - [32mINFO    [0m - models.god_level_signal_generator -   XGB trained successfully
+2026-02-20 17:04:41 - [32mINFO    [0m - models.god_level_signal_generator -   LGB trained successfully
+2026-02-20 17:04:41 - [32mINFO    [0m - models.god_level_signal_generator - ✅ God Level models saved to models/saved/god_level_models.pkl
+2026-02-20 17:04:41 - [32mINFO    [0m - models.god_level_signal_generator - God Level models trained with 4 active models and saved to models/saved
+2026-02-20 17:04:41 - [32mINFO    [0m - risk.god_level_risk_manager - Updated correlation matrix for 40 symbols
+2026-02-20 17:06:55 - [32mINFO    [0m - scripts.god_level_backtest -   Period 2 produced 37 trades
+2026-02-20 17:06:55 - [32mINFO    [0m - scripts.god_level_backtest - 
+  Period 3: Train 2024-05-16 -> Test 2025-10-29
+2026-02-20 17:06:55 - [32mINFO    [0m - models.god_level_signal_generator - Training God Level ML models...
+2026-02-20 17:07:34 - [32mINFO    [0m - models.god_level_signal_generator -   Training on 7156 samples with 48 features...
+2026-02-20 17:07:35 - [32mINFO    [0m - models.god_level_signal_generator -   RF trained successfully
+2026-02-20 17:07:52 - [32mINFO    [0m - models.god_level_signal_generator -   GB trained successfully
+2026-02-20 17:07:52 - [32mINFO    [0m - models.god_level_signal_generator -   XGB trained successfully
+2026-02-20 17:07:54 - [32mINFO    [0m - models.god_level_signal_generator -   LGB trained successfully
+2026-02-20 17:07:54 - [32mINFO    [0m - models.god_level_signal_generator - ✅ God Level models saved to models/saved/god_level_models.pkl
+2026-02-20 17:07:54 - [32mINFO    [0m - models.god_level_signal_generator - God Level models trained with 4 active models and saved to models/saved
+2026-02-20 17:07:54 - [32mINFO    [0m - risk.god_level_risk_manager - Updated correlation matrix for 40 symbols
+2026-02-20 17:12:36 - [32mINFO    [0m - scripts.god_level_backtest -   Period 3 produced 59 trades
+2026-02-20 17:12:36 - [32mINFO    [0m - scripts.god_level_backtest - 
+======================================================================
+2026-02-20 17:12:36 - [32mINFO    [0m - scripts.god_level_backtest - CALCULATING RESULTS
+2026-02-20 17:12:36 - [32mINFO    [0m - scripts.god_level_backtest - ======================================================================
+2026-02-20 17:12:36 - [32mINFO    [0m - scripts.god_level_backtest - 
+Total Return: 2.57%
+2026-02-20 17:12:36 - [32mINFO    [0m - scripts.god_level_backtest - Sharpe Ratio: 0.67
+2026-02-20 17:12:36 - [32mINFO    [0m - scripts.god_level_backtest - Win Rate: 55.8%
+2026-02-20 17:12:36 - [32mINFO    [0m - scripts.god_level_backtest - Max Drawdown: 3.88%
+2026-02-20 17:12:36 - [32mINFO    [0m - scripts.god_level_backtest - Total Trades: 120
+2026-02-20 17:12:36 - [32mINFO    [0m - scripts.god_level_backtest - 
+Running Monte Carlo simulation (1000 iterations)...
+2026-02-20 17:12:36 - [32mINFO    [0m - scripts.god_level_backtest -   Monte Carlo Results:
+2026-02-20 17:12:36 - [32mINFO    [0m - scripts.god_level_backtest -     Expected Return: 2.7% (5th-95th: -0.5% to 6.1%)
+2026-02-20 17:12:36 - [32mINFO    [0m - scripts.god_level_backtest -     Expected Max DD: 1.4% (95th percentile: 2.5%)
+2026-02-20 17:12:36 - [32mINFO    [0m - scripts.god_level_backtest -     Probability of Profit: 92.4%
+
+======================================================================
+GOD LEVEL BACKTEST RESULTS
+======================================================================
+
+📈 RETURNS
+----------------------------------------
+  Total Return:             2.57%
+  Annualized Return:        1.70%
+  Benchmark (SPY):          0.00%
+  Alpha:                    2.57%
+
+⚖️  RISK METRICS
+----------------------------------------
+  Sharpe Ratio:             0.67
+  Sortino Ratio:            0.72
+  Calmar Ratio:             0.44
+  Max Drawdown:             3.88%
+  Avg Drawdown:             1.45%
+  Max DD Duration:           202 days
+  Ulcer Index:              1.73
+
+🎯 TRADE METRICS
+----------------------------------------
+  Total Trades:              120
+  Win Rate:                 55.8%
+  Profit Factor:            1.35
+  Avg Win:            $   155.84
+  Avg Loss:           $  -145.88
+  Avg Trade:          $    22.58
+  Largest Win:        $   765.76
+  Largest Loss:       $  -379.14
+  Avg Hold Days:             8.6
+
+🧠 ADVANCED METRICS
+----------------------------------------
+  Expectancy:         $    22.58
+  SQN:                      1.39
+  Recovery Factor:          0.66
+
+📊 REGIME PERFORMANCE
+----------------------------------------
+  bear                 | Trades:   5 | Win Rate:  60.0% | P&L: $715
+  bull                 | Trades:  12 | Win Rate:  33.3% | P&L: $-1,072
+  strong_bear          | Trades:   3 | Win Rate:  66.7% | P&L: $323
+  strong_bull          | Trades: 100 | Win Rate:  58.0% | P&L: $2,743
+
+🎲 MONTE CARLO SIMULATION
+----------------------------------------
+  Expected Return:           2.7%
+  Return Range (90%):   -0.5% to 6.1%
+  Expected Max DD:           1.4%
+  Prob of Profit:           92.4%
+
+======================================================================
+SYSTEM QUALITY ASSESSMENT
+======================================================================
+  ✓ Great win rate (>= 55%)
+  ✓ Excellent drawdown control (<= 10%)
+  ✓ Decent profit factor (>= 1.2)
+
+  TOTAL SCORE: 60/100
+  👍 GOOD SYSTEM
+======================================================================
+2026-02-20 17:12:36 - [32mINFO    [0m - ib_insync.ib - Disconnecting from 127.0.0.1:7497, 5.35 kB sent in 89 messages, 1.22 MB received in 509 messages, session time 640 s.
+2026-02-20 17:12:36 - [32mINFO    [0m - ib_insync.client - Disconnecting
+2026-02-20 17:12:36 - [32mINFO    [0m - execution.ibkr_connector - 🔌 Disconnected from IBKR
+2026-02-20 17:12:36 - [33mWARNING [0m - services.common.redis_client - Redis connection failed (Error connecting to localhost:6379. Multiple exceptions: [Errno 61] Connect call failed ('::1', 6379, 0, 0), [Errno 61] Connect call failed ('127.0.0.1', 6379).) - caching disabled
+2026-02-20 17:12:36 - [32mINFO    [0m - ib_insync.client - Disconnected.

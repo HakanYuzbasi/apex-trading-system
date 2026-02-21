@@ -5,5 +5,5 @@ export type AlertsFeedProps = {
 };
 
 export default function AlertsFeed({ children }: AlertsFeedProps) {
-  return <section className="sticky top-2 z-30">{children}</section>;
+  return <section className="sticky top-2 z-30" aria-live="polite" aria-atomic="false">{children}</section>;
 }

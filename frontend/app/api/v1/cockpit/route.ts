@@ -266,7 +266,8 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
   );
   const sharpe = asNumber(statusData.sharpe_ratio, 0);
   const drawdown = asNumber(statusData.max_drawdown, 0);
-  const normalizedDrawdownPct = Math.abs(drawdown) > 1 ? drawdown : drawdown * 100;
+  const absDrawdown = Math.abs(drawdown);
+  const normalizedDrawdownPct = absDrawdown > 1 ? absDrawdown : absDrawdown * 100;
 
   const killSwitch = (stateData.kill_switch && typeof stateData.kill_switch === "object"
     ? stateData.kill_switch
@@ -380,13 +381,13 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
       detail: String(reconciliation.reason || "Equity reconciliation gap is above allowed threshold."),
     });
   }
-  if (statusResp.ok && normalizedDrawdownPct <= -8) {
+  if (statusResp.ok && normalizedDrawdownPct >= 8) {
     alerts.push({
       id: "drawdown-warning",
       severity: "warning",
       source: "risk",
       title: "Drawdown pressure elevated",
-      detail: `Current drawdown ${normalizedDrawdownPct.toFixed(2)}% is approaching policy limits.`,
+      detail: `Current drawdown -${normalizedDrawdownPct.toFixed(2)}% is approaching policy limits.`,
     });
   }
   if (statusResp.ok && sharpe < 1.0) {
@@ -477,6 +478,7 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
       state_fresh: stateFresh,
       timestamp: statusData.timestamp ?? null,
       capital: asNumber(statusData.capital),
+      starting_capital: asNumber(statusData.starting_capital),
       daily_pnl: asNumber(statusData.daily_pnl),
       total_pnl: asNumber(statusData.total_pnl),
       max_drawdown: drawdown,

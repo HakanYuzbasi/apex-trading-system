@@ -1,0 +1,13 @@
+{
+  "day_start_capital": 50000.0,
+  "peak_capital": 50000.0,
+  "starting_capital": 50000.0,
+  "current_day": "2026-02-20",
+  "circuit_breaker": {
+    "is_tripped": false,
+    "reason": null,
+    "trip_time": null,
+    "consecutive_losses": 0,
+    "recent_trades": 0
+  }
+}

@@ -1,0 +1,757 @@
+{
+  "timestamp": "2026-02-20T13:22:26.944207",
+  "capital": 1282521.6400000001,
+  "initial_capital": 100000.0,
+  "starting_capital": 1282858.79,
+  "positions": {
+    "LRCX": {
+      "qty": 39,
+      "side": "LONG",
+      "avg_price": 213.49564105,
+      "current_price": 237.38999938964844,
+      "pnl": 931.8799752462895,
+      "pnl_pct": 11.191965429426487,
+      "entry_time": "2026-02-20T00:12:05.002714",
+      "current_signal": -0.039470136475119176,
+      "signal_direction": "NEUTRAL",
+      "source_id": "ibkr"
+    },
+    "SLB": {
+      "qty": 280,
+      "side": "LONG",
+      "avg_price": 49.755,
+      "current_price": 51.540000915527344,
+      "pnl": 499.80025634765553,
+      "pnl_pct": 3.5875809778461276,
+      "entry_time": "2026-02-20T00:12:05.002726",
+      "current_signal": -0.7775376677022838,
+      "signal_direction": "STRONG SELL",
+      "source_id": "ibkr"
+    },
+    "COP": {
+      "qty": -2,
+      "side": "SHORT",
+      "avg_price": 96.94795,
+      "current_price": 111.58999633789062,
+      "pnl": -29.28409267578124,
+      "pnl_pct": -13.121289379340972,
+      "entry_time": "2026-02-20T00:12:05.002729",
+      "current_signal": -0.7175892395895056,
+      "signal_direction": "STRONG SELL",
+      "source_id": "ibkr"
+    },
+    "VLO": {
+      "qty": 60,
+      "side": "LONG",
+      "avg_price": 194.17666665,
+      "current_price": 199.24000549316406,
+      "pnl": 303.8003305898445,
+      "pnl_pct": 2.6075938631136664,
+      "entry_time": "2026-02-20T00:12:05.002731",
+      "current_signal": 0.008406518257480323,
+      "signal_direction": "NEUTRAL",
+      "source_id": "ibkr"
+    },
+    "ALB": {
+      "qty": 55,
+      "side": "LONG",
+      "avg_price": 157.0281818,
+      "current_price": 168.41000366210938,
+      "pnl": 626.0002024160157,
+      "pnl_pct": 7.248266987263419,
+      "entry_time": "2026-02-20T00:12:05.002733",
+      "current_signal": -0.004055214834523441,
+      "signal_direction": "NEUTRAL",
+      "source_id": "ibkr"
+    },
+    "CAT": {
+      "qty": 17,
+      "side": "LONG",
+      "avg_price": 679.32882355,
+      "current_price": 760.530029296875,
+      "pnl": 1380.4204976968745,
+      "pnl_pct": 11.953151836328413,
+      "entry_time": "2026-02-20T00:12:05.002735",
+      "current_signal": -0.008447049244135672,
+      "signal_direction": "NEUTRAL",
+      "source_id": "ibkr"
+    },
+    "NEM": {
+      "qty": 83,
+      "side": "LONG",
+      "avg_price": 108.6220482,
+      "current_price": 125.4000015258789,
+      "pnl": 1392.5701260479495,
+      "pnl_pct": 15.446176539579293,
+      "entry_time": "2026-02-20T00:12:05.002737",
+      "current_signal": -0.007959184768390725,
+      "signal_direction": "NEUTRAL",
+      "source_id": "ibkr"
+    },
+    "LMT": {
+      "qty": 19,
+      "side": "LONG",
+      "avg_price": 611.1126316,
+      "current_price": 666.510009765625,
+      "pnl": 1052.5501851468753,
+      "pnl_pct": 9.065002963624714,
+      "entry_time": "2026-02-20T00:12:05.002739",
+      "current_signal": -0.39389153801777366,
+      "signal_direction": "WEAK SELL",
+      "source_id": "ibkr"
+    },
+    "GS": {
+      "qty": 13,
+      "side": "LONG",
+      "avg_price": 895.0269231,
+      "current_price": 916.6500244140625,
+      "pnl": 281.1003170828128,
+      "pnl_pct": 2.415916298826981,
+      "entry_time": "2026-02-20T00:12:05.002740",
+      "current_signal": 0.5478023874929441,
+      "signal_direction": "BUY",
+      "source_id": "ibkr"
+    },
+    "CVX": {
+      "qty": 66,
+      "side": "LONG",
+      "avg_price": 179.6151515,
+      "current_price": 184.77999877929688,
+      "pnl": 340.879920433594,
+      "pnl_pct": 2.8755075705831468,
+      "entry_time": "2026-02-20T00:12:05.002742",
+      "current_signal": -0.3661163419805854,
+      "signal_direction": "WEAK SELL",
+      "source_id": "ibkr"
+    },
+    "HAL": {
+      "qty": -6,
+      "side": "SHORT",
+      "avg_price": 75.29796665,
+      "current_price": 35.369998931884766,
+      "pnl": 239.56780630869144,
+      "pnl_pct": 112.88653922497471,
+      "entry_time": "2026-02-20T00:12:05.002744",
+      "current_signal": -0.8966966188580223,
+      "signal_direction": "STRONG SELL",
+      "source_id": "ibkr"
+    },
+    "DLTR": {
+      "qty": 98,
+      "side": "LONG",
+      "avg_price": 120.1102041,
+      "current_price": 133.57000732421875,
+      "pnl": 1319.060715973437,
+      "pnl_pct": 11.206211266623555,
+      "entry_time": "2026-02-20T00:12:05.002745",
+      "current_signal": -0.5386707919398939,
+      "signal_direction": "SELL",
+      "source_id": "ibkr"
+    },
+    "ORCL": {
+      "qty": 82,
+      "side": "LONG",
+      "avg_price": 137.4021951,
+      "current_price": 156.5399932861328,
+      "pnl": 1569.2994512628907,
+      "pnl_pct": 13.928306001373937,
+      "entry_time": "2026-02-20T00:12:05.002747",
+      "current_signal": -0.15691771199413412,
+      "signal_direction": "NEUTRAL",
+      "source_id": "ibkr"
+    }
+  },
+  "signals": {
+    "LRCX": {
+      "signal": -0.039470136475119176,
+      "confidence": 0.0,
+      "direction": "NEUTRAL",
+      "strength_pct": 3.9470136475119175,
+      "timestamp": "2026-02-20T13:22:25.388649"
+    },
+    "SLB": {
+      "signal": -0.7775376677022838,
+      "confidence": 0.7756135641280496,
+      "direction": "STRONG SELL",
+      "strength_pct": 77.75376677022838,
+      "timestamp": "2026-02-20T13:22:25.420179"
+    },
+    "COP": {
+      "signal": -0.7175892395895056,
+      "confidence": 0.7159059774905242,
+      "direction": "STRONG SELL",
+      "strength_pct": 71.75892395895056,
+      "timestamp": "2026-02-20T13:22:25.449193"
+    },
+    "VLO": {
+      "signal": 0.008406518257480323,
+      "confidence": 0.0,
+      "direction": "NEUTRAL",
+      "strength_pct": 0.8406518257480323,
+      "timestamp": "2026-02-20T13:22:25.476821"
+    },
+    "ALB": {
+      "signal": -0.004055214834523441,
+      "confidence": 0.0,
+      "direction": "NEUTRAL",
+      "strength_pct": 0.4055214834523441,
+      "timestamp": "2026-02-20T13:22:25.503536"
+    },
+    "CAT": {
+      "signal": -0.008447049244135672,
+      "confidence": 0.0,
+      "direction": "NEUTRAL",
+      "strength_pct": 0.8447049244135671,
+      "timestamp": "2026-02-20T13:22:25.530522"
+    },
+    "NEM": {
+      "signal": -0.007959184768390725,
+      "confidence": 0.0,
+      "direction": "NEUTRAL",
+      "strength_pct": 0.7959184768390726,
+      "timestamp": "2026-02-20T13:22:25.560562"
+    },
+    "LMT": {
+      "signal": -0.39389153801777366,
+      "confidence": 0.0,
+      "direction": "WEAK SELL",
+      "strength_pct": 39.38915380177737,
+      "timestamp": "2026-02-20T13:22:25.587139"
+    },
+    "GS": {
+      "signal": 0.5478023874929441,
+      "confidence": 0.0,
+      "direction": "BUY",
+      "strength_pct": 54.780238749294405,
+      "timestamp": "2026-02-20T13:22:25.614502"
+    },
+    "CVX": {
+      "signal": -0.3661163419805854,
+      "confidence": 0.0,
+      "direction": "WEAK SELL",
+      "strength_pct": 36.61163419805854,
+      "timestamp": "2026-02-20T13:22:25.642089"
+    },
+    "HAL": {
+      "signal": -0.8966966188580223,
+      "confidence": 0.8668413536383544,
+      "direction": "STRONG SELL",
+      "strength_pct": 89.66966188580223,
+      "timestamp": "2026-02-20T13:22:25.669762"
+    },
+    "DLTR": {
+      "signal": -0.5386707919398939,
+      "confidence": 0.5379023921591604,
+      "direction": "SELL",
+      "strength_pct": 53.86707919398938,
+      "timestamp": "2026-02-20T13:22:25.697266"
+    },
+    "ORCL": {
+      "signal": -0.15691771199413412,
+      "confidence": 0.0,
+      "direction": "NEUTRAL",
+      "strength_pct": 15.691771199413413,
+      "timestamp": "2026-02-20T13:22:25.722388"
+    },
+    "HON": {
+      "signal": -0.44330961355379783,
+      "confidence": 0.0,
+      "direction": "SELL",
+      "strength_pct": 44.330961355379785,
+      "timestamp": "2026-02-20T13:22:25.748986"
+    },
+    "RTX": {
+      "signal": -0.3363495477072628,
+      "confidence": 0.0,
+      "direction": "WEAK SELL",
+      "strength_pct": 33.634954770726274,
+      "timestamp": "2026-02-20T13:22:25.777935"
+    },
+    "MCD": {
+      "signal": -0.09187889282071388,
+      "confidence": 0.0,
+      "direction": "NEUTRAL",
+      "strength_pct": 9.187889282071387,
+      "timestamp": "2026-02-20T13:22:25.803774"
+    },
+    "BAC": {
+      "signal": -0.3180719128955633,
+      "confidence": 0.0,
+      "direction": "WEAK SELL",
+      "strength_pct": 31.80719128955633,
+      "timestamp": "2026-02-20T13:22:25.830523"
+    },
+    "MS": {
+      "signal": 0.8561042121884843,
+      "confidence": 0.8443627480108918,
+      "direction": "STRONG BUY",
+      "strength_pct": 85.61042121884843,
+      "timestamp": "2026-02-20T13:22:25.958527"
+    },
+    "LIN": {
+      "signal": -0.5002276821300768,
+      "confidence": 0.0,
+      "direction": "SELL",
+      "strength_pct": 50.02276821300769,
+      "timestamp": "2026-02-20T13:22:25.987031"
+    },
+    "MRK": {
+      "signal": -0.4069817787434,
+      "confidence": 0.0,
+      "direction": "SELL",
+      "strength_pct": 40.698177874340004,
+      "timestamp": "2026-02-20T13:22:26.014564"
+    },
+    "EUR/USD": {
+      "signal": -1.0,
+      "confidence": 1.0,
+      "direction": "STRONG SELL",
+      "strength_pct": 100.0,
+      "timestamp": "2026-02-20T13:22:26.041332"
+    },
+    "TGT": {
+      "signal": -0.5168595837192412,
+      "confidence": 0.514111370846971,
+      "direction": "SELL",
+      "strength_pct": 51.68595837192412,
+      "timestamp": "2026-02-20T13:22:26.067167"
+    },
+    "DIS": {
+      "signal": 0.4966198366134136,
+      "confidence": 0.48459495266923225,
+      "direction": "BUY",
+      "strength_pct": 49.66198366134136,
+      "timestamp": "2026-02-20T13:22:26.094669"
+    },
+    "DOGE/USD": {
+      "signal": 0.22500000000000003,
+      "confidence": 0.22500000000000003,
+      "direction": "WEAK BUY",
+      "strength_pct": 22.500000000000004,
+      "timestamp": "2026-02-20T13:22:26.125595"
+    },
+    "AXP": {
+      "signal": -0.9999999999999999,
+      "confidence": 1.0,
+      "direction": "STRONG SELL",
+      "strength_pct": 99.99999999999999,
+      "timestamp": "2026-02-20T13:22:26.152790"
+    },
+    "APD": {
+      "signal": 0.4981998803628743,
+      "confidence": 0.49819227594703985,
+      "direction": "BUY",
+      "strength_pct": 49.819988036287434,
+      "timestamp": "2026-02-20T13:22:26.180286"
+    },
+    "NFLX": {
+      "signal": -0.7745607268985624,
+      "confidence": 0.774560726849027,
+      "direction": "STRONG SELL",
+      "strength_pct": 77.45607268985624,
+      "timestamp": "2026-02-20T13:22:26.210264"
+    },
+    "JNJ": {
+      "signal": 0.3031580798002569,
+      "confidence": 0.0,
+      "direction": "WEAK BUY",
+      "strength_pct": 30.31580798002569,
+      "timestamp": "2026-02-20T13:22:26.236150"
+    },
+    "WMT": {
+      "signal": 0.2491926355251672,
+      "confidence": 0.0,
+      "direction": "WEAK BUY",
+      "strength_pct": 24.91926355251672,
+      "timestamp": "2026-02-20T13:22:26.264629"
+    },
+    "SHW": {
+      "signal": -0.16941922413250465,
+      "confidence": 0.0,
+      "direction": "NEUTRAL",
+      "strength_pct": 16.941922413250467,
+      "timestamp": "2026-02-20T13:22:26.291303"
+    },
+    "QCOM": {
+      "signal": 0.24705021755514672,
+      "confidence": 0.0,
+      "direction": "WEAK BUY",
+      "strength_pct": 24.70502175551467,
+      "timestamp": "2026-02-20T13:22:26.319210"
+    },
+    "CRM": {
+      "signal": -0.2933454359364043,
+      "confidence": 0.2933454359242294,
+      "direction": "WEAK SELL",
+      "strength_pct": 29.334543593640426,
+      "timestamp": "2026-02-20T13:22:26.350754"
+    },
+    "EQIX": {
+      "signal": 0.0997333138184866,
+      "confidence": 0.0,
+      "direction": "NEUTRAL",
+      "strength_pct": 9.97333138184866,
+      "timestamp": "2026-02-20T13:22:26.380788"
+    },
+    "GLD": {
+      "signal": 0.26779948454512514,
+      "confidence": 0.26779948444640844,
+      "direction": "WEAK BUY",
+      "strength_pct": 26.779948454512514,
+      "timestamp": "2026-02-20T13:22:26.410011"
+    },
+    "TMUS": {
+      "signal": -0.3040067297204964,
+      "confidence": 0.0,
+      "direction": "WEAK SELL",
+      "strength_pct": 30.40067297204964,
+      "timestamp": "2026-02-20T13:22:26.442528"
+    },
+    "EOG": {
+      "signal": -0.033283302602589424,
+      "confidence": 0.0,
+      "direction": "NEUTRAL",
+      "strength_pct": 3.328330260258942,
+      "timestamp": "2026-02-20T13:22:26.471082"
+    },
+    "UNG": {
+      "signal": -0.2999970205539543,
+      "confidence": 0.29998967889694217,
+      "direction": "WEAK SELL",
+      "strength_pct": 29.999702055395428,
+      "timestamp": "2026-02-20T13:22:26.502020"
+    },
+    "FCX": {
+      "signal": -0.12217784223242664,
+      "confidence": 0.0,
+      "direction": "NEUTRAL",
+      "strength_pct": 12.217784223242663,
+      "timestamp": "2026-02-20T13:22:26.532222"
+    },
+    "AAPL": {
+      "signal": -0.800035472158148,
+      "confidence": 0.8000354683445893,
+      "direction": "STRONG SELL",
+      "strength_pct": 80.00354721581479,
+      "timestamp": "2026-02-20T13:22:26.600447"
+    },
+    "MPC": {
+      "signal": 0.3491704689640168,
+      "confidence": 0.34260583429891417,
+      "direction": "WEAK BUY",
+      "strength_pct": 34.91704689640168,
+      "timestamp": "2026-02-20T13:22:26.638656"
+    },
+    "GOOGL": {
+      "signal": -0.910876990856739,
+      "confidence": 0.9108769908472576,
+      "direction": "STRONG SELL",
+      "strength_pct": 91.0876990856739,
+      "timestamp": "2026-02-20T13:22:26.667717"
+    },
+    "CSCO": {
+      "signal": 0.15075032911558456,
+      "confidence": 0.0,
+      "direction": "NEUTRAL",
+      "strength_pct": 15.075032911558456,
+      "timestamp": "2026-02-20T13:22:26.699593"
+    },
+    "AMD": {
+      "signal": 0.06536950175550024,
+      "confidence": 0.0,
+      "direction": "NEUTRAL",
+      "strength_pct": 6.536950175550024,
+      "timestamp": "2026-02-20T13:22:26.730309"
+    },
+    "LOW": {
+      "signal": -0.43546993466503764,
+      "confidence": 0.0,
+      "direction": "SELL",
+      "strength_pct": 43.546993466503764,
+      "timestamp": "2026-02-20T13:22:26.760165"
+    },
+    "XOM": {
+      "signal": -0.6287423560988906,
+      "confidence": 0.5375660129261347,
+      "direction": "STRONG SELL",
+      "strength_pct": 62.87423560988906,
+      "timestamp": "2026-02-20T13:22:26.788627"
+    },
+    "QQQ": {
+      "signal": 0.7164470886082959,
+      "confidence": 0.0,
+      "direction": "STRONG BUY",
+      "strength_pct": 71.64470886082958,
+      "timestamp": "2026-02-20T13:22:26.817457"
+    },
+    "CCI": {
+      "signal": 0.2049479429032089,
+      "confidence": 0.0,
+      "direction": "WEAK BUY",
+      "strength_pct": 20.49479429032089,
+      "timestamp": "2026-02-20T13:22:26.847674"
+    },
+    "HD": {
+      "signal": 0.9602773723643867,
+      "confidence": 0.6687063227812947,
+      "direction": "STRONG BUY",
+      "strength_pct": 96.02773723643867,
+      "timestamp": "2026-02-20T13:22:26.882672"
+    },
+    "USD/CHF": {
+      "signal": -0.9999999999999999,
+      "confidence": 1.0,
+      "direction": "STRONG SELL",
+      "strength_pct": 99.99999999999999,
+      "timestamp": "2026-02-20T13:22:26.914136"
+    },
+    "AVGO": {
+      "signal": -0.29572345718312154,
+      "confidence": 0.0,
+      "direction": "WEAK SELL",
+      "strength_pct": 29.572345718312153,
+      "timestamp": "2026-02-20T13:22:26.944116"
+    }
+  },
+  "daily_pnl": -337.14999999990687,
+  "total_pnl": -337.14999999990687,
+  "total_commissions": 0.0,
+  "max_drawdown": 0.922138472787876,
+  "sharpe_ratio": 0.3970556746279673,
+  "win_rate": 0.0,
+  "total_trades": 0,
+  "open_positions": 13,
+  "option_positions": 5,
+  "open_positions_total": 18,
+  "option_positions_detail": [
+    {
+      "symbol": "COP",
+      "expiry": "20260313",
+      "strike": 114.0,
+      "right": "C",
+      "quantity": -4,
+      "side": "SHORT",
+      "avg_cost": 96.94795
+    },
+    {
+      "symbol": "COP",
+      "expiry": "20260320",
+      "strike": 115.0,
+      "right": "C",
+      "quantity": -12,
+      "side": "SHORT",
+      "avg_cost": 211.89796665
+    },
+    {
+      "symbol": "HAL",
+      "expiry": "20260313",
+      "strike": 36.0,
+      "right": "C",
+      "quantity": -12,
+      "side": "SHORT",
+      "avg_cost": 75.29796665
+    },
+    {
+      "symbol": "SLB",
+      "expiry": "20260313",
+      "strike": 54.0,
+      "right": "C",
+      "quantity": -8,
+      "side": "SHORT",
+      "avg_cost": 68.29795
+    },
+    {
+      "symbol": "SLB",
+      "expiry": "20260320",
+      "strike": 52.5,
+      "right": "C",
+      "quantity": -4,
+      "side": "SHORT",
+      "avg_cost": 135.54795
+    }
+  ],
+  "sector_exposure": {
+    "Technology": 0.16817145935596273,
+    "Energy": 0.2969726223042823,
+    "Materials": 0.14972325114947094,
+    "Industrials": 0.1947979760881892,
+    "Financials": 0.09070165875341579,
+    "Consumer": 0.09963303234867907
+  },
+  "performance_governor": {
+    "tier": "red",
+    "sharpe": -19.458842652439646,
+    "sortino": -23.666003219410864,
+    "drawdown": 0.00035567251677482624,
+    "sample_count": 51,
+    "size_multiplier": 0.25,
+    "signal_threshold_boost": 0.12,
+    "confidence_boost": 0.2,
+    "halt_new_entries": true,
+    "reasons": [
+      "drawdown=0.04%, sharpe=-19.46, sortino=-23.67"
+    ]
+  },
+  "kill_switch": {
+    "active": false,
+    "triggered_at": null,
+    "reason": "",
+    "drawdown": 0.001346948050189355,
+    "historical_mdd": 0.08,
+    "sharpe_rolling": 23.778448485656742,
+    "flatten_executed": false
+  },
+  "equity_reconciliation": {
+    "timestamp": "2026-02-20T13:22:21.993522",
+    "broker_equity": 1282521.6400000001,
+    "modeled_equity": 1270028.561991577,
+    "gap_dollars": 12493.078008423094,
+    "gap_pct": 0.00974102706635273,
+    "max_gap_dollars": 20000.0,
+    "max_gap_pct": 0.015,
+    "breached": false,
+    "block_entries": false,
+    "reason": "ok",
+    "breach_streak": 0,
+    "healthy_streak": 1199
+  },
+  "performance_attribution": {
+    "lookback_days": 30,
+    "closed_trades": 0,
+    "open_positions_tracked": 14,
+    "gross_pnl": 0.0,
+    "net_pnl": 0.0,
+    "commissions": 0.0,
+    "modeled_execution_drag": 0.0,
+    "modeled_slippage_drag": 0.0,
+    "by_sleeve": {},
+    "by_asset_class": {},
+    "social_governor": {
+      "events": 0,
+      "blocked_alpha_opportunity": 0.0,
+      "avoided_drawdown_estimate": 0.0,
+      "hedge_cost_drag": 0.0,
+      "by_asset_class_regime": {}
+    }
+  },
+  "social_shock": {
+    "enabled": true,
+    "policy_version": "runtime-default",
+    "input_validation": {
+      "valid": true,
+      "has_usable_feeds": false,
+      "source_status": {
+        "X": "missing",
+        "TIKTOK": "missing",
+        "INSTAGRAM": "missing",
+        "YOUTUBE": "missing"
+      },
+      "usable_sources": [],
+      "stale_sources": [],
+      "warnings": [
+        {
+          "level": "warning",
+          "code": "all_sources_unusable",
+          "message": "all social feeds are missing/stale; runtime should fail-open for entry blocking"
+        }
+      ],
+      "errors": []
+    },
+    "decisions": [
+      {
+        "asset_class": "EQUITY",
+        "regime": "default",
+        "policy_version": "runtime-config",
+        "social_risk_score": 0.0,
+        "combined_risk_score": 0.0,
+        "gross_exposure_multiplier": 1.0,
+        "block_new_entries": false,
+        "verified_event_probability": 0.0,
+        "prediction_verification_failures": 0,
+        "reasons": [
+          "insufficient_platform_coverage",
+          "social_shock_normal",
+          "social_feed_unavailable_fail_open",
+          "no_usable_platform_signals"
+        ]
+      },
+      {
+        "asset_class": "FOREX",
+        "regime": "default",
+        "policy_version": "runtime-config",
+        "social_risk_score": 0.0,
+        "combined_risk_score": 0.0,
+        "gross_exposure_multiplier": 1.0,
+        "block_new_entries": false,
+        "verified_event_probability": 0.0,
+        "prediction_verification_failures": 0,
+        "reasons": [
+          "insufficient_platform_coverage",
+          "social_shock_normal",
+          "social_feed_unavailable_fail_open",
+          "no_usable_platform_signals"
+        ]
+      },
+      {
+        "asset_class": "CRYPTO",
+        "regime": "default",
+        "policy_version": "runtime-config",
+        "social_risk_score": 0.0,
+        "combined_risk_score": 0.0,
+        "gross_exposure_multiplier": 1.0,
+        "block_new_entries": false,
+        "verified_event_probability": 0.0,
+        "prediction_verification_failures": 0,
+        "reasons": [
+          "insufficient_platform_coverage",
+          "social_shock_normal",
+          "social_feed_unavailable_fail_open",
+          "no_usable_platform_signals"
+        ]
+      }
+    ],
+    "snapshots": [
+      {
+        "timestamp": "2026-02-20T13:22:22.332180",
+        "asset_class": "EQUITY",
+        "regime": "default",
+        "platform_count": 0,
+        "attention_z": 0.0,
+        "sentiment_score": 0.0,
+        "confidence": 0.0,
+        "risk_score": 0.0,
+        "reasons": [
+          "insufficient_platform_coverage"
+        ]
+      },
+      {
+        "timestamp": "2026-02-20T13:22:22.342032",
+        "asset_class": "FOREX",
+        "regime": "default",
+        "platform_count": 0,
+        "attention_z": 0.0,
+        "sentiment_score": 0.0,
+        "confidence": 0.0,
+        "risk_score": 0.0,
+        "reasons": [
+          "insufficient_platform_coverage"
+        ]
+      },
+      {
+        "timestamp": "2026-02-20T13:22:22.348340",
+        "asset_class": "CRYPTO",
+        "regime": "default",
+        "platform_count": 0,
+        "attention_z": 0.0,
+        "sentiment_score": 0.0,
+        "confidence": 0.0,
+        "risk_score": 0.0,
+        "reasons": [
+          "insufficient_platform_coverage"
+        ]
+      }
+    ],
+    "prediction_verification": []
+  },
+  "signal_quality": {}
+}
