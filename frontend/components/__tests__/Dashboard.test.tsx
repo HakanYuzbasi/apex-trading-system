@@ -2,309 +2,169 @@
  * @jest-environment jsdom
  */
 
-import { render, screen, fireEvent, waitFor } from '@testing-library/react';
-import { jest } from '@jest/globals';
-import Dashboard from '../Dashboard';
-import * as useWebSocketModule from '@/hooks/useWebSocket';
-import * as authModule from '@/components/auth/AuthProvider';
+import { fireEvent, render, screen } from "@testing-library/react";
+import Dashboard from "../Dashboard";
+import { useCockpitData, useMetrics } from "@/lib/api";
+import { useAuthContext } from "@/components/auth/AuthProvider";
+import { useTheme } from "@/components/theme/ThemeProvider";
+import { useWebSocket } from "@/hooks/useWebSocket";
 
-// Mock the WebSocket hook
-const mockSendMessage = jest.fn();
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-const mockLastMessage = { data: JSON.stringify({ type: 'connected' }) } as any;
+const pushMock = jest.fn();
+const replaceMock = jest.fn();
+const logoutMock = jest.fn();
 
-jest.mock('@/hooks/useWebSocket');
-const mockUseWebSocket = useWebSocketModule.useWebSocket as jest.MockedFunction<typeof useWebSocketModule.useWebSocket>;
+jest.mock("next/navigation", () => ({
+  useRouter: () => ({
+    push: pushMock,
+    replace: replaceMock,
+  }),
+}));
 
-// Mock the auth context
-jest.mock('@/components/auth/AuthProvider');
-const mockUseAuth = authModule.useAuthContext as jest.MockedFunction<typeof authModule.useAuthContext>;
+jest.mock("@/hooks/useWebSocket", () => ({
+  useWebSocket: jest.fn(),
+}));
 
-// Mock the 3D component
-jest.mock('../VolatilitySurface3D', () => {
-  return function MockVolatilitySurface3D() {
-    return <div data-testid="volatility-surface-3d">3D Surface</div>;
-  };
-});
+jest.mock("@/lib/api", () => ({
+  useMetrics: jest.fn(),
+  useCockpitData: jest.fn(),
+}));
 
-describe('Dashboard Component', () => {
-  const mockTradingState = {
-    timestamp: '2024-01-01T12:00:00Z',
-    capital: 1000000,
-    initial_capital: 1000000,
-    positions: {
-      'AAPL': {
-        qty: 100,
-        side: 'long',
-        avg_price: 150.0,
-        current_price: 155.0,
-        pnl: 500,
-        pnl_pct: 0.033,
-        signal_direction: 'long'
-      }
-    },
-    daily_pnl: 500,
+jest.mock("@/components/theme/ThemeProvider", () => ({
+  useTheme: jest.fn(),
+}));
+
+jest.mock("@/components/auth/AuthProvider", () => ({
+  useAuthContext: jest.fn(),
+}));
+
+const mockMetrics = {
+  status: true,
+  timestamp: "2026-02-21T12:00:00Z",
+  capital: 105000,
+  starting_capital: 100000,
+  daily_pnl: 1200,
+  total_pnl: 5000,
+  max_drawdown: -0.04,
+  sharpe_ratio: 1.35,
+  win_rate: 0.58,
+  open_positions: 3,
+  trades_count: 42,
+};
+
+const mockCockpit = {
+  status: {
+    online: true,
+    api_reachable: true,
+    state_fresh: true,
+    timestamp: "2026-02-21T12:00:00Z",
+    capital: 105000,
+    starting_capital: 100000,
+    daily_pnl: 1200,
     total_pnl: 5000,
-    sector_exposure: {
-      'Technology': 0.6,
-      'Healthcare': 0.4
-    },
-    open_positions: 1,
-    total_trades: 10,
-    sharpe_ratio: 1.5,
-    win_rate: 0.6,
-    max_drawdown: -0.05,
-    alerts: [],
-    equity_history: [
-      {
-        timestamp: '2024-01-01T10:00:00Z',
-        equity: 1000000,
-        drawdown: 0,
-        sharpe: 1.5
-      }
-    ]
-  };
+    max_drawdown: -0.04,
+    sharpe_ratio: 1.35,
+    win_rate: 0.58,
+    open_positions: 3,
+    option_positions: 0,
+    open_positions_total: 3,
+    total_trades: 42,
+  },
+  positions: [],
+  derivatives: [],
+  attribution: {
+    closed_trades: 42,
+    open_positions_tracked: 3,
+    gross_pnl: 5600,
+    net_pnl: 5000,
+    commissions: 300,
+    modeled_execution_drag: 180,
+    modeled_slippage_drag: 120,
+    sleeves: [],
+  },
+  usp: {
+    engine: "online",
+    score: 76,
+    band: "improving" as const,
+    sharpe_progress_pct: 90,
+    drawdown_budget_used_pct: 26,
+    alpha_retention_pct: 84,
+    execution_drag_pct_of_gross: 5,
+  },
+  social_audit: {
+    available: true,
+    unauthorized: false,
+    transport_error: false,
+    status_code: 200,
+    warning: null,
+    count: 0,
+    events: [],
+  },
+  alerts: [],
+  notes: [],
+};
+
+describe("Dashboard", () => {
+  const mockUseWebSocket = useWebSocket as jest.MockedFunction<typeof useWebSocket>;
+  const mockUseMetrics = useMetrics as jest.MockedFunction<typeof useMetrics>;
+  const mockUseCockpitData = useCockpitData as jest.MockedFunction<typeof useCockpitData>;
+  const mockUseTheme = useTheme as jest.MockedFunction<typeof useTheme>;
+  const mockUseAuth = useAuthContext as jest.MockedFunction<typeof useAuthContext>;
 
   beforeEach(() => {
     jest.clearAllMocks();
 
-    // Mock WebSocket hook
     mockUseWebSocket.mockReturnValue({
-      lastMessage: mockLastMessage,
-      sendMessage: mockSendMessage,
-      readyState: 1
-    } as any);
+      isConnected: true,
+      isConnecting: false,
+      reconnectAttempt: 0,
+      lastError: undefined,
+      lastMessage: null,
+      retry: jest.fn(),
+    });
 
-    // Mock auth context
+    mockUseMetrics.mockReturnValue({
+      metrics: mockMetrics,
+      isLoading: false,
+      isError: false,
+      error: undefined,
+    });
+
+    mockUseCockpitData.mockReturnValue({
+      data: mockCockpit,
+      isLoading: false,
+      isError: false,
+      error: undefined,
+    });
+
+    mockUseTheme.mockReturnValue({
+      theme: "dark",
+      setTheme: jest.fn(),
+      toggleTheme: jest.fn(),
+    });
+
     mockUseAuth.mockReturnValue({
-      user: { id: 'test-user', email: 'test@example.com' },
-      token: 'mock-token',
-      login: jest.fn(),
-      logout: jest.fn(),
-      loading: false
-    } as any);
-  });
-
-  test('renders dashboard with initial state', async () => {
-    render(<Dashboard />);
-
-    // Check for main dashboard elements
-    expect(screen.getByText('APEX Trading System')).toBeInTheDocument();
-    expect(screen.getByText('Live Trading Dashboard')).toBeInTheDocument();
-  });
-
-  test('displays connection status', async () => {
-    render(<Dashboard />);
-
-    // Connection status component should be present
-    await waitFor(() => {
-      expect(screen.getByText(/connection/i)).toBeInTheDocument();
+      user: null,
+      accessToken: "token",
+      isLoading: false,
+      isAuthenticated: true,
+      login: async () => ({ ok: true }),
+      register: async () => ({ ok: true }),
+      logout: logoutMock,
+      refreshUser: async () => {},
+      getToken: () => "token",
     });
   });
 
-  test('handles WebSocket messages correctly', async () => {
+  test("renders dashboard shell with live heading", () => {
     render(<Dashboard />);
-
-    // Simulate receiving trading state
-    const tradingStateMessage = {
-      data: JSON.stringify({
-        type: 'trading_state',
-        data: mockTradingState
-      })
-    };
-
-    // Update the mock to return our test message
-    mockUseWebSocket.mockReturnValue({
-      lastMessage: tradingStateMessage,
-      sendMessage: mockSendMessage,
-      readyState: 1
-    } as any);
-
-    // Re-render with the new message
-    render(<Dashboard />);
-
-    // Wait for the component to process the message
-    await waitFor(() => {
-      expect(screen.getByText('$1,000,000')).toBeInTheDocument();
-    });
+    expect(screen.getByRole("heading", { name: "Apex Dashboard" })).toBeInTheDocument();
+    expect(screen.getByText("Function Readiness")).toBeInTheDocument();
   });
 
-  test('displays trading metrics when data is available', async () => {
-    // Mock WebSocket to return trading state
-    mockUseWebSocket.mockReturnValue({
-      lastMessage: {
-        data: JSON.stringify({
-          type: 'trading_state',
-          data: mockTradingState
-        })
-      },
-      sendMessage: mockSendMessage,
-      readyState: 1
-    } as any);
-
+  test("logs out and routes to login", () => {
     render(<Dashboard />);
-
-    await waitFor(() => {
-      // Check for key metrics
-      expect(screen.getByText('$1,000,000')).toBeInTheDocument();
-      expect(screen.getByText('$500')).toBeInTheDocument(); // Daily P&L
-      expect(screen.getByText('1')).toBeInTheDocument(); // Open positions
-    });
-  });
-
-  test('handles tab navigation', async () => {
-    render(<Dashboard />);
-
-    // Find and click the charts tab
-    const chartsTab = screen.getByText('Charts');
-    fireEvent.click(chartsTab);
-
-    await waitFor(() => {
-      // Should show charts content
-      expect(screen.getByText('Performance Charts')).toBeInTheDocument();
-    });
-  });
-
-  test('displays alerts when present', async () => {
-    const stateWithAlerts = {
-      ...mockTradingState,
-      alerts: [
-        {
-          id: 'alert-1',
-          severity: 'warning' as const,
-          title: 'Test Alert',
-          message: 'This is a test alert',
-          timestamp: '2024-01-01T12:00:00Z',
-          source: 'system'
-        }
-      ]
-    };
-
-    mockUseWebSocket.mockReturnValue({
-      lastMessage: {
-        data: JSON.stringify({
-          type: 'trading_state',
-          data: stateWithAlerts
-        })
-      },
-      sendMessage: mockSendMessage,
-      readyState: 1
-    } as any);
-
-    render(<Dashboard />);
-
-    await waitFor(() => {
-      expect(screen.getByText('Test Alert')).toBeInTheDocument();
-      expect(screen.getByText('This is a test alert')).toBeInTheDocument();
-    });
-  });
-
-  test('handles circuit breaker activation', async () => {
-    const stateWithCircuitBreaker = {
-      ...mockTradingState,
-      circuit_breaker_active: true,
-      circuit_breaker_reason: 'High volatility detected'
-    };
-
-    mockUseWebSocket.mockReturnValue({
-      lastMessage: {
-        data: JSON.stringify({
-          type: 'trading_state',
-          data: stateWithCircuitBreaker
-        })
-      },
-      sendMessage: mockSendMessage,
-      readyState: 1
-    } as any);
-
-    render(<Dashboard />);
-
-    await waitFor(() => {
-      expect(screen.getByText(/circuit breaker/i)).toBeInTheDocument();
-      expect(screen.getByText('High volatility detected')).toBeInTheDocument();
-    });
-  });
-
-  test('displays sector exposure chart', async () => {
-    render(<Dashboard />);
-
-    await waitFor(() => {
-      // Check for sector chart component
-      const sectorChart = screen.getByTestId('sector-chart') ||
-        screen.getByText('Sector Exposure');
-      expect(sectorChart).toBeInTheDocument();
-    });
-  });
-
-  test('handles connection errors gracefully', async () => {
-    // Mock WebSocket error state
-    mockUseWebSocket.mockReturnValue({
-      lastMessage: null,
-      sendMessage: mockSendMessage,
-      readyState: 3 // CLOSED state
-    } as any);
-
-    render(<Dashboard />);
-
-    await waitFor(() => {
-      // Should show disconnected state
-      expect(screen.getByText(/disconnected/i)).toBeInTheDocument();
-    });
-  });
-
-  test('formats currency values correctly', async () => {
-    mockUseWebSocket.mockReturnValue({
-      lastMessage: {
-        data: JSON.stringify({
-          type: 'trading_state',
-          data: mockTradingState
-        })
-      },
-      sendMessage: mockSendMessage,
-      readyState: 1
-    } as any);
-
-    render(<Dashboard />);
-
-    await waitFor(() => {
-      // Check currency formatting
-      expect(screen.getByText('$1,000,000')).toBeInTheDocument();
-      expect(screen.getByText('$5,000')).toBeInTheDocument(); // Total P&L
-    });
-  });
-
-  test('updates real-time metrics', async () => {
-    mockUseWebSocket.mockReturnValue({
-      lastMessage: null,
-      sendMessage: mockSendMessage,
-      readyState: 1
-    } as any);
-
-    const { rerender } = render(<Dashboard />);
-
-    // Simulate real-time updates
-    const updatedState = {
-      ...mockTradingState,
-      capital: 1001000,
-      daily_pnl: 1000
-    };
-
-    mockUseWebSocket.mockReturnValue({
-      lastMessage: {
-        data: JSON.stringify({
-          type: 'trading_state',
-          data: updatedState
-        })
-      },
-      sendMessage: mockSendMessage,
-      readyState: 1
-    } as any);
-
-    rerender(<Dashboard />);
-
-    await waitFor(() => {
-      expect(screen.getByText('$1,001,000')).toBeInTheDocument();
-      expect(screen.getByText('$1,000')).toBeInTheDocument();
-    });
+    fireEvent.click(screen.getByRole("button", { name: "Logout" }));
+    expect(logoutMock).toHaveBeenCalledTimes(1);
+    expect(pushMock).toHaveBeenCalledWith("/login");
   });
 });

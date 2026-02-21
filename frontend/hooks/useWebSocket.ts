@@ -66,7 +66,7 @@ export function useWebSocket(isPublic?: boolean, {
     const attemptRef = useRef(0);
     const stoppedRef = useRef(false); // true when we should NOT reconnect (e.g. 403)
 
-    const connect = useCallback(() => {
+    const connect = useCallback(function connectSocket() {
         if (!shouldConnect || stoppedRef.current) return;
         if (wsRef.current?.readyState === WebSocket.OPEN) return;
 
@@ -120,7 +120,7 @@ export function useWebSocket(isPublic?: boolean, {
                 );
                 attemptRef.current += 1;
                 setState((s) => ({ ...s, reconnectAttempt: attemptRef.current }));
-                reconnectTimeoutRef.current = setTimeout(connect, delay);
+                reconnectTimeoutRef.current = setTimeout(connectSocket, delay);
             };
 
             socket.onerror = () => {
@@ -147,9 +147,9 @@ export function useWebSocket(isPublic?: boolean, {
                 MAX_RECONNECT_DELAY_MS
             );
             attemptRef.current += 1;
-            reconnectTimeoutRef.current = setTimeout(connect, delay);
+            reconnectTimeoutRef.current = setTimeout(connectSocket, delay);
         }
-    }, [url, reconnectInterval, shouldConnect, onMessage]);
+    }, [url, reconnectInterval, shouldConnect, onMessage, isPublic]);
 
     useEffect(() => {
         stoppedRef.current = false;

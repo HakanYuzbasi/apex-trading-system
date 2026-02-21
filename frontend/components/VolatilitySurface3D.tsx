@@ -9,7 +9,7 @@ function SurfaceMesh() {
     const meshRef = useRef<THREE.Mesh>(null);
 
     // Generate dummy vol surface data
-    const { geometry, colors } = useMemo(() => {
+    const { geometry } = useMemo(() => {
         const size = 30;
         const geometry = new THREE.PlaneGeometry(10, 10, size, size);
         const count = geometry.attributes.position.count;
@@ -49,10 +49,10 @@ function SurfaceMesh() {
         geometry.computeVertexNormals();
         geometry.setAttribute('color', new THREE.BufferAttribute(colors, 3));
 
-        return { geometry, colors };
+        return { geometry };
     }, []);
 
-    useFrame((state) => {
+    useFrame(() => {
         if (meshRef.current) {
             // Slowly rotate
             meshRef.current.rotation.z += 0.001;
@@ -71,18 +71,6 @@ function SurfaceMesh() {
             />
         </mesh>
     );
-}
-
-function WireframeOverlay() {
-    // Duplicate of surface but wireframe
-    return (
-        <mesh position={[0, 0, 0.01]} rotation={[-Math.PI / 2.5, 0, 0]}>
-            <planeGeometry args={[10, 10, 30, 30]} />
-            {/* We need the same deformation, so maybe better to pass geometry props. 
-                 For simplicity, skip dynamic overlay or use helper provided by Drei if needed.
-             */}
-        </mesh>
-    )
 }
 
 export default function VolatilitySurface3D() {

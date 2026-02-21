@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import {
@@ -29,12 +29,34 @@ import {
   type SleeveAttribution,
 } from "@/lib/api";
 import { useTheme } from "@/components/theme/ThemeProvider";
+import { useAuthContext } from "@/components/auth/AuthProvider";
 import { Button } from "@/components/ui/button";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import AlertsFeed from "@/components/dashboard/AlertsFeed";
 import ControlsPanel from "@/components/dashboard/ControlsPanel";
 import EquityPanel from "@/components/dashboard/EquityPanel";
 import PositionsTable from "@/components/dashboard/PositionsTable";
+import { Skeleton } from "@/components/ui/skeleton";
+import { useWebSocket } from "@/hooks/useWebSocket";
+import {
+  MAX_POSITIONS,
+  DRAWDOWN_BUDGET_PCT,
+  SHARPE_TARGET,
+  WIN_RATE_TARGET,
+  RETURN_CYCLE_TARGET,
+  TRADE_CYCLE_TARGET,
+  EDGE_CAPTURE_TARGET,
+} from "@/lib/constants";
+import {
+  clampPct,
+  formatCurrency,
+  formatCurrencyWithCents,
+  formatCompactCurrency,
+  formatPct,
+  normalizeDrawdownPct,
+  formatSleeveLabel,
+  sortIndicator,
+} from "@/lib/formatters";
 
 type LensKey = "performance" | "risk" | "execution";
 type SortDirection = "asc" | "desc";
@@ -182,74 +204,23 @@ type MonthlyModelRiskReport = {
   notes: string[];
 };
 
-function clampPct(value: number): number {
-  return Math.max(0, Math.min(100, value));
-}
-
-function formatCurrency(value: number): string {
-  return new Intl.NumberFormat("en-US", {
-    style: "currency",
-    currency: "USD",
-    maximumFractionDigits: 0,
-  }).format(value);
-}
-
-function formatCurrencyWithCents(value: number): string {
-  return new Intl.NumberFormat("en-US", {
-    style: "currency",
-    currency: "USD",
-    minimumFractionDigits: 2,
-    maximumFractionDigits: 2,
-  }).format(value);
-}
-
-function formatCompactCurrency(value: number): string {
-  return new Intl.NumberFormat("en-US", {
-    style: "currency",
-    currency: "USD",
-    notation: "compact",
-    maximumFractionDigits: 1,
-  }).format(value);
-}
-
-function formatPct(value: number): string {
-  return `${(value * 100).toFixed(2)}%`;
-}
-
-function normalizeDrawdownPct(value: number): number {
-  const absValue = Math.abs(value);
-  const pct = absValue > 1 ? absValue : absValue * 100;
-  return -pct;
-}
 
 function toneClass(tone: LensRow["tone"]): string {
-  if (tone === "positive") {
-    return "text-emerald-600 dark:text-emerald-300";
-  }
-  if (tone === "negative") {
-    return "text-rose-600 dark:text-rose-300";
-  }
+  if (tone === "positive") return "text-positive";
+  if (tone === "negative") return "text-negative";
   return "text-foreground";
 }
 
 function barToneClass(tone: LensBar["tone"]): string {
-  if (tone === "positive") {
-    return "bg-emerald-500";
-  }
-  if (tone === "negative") {
-    return "bg-rose-500";
-  }
+  if (tone === "positive") return "bg-positive";
+  if (tone === "negative") return "bg-negative";
   return "bg-primary";
 }
 
 function severityBadgeClass(severity: CockpitAlert["severity"]): string {
-  if (severity === "critical") {
-    return "bg-rose-100 text-rose-700 dark:bg-rose-900/60 dark:text-rose-300";
-  }
-  if (severity === "warning") {
-    return "bg-amber-100 text-amber-700 dark:bg-amber-900/50 dark:text-amber-300";
-  }
-  return "bg-sky-100 text-sky-700 dark:bg-sky-900/50 dark:text-sky-300";
+  if (severity === "critical") return "bg-negative/15 text-negative";
+  if (severity === "warning") return "bg-warning/15 text-warning";
+  return "bg-primary/15 text-primary";
 }
 
 function comparePositions(a: CockpitPosition, b: CockpitPosition, key: PositionSortKey): number {
@@ -259,38 +230,30 @@ function comparePositions(a: CockpitPosition, b: CockpitPosition, key: PositionS
   return Number(a[key]) - Number(b[key]);
 }
 
-function sortIndicator(active: boolean, direction: SortDirection): string {
-  if (!active) return "";
-  return direction === "asc" ? "↑" : "↓";
-}
-
-function formatSleeveLabel(name: string): string {
-  return name.replaceAll("_", " ");
-}
 
 function mandateBandClass(band: string): string {
-  if (band === "green") return "bg-emerald-100 text-emerald-700 dark:bg-emerald-900/60 dark:text-emerald-300";
-  if (band === "yellow") return "bg-amber-100 text-amber-700 dark:bg-amber-900/50 dark:text-amber-300";
-  return "bg-rose-100 text-rose-700 dark:bg-rose-900/60 dark:text-rose-300";
+  if (band === "green") return "bg-positive/15 text-positive";
+  if (band === "yellow") return "bg-warning/15 text-warning";
+  return "bg-negative/15 text-negative";
 }
 
 function readinessClass(state: "ok" | "warn" | "down"): string {
-  if (state === "ok") return "bg-emerald-100 text-emerald-700 dark:bg-emerald-900/60 dark:text-emerald-300";
-  if (state === "warn") return "bg-amber-100 text-amber-700 dark:bg-amber-900/50 dark:text-amber-300";
-  return "bg-rose-100 text-rose-700 dark:bg-rose-900/60 dark:text-rose-300";
+  if (state === "ok") return "bg-positive/15 text-positive";
+  if (state === "warn") return "bg-warning/15 text-warning";
+  return "bg-negative/15 text-negative";
 }
 
 function workflowStatusClass(status: MandateWorkflowPack["status"]): string {
-  if (status === "paper_live") return "bg-sky-100 text-sky-700 dark:bg-sky-900/50 dark:text-sky-300";
-  if (status === "approved") return "bg-emerald-100 text-emerald-700 dark:bg-emerald-900/60 dark:text-emerald-300";
-  if (status === "retired") return "bg-zinc-200 text-zinc-700 dark:bg-zinc-800 dark:text-zinc-300";
-  return "bg-amber-100 text-amber-700 dark:bg-amber-900/50 dark:text-amber-300";
+  if (status === "paper_live") return "bg-primary/15 text-primary";
+  if (status === "approved") return "bg-positive/15 text-positive";
+  if (status === "retired") return "bg-muted text-muted-foreground";
+  return "bg-warning/15 text-warning";
 }
 
 function socialDecisionClass(row: SocialAuditEvent): string {
-  if (row.block_new_entries) return "bg-rose-100 text-rose-700 dark:bg-rose-900/60 dark:text-rose-300";
-  if (row.gross_exposure_multiplier < 0.999) return "bg-amber-100 text-amber-700 dark:bg-amber-900/50 dark:text-amber-300";
-  return "bg-emerald-100 text-emerald-700 dark:bg-emerald-900/60 dark:text-emerald-300";
+  if (row.block_new_entries) return "bg-negative/15 text-negative";
+  if (row.gross_exposure_multiplier < 0.999) return "bg-warning/15 text-warning";
+  return "bg-positive/15 text-positive";
 }
 
 function socialDecisionLabel(row: SocialAuditEvent): string {
@@ -299,12 +262,9 @@ function socialDecisionLabel(row: SocialAuditEvent): string {
   return "NORMAL";
 }
 
-import { useWebSocket } from "@/hooks/useWebSocket";
-
-// ... existing imports ...
-
 export default function Dashboard({ isPublic = false }: { isPublic?: boolean }) {
   const router = useRouter();
+  const { logout } = useAuthContext();
   const { isConnected: wsConnected, lastMessage: wsMessage } = useWebSocket(isPublic);
   const { metrics, isLoading: metricsLoading, isError: metricsError, error: metricsFetchError } = useMetrics(isPublic);
   const { data: cockpit, isLoading: cockpitLoading, isError: cockpitError, error: cockpitFetchError } = useCockpitData(isPublic);
@@ -317,7 +277,6 @@ export default function Dashboard({ isPublic = false }: { isPublic?: boolean }) 
   // UI state
   const [themeMounted, setThemeMounted] = useState(false);
   const [activeLens, setActiveLens] = useState<LensKey>("performance");
-  const [activeTab, setActiveTab] = useState("positions");
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [historyDrawerOpen, setHistoryDrawerOpen] = useState(false);
 
@@ -361,8 +320,18 @@ export default function Dashboard({ isPublic = false }: { isPublic?: boolean }) 
   const [workflowPack, setWorkflowPack] = useState<MandateWorkflowPack | null>(null);
   const [workflowLoading, setWorkflowLoading] = useState(false);
   const [workflowError, setWorkflowError] = useState("");
+  const [sessionExpiredRedirecting, setSessionExpiredRedirecting] = useState(false);
 
   // ... existing state ...
+
+  const handleSessionExpired = useCallback(() => {
+    if (isPublic || sessionExpiredRedirecting) {
+      return;
+    }
+    setSessionExpiredRedirecting(true);
+    logout();
+    router.replace("/login?reason=session_expired");
+  }, [isPublic, logout, router, sessionExpiredRedirecting]);
 
   // Parse WebSocket message
   const wsData = wsMessage?.type === "state_update" ? wsMessage : null;
@@ -373,6 +342,7 @@ export default function Dashboard({ isPublic = false }: { isPublic?: boolean }) 
       status: true,
       timestamp: wsData.timestamp,
       capital: wsData.capital,
+      starting_capital: wsData.starting_capital ?? wsData.initial_capital ?? 0,
       daily_pnl: wsData.daily_pnl,
       total_pnl: wsData.total_pnl,
       max_drawdown: wsData.max_drawdown,
@@ -386,6 +356,7 @@ export default function Dashboard({ isPublic = false }: { isPublic?: boolean }) 
         status: cockpit.status.state_fresh,
         timestamp: cockpit.status.timestamp,
         capital: cockpit.status.capital,
+        starting_capital: cockpit.status.starting_capital ?? 0,
         daily_pnl: cockpit.status.daily_pnl,
         total_pnl: cockpit.status.total_pnl,
         max_drawdown: cockpit.status.max_drawdown,
@@ -400,8 +371,11 @@ export default function Dashboard({ isPublic = false }: { isPublic?: boolean }) 
   useEffect(() => {
     const fetchAggregated = async () => {
       try {
-        const base = (process.env.NEXT_PUBLIC_API_URL || "http://127.0.0.1:8000").replace(/\/+$/, "");
-        const res = await fetch(`${base}/portfolio/balance`, { cache: "no-store" });
+        const res = await fetch("/api/v1/portfolio/balance", { cache: "no-store" });
+        if (res.status === 401) {
+          handleSessionExpired();
+          return;
+        }
         if (res.ok) {
           const data = await res.json() as { total_equity: number; breakdown?: { source: string }[] };
           setAggregatedEquity(data.total_equity);
@@ -414,14 +388,17 @@ export default function Dashboard({ isPublic = false }: { isPublic?: boolean }) 
     void fetchAggregated();
     const interval = setInterval(() => void fetchAggregated(), 30000);
     return () => clearInterval(interval);
-  }, []);
+  }, [handleSessionExpired]);
 
   // Fetch broker sources for account selector
   useEffect(() => {
     const fetchSources = async () => {
       try {
-        const base = (process.env.NEXT_PUBLIC_API_URL || "http://127.0.0.1:8000").replace(/\/+$/, "");
-        const res = await fetch(`${base}/portfolio/sources`, { cache: "no-store" });
+        const res = await fetch("/api/v1/portfolio/sources", { cache: "no-store" });
+        if (res.status === 401) {
+          handleSessionExpired();
+          return;
+        }
         if (res.ok) {
           const data = await res.json() as { id: string; name: string; broker_type: string; environment: string }[];
           setBrokerSources(data);
@@ -431,14 +408,24 @@ export default function Dashboard({ isPublic = false }: { isPublic?: boolean }) 
       }
     };
     void fetchSources();
-  }, []);
+  }, [handleSessionExpired]);
 
   const errorText = `${String((cockpitFetchError as Error | undefined)?.message ?? "")} ${String((metricsFetchError as Error | undefined)?.message ?? "")}`.toLowerCase();
-  const authExpired = errorText.includes("not authenticated")
+  const authExpired = sessionExpiredRedirecting
+    || errorText.includes("not authenticated")
     || errorText.includes("session expired")
     || errorText.includes("401");
 
   // ... effects ...
+  useEffect(() => {
+    if (authExpired) {
+      handleSessionExpired();
+    }
+  }, [authExpired, handleSessionExpired]);
+
+  useEffect(() => {
+    setThemeMounted(true);
+  }, []);
 
   const showLoading = (metricsLoading || cockpitLoading) && !mergedMetrics;
   const apiReachable = wsConnected || (cockpit?.status.api_reachable ?? (!cockpitError || !metricsError));
@@ -458,18 +445,22 @@ export default function Dashboard({ isPublic = false }: { isPublic?: boolean }) 
   // Parse WS positions to match CockpitPosition interface
   const wsPositions = useMemo(() => {
     if (!wsData?.positions) return null;
-    return Object.entries(wsData.positions).map(([symbol, data]: [string, any]) => ({
-      symbol,
-      qty: data.qty || 0,
-      side: data.qty > 0 ? "LONG" : "SHORT", // Simple inference
-      entry: data.avg_price || 0,
-      current: data.current_price || 0,
-      pnl: data.pnl || 0,
-      pnl_pct: data.pnl_pct || 0,
-      signal: data.current_signal || 0,
-      signal_direction: data.signal_direction || "UNKNOWN",
-      source_id: data.source_id || "",
-    }));
+    return Object.entries(wsData.positions).map(([symbol, raw]) => {
+      const data = (raw && typeof raw === "object") ? (raw as Record<string, unknown>) : {};
+      const qty = Number(data.qty ?? 0);
+      return {
+        symbol,
+        qty,
+        side: qty > 0 ? "LONG" : "SHORT",
+        entry: Number(data.avg_price ?? 0),
+        current: Number(data.current_price ?? 0),
+        pnl: Number(data.pnl ?? 0),
+        pnl_pct: Number(data.pnl_pct ?? 0),
+        signal: Number(data.current_signal ?? 0),
+        signal_direction: String(data.signal_direction ?? "UNKNOWN"),
+        source_id: String(data.source_id ?? ""),
+      };
+    });
   }, [wsData]);
 
   const positions = useMemo(() => wsPositions ?? cockpit?.positions ?? [], [wsPositions, cockpit?.positions]);
@@ -482,8 +473,8 @@ export default function Dashboard({ isPublic = false }: { isPublic?: boolean }) 
   const optionPositions = cockpit?.status.option_positions ?? 0;
   const totalLines = cockpit?.status.open_positions_total ?? openPositions + optionPositions;
 
-  const startingCapital = Math.max(1, capital - totalPnl);
-  const returnPct = totalPnl / startingCapital;
+  const startingCapital = Number(mergedMetrics?.starting_capital) || Math.max(1, capital - totalPnl);
+  const returnPct = startingCapital > 0 ? totalPnl / startingCapital : 0;
   const pnlPerTrade = tradesCount > 0 ? totalPnl / tradesCount : 0;
   const avgPositionSize = openPositions > 0 ? capital / openPositions : 0;
   const nowLabel = String(mergedMetrics?.timestamp ?? "--");
@@ -543,20 +534,20 @@ export default function Dashboard({ isPublic = false }: { isPublic?: boolean }) 
         bars: [
           {
             label: "Sharpe Attainment",
-            value: clampPct((sharpe / 1.5) * 100),
-            targetLabel: "Target 1.50",
-            tone: sharpe >= 1.5 ? "positive" : "neutral",
+            value: clampPct((sharpe / SHARPE_TARGET) * 100),
+            targetLabel: `Target ${SHARPE_TARGET.toFixed(2)}`,
+            tone: sharpe >= SHARPE_TARGET ? "positive" : "neutral",
           },
           {
             label: "Win Rate Quality",
-            value: clampPct((winRate / 0.55) * 100),
-            targetLabel: "Target 55%",
-            tone: winRate >= 0.55 ? "positive" : "neutral",
+            value: clampPct((winRate / WIN_RATE_TARGET) * 100),
+            targetLabel: `Target ${(WIN_RATE_TARGET * 100).toFixed(0)}%`,
+            tone: winRate >= WIN_RATE_TARGET ? "positive" : "neutral",
           },
           {
             label: "Capital Efficiency",
-            value: clampPct((Math.abs(returnPct) / 0.12) * 100),
-            targetLabel: "12% cycle return",
+            value: clampPct((Math.abs(returnPct) / RETURN_CYCLE_TARGET) * 100),
+            targetLabel: `${(RETURN_CYCLE_TARGET * 100).toFixed(0)}% cycle return`,
             tone: returnPct >= 0 ? "positive" : "negative",
           },
         ],
@@ -591,13 +582,13 @@ export default function Dashboard({ isPublic = false }: { isPublic?: boolean }) 
         bars: [
           {
             label: "DD Budget Use",
-            value: clampPct((Math.abs(drawdownPct) / 15) * 100),
-            targetLabel: "15% portfolio cap",
+            value: clampPct((Math.abs(drawdownPct) / DRAWDOWN_BUDGET_PCT) * 100),
+            targetLabel: `${DRAWDOWN_BUDGET_PCT}% portfolio cap`,
             tone: Math.abs(drawdownPct) <= 8 ? "positive" : "negative",
           },
           {
             label: "Risk Buffer",
-            value: clampPct(100 - (Math.abs(drawdownPct) / 15) * 100),
+            value: clampPct(100 - (Math.abs(drawdownPct) / DRAWDOWN_BUDGET_PCT) * 100),
             targetLabel: "Higher is safer",
             tone: Math.abs(drawdownPct) <= 8 ? "positive" : "negative",
           },
@@ -631,27 +622,27 @@ export default function Dashboard({ isPublic = false }: { isPublic?: boolean }) 
           },
           {
             label: "Book Utilization",
-            value: formatPct(openPositions / 40),
-            hint: "Using 40-slot max book",
+            value: formatPct(openPositions / MAX_POSITIONS),
+            hint: `Using ${MAX_POSITIONS}-slot max book`,
           },
         ],
         bars: [
           {
             label: "Execution Throughput",
-            value: clampPct((tradesCount / 80) * 100),
-            targetLabel: "80 trade cycle",
+            value: clampPct((tradesCount / TRADE_CYCLE_TARGET) * 100),
+            targetLabel: `${TRADE_CYCLE_TARGET} trade cycle`,
             tone: tradesCount >= 20 ? "positive" : "neutral",
           },
           {
             label: "Position Dispersion",
-            value: clampPct((openPositions / 40) * 100),
+            value: clampPct((openPositions / MAX_POSITIONS) * 100),
             targetLabel: "Concentration monitor",
-            tone: openPositions <= 24 ? "positive" : "negative",
+            tone: openPositions <= Math.floor(MAX_POSITIONS * 0.6) ? "positive" : "negative",
           },
           {
             label: "Edge Capture",
-            value: clampPct((pnlPerTrade / 300) * 100),
-            targetLabel: "$300/trade benchmark",
+            value: clampPct((pnlPerTrade / EDGE_CAPTURE_TARGET) * 100),
+            targetLabel: `$${EDGE_CAPTURE_TARGET}/trade benchmark`,
             tone: pnlPerTrade >= 0 ? "positive" : "negative",
           },
         ],
@@ -660,7 +651,7 @@ export default function Dashboard({ isPublic = false }: { isPublic?: boolean }) 
   }, [capital, dailyPnl, drawdownPct, openPositions, pnlPerTrade, returnPct, sharpe, totalPnl, tradesCount, avgPositionSize, winRate]);
 
   const handleLogout = () => {
-    document.cookie = "token=; path=/; expires=Thu, 01 Jan 1970 00:00:01 GMT";
+    logout();
     router.push("/login");
   };
 
@@ -684,8 +675,7 @@ export default function Dashboard({ isPublic = false }: { isPublic?: boolean }) 
       const response = await fetch("/api/v1/mandate/audit?limit=30", { cache: "no-store" });
       const payload = (await response.json().catch(() => ({}))) as { events?: MandateAuditEvent[]; detail?: string };
       if (response.status === 401) {
-        document.cookie = "token=; path=/; expires=Thu, 01 Jan 1970 00:00:01 GMT";
-        router.replace("/login?reason=session_expired");
+        handleSessionExpired();
         return;
       }
       if (!response.ok) {
@@ -706,8 +696,7 @@ export default function Dashboard({ isPublic = false }: { isPublic?: boolean }) 
       const response = await fetch("/api/v1/mandate/calibration?limit=250", { cache: "no-store" });
       const payload = (await response.json().catch(() => ({}))) as MandateCalibrationSnapshot & { detail?: string };
       if (response.status === 401) {
-        document.cookie = "token=; path=/; expires=Thu, 01 Jan 1970 00:00:01 GMT";
-        router.replace("/login?reason=session_expired");
+        handleSessionExpired();
         return;
       }
       if (!response.ok) {
@@ -728,8 +717,7 @@ export default function Dashboard({ isPublic = false }: { isPublic?: boolean }) 
       const response = await fetch("/api/v1/mandate/reports/monthly?lookback=1000", { cache: "no-store" });
       const payload = (await response.json().catch(() => ({}))) as MonthlyModelRiskReport & { detail?: string };
       if (response.status === 401) {
-        document.cookie = "token=; path=/; expires=Thu, 01 Jan 1970 00:00:01 GMT";
-        router.replace("/login?reason=session_expired");
+        handleSessionExpired();
         return;
       }
       if (response.status === 403) {
@@ -754,8 +742,7 @@ export default function Dashboard({ isPublic = false }: { isPublic?: boolean }) 
       const response = await fetch("/api/v1/mandate/workflows?limit=50", { cache: "no-store" });
       const payload = (await response.json().catch(() => ([]))) as MandateWorkflowPack[] | { detail?: string };
       if (response.status === 401) {
-        document.cookie = "token=; path=/; expires=Thu, 01 Jan 1970 00:00:01 GMT";
-        router.replace("/login?reason=session_expired");
+        handleSessionExpired();
         return;
       }
       if (response.status === 403) {
@@ -793,8 +780,7 @@ export default function Dashboard({ isPublic = false }: { isPublic?: boolean }) 
       });
       const payload = (await response.json().catch(() => ({}))) as MandateWorkflowPack & { detail?: string };
       if (response.status === 401) {
-        document.cookie = "token=; path=/; expires=Thu, 01 Jan 1970 00:00:01 GMT";
-        router.replace("/login?reason=session_expired");
+        handleSessionExpired();
         return;
       }
       if (response.status === 403) {
@@ -827,8 +813,7 @@ export default function Dashboard({ isPublic = false }: { isPublic?: boolean }) 
       });
       const payload = (await response.json().catch(() => ({}))) as MandateWorkflowPack & { detail?: string };
       if (response.status === 401) {
-        document.cookie = "token=; path=/; expires=Thu, 01 Jan 1970 00:00:01 GMT";
-        router.replace("/login?reason=session_expired");
+        handleSessionExpired();
         return;
       }
       if (response.status === 403) {
@@ -862,8 +847,7 @@ export default function Dashboard({ isPublic = false }: { isPublic?: boolean }) 
       });
       const payload = (await response.json().catch(() => ({}))) as MandateWorkflowPack & { detail?: string };
       if (response.status === 401) {
-        document.cookie = "token=; path=/; expires=Thu, 01 Jan 1970 00:00:01 GMT";
-        router.replace("/login?reason=session_expired");
+        handleSessionExpired();
         return;
       }
       if (response.status === 403) {
@@ -904,8 +888,7 @@ export default function Dashboard({ isPublic = false }: { isPublic?: boolean }) 
       });
       const payload = (await response.json().catch(() => ({}))) as MandateEvaluationResult & { detail?: string };
       if (response.status === 401) {
-        document.cookie = "token=; path=/; expires=Thu, 01 Jan 1970 00:00:01 GMT";
-        router.replace("/login?reason=session_expired");
+        handleSessionExpired();
         return;
       }
       if (!response.ok) {
@@ -977,7 +960,7 @@ export default function Dashboard({ isPublic = false }: { isPublic?: boolean }) 
     return (
       <main className="apex-shell min-h-screen px-4 py-6 sm:px-6 lg:px-10">
         <div className="mx-auto w-full max-w-3xl">
-          <Alert className="rounded-2xl border-amber-300/60 bg-amber-50/70 text-amber-900 dark:border-amber-700/60 dark:bg-amber-950/40 dark:text-amber-200">
+          <Alert className="rounded-2xl border-warning/40 bg-warning/10 text-warning">
             <AlertTriangle className="h-4 w-4" />
             <AlertTitle>Session expired</AlertTitle>
             <AlertDescription>Redirecting to login.</AlertDescription>
@@ -996,8 +979,8 @@ export default function Dashboard({ isPublic = false }: { isPublic?: boolean }) 
               <div className="flex items-center gap-2 text-sm">
                 <AlertTriangle className="h-4 w-4 text-primary" />
                 <span className="font-semibold text-foreground">Alert Triage</span>
-                <span className="rounded-full bg-rose-100 px-2 py-0.5 text-xs font-semibold text-rose-700 dark:bg-rose-900/60 dark:text-rose-300">{criticalCount} critical</span>
-                <span className="rounded-full bg-amber-100 px-2 py-0.5 text-xs font-semibold text-amber-700 dark:bg-amber-900/50 dark:text-amber-300">{warningCount} warning</span>
+                <span className="rounded-full bg-negative/15 px-2 py-0.5 text-xs font-semibold text-negative">{criticalCount} critical</span>
+                <span className="rounded-full bg-warning/15 px-2 py-0.5 text-xs font-semibold text-warning">{warningCount} warning</span>
               </div>
 
               <div className="flex flex-wrap items-center gap-2">
@@ -1005,6 +988,7 @@ export default function Dashboard({ isPublic = false }: { isPublic?: boolean }) 
                   <button
                     key={filter}
                     type="button"
+                    aria-pressed={alertFilter === filter}
                     onClick={() => setAlertFilter(filter)}
                     className={`rounded-full px-2.5 py-1 text-xs font-semibold transition ${alertFilter === filter
                       ? "bg-primary text-primary-foreground"
@@ -1061,8 +1045,8 @@ export default function Dashboard({ isPublic = false }: { isPublic?: boolean }) 
               <p className="text-sm text-muted-foreground">Real-time execution monitoring.</p>
               <p className="text-xs text-muted-foreground">Desk sync: {nowLabel}</p>
               {aggregatedEquity !== null && (
-                <p className="inline-flex items-center gap-1.5 text-xs font-medium text-emerald-600 dark:text-emerald-400">
-                  <span className="inline-block h-1.5 w-1.5 rounded-full bg-emerald-500" />
+                <p className="inline-flex items-center gap-1.5 text-xs font-medium text-positive">
+                  <span className="inline-block h-1.5 w-1.5 rounded-full bg-positive" />
                   Total Equity ({brokerCount} broker{brokerCount !== 1 ? "s" : ""}): {formatCurrency(aggregatedEquity)}
                 </p>
               )}
@@ -1073,8 +1057,8 @@ export default function Dashboard({ isPublic = false }: { isPublic?: boolean }) 
                 className={`inline-flex items-center gap-2 rounded-full px-3 py-1 text-xs font-semibold ${isDisconnected
                   ? "bg-destructive/15 text-destructive"
                   : isStale
-                    ? "bg-amber-100 text-amber-700 dark:bg-amber-900/50 dark:text-amber-300"
-                    : "bg-emerald-100 text-emerald-700 dark:bg-emerald-900/50 dark:text-emerald-300"
+                    ? "bg-warning/15 text-warning"
+                    : "bg-positive/15 text-positive"
                   }`}
               >
                 {isDisconnected ? <WifiOff className="h-3.5 w-3.5" /> : <Wifi className="h-3.5 w-3.5" />}
@@ -1132,7 +1116,7 @@ export default function Dashboard({ isPublic = false }: { isPublic?: boolean }) 
         ) : null}
 
         {isStale ? (
-          <Alert className="apex-fade-up rounded-2xl border-amber-300/60 bg-amber-50/70 text-amber-900 dark:border-amber-700/60 dark:bg-amber-950/40 dark:text-amber-200">
+          <Alert className="apex-fade-up rounded-2xl border-warning/40 bg-warning/10 text-warning">
             <AlertTriangle className="h-4 w-4" />
             <AlertTitle>State stale</AlertTitle>
             <AlertDescription>Backend is reachable, but trading state freshness is below threshold.</AlertDescription>
@@ -1165,17 +1149,17 @@ export default function Dashboard({ isPublic = false }: { isPublic?: boolean }) 
               <p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">Capital</p>
               <DollarSign className="h-4 w-4 text-primary" />
             </div>
-            <p className="apex-kpi-value mt-2 text-lg font-semibold text-foreground">{showLoading ? "..." : formatCompactCurrency(capital)}</p>
+            <p className="apex-kpi-value mt-2 text-lg font-semibold text-foreground">{showLoading ? <Skeleton className="h-5 w-20" /> : formatCompactCurrency(capital)}</p>
             <p className="mt-1 text-[11px] text-muted-foreground">Live equity base</p>
           </button>
 
           <button type="button" className="apex-panel apex-interactive rounded-2xl p-4 text-left" onClick={() => setActiveLens("performance")}>
             <div className="flex items-center justify-between">
               <p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">Daily PnL</p>
-              {dailyPnl >= 0 ? <TrendingUp className="h-4 w-4 text-emerald-600 dark:text-emerald-300" /> : <TrendingDown className="h-4 w-4 text-rose-600 dark:text-rose-300" />}
+              {dailyPnl >= 0 ? <TrendingUp className="h-4 w-4 text-positive" /> : <TrendingDown className="h-4 w-4 text-negative" />}
             </div>
-            <p className={`apex-kpi-value mt-2 text-lg font-semibold ${dailyPnl >= 0 ? "text-emerald-700 dark:text-emerald-300" : "text-rose-700 dark:text-rose-300"}`}>
-              {showLoading ? "..." : formatCompactCurrency(dailyPnl)}
+            <p className={`apex-kpi-value mt-2 text-lg font-semibold ${dailyPnl >= 0 ? "text-positive" : "text-negative"}`}>
+              {showLoading ? <Skeleton className="h-5 w-20" /> : formatCompactCurrency(dailyPnl)}
             </p>
             <p className="mt-1 text-[11px] text-muted-foreground">Session contribution</p>
           </button>
@@ -1185,8 +1169,8 @@ export default function Dashboard({ isPublic = false }: { isPublic?: boolean }) 
               <p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">Sharpe</p>
               <Gauge className="h-4 w-4 text-primary" />
             </div>
-            <p className="apex-kpi-value mt-2 text-lg font-semibold text-foreground">{showLoading ? "..." : sharpe.toFixed(2)}</p>
-            <p className="mt-1 text-[11px] text-muted-foreground">Target 1.50+</p>
+            <p className="apex-kpi-value mt-2 text-lg font-semibold text-foreground">{showLoading ? <Skeleton className="h-5 w-14" /> : sharpe.toFixed(2)}</p>
+            <p className="mt-1 text-[11px] text-muted-foreground">{`Target ${SHARPE_TARGET.toFixed(2)}+`}</p>
           </button>
 
           <button type="button" className="apex-panel apex-interactive rounded-2xl p-4 text-left" onClick={() => setActiveLens("risk")}>
@@ -1194,10 +1178,10 @@ export default function Dashboard({ isPublic = false }: { isPublic?: boolean }) 
               <p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">Max Drawdown</p>
               <AlertTriangle className="h-4 w-4 text-primary" />
             </div>
-            <p className={`apex-kpi-value mt-2 text-lg font-semibold ${drawdownPct > -8 ? "text-emerald-700 dark:text-emerald-300" : "text-rose-700 dark:text-rose-300"}`}>
-              {showLoading ? "..." : `${drawdownPct.toFixed(2)}%`}
+            <p className={`apex-kpi-value mt-2 text-lg font-semibold ${drawdownPct > -8 ? "text-positive" : "text-negative"}`}>
+              {showLoading ? <Skeleton className="h-5 w-16" /> : `${drawdownPct.toFixed(2)}%`}
             </p>
-            <p className="mt-1 text-[11px] text-muted-foreground">Budget under 15%</p>
+            <p className="mt-1 text-[11px] text-muted-foreground">{`Budget under ${DRAWDOWN_BUDGET_PCT}%`}</p>
           </button>
 
           <button type="button" className="apex-panel apex-interactive rounded-2xl p-4 text-left" onClick={() => setActiveLens("execution")}>
@@ -1205,7 +1189,7 @@ export default function Dashboard({ isPublic = false }: { isPublic?: boolean }) 
               <p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">Open Positions</p>
               <BarChart3 className="h-4 w-4 text-primary" />
             </div>
-            <p className="apex-kpi-value mt-2 text-lg font-semibold text-foreground">{showLoading ? "..." : String(openPositions)}</p>
+            <p className="apex-kpi-value mt-2 text-lg font-semibold text-foreground">{showLoading ? <Skeleton className="h-5 w-10" /> : String(openPositions)}</p>
             <p className="mt-1 text-[11px] text-muted-foreground">Equity symbols only</p>
           </button>
 
@@ -1214,7 +1198,7 @@ export default function Dashboard({ isPublic = false }: { isPublic?: boolean }) 
               <p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">Total Trades</p>
               <Timer className="h-4 w-4 text-primary" />
             </div>
-            <p className="apex-kpi-value mt-2 text-lg font-semibold text-foreground">{showLoading ? "..." : String(tradesCount)}</p>
+            <p className="apex-kpi-value mt-2 text-lg font-semibold text-foreground">{showLoading ? <Skeleton className="h-5 w-10" /> : String(tradesCount)}</p>
             <p className="mt-1 text-[11px] text-muted-foreground">Execution sample</p>
           </button>
 
@@ -1223,9 +1207,9 @@ export default function Dashboard({ isPublic = false }: { isPublic?: boolean }) 
               <p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">USP Engine</p>
               <ShieldCheck className="h-4 w-4 text-primary" />
             </div>
-            <p className="apex-kpi-value mt-2 text-lg font-semibold text-foreground">{showLoading ? "..." : `${(usp?.score ?? 0).toFixed(1)}/100`}</p>
+            <p className="apex-kpi-value mt-2 text-lg font-semibold text-foreground">{showLoading ? <Skeleton className="h-5 w-16" /> : `${(usp?.score ?? 0).toFixed(1)}/100`}</p>
             <p className="mt-1 text-[11px] capitalize text-muted-foreground">
-              {showLoading ? "..." : (usp?.band ?? "stabilize").replaceAll("_", " ")}
+              {showLoading ? <Skeleton className="h-3 w-20" /> : (usp?.band ?? "stabilize").replaceAll("_", " ")}
             </p>
           </button>
         </EquityPanel>
@@ -1260,7 +1244,7 @@ export default function Dashboard({ isPublic = false }: { isPublic?: boolean }) 
                   <div key={row.label} className="rounded-xl border border-border/80 bg-background/70 p-3">
                     <div className="flex items-center justify-between gap-4">
                       <p className="text-xs uppercase tracking-wide text-muted-foreground">{row.label}</p>
-                      <p className={`apex-kpi-value text-sm font-semibold ${toneClass(row.tone)}`}>{showLoading ? "..." : row.value}</p>
+                      <p className={`apex-kpi-value text-sm font-semibold ${toneClass(row.tone)}`}>{showLoading ? <Skeleton className="h-4 w-16" /> : row.value}</p>
                     </div>
                     <p className="mt-1 text-[11px] text-muted-foreground">{row.hint}</p>
                   </div>
@@ -1278,7 +1262,7 @@ export default function Dashboard({ isPublic = false }: { isPublic?: boolean }) 
                     <div className="apex-progress-track">
                       <div className={`apex-progress-fill ${barToneClass(bar.tone)}`} style={{ width: `${showLoading ? 0 : clampPct(bar.value)}%` }} />
                     </div>
-                    <p className="apex-kpi-value mt-1 text-[11px] font-medium text-muted-foreground">{showLoading ? "..." : `${clampPct(bar.value).toFixed(0)}%`}</p>
+                    <p className="apex-kpi-value mt-1 text-[11px] font-medium text-muted-foreground">{showLoading ? <Skeleton className="h-3 w-10" /> : `${clampPct(bar.value).toFixed(0)}%`}</p>
                   </div>
                 ))}
               </div>
@@ -1300,22 +1284,22 @@ export default function Dashboard({ isPublic = false }: { isPublic?: boolean }) 
               </div>
               <div className="flex items-center justify-between rounded-lg border border-border/70 bg-background/60 px-3 py-2">
                 <dt className="text-muted-foreground">Win rate</dt>
-                <dd className="apex-kpi-value font-medium text-foreground">{showLoading ? "..." : formatPct(winRate)}</dd>
+                <dd className="apex-kpi-value font-medium text-foreground">{showLoading ? <Skeleton className="h-4 w-14" /> : formatPct(winRate)}</dd>
               </div>
               <div className="flex items-center justify-between rounded-lg border border-border/70 bg-background/60 px-3 py-2">
                 <dt className="text-muted-foreground">Net PnL</dt>
-                <dd className={`apex-kpi-value font-medium ${totalPnl >= 0 ? "text-emerald-700 dark:text-emerald-300" : "text-rose-700 dark:text-rose-300"}`}>
-                  {showLoading ? "..." : formatCompactCurrency(totalPnl)}
+                <dd className={`apex-kpi-value font-medium ${totalPnl >= 0 ? "text-positive" : "text-negative"}`}>
+                  {showLoading ? <Skeleton className="h-4 w-16" /> : formatCompactCurrency(totalPnl)}
                 </dd>
               </div>
               <div className="flex items-center justify-between rounded-lg border border-border/70 bg-background/60 px-3 py-2">
                 <dt className="text-muted-foreground">Book utilization</dt>
-                <dd className="apex-kpi-value font-medium text-foreground">{showLoading ? "..." : formatPct(openPositions / 40)}</dd>
+                <dd className="apex-kpi-value font-medium text-foreground">{showLoading ? <Skeleton className="h-4 w-14" /> : formatPct(openPositions / MAX_POSITIONS)}</dd>
               </div>
               <div className="flex items-center justify-between rounded-lg border border-border/70 bg-background/60 px-3 py-2">
                 <dt className="text-muted-foreground">Alpha retention</dt>
                 <dd className="apex-kpi-value font-medium text-foreground">
-                  {showLoading ? "..." : `${(usp?.alpha_retention_pct ?? 0).toFixed(1)}%`}
+                  {showLoading ? <Skeleton className="h-4 w-14" /> : `${(usp?.alpha_retention_pct ?? 0).toFixed(1)}%`}
                 </dd>
               </div>
               <div className="flex items-center justify-between rounded-lg border border-border/70 bg-background/60 px-3 py-2">
@@ -1361,7 +1345,7 @@ export default function Dashboard({ isPublic = false }: { isPublic?: boolean }) 
                   }}
                   disabled={calibrationLoading}
                 >
-                  {calibrationLoading ? "Refreshing..." : "Refresh Calibration"}
+                  {calibrationLoading ? <><RefreshCw className="h-3.5 w-3.5 animate-spin" /> Refreshing...</> : "Refresh Calibration"}
                 </Button>
               </div>
             </div>
@@ -1422,7 +1406,7 @@ export default function Dashboard({ isPublic = false }: { isPublic?: boolean }) 
                 }}
                 disabled={mandateLoading}
               >
-                {mandateLoading ? "Evaluating..." : "Evaluate Mandate"}
+                {mandateLoading ? <><RefreshCw className="h-3.5 w-3.5 animate-spin" /> Evaluating...</> : "Evaluate Mandate"}
               </Button>
             </div>
 
@@ -1443,7 +1427,7 @@ export default function Dashboard({ isPublic = false }: { isPublic?: boolean }) 
                     {mandateHistoryError}
                   </p>
                 ) : null}
-                <div className="max-h-[220px] space-y-2 overflow-auto">
+                <div className="max-h-[30vh] space-y-2 overflow-auto">
                   {mandateHistoryLoading ? (
                     <p className="text-xs text-muted-foreground">Loading history...</p>
                   ) : mandateHistory.length === 0 ? (
@@ -1603,10 +1587,10 @@ export default function Dashboard({ isPublic = false }: { isPublic?: boolean }) 
                   </div>
                   <p>Execution isolation: {workflowPack.execution_enabled ? "disabled policy violated" : "enabled (no live routing)"}</p>
                   <div className="flex flex-wrap items-center gap-2">
-                    <span className={`rounded-full px-2 py-0.5 text-[11px] font-semibold ${pmSigned ? "bg-emerald-100 text-emerald-700 dark:bg-emerald-900/60 dark:text-emerald-300" : "bg-amber-100 text-amber-700 dark:bg-amber-900/50 dark:text-amber-300"}`}>
+                    <span className={`rounded-full px-2 py-0.5 text-[11px] font-semibold ${pmSigned ? "bg-positive/15 text-positive" : "bg-warning/15 text-warning"}`}>
                       PM: {pmSigned ? "signed" : "pending"}
                     </span>
-                    <span className={`rounded-full px-2 py-0.5 text-[11px] font-semibold ${complianceSigned ? "bg-emerald-100 text-emerald-700 dark:bg-emerald-900/60 dark:text-emerald-300" : "bg-amber-100 text-amber-700 dark:bg-amber-900/50 dark:text-amber-300"}`}>
+                    <span className={`rounded-full px-2 py-0.5 text-[11px] font-semibold ${complianceSigned ? "bg-positive/15 text-positive" : "bg-warning/15 text-warning"}`}>
                       Compliance: {complianceSigned ? "signed" : "pending"}
                     </span>
                   </div>
@@ -1676,7 +1660,7 @@ export default function Dashboard({ isPublic = false }: { isPublic?: boolean }) 
                   <p className="text-xs font-semibold text-foreground">Workflow History</p>
                   <span className="text-[11px] text-muted-foreground">{workflowList.length} packs</span>
                 </div>
-                <div className="max-h-[170px] overflow-auto">
+                <div className="max-h-[25vh] overflow-auto">
                   {workflowList.length === 0 ? (
                     <p className="px-3 py-3 text-xs text-muted-foreground">No workflow packs yet or paywall restricted.</p>
                   ) : (
@@ -1710,7 +1694,7 @@ export default function Dashboard({ isPublic = false }: { isPublic?: boolean }) 
                   {calibrationError}
                 </p>
               ) : null}
-              <div className="max-h-[220px] overflow-auto rounded-lg border border-border/70">
+              <div className="max-h-[30vh] overflow-auto rounded-lg border border-border/70">
                 <table className="min-w-full text-xs">
                   <thead className="sticky top-0 z-10 bg-background/95">
                     <tr className="text-left text-muted-foreground">
@@ -1744,11 +1728,11 @@ export default function Dashboard({ isPublic = false }: { isPublic?: boolean }) 
                           <td className="apex-kpi-value px-3 py-2 text-foreground">{row.predictions}</td>
                           <td className="apex-kpi-value px-3 py-2 text-foreground">{(row.predicted_hit_rate * 100).toFixed(1)}%</td>
                           <td className="apex-kpi-value px-3 py-2 text-foreground">{(row.realized_hit_rate * 100).toFixed(1)}%</td>
-                          <td className={`apex-kpi-value px-3 py-2 ${Math.abs(row.calibration_gap) <= row.threshold_abs_gap ? "text-emerald-700 dark:text-emerald-300" : "text-amber-700 dark:text-amber-300"}`}>
+                          <td className={`apex-kpi-value px-3 py-2 ${Math.abs(row.calibration_gap) <= row.threshold_abs_gap ? "text-positive" : "text-warning"}`}>
                             {(row.calibration_gap * 100).toFixed(1)}%
                           </td>
                           <td className="apex-kpi-value px-3 py-2 text-foreground">{(row.threshold_abs_gap * 100).toFixed(1)}%</td>
-                          <td className={`px-3 py-2 ${row.within_threshold ? "text-emerald-700 dark:text-emerald-300" : "text-rose-700 dark:text-rose-300"}`}>
+                          <td className={`px-3 py-2 ${row.within_threshold ? "text-positive" : "text-negative"}`}>
                             {row.within_threshold ? "pass" : "breach"}
                           </td>
                           <td className="px-3 py-2 text-muted-foreground">{row.data_quality}</td>
@@ -1834,10 +1818,10 @@ export default function Dashboard({ isPublic = false }: { isPublic?: boolean }) 
               </div>
               <div className="flex flex-wrap items-center gap-2">
                 <span className={`rounded-full px-2 py-0.5 text-[11px] font-semibold uppercase ${socialAudit?.available
-                  ? "bg-emerald-100 text-emerald-700 dark:bg-emerald-900/60 dark:text-emerald-300"
+                  ? "bg-positive/15 text-positive"
                   : socialAudit?.unauthorized
-                    ? "bg-amber-100 text-amber-700 dark:bg-amber-900/50 dark:text-amber-300"
-                    : "bg-rose-100 text-rose-700 dark:bg-rose-900/60 dark:text-rose-300"
+                    ? "bg-warning/15 text-warning"
+                    : "bg-negative/15 text-negative"
                   }`}>
                   {socialAudit?.available ? "live" : socialAudit?.unauthorized ? "restricted" : "degraded"}
                 </span>
@@ -1859,7 +1843,7 @@ export default function Dashboard({ isPublic = false }: { isPublic?: boolean }) 
               </p>
             ) : null}
 
-            <div className="max-h-[280px] overflow-auto rounded-xl border border-border/80">
+            <div className="max-h-[35vh] overflow-auto rounded-xl border border-border/80">
               <table className="min-w-full text-xs">
                 <thead className="sticky top-0 z-10 bg-background/95 backdrop-blur">
                   <tr className="text-left text-muted-foreground">
@@ -1928,7 +1912,7 @@ export default function Dashboard({ isPublic = false }: { isPublic?: boolean }) 
                     <div className="mt-3 grid grid-cols-2 gap-2 text-xs">
                       <div className="rounded-lg border border-border/70 bg-background/60 px-2 py-1.5">
                         <p className="text-muted-foreground">Net alpha</p>
-                        <p className={`apex-kpi-value mt-0.5 text-sm font-semibold ${sleeve.net_pnl >= 0 ? "text-emerald-700 dark:text-emerald-300" : "text-rose-700 dark:text-rose-300"}`}>
+                        <p className={`apex-kpi-value mt-0.5 text-sm font-semibold ${sleeve.net_pnl >= 0 ? "text-positive" : "text-negative"}`}>
                           {formatCurrencyWithCents(sleeve.net_pnl)}
                         </p>
                       </div>
@@ -1986,13 +1970,13 @@ export default function Dashboard({ isPublic = false }: { isPublic?: boolean }) 
             {selectedSourceId && brokerSources.length > 0 && (() => {
               const src = brokerSources.find(s => s.id === selectedSourceId);
               return src ? (
-                <p className="mb-2 rounded-lg border border-emerald-300/50 bg-emerald-50/60 px-3 py-2 text-xs font-medium text-emerald-700 dark:border-emerald-700/40 dark:bg-emerald-950/40 dark:text-emerald-300">
+                <p className="mb-2 rounded-lg border border-positive/30 bg-positive/10 px-3 py-2 text-xs font-medium text-positive">
                   📂 Viewing: <strong>{src.name}</strong> ({src.broker_type.toUpperCase()} · {src.environment}) — positions scope active
                 </p>
               ) : null;
             })()}
 
-            <div className="max-h-[420px] overflow-auto rounded-xl border border-border/80">
+            <div className="max-h-[50vh] overflow-auto rounded-xl border border-border/80">
               <table className="min-w-full text-xs">
                 <thead className="sticky top-0 z-10 bg-background/95 backdrop-blur">
                   <tr className="text-left text-muted-foreground">
@@ -2005,7 +1989,7 @@ export default function Dashboard({ isPublic = false }: { isPublic?: boolean }) 
                       ["pnl_pct", "PnL %"],
                       ["signal_direction", "Signal"],
                     ] as [PositionSortKey, string][]).map(([key, label]) => (
-                      <th key={key} className="px-3 py-2 font-semibold">
+                      <th key={key} className="px-3 py-2 font-semibold" aria-sort={sortKey === key ? (sortDirection === "asc" ? "ascending" : "descending") : "none"}>
                         <button
                           type="button"
                           onClick={() => setSort(key)}
@@ -2032,10 +2016,10 @@ export default function Dashboard({ isPublic = false }: { isPublic?: boolean }) 
                         <td className="apex-kpi-value px-3 py-2 text-foreground">{position.qty}</td>
                         <td className="apex-kpi-value px-3 py-2 text-foreground">{formatCurrencyWithCents(position.entry)}</td>
                         <td className="apex-kpi-value px-3 py-2 text-foreground">{formatCurrencyWithCents(position.current)}</td>
-                        <td className={`apex-kpi-value px-3 py-2 font-semibold ${position.pnl >= 0 ? "text-emerald-700 dark:text-emerald-300" : "text-rose-700 dark:text-rose-300"}`}>
+                        <td className={`apex-kpi-value px-3 py-2 font-semibold ${position.pnl >= 0 ? "text-positive" : "text-negative"}`}>
                           {formatCurrencyWithCents(position.pnl)}
                         </td>
-                        <td className={`apex-kpi-value px-3 py-2 font-semibold ${position.pnl_pct >= 0 ? "text-emerald-700 dark:text-emerald-300" : "text-rose-700 dark:text-rose-300"}`}>
+                        <td className={`apex-kpi-value px-3 py-2 font-semibold ${position.pnl_pct >= 0 ? "text-positive" : "text-negative"}`}>
                           {position.pnl_pct.toFixed(2)}%
                         </td>
                         <td className="px-3 py-2 uppercase text-muted-foreground">{position.signal_direction || "unknown"}</td>
@@ -2051,7 +2035,7 @@ export default function Dashboard({ isPublic = false }: { isPublic?: boolean }) 
                 <h3 className="text-sm font-semibold text-foreground">Derivatives (Options)</h3>
                 <span className="text-xs text-muted-foreground">{derivatives.length} option legs</span>
               </div>
-              <div className="max-h-[220px] overflow-auto rounded-xl border border-border/80">
+              <div className="max-h-[30vh] overflow-auto rounded-xl border border-border/80">
                 <table className="min-w-full text-xs">
                   <thead className="sticky top-0 z-10 bg-background/95 backdrop-blur">
                     <tr className="text-left text-muted-foreground">

@@ -1,18 +1,27 @@
 import type { Metadata } from "next";
-import { Space_Grotesk, IBM_Plex_Mono } from "next/font/google";
+import localFont from "next/font/local";
 import "./globals.css";
 import { AuthProvider } from "@/components/auth/AuthProvider";
 import { ThemeProvider } from "@/components/theme/ThemeProvider";
 
-const sans = Space_Grotesk({
+const sans = localFont({
+  src: [
+    { path: "../public/fonts/geist-latin.woff2", weight: "100 900", style: "normal" },
+    { path: "../public/fonts/geist-latin-ext.woff2", weight: "100 900", style: "normal" },
+  ],
   variable: "--font-sans",
-  subsets: ["latin"],
+  display: "swap",
+  fallback: ["Segoe UI", "Helvetica Neue", "Arial", "sans-serif"],
 });
 
-const mono = IBM_Plex_Mono({
+const mono = localFont({
+  src: [
+    { path: "../public/fonts/geist-mono-latin.woff2", weight: "100 900", style: "normal" },
+    { path: "../public/fonts/geist-mono-latin-ext.woff2", weight: "100 900", style: "normal" },
+  ],
   variable: "--font-mono",
-  weight: ["400", "500", "600"],
-  subsets: ["latin"],
+  display: "swap",
+  fallback: ["SFMono-Regular", "Menlo", "Monaco", "Consolas", "monospace"],
 });
 
 export const metadata: Metadata = {

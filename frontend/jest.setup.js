@@ -1,6 +1,6 @@
 import '@testing-library/jest-dom'
 
-// Mock next/router
+// Mock next/router (pages router)
 jest.mock('next/router', () => ({
   useRouter() {
     return {
@@ -23,11 +23,33 @@ jest.mock('next/router', () => ({
   },
 }))
 
+// Mock next/navigation (app router — used by Dashboard and other app-dir components)
+jest.mock('next/navigation', () => ({
+  useRouter() {
+    return {
+      push: jest.fn(),
+      replace: jest.fn(),
+      back: jest.fn(),
+      forward: jest.fn(),
+      refresh: jest.fn(),
+      prefetch: jest.fn(),
+    }
+  },
+  usePathname() {
+    return '/'
+  },
+  useSearchParams() {
+    return new URLSearchParams()
+  },
+}))
+
 // Mock next/image
+/* eslint-disable @next/next/no-img-element */
 jest.mock('next/image', () => ({
   __esModule: true,
-  default: (props) => <img {...props} />,
+  default: (props) => <img alt="" {...props} />,
 }))
+/* eslint-enable @next/next/no-img-element */
 
 // Mock framer-motion
 jest.mock('framer-motion', () => ({

@@ -29,6 +29,12 @@
   --color-chart-3: var(--chart-3);
   --color-chart-4: var(--chart-4);
   --color-chart-5: var(--chart-5);
+  --color-positive: var(--positive);
+  --color-positive-foreground: var(--positive-foreground);
+  --color-negative: var(--negative);
+  --color-negative-foreground: var(--negative-foreground);
+  --color-warning: var(--warning);
+  --color-warning-foreground: var(--warning-foreground);
   --radius-sm: calc(var(--radius) - 4px);
   --radius-md: calc(var(--radius) - 2px);
   --radius-lg: var(--radius);
@@ -72,6 +78,13 @@
   --chart-4: oklch(0.74 0.14 75);
   --chart-5: oklch(0.7 0.14 20);
 
+  --positive: oklch(0.55 0.16 155);
+  --positive-foreground: oklch(0.99 0 0);
+  --negative: oklch(0.58 0.2 20);
+  --negative-foreground: oklch(0.99 0 0);
+  --warning: oklch(0.7 0.15 75);
+  --warning-foreground: oklch(0.2 0.03 75);
+
   --sidebar: oklch(0.98 0.01 230);
   --sidebar-foreground: oklch(0.18 0.02 252);
   --sidebar-primary: oklch(0.48 0.09 221);
@@ -111,6 +124,10 @@
   --input: oklch(0.38 0.02 245);
   --ring: oklch(0.72 0.08 220);
 
+  --positive: oklch(0.75 0.14 155);
+  --negative: oklch(0.72 0.17 20);
+  --warning: oklch(0.78 0.12 75);
+
   --sidebar: oklch(0.24 0.02 250);
   --sidebar-foreground: oklch(0.97 0.01 220);
   --sidebar-primary: oklch(0.71 0.1 221);
@@ -128,7 +145,7 @@
 
   body {
     @apply bg-background text-foreground;
-    font-family: var(--font-sans), "Space Grotesk", sans-serif;
+    font-family: var(--font-sans), "Geist", "Segoe UI", sans-serif;
     background-image:
       radial-gradient(circle at 10% 15%, rgba(53, 99, 233, 0.2), transparent 34%),
       radial-gradient(circle at 92% 82%, rgba(26, 181, 158, 0.2), transparent 30%),
@@ -222,7 +239,7 @@
 }
 
 .apex-kpi-value {
-  font-family: var(--font-mono), "IBM Plex Mono", monospace;
+  font-family: var(--font-mono), "Geist Mono", "SFMono-Regular", monospace;
   font-variant-numeric: tabular-nums;
 }
 
@@ -239,6 +256,9 @@
 .apex-stagger > *:nth-child(2) { animation-delay: 80ms; }
 .apex-stagger > *:nth-child(3) { animation-delay: 120ms; }
 .apex-stagger > *:nth-child(4) { animation-delay: 160ms; }
+.apex-stagger > *:nth-child(5) { animation-delay: 200ms; }
+.apex-stagger > *:nth-child(6) { animation-delay: 240ms; }
+.apex-stagger > *:nth-child(7) { animation-delay: 280ms; }
 
 .apex-density-grid {
   align-items: stretch;
@@ -325,12 +345,36 @@
   background: color-mix(in oklab, var(--primary) 55%, transparent 45%);
 }
 
+.apex-skeleton {
+  background: linear-gradient(90deg,
+    oklch(0.92 0.01 220) 25%,
+    oklch(0.96 0.005 220) 50%,
+    oklch(0.92 0.01 220) 75%);
+  background-size: 200% 100%;
+  animation: apex-skeleton-shimmer 1.5s ease-in-out infinite;
+  border-radius: 6px;
+}
+
+.dark .apex-skeleton {
+  background: linear-gradient(90deg,
+    oklch(0.28 0.02 250) 25%,
+    oklch(0.33 0.015 250) 50%,
+    oklch(0.28 0.02 250) 75%);
+  background-size: 200% 100%;
+}
+
+@keyframes apex-skeleton-shimmer {
+  0% { background-position: 200% 0; }
+  100% { background-position: -200% 0; }
+}
+
 @media (prefers-reduced-motion: reduce) {
   .apex-fade-up,
   .apex-stagger > *,
   .apex-progress-fill,
   .apex-interactive,
-  .apex-interactive::before {
+  .apex-interactive::before,
+  .apex-skeleton {
     animation: none !important;
     transition: none !important;
   }

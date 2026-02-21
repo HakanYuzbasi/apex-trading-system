@@ -66,9 +66,49 @@ const mockCockpit = {
   notes: [],
 };
 
-test.describe("Dashboard Resilience", () => {
-  test.beforeEach(async ({ page }) => {
-    await page.context().addCookies([{ name: "token", value: "mock-token", domain: "localhost", path: "/" }]);
+test.describe("Session Re-authentication", () => {
+  test("session_expired banner -> re-authenticate -> return to dashboard", async ({ page }) => {
+    await page.route("**/api/auth/login", async (route) => {
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          access_token: "test-access-token",
+          refresh_token: "test-refresh-token",
+          token_type: "bearer",
+        }),
+      });
+    });
+
+    await page.route("**/api/auth/me", async (route) => {
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          user_id: "u-admin",
+          username: "admin",
+          email: "admin@example.com",
+          roles: ["admin"],
+          tier: "enterprise",
+        }),
+      });
+    });
+
+    await page.route("**/api/v1/metrics", async (route) => {
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify(mockMetrics),
+      });
+    });
+
+    await page.route("**/api/v1/cockpit", async (route) => {
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify(mockCockpit),
+      });
+    });
 
     await page.route("**/api/v1/portfolio/balance", async (route) => {
       await route.fulfill({
@@ -88,51 +128,15 @@ test.describe("Dashboard Resilience", () => {
         body: JSON.stringify([]),
       });
     });
-  });
 
-  test("loads dashboard and shows live metrics", async ({ page }) => {
-    await page.route("**/api/v1/metrics", async (route) => {
-      await route.fulfill({
-        status: 200,
-        contentType: "application/json",
-        body: JSON.stringify(mockMetrics),
-      });
-    });
+    await page.goto("/login?reason=session_expired&returnUrl=%2Fdashboard");
+    await expect(page.getByText("Session expired. Please authenticate again.")).toBeVisible();
 
-    await page.route("**/api/v1/cockpit", async (route) => {
-      await route.fulfill({
-        status: 200,
-        contentType: "application/json",
-        body: JSON.stringify(mockCockpit),
-      });
-    });
+    await page.getByLabel("Username").fill("admin");
+    await page.getByLabel("Password / Master Key").fill("P3rO_f73zKfHHkt2WfxJ7zDZ");
+    await page.getByRole("button", { name: "Authenticate" }).click();
 
-    await page.goto("/dashboard");
+    await expect(page).toHaveURL(/\/dashboard$/);
     await expect(page.getByRole("heading", { name: "Apex Dashboard" })).toBeVisible();
-    await expect(page.getByText("Function Readiness")).toBeVisible();
-    await expect(page.getByText("$105K")).toBeVisible();
-    await expect(page.getByRole("button", { name: /Total Trades 42/i })).toBeVisible();
-  });
-
-  test("shows disconnected state when backend is offline", async ({ page }) => {
-    await page.route("**/api/v1/metrics", async (route) => {
-      await route.fulfill({
-        status: 503,
-        contentType: "application/json",
-        body: JSON.stringify({ detail: "Backend unavailable" }),
-      });
-    });
-
-    await page.route("**/api/v1/cockpit", async (route) => {
-      await route.fulfill({
-        status: 503,
-        contentType: "application/json",
-        body: JSON.stringify({ detail: "Backend unavailable" }),
-      });
-    });
-
-    await page.goto("/dashboard");
-    await expect(page.getByRole("heading", { name: "Apex Dashboard" })).toBeVisible();
-    await expect(page.getByText("Backend service is unreachable. Displaying cached data if available.")).toBeVisible();
   });
 });

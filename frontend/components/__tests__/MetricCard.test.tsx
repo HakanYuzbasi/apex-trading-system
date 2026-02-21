@@ -79,7 +79,11 @@ describe('MetricCard Component', () => {
   });
 
   test('handles missing subValue prop', () => {
-    const { subValue, trend, ...propsWithoutSubValue } = defaultProps;
+    const propsWithoutSubValue = {
+      title: defaultProps.title,
+      value: defaultProps.value,
+      icon: defaultProps.icon,
+    };
     
     render(<MetricCard {...propsWithoutSubValue} />);
     

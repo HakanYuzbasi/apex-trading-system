@@ -6,11 +6,6 @@ function getApiBase(): string {
   return (process.env.NEXT_PUBLIC_API_URL || process.env.APEX_API_URL || DEFAULT_API_BASE).replace(/\/+$/, "");
 }
 
-function asNumber(value: unknown, fallback = 0): number {
-  const parsed = Number(value);
-  return Number.isFinite(parsed) ? parsed : fallback;
-}
-
 export async function GET(): Promise<NextResponse> {
   try {
     const upstream = await fetch(`${getApiBase()}/public/cockpit`, {
