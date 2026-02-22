@@ -1,79 +1,54 @@
-"""Circuit breaker pattern implementation for fault tolerance.
-
-Provides automatic failure detection and recovery mechanisms to prevent
-cascading failures in distributed systems.
 """
-
+services/common/circuit_breaker.py
+Production-Grade SLO Circuit Breaker
+Monitors API errors and latency. Transitions system into Fail-Safe Mode if breached.
+"""
 import time
-import asyncio
-from typing import Callable, Optional, Any
-from dataclasses import dataclass
-from enum import Enum
 import logging
 
 logger = logging.getLogger(__name__)
 
-
-class CircuitState(Enum):
-    """States of the circuit breaker."""
-    CLOSED = "closed"  # Normal operation
-    OPEN = "open"  # Failing, rejecting requests
-    HALF_OPEN = "half_open"  # Testing if service recovered
-
-
-@dataclass
-class CircuitBreakerConfig:
-    """Configuration for circuit breaker."""
-    failure_threshold: int = 5  # Failures before opening
-    timeout: float = 60.0  # Seconds before trying half-open
-    success_threshold: int = 2  # Successes in half-open before closing
-    expected_exception: type = Exception
-
-
 class CircuitBreaker:
-    """Circuit breaker for protecting against cascading failures."""
-    
-    def __init__(self, config: CircuitBreakerConfig):
-        self.config = config
-        self.state = CircuitState.CLOSED
-        self.failure_count = 0
-        self.success_count = 0
-        self.last_failure_time: Optional[float] = None
-        
-    async def call(self, func: Callable, *args, **kwargs) -> Any:
-        """Execute function with circuit breaker protection."""
-        if self.state == CircuitState.OPEN:
-            if time.time() - self.last_failure_time >= self.config.timeout:
-                self.state = CircuitState.HALF_OPEN
-                self.success_count = 0
-                logger.info("Circuit breaker entering HALF_OPEN state")
-            else:
-                raise Exception("Circuit breaker is OPEN")
-        
-        try:
-            result = await func(*args, **kwargs) if asyncio.iscoroutinefunction(func) else func(*args, **kwargs)
-            self._on_success()
-            return result
-        except self.config.expected_exception as e:
-            self._on_failure()
-            raise e
-    
-    def _on_success(self):
-        """Handle successful call."""
-        self.failure_count = 0
-        
-        if self.state == CircuitState.HALF_OPEN:
-            self.success_count += 1
-            if self.success_count >= self.config.success_threshold:
-                self.state = CircuitState.CLOSED
-                logger.info("Circuit breaker closed after recovery")
-    
-    def _on_failure(self):
-        """Handle failed call."""
-        self.failure_count += 1
+    def __init__(self, error_threshold: int = 5, recovery_window: int = 60, slo_latency_ms: float = 50.0) -> None:
+        self.error_threshold = error_threshold
+        self.recovery_window = recovery_window
+        self.slo_latency_ms = slo_latency_ms
+        self.failures = 0
+        self.last_failure_time = 0.0
+        self.state = "CLOSED"  # CLOSED = OK, OPEN = Tripped, HALF_OPEN = Testing
+
+    def record_error(self) -> None:
+        """Increments error count and potentially trips the breaker."""
+        self.failures += 1
         self.last_failure_time = time.time()
-        
-        if self.failure_count >= self.config.failure_threshold:
-            self.state = CircuitState.OPEN
-            logger.warning(f"Circuit breaker opened after {self.failure_count} failures")
-circuit_breaker.py
+        if self.failures >= self.error_threshold and self.state == "CLOSED":
+            self._trip("API Error Threshold Exceeded")
+
+    def record_latency(self, latency_ms: float) -> None:
+        """Monitors execution speed against defined SLOs."""
+        if latency_ms > self.slo_latency_ms:
+            logger.warning(f"🐌 SLO Breach: Latency {latency_ms:.2f}ms > {self.slo_latency_ms}ms")
+            self.record_error()
+        elif self.state == "HALF_OPEN":
+            self._reset()
+
+    def _trip(self, reason: str) -> None:
+        """Activates Fail-Safe Mode."""
+        self.state = "OPEN"
+        logger.critical(f"🛑 CIRCUIT BREAKER TRIPPED: {reason}. System transitioned to FAIL-SAFE MODE.")
+
+    def _reset(self) -> None:
+        """Restores normal trading operations."""
+        self.state = "CLOSED"
+        self.failures = 0
+        logger.info("✅ Circuit Breaker Reset. Normal operations resumed.")
+
+    def is_allowed(self) -> bool:
+        """Gatekeeper check before allowing API calls or Order Routing."""
+        if self.state == "OPEN":
+            if time.time() - self.last_failure_time > self.recovery_window:
+                self.state = "HALF_OPEN"
+                logger.info("⚠️ Circuit Breaker Half-Open: Testing connection stability...")
+                return True
+            return False
+        return True

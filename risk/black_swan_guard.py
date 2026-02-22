@@ -429,3 +429,36 @@ class BlackSwanGuard:
                 self._threat_expiry.isoformat() if self._threat_expiry else None
             ),
         }
+
+
+# --- PHASE 3: Incident Response Dispatcher ---
+import os
+import httpx
+import logging
+
+dispatcher_logger = logging.getLogger("AlertDispatcher")
+
+class AlertDispatcher:
+    @staticmethod
+    async def trigger_pagerduty(reason: str) -> None:
+        """Dispatches a critical alert to PagerDuty/Slack during Black Swan events."""
+        webhook_url = os.getenv("PAGERDUTY_WEBHOOK_URL", "")
+        if not webhook_url:
+            dispatcher_logger.warning(f"🚨 BLACK SWAN EVENT: {reason}. (Webhook URL not configured).")
+            return
+        
+        payload = {
+            "routing_key": webhook_url,
+            "event_action": "trigger",
+            "payload": {
+                "summary": f"🚨 APEX BLACK SWAN ALERT: {reason}",
+                "severity": "critical",
+                "source": "apex_trading_system_prod"
+            }
+        }
+        try:
+            async with httpx.AsyncClient() as client:
+                await client.post("https://events.pagerduty.com/v2/enqueue", json=payload)
+                dispatcher_logger.info("📡 PagerDuty alert successfully dispatched.")
+        except Exception as e:
+            dispatcher_logger.error(f"Failed to dispatch PagerDuty alert: {e}")

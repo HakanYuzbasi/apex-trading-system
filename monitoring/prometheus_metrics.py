@@ -1228,3 +1228,27 @@ GRAFANA_DASHBOARD = {
         }
     ]
 }
+
+
+# --- PHASE 3: Production-Grade SLO Automation ---
+try:
+    from prometheus_client import Histogram, Counter
+    
+    RISK_CHECK_LATENCY = Histogram('apex_slo_risk_check_latency_ms', 'Latency of Pre-Trade Risk Checks', buckets=(1, 5, 10, 25, 50))
+    ROUTING_LATENCY = Histogram('apex_slo_order_routing_latency_ms', 'Latency of Smart Order Routing', buckets=(10, 25, 50, 100, 250))
+    SLO_BREACH_COUNTER = Counter('apex_slo_breaches_total', 'Number of times SLOs were breached', ['service'])
+
+    class SLOMonitor:
+        @staticmethod
+        def record_risk_latency(latency_ms: float) -> None:
+            RISK_CHECK_LATENCY.observe(latency_ms)
+            if latency_ms > 10.0:
+                SLO_BREACH_COUNTER.labels(service='risk_gateway').inc()
+
+        @staticmethod
+        def record_routing_latency(latency_ms: float) -> None:
+            ROUTING_LATENCY.observe(latency_ms)
+            if latency_ms > 50.0:
+                SLO_BREACH_COUNTER.labels(service='order_router').inc()
+except ImportError:
+    pass
