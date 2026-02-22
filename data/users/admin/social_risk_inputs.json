@@ -1,0 +1,26 @@
+{
+  "schema_version": "1.0",
+  "generated_at": "2026-02-22T23:00:00",
+  "freshness_sla_seconds": 1800,
+  "sources": {
+    "X": {
+      "freshness_ts": "2026-02-22T23:00:00",
+      "quality": { "status": "missing" }
+    },
+    "TIKTOK": {
+      "freshness_ts": "2026-02-22T23:00:00",
+      "quality": { "status": "missing" }
+    },
+    "INSTAGRAM": {
+      "freshness_ts": "2026-02-22T23:00:00",
+      "quality": { "status": "missing" }
+    },
+    "YOUTUBE": {
+      "freshness_ts": "2026-02-22T23:00:00",
+      "quality": { "status": "missing" }
+    }
+  },
+  "platforms": {},
+  "asset_classes": {},
+  "prediction_events": []
+}

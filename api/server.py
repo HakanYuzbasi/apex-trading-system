@@ -19,6 +19,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import PlainTextResponse
 import json
 import math
+import re
 from datetime import datetime
 from pydantic import BaseModel, Field
 
@@ -428,6 +429,45 @@ def _social_audit_repo() -> SocialDecisionAuditRepository:
         fallback_filepaths=fallback_filepaths,
     )
 
+
+def _social_audit_repo_for_user(user_id: str) -> SocialDecisionAuditRepository:
+    """Resolve tenant-scoped social audit repository with global legacy fallbacks."""
+    tenant = str(user_id or "").strip()
+    if not tenant:
+        return _social_audit_repo()
+
+    tenant_root = ApexConfig.DATA_DIR if tenant == "default" else (ApexConfig.DATA_DIR / "users" / tenant)
+    tenant_runtime_file = Path(
+        os.getenv(
+            "APEX_SOCIAL_DECISION_AUDIT_FILE",
+            str(tenant_root / "runtime" / "social_governor_decisions.jsonl"),
+        )
+    )
+    tenant_legacy_file = Path(
+        os.getenv(
+            "APEX_SOCIAL_DECISION_AUDIT_LEGACY_FILE",
+            str(tenant_root / "audit" / "social_governor_decisions.jsonl"),
+        )
+    )
+
+    fallback_filepaths: List[Path] = []
+    if tenant_legacy_file != tenant_runtime_file:
+        fallback_filepaths.append(tenant_legacy_file)
+    # Include global files as final fallback so historical events remain visible.
+    if SOCIAL_DECISION_AUDIT_FILE not in {tenant_runtime_file, tenant_legacy_file}:
+        fallback_filepaths.append(SOCIAL_DECISION_AUDIT_FILE)
+    if SOCIAL_DECISION_AUDIT_LEGACY_FILE not in {
+        tenant_runtime_file,
+        tenant_legacy_file,
+        SOCIAL_DECISION_AUDIT_FILE,
+    }:
+        fallback_filepaths.append(SOCIAL_DECISION_AUDIT_LEGACY_FILE)
+
+    return SocialDecisionAuditRepository(
+        tenant_runtime_file,
+        fallback_filepaths=fallback_filepaths,
+    )
+
 # --------------------------------------------------------------------------------
 # Real-time State Streaming
 # --------------------------------------------------------------------------------
@@ -480,6 +520,8 @@ async def stream_trading_state():
                             "starting_capital": current_state.get("starting_capital", 0),
                             "positions": current_state.get("positions", {}),
                             "daily_pnl": current_state.get("daily_pnl", 0),
+                            "daily_pnl_realized": current_state.get("daily_pnl_realized", current_state.get("daily_pnl", 0)),
+                            "daily_pnl_source": current_state.get("daily_pnl_source", "equity_delta"),
                             "total_pnl": current_state.get("total_pnl", 0),
                             "max_drawdown": current_state.get("max_drawdown", 0),
                             "sharpe_ratio": current_state.get("sharpe_ratio", 0),
@@ -497,6 +539,8 @@ async def stream_trading_state():
                             "starting_capital": 0,
                             "positions": {},
                             "daily_pnl": 0,
+                            "daily_pnl_realized": 0,
+                            "daily_pnl_source": "equity_delta",
                             "total_pnl": 0,
                             "max_drawdown": 0,
                             "sharpe_ratio": 0,
@@ -509,7 +553,12 @@ async def stream_trading_state():
 
                     tenant_equity = cached_equity_data_by_tenant.get(tenant_id)
                     if tenant_equity:
-                        update["aggregated_equity"] = tenant_equity.get("total_equity", 0.0)
+                        aggregated_equity = float(tenant_equity.get("total_equity", 0.0) or 0.0)
+                        update["aggregated_equity"] = aggregated_equity
+                        update["total_equity"] = aggregated_equity
+                        if is_admin and aggregated_equity > 0:
+                            # Keep WS KPI stream aligned with broker-aggregated equity.
+                            update["capital"] = aggregated_equity
                         update["equity_breakdown"] = tenant_equity.get("breakdown", [])
 
                     def increment_metrics():
@@ -523,6 +572,73 @@ async def stream_trading_state():
             logger.error(f"Error in broadcast loop: {e}")
             
         await asyncio.sleep(getattr(ApexConfig, "POLL_INTERVAL_SECONDS", 1.0))
+
+
+async def _collect_user_broker_overlay(user_id: str) -> Dict[str, object]:
+    """
+    Collect broker-derived status overrides for a user.
+    Keeps `/status` aligned with `/portfolio/balance` + `/portfolio/positions`
+    so downstream consumers do not diverge when daemon state is stale/flat.
+    """
+    try:
+        from services.broker.service import broker_service
+    except Exception as exc:  # SWALLOW: optional import path during partial startup
+        logger.debug("Broker overlay unavailable (import): %s", exc)
+        return {}
+
+    snapshot_task = broker_service.get_tenant_equity_snapshot(user_id)
+    positions_task = broker_service.get_positions(user_id)
+    snapshot_result, positions_result = await asyncio.gather(
+        snapshot_task,
+        positions_task,
+        return_exceptions=True,
+    )
+
+    overlay: Dict[str, object] = {}
+    if isinstance(snapshot_result, Exception):
+        logger.debug("Broker equity overlay failed for %s: %s", user_id, snapshot_result)
+    elif isinstance(snapshot_result, dict):
+        total_equity = snapshot_result.get("total_equity")
+        breakdown = snapshot_result.get("breakdown")
+        if isinstance(total_equity, (int, float)):
+            overlay["capital"] = float(total_equity)
+            overlay["aggregated_equity"] = float(total_equity)
+        if isinstance(breakdown, list):
+            overlay["equity_breakdown"] = breakdown
+
+    if isinstance(positions_result, Exception):
+        logger.debug("Broker positions overlay failed for %s: %s", user_id, positions_result)
+    elif isinstance(positions_result, list):
+        if len(positions_result) == 0:
+            return overlay
+        equity_positions = 0
+        option_positions = 0
+        aggregated_unrealized = 0.0
+        for row in positions_result:
+            rec = row if isinstance(row, dict) else {}
+            security_type = str(rec.get("security_type", "")).upper()
+            symbol = str(rec.get("symbol", "")).strip().upper()
+            symbol_compact = re.sub(r"\s+", "", symbol)
+            has_option_fields = bool(rec.get("right")) or bool(rec.get("strike")) or bool(rec.get("expiry"))
+            is_occ_option = bool(re.match(r"^[A-Z]{1,6}\d{6}[CP]\d{8}$", symbol_compact))
+            is_option = "OPT" in security_type or has_option_fields or is_occ_option
+            if is_option:
+                option_positions += 1
+            else:
+                equity_positions += 1
+            try:
+                aggregated_unrealized += float(rec.get("unrealized_pl", 0.0) or 0.0)
+            except Exception:
+                continue
+        overlay["open_positions"] = equity_positions
+        overlay["option_positions"] = option_positions
+        overlay["open_positions_total"] = equity_positions + option_positions
+        overlay["aggregated_positions"] = equity_positions
+        overlay["aggregated_positions_total"] = equity_positions + option_positions
+        if not math.isclose(aggregated_unrealized, 0.0, abs_tol=1e-9):
+            overlay["total_pnl"] = aggregated_unrealized
+
+    return overlay
 
 @app.on_event("startup")
 async def startup_event():
@@ -554,18 +670,45 @@ async def get_metrics(request: Request):
 @app.get("/status")
 async def get_status(user=Depends(require_user)):
     """Get daemon execution status. Only populated for admins until Phase 9 execution split."""
+    broker_mode = str(getattr(ApexConfig, "BROKER_MODE", "both")).lower()
+    primary_execution_broker = str(
+        os.getenv(
+            "APEX_PRIMARY_EXECUTION_BROKER",
+            getattr(ApexConfig, "PRIMARY_EXECUTION_BROKER", "alpaca"),
+        )
+    ).lower()
     if not user.has_role("admin"):
         safe_metrics = sanitize_execution_metrics({})
         return {
             "status": "online",
             "timestamp": datetime.now().isoformat(),
+            "broker_mode": broker_mode,
+            "primary_execution_broker": primary_execution_broker,
             **safe_metrics,
         }
     state = read_trading_state()
-    safe_metrics = sanitize_execution_metrics(state)
+    status_payload = dict(state)
+    broker_overlay = await _collect_user_broker_overlay(str(getattr(user, "user_id", "") or ""))
+    if broker_overlay:
+        status_payload.update(broker_overlay)
+        if "open_positions" in broker_overlay:
+            option_positions = int(status_payload.get("option_positions", 0) or 0)
+            status_payload["open_positions_total"] = max(
+                int(status_payload.get("open_positions_total", 0) or 0),
+                int(broker_overlay["open_positions"]) + option_positions,
+            )
+    safe_metrics = sanitize_execution_metrics(status_payload)
+    if "aggregated_equity" in broker_overlay:
+        safe_metrics["aggregated_equity"] = float(broker_overlay["aggregated_equity"])  # type: ignore[arg-type]
+    if "equity_breakdown" in broker_overlay:
+        safe_metrics["equity_breakdown"] = broker_overlay["equity_breakdown"]
+    if "aggregated_positions" in broker_overlay:
+        safe_metrics["aggregated_positions"] = int(broker_overlay["aggregated_positions"])  # type: ignore[arg-type]
     return {
-        "status": "online" if _state_is_fresh(state, ApexConfig.HEALTH_STALENESS_SECONDS) else "offline",
-        "timestamp": state.get("timestamp"),
+        "status": "online" if _state_is_fresh(status_payload, ApexConfig.HEALTH_STALENESS_SECONDS) else "offline",
+        "timestamp": status_payload.get("timestamp"),
+        "broker_mode": broker_mode,
+        "primary_execution_broker": primary_execution_broker,
         **safe_metrics,
     }
 
@@ -898,7 +1041,8 @@ async def get_social_governor_decisions(
     if regime and not asset_class:
         raise HTTPException(status_code=400, detail="asset_class is required when regime is provided")
     bounded_limit = min(max(int(limit), 1), 2000)
-    repo = _social_audit_repo()
+    user_id = str(getattr(user, "user_id", "") or getattr(user, "id", "") or "")
+    repo = _social_audit_repo_for_user(user_id)
     events = repo.load_events(
         limit=bounded_limit,
         asset_class=asset_class,
@@ -930,15 +1074,18 @@ async def websocket_endpoint(websocket: WebSocket):
         current_state = read_trading_state()
         from services.broker.service import broker_service
         tenant_equity_snapshot = await broker_service.get_tenant_equity_snapshot(tenant_id)
+        aggregated_equity = float(tenant_equity_snapshot.get("total_equity", 0.0) or 0.0)
         await websocket.send_json({
             "type": "state_update",
             "tenant_id": tenant_id,
             "timestamp": current_state.get("timestamp", datetime.now().isoformat()),
-            "capital": current_state.get("capital", 0),
+            "capital": aggregated_equity if aggregated_equity > 0 else current_state.get("capital", 0),
             "initial_capital": current_state.get("initial_capital", 0),
             "starting_capital": current_state.get("starting_capital", 0),
             "positions": current_state.get("positions", {}),
             "daily_pnl": current_state.get("daily_pnl", 0),
+            "daily_pnl_realized": current_state.get("daily_pnl_realized", current_state.get("daily_pnl", 0)),
+            "daily_pnl_source": current_state.get("daily_pnl_source", "equity_delta"),
             "total_pnl": current_state.get("total_pnl", 0),
             "max_drawdown": current_state.get("max_drawdown", 0),
             "sharpe_ratio": current_state.get("sharpe_ratio", 0),
@@ -947,7 +1094,8 @@ async def websocket_endpoint(websocket: WebSocket):
             "open_positions": current_state.get("open_positions", 0),
             "max_positions": current_state.get("max_positions", ApexConfig.MAX_POSITIONS),
             "total_trades": current_state.get("total_trades", 0),
-            "aggregated_equity": tenant_equity_snapshot.get("total_equity", 0.0),
+            "aggregated_equity": aggregated_equity,
+            "total_equity": aggregated_equity,
             "equity_breakdown": tenant_equity_snapshot.get("breakdown", []),
         })
         while True:

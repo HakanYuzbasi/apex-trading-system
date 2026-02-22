@@ -27,6 +27,8 @@ export async function GET(): Promise<NextResponse> {
       capital: sanitized.capital,
       starting_capital: sanitized.starting_capital,
       daily_pnl: sanitized.daily_pnl,
+      daily_pnl_realized: sanitized.daily_pnl,
+      daily_pnl_source: String(data.daily_pnl_source || "inferred"),
       total_pnl: sanitized.total_pnl,
       max_drawdown: sanitized.max_drawdown,
       sharpe_ratio: sanitized.sharpe_ratio,

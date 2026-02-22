@@ -106,8 +106,8 @@ class ApexConfig:
     # Fee model knobs for backtests and estimates (tune for sensitivity analysis)
     FX_SPREAD_BPS = float(os.getenv("APEX_FX_SPREAD_BPS", "1.5"))  # typical tight spread
     FX_COMMISSION_BPS = float(os.getenv("APEX_FX_COMMISSION_BPS", "0.2"))
-    CRYPTO_SPREAD_BPS = float(os.getenv("APEX_CRYPTO_SPREAD_BPS", "5.0"))
-    CRYPTO_COMMISSION_BPS = float(os.getenv("APEX_CRYPTO_COMMISSION_BPS", "15.0"))  # 0.15%
+    CRYPTO_SPREAD_BPS = float(os.getenv("APEX_CRYPTO_SPREAD_BPS", "3.0"))
+    CRYPTO_COMMISSION_BPS = float(os.getenv("APEX_CRYPTO_COMMISSION_BPS", "8.0"))  # 0.08%
 
     # IBKR pacing (requests per second, for paper-safe throttling)
     IBKR_MAX_REQ_PER_SEC = float(os.getenv("APEX_IBKR_MAX_REQ_PER_SEC", "6"))
@@ -142,6 +142,19 @@ class ApexConfig:
     ALPACA_ALLOW_OFFLINE: bool = (
         os.getenv("APEX_ALPACA_ALLOW_OFFLINE", "false").lower() == "true"
     )
+    ALPACA_DISCOVER_CRYPTO_SYMBOLS: bool = (
+        os.getenv("APEX_ALPACA_DISCOVER_CRYPTO_SYMBOLS", "true").lower() == "true"
+    )
+    ALPACA_DISCOVER_CRYPTO_LIMIT: int = int(
+        os.getenv("APEX_ALPACA_DISCOVER_CRYPTO_LIMIT", "24")
+    )
+    ALPACA_DISCOVER_CRYPTO_PREFERRED_QUOTES: List[str] = [
+        token.strip().upper()
+        for token in os.getenv(
+            "APEX_ALPACA_DISCOVER_CRYPTO_PREFERRED_QUOTES", "USD,USDT,USDC"
+        ).split(",")
+        if token.strip()
+    ]
 
     # ═══════════════════════════════════════════════════════════════
     # AUTHENTICATION
@@ -158,11 +171,23 @@ class ApexConfig:
         "APEX_BROKER_MODE",
         os.getenv("BROKER_MODE", os.getenv("APEX_484BACKTEST_ONLY484", "both")),
     )
+    # Preferred execution broker for UI/runtime role attribution.
+    # In mixed mode this determines which broker is shown as "trading" vs "idle".
+    PRIMARY_EXECUTION_BROKER: str = os.getenv(
+        "APEX_PRIMARY_EXECUTION_BROKER",
+        "alpaca",
+    ).lower()
     BROKER_EQUITY_CACHE_TTL_SECONDS: int = int(
         os.getenv("APEX_BROKER_EQUITY_CACHE_TTL_SECONDS", "900")
     )
     BROKER_EQUITY_QUORUM_MIN_BROKERS: int = int(
         os.getenv("APEX_BROKER_EQUITY_QUORUM_MIN_BROKERS", "1")
+    )
+    BROKER_EQUITY_REFRESH_INTERVAL_SECONDS: int = int(
+        os.getenv("APEX_BROKER_EQUITY_REFRESH_INTERVAL_SECONDS", "5")
+    )
+    BROKER_POSITIONS_REFRESH_INTERVAL_SECONDS: int = int(
+        os.getenv("APEX_BROKER_POSITIONS_REFRESH_INTERVAL_SECONDS", "5")
     )
     # Paper-session startup hygiene: stale persisted state can block trading after restarts.
     PAPER_STARTUP_RISK_SELF_HEAL_ENABLED: bool = os.getenv(
@@ -239,9 +264,9 @@ class ApexConfig:
     PERFORMANCE_GOVERNOR_ENABLED: bool = os.getenv(
         "APEX_PERFORMANCE_GOVERNOR_ENABLED", "true"
     ).lower() == "true"
-    PERFORMANCE_TARGET_SHARPE: float = float(os.getenv("APEX_PERFORMANCE_TARGET_SHARPE", "1.5"))
-    PERFORMANCE_TARGET_SORTINO: float = float(os.getenv("APEX_PERFORMANCE_TARGET_SORTINO", "2.0"))
-    PERFORMANCE_MAX_DRAWDOWN: float = float(os.getenv("APEX_PERFORMANCE_MAX_DRAWDOWN", "0.08"))
+    PERFORMANCE_TARGET_SHARPE: float = float(os.getenv("APEX_PERFORMANCE_TARGET_SHARPE", "0.8"))
+    PERFORMANCE_TARGET_SORTINO: float = float(os.getenv("APEX_PERFORMANCE_TARGET_SORTINO", "1.0"))
+    PERFORMANCE_MAX_DRAWDOWN: float = float(os.getenv("APEX_PERFORMANCE_MAX_DRAWDOWN", "0.10"))
     PERFORMANCE_GOV_SAMPLE_MINUTES: int = int(os.getenv("APEX_PERFORMANCE_GOV_SAMPLE_MINUTES", "15"))
     PERFORMANCE_GOV_MIN_SAMPLES: int = int(os.getenv("APEX_PERFORMANCE_GOV_MIN_SAMPLES", "30"))
     PERFORMANCE_GOV_LOOKBACK_POINTS: int = int(os.getenv("APEX_PERFORMANCE_GOV_LOOKBACK_POINTS", "200"))
@@ -381,18 +406,59 @@ class ApexConfig:
     # ═══════════════════════════════════════════════════════════════
     # SIGNAL THRESHOLDS (QUALITY FOCUS - Reduced noise)    # ML Configuration
     # ═══════════════════════════════════════════════════════════════
-    MIN_SIGNAL_THRESHOLD = 0.25      # Tighter threshold (was 0.15)
-    MIN_CONFIDENCE = 0.35            # Higher confidence required (was 0.20)
+    MIN_SIGNAL_THRESHOLD = 0.18      # Lowered from 0.25 to let moderate signals through
+    MIN_CONFIDENCE = 0.25            # Lowered from 0.35 (soft filters stack 0.85x*0.90x penalties)
+    CRYPTO_SIGNAL_THRESHOLD_MULTIPLIER: float = float(
+        os.getenv("APEX_CRYPTO_SIGNAL_THRESHOLD_MULTIPLIER", "0.60")
+    )
+    CRYPTO_CONFIDENCE_THRESHOLD_MULTIPLIER: float = float(
+        os.getenv("APEX_CRYPTO_CONFIDENCE_THRESHOLD_MULTIPLIER", "0.70")
+    )
+    CRYPTO_ROTATION_ENABLED: bool = os.getenv(
+        "APEX_CRYPTO_ROTATION_ENABLED", "true"
+    ).lower() == "true"
+    CRYPTO_ROTATION_TOP_N: int = int(
+        os.getenv("APEX_CRYPTO_ROTATION_TOP_N", "10")
+    )
+    CRYPTO_ROTATION_MOMENTUM_LOOKBACK: int = int(
+        os.getenv("APEX_CRYPTO_ROTATION_MOMENTUM_LOOKBACK", "20")
+    )
+    CRYPTO_ROTATION_LIQUIDITY_LOOKBACK: int = int(
+        os.getenv("APEX_CRYPTO_ROTATION_LIQUIDITY_LOOKBACK", "20")
+    )
+    CRYPTO_ROTATION_MIN_DOLLAR_VOLUME: float = float(
+        os.getenv("APEX_CRYPTO_ROTATION_MIN_DOLLAR_VOLUME", "250000")
+    )
+    CRYPTO_ROTATION_MOMENTUM_WEIGHT: float = float(
+        os.getenv("APEX_CRYPTO_ROTATION_MOMENTUM_WEIGHT", "0.65")
+    )
+    CRYPTO_ROTATION_LIQUIDITY_WEIGHT: float = float(
+        os.getenv("APEX_CRYPTO_ROTATION_LIQUIDITY_WEIGHT", "0.35")
+    )
+    # Extra crypto gating controls:
+    # - Top-ranked pairs get lower thresholds and momentum-alignment boosts.
+    CRYPTO_ROTATION_THRESHOLD_DISCOUNT_MAX: float = float(
+        os.getenv("APEX_CRYPTO_ROTATION_THRESHOLD_DISCOUNT_MAX", "0.30")
+    )
+    CRYPTO_MOMENTUM_ALIGN_SIGNAL_BOOST_MAX: float = float(
+        os.getenv("APEX_CRYPTO_MOMENTUM_ALIGN_SIGNAL_BOOST_MAX", "0.08")
+    )
+    CRYPTO_MOMENTUM_ALIGN_CONFIDENCE_BOOST_MAX: float = float(
+        os.getenv("APEX_CRYPTO_MOMENTUM_ALIGN_CONFIDENCE_BOOST_MAX", "0.10")
+    )
+    CRYPTO_MOMENTUM_CONFLICT_CONFIDENCE_PENALTY_MAX: float = float(
+        os.getenv("APEX_CRYPTO_MOMENTUM_CONFLICT_CONFIDENCE_PENALTY_MAX", "0.08")
+    )
     FORCE_RETRAIN = False            # Set to True to force model retraining on startup
 
     # Regime-based entry thresholds (High filter)
     SIGNAL_THRESHOLDS_BY_REGIME = {
-        'strong_bull': 0.20,    # Raised from 0.12
-        'bull': 0.23,          # Raised from 0.15
-        'neutral': 0.28,       # Raised from 0.18
-        'bear': 0.25,          # Raised from 0.15
-        'strong_bear': 0.22,   # Raised from 0.13
-        'volatile': 0.30       # New explicit threshold
+        'strong_bull': 0.15,    # Lowered from 0.20
+        'bull': 0.18,          # Lowered from 0.23
+        'neutral': 0.20,       # Lowered from 0.28
+        'bear': 0.18,          # Lowered from 0.25
+        'strong_bear': 0.15,   # Lowered from 0.22
+        'volatile': 0.22       # Lowered from 0.30
     }
 
     # Exit signal hysteresis (separate from entry threshold)
@@ -557,7 +623,7 @@ class ApexConfig:
         os.getenv("APEX_EXECUTION_MIN_EDGE_OVER_COST_BPS_FX", "6")
     )
     EXECUTION_MIN_EDGE_OVER_COST_BPS_CRYPTO: float = float(
-        os.getenv("APEX_EXECUTION_MIN_EDGE_OVER_COST_BPS_CRYPTO", "10")
+        os.getenv("APEX_EXECUTION_MIN_EDGE_OVER_COST_BPS_CRYPTO", "4")
     )
 
     # ═══════════════════════════════════════════════════════════════
@@ -667,7 +733,7 @@ class ApexConfig:
     # TIMING & EXECUTION
     # ═══════════════════════════════════════════════════════════════
     CHECK_INTERVAL_SECONDS = 30  # Check symbols every 30 seconds
-    TRADE_COOLDOWN_SECONDS = 240  # ✅ NEW: 4 minutes between trades per symbol
+    TRADE_COOLDOWN_SECONDS = 120  # Reduced from 240s; doubles opportunity window per symbol
     
     # ═══════════════════════════════════════════════════════════════
     # TRANSACTION COSTS

@@ -163,10 +163,11 @@ class HealthDashboard:
     
     def check_heartbeat(self) -> HealthCheck:
         """Check if system heartbeat is recent."""
-        heartbeat_file = self.data_dir / 'heartbeat.json'
+        heartbeat_candidates = [self.data_dir / 'heartbeat.json', Path('data') / 'heartbeat.json']
         
         try:
-            if heartbeat_file.exists():
+            heartbeat_file = next((p for p in heartbeat_candidates if p.exists()), None)
+            if heartbeat_file:
                 with open(heartbeat_file) as f:
                     data = json.load(f)
                 

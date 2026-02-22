@@ -47,6 +47,10 @@ class AggregatedPositionItem(BaseModel):
     source_id: str
     broker_type: str
     symbol: str
+    security_type: str = "EQUITY"
+    expiry: Optional[str] = None
+    strike: Optional[float] = None
+    right: Optional[str] = None
     qty: float
     side: str
     avg_cost: float

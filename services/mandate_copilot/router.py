@@ -52,7 +52,7 @@ def require_feature_or_admin(feature_key: str):
 async def evaluate_mandate(
     body: MandateEvaluationRequest,
     request: Request,
-    user=Depends(require_feature("mandate_copilot_preview")),
+    user=Depends(require_feature_or_admin("mandate_copilot_preview")),
 ):
     """Evaluate mandate feasibility and return policy-only recommendations."""
     if body.recommendation_mode != RecommendationMode.POLICY_ONLY:
@@ -75,7 +75,7 @@ async def evaluate_mandate(
 @router.get("/audit")
 async def get_mandate_audit(
     request: Request,
-    user=Depends(require_feature("mandate_copilot_preview")),
+    user=Depends(require_feature_or_admin("mandate_copilot_preview")),
     limit: int = Query(25, ge=1, le=200),
 ):
     """Get recent mandate copilot audit events."""
@@ -91,7 +91,7 @@ async def get_mandate_audit(
 @router.get("/calibration", response_model=MandateCalibrationResponse)
 async def get_mandate_calibration(
     request: Request,
-    user=Depends(require_feature("mandate_copilot_preview")),
+    user=Depends(require_feature_or_admin("mandate_copilot_preview")),
     limit: int = Query(200, ge=10, le=1000),
 ):
     """Get lightweight predicted-vs-realized calibration snapshot by sleeve."""

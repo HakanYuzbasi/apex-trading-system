@@ -2,6 +2,17 @@ import { NextRequest, NextResponse } from "next/server";
 import { sanitizeCount, sanitizeExecutionMetrics, sanitizeMoney } from "@/lib/metricGuards";
 
 const DEFAULT_API_BASE = "http://127.0.0.1:8000";
+export const dynamic = "force-dynamic";
+export const revalidate = 0;
+
+type MetricsSnapshotCache = {
+  updated_at_ms: number;
+  capital: number;
+  open_positions: number;
+};
+
+let LAST_GOOD_METRICS_SNAPSHOT: MetricsSnapshotCache | null = null;
+const METRICS_SNAPSHOT_CACHE_TTL_MS = Number(process.env.APEX_METRICS_UI_STABILITY_MS || "30000");
 
 function getApiBase(): string {
   return (process.env.NEXT_PUBLIC_API_URL || process.env.APEX_API_URL || DEFAULT_API_BASE).replace(/\/+$/, "");
@@ -48,18 +59,36 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
       ? ((await portfolioPositionsResp.json().catch(() => [])) as unknown[])
       : [];
     const sanitized = sanitizeExecutionMetrics(data);
-    const combinedCapital = portfolioBalanceResp.ok
+    const nowMs = Date.now();
+    const cachedFresh = Boolean(
+      LAST_GOOD_METRICS_SNAPSHOT
+      && (nowMs - LAST_GOOD_METRICS_SNAPSHOT.updated_at_ms) <= METRICS_SNAPSHOT_CACHE_TTL_MS,
+    );
+    let combinedCapital = portfolioBalanceResp.ok
       ? sanitizeMoney(balanceData.total_equity, sanitized.capital)
       : sanitized.capital;
-    const combinedOpenPositions = portfolioPositionsResp.ok
+    let combinedOpenPositions = portfolioPositionsResp.ok
       ? Math.max(sanitized.open_positions, sanitizeCount(portfolioPositions.length, 0))
       : sanitized.open_positions;
+
+    if ((!portfolioBalanceResp.ok || !portfolioPositionsResp.ok) && cachedFresh && LAST_GOOD_METRICS_SNAPSHOT) {
+      combinedCapital = LAST_GOOD_METRICS_SNAPSHOT.capital;
+      combinedOpenPositions = LAST_GOOD_METRICS_SNAPSHOT.open_positions;
+    } else if (portfolioBalanceResp.ok || portfolioPositionsResp.ok) {
+      LAST_GOOD_METRICS_SNAPSHOT = {
+        updated_at_ms: nowMs,
+        capital: combinedCapital,
+        open_positions: combinedOpenPositions,
+      };
+    }
     return NextResponse.json({
       status: String(data.status || "").toLowerCase() === "online",
       timestamp: (data.timestamp as string | null) ?? null,
       capital: combinedCapital,
       starting_capital: sanitized.starting_capital,
       daily_pnl: sanitized.daily_pnl,
+      daily_pnl_realized: sanitizeMoney(data.daily_pnl_realized, sanitized.daily_pnl),
+      daily_pnl_source: String(data.daily_pnl_source || "inferred"),
       total_pnl: sanitized.total_pnl,
       max_drawdown: sanitized.max_drawdown,
       sharpe_ratio: sanitized.sharpe_ratio,

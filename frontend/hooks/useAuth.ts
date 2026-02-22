@@ -5,6 +5,7 @@ import { useCallback, useEffect, useState } from "react";
 const STORAGE_ACCESS = "apex_access_token";
 const STORAGE_REFRESH = "apex_refresh_token";
 const STORAGE_USER = "apex_user";
+const DEFAULT_SESSION_COOKIE_MAX_AGE_SECONDS = 24 * 60 * 60;
 
 export type SubscriptionTier = "free" | "basic" | "pro" | "enterprise";
 
@@ -21,6 +22,28 @@ export interface AuthState {
   accessToken: string | null;
   isLoading: boolean;
   isAuthenticated: boolean;
+}
+
+function decodeJwtPayload(token: string): Record<string, unknown> | null {
+  const parts = token.split(".");
+  if (parts.length < 2) return null;
+  try {
+    const payloadB64 = parts[1].replace(/-/g, "+").replace(/_/g, "/");
+    const padded = payloadB64 + "=".repeat((4 - (payloadB64.length % 4)) % 4);
+    const decoded = atob(padded);
+    return JSON.parse(decoded) as Record<string, unknown>;
+  } catch {
+    return null;
+  }
+}
+
+function computeSessionCookieMaxAgeSeconds(token: string): number {
+  const payload = decodeJwtPayload(token);
+  const exp = payload?.exp;
+  if (typeof exp === "number" && Number.isFinite(exp)) {
+    return Math.max(0, Math.floor(exp - Date.now() / 1000));
+  }
+  return DEFAULT_SESSION_COOKIE_MAX_AGE_SECONDS;
 }
 
 function getStoredToken(): string | null {
@@ -56,7 +79,8 @@ function setStored(token: string | null, refresh: string | null, user: AuthUser 
   if (typeof document !== "undefined") {
     const secure = window.location.protocol === "https:" ? "; secure" : "";
     if (token) {
-      document.cookie = `token=${encodeURIComponent(token)}; path=/; max-age=1800; samesite=lax${secure}`;
+      const maxAge = computeSessionCookieMaxAgeSeconds(token);
+      document.cookie = `token=${encodeURIComponent(token)}; path=/; max-age=${maxAge}; samesite=lax${secure}`;
     } else {
       document.cookie = `token=; path=/; max-age=0; samesite=lax${secure}`;
     }

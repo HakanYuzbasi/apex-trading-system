@@ -159,6 +159,44 @@ class AlpacaConnector:
                 len(self._active_crypto_symbols),
             )
 
+    def get_discovered_crypto_symbols(
+        self,
+        *,
+        limit: int = 24,
+        preferred_quotes: Optional[List[str]] = None,
+    ) -> List[str]:
+        """
+        Return active Alpaca crypto pairs in APEX format (CRYPTO:BASE/QUOTE).
+        """
+        if not self._active_crypto_symbols:
+            return []
+
+        quotes = [
+            q.strip().upper()
+            for q in (preferred_quotes or getattr(ApexConfig, "ALPACA_DISCOVER_CRYPTO_PREFERRED_QUOTES", []))
+            if str(q).strip()
+        ]
+        if not quotes:
+            quotes = ["USD", "USDT", "USDC"]
+        quote_rank = {q: idx for idx, q in enumerate(quotes)}
+
+        ranked: List[tuple[int, str, str, str]] = []
+        for raw in self._active_crypto_symbols:
+            if "/" not in raw:
+                continue
+            base, quote = raw.split("/", 1)
+            base = base.strip().upper()
+            quote = quote.strip().upper()
+            if not base or not quote or not base.isalnum() or not quote.isalnum():
+                continue
+            ranked.append((quote_rank.get(quote, len(quotes)), base, quote, f"CRYPTO:{base}/{quote}"))
+
+        ranked.sort(key=lambda row: (row[0], row[1], row[2]))
+        pairs = [row[3] for row in ranked]
+        if limit > 0:
+            pairs = pairs[:limit]
+        return pairs
+
     # Known crypto base assets for reverse mapping
     _CRYPTO_BASES = {
         "BTC", "ETH", "SOL", "ADA", "XRP", "DOT", "LTC", "BCH",
@@ -207,7 +245,10 @@ class AlpacaConnector:
         params: Optional[dict] = None,
     ) -> Any:
         """Make authenticated API request with retry."""
-        if not self._client or not self._connected:
+        if not self._client:
+            raise ConnectionError("Not connected. Call connect() first.")
+        # Allow initial account probe during connect() before _connected flips true.
+        if not self._connected and path != "/v2/account":
             raise ConnectionError("Not connected. Call connect() first.")
 
         url = f"{base_url or self.base_url}{path}"
@@ -243,11 +284,16 @@ class AlpacaConnector:
                         await asyncio.sleep(2 ** attempt)
                         continue
                     return {}
-            except (httpx.RequestError, asyncio.TimeoutError) as e:
+            except (httpx.RequestError, asyncio.TimeoutError, RuntimeError) as e:
                 if "client has been closed" in str(e).lower():
                     self._connected = False
                     self._client = None
                     logger.warning("Alpaca HTTP client was closed; marking connector disconnected")
+                    return {}
+                if "cannot send a request" in str(e).lower():
+                    self._connected = False
+                    self._client = None
+                    logger.warning("Alpaca HTTP request rejected because client was closed; connector marked disconnected")
                     return {}
                 if attempt < max_retries:
                     logger.warning(
@@ -384,6 +430,10 @@ class AlpacaConnector:
             return self._fallback_price(normalized)
 
         except Exception as e:
+            msg = str(e).lower()
+            if "client has been closed" in msg or "cannot send a request" in msg:
+                logger.warning("Alpaca price request skipped for %s: connector client closed", symbol)
+                return self._fallback_price(normalized)
             logger.error(f"Error getting price for {symbol}: {e}")
             return 0.0
 

@@ -124,6 +124,36 @@ class TestRESTEndpoints:
         assert body["total_trades"] == 0
         assert body["daily_pnl"] == 0
 
+    def test_status_endpoint_overlays_broker_aggregates(self):
+        """GET /status should prefer broker aggregate equity/positions when available."""
+        client = TestClient(app)
+        with patch("api.server.read_trading_state", return_value={
+            "timestamp": "2026-02-22T12:00:00",
+            "capital": 100000,
+            "starting_capital": 100000,
+            "open_positions": 0,
+            "option_positions": 2,
+            "open_positions_total": 2,
+        }), patch(
+            "api.server._collect_user_broker_overlay",
+            return_value={
+                "capital": 1_283_013.79,
+                "aggregated_equity": 1_283_013.79,
+                "open_positions": 12,
+                "aggregated_positions": 12,
+                "equity_breakdown": [{"broker": "ibkr", "value": 1_280_000.0, "stale": False}],
+            },
+        ):
+            resp = client.get("/status")
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["capital"] == pytest.approx(1_283_013.79)
+        assert body["aggregated_equity"] == pytest.approx(1_283_013.79)
+        assert body["open_positions"] == 12
+        assert body["open_positions_total"] == 14
+        assert body["aggregated_positions"] == 12
+        assert body["equity_breakdown"][0]["broker"] == "ibkr"
+
     def test_public_metrics_endpoint_sanitizes_outliers(self):
         """GET /public/metrics should emit bounded KPIs even with malformed state."""
         client = TestClient(app)

@@ -77,13 +77,23 @@ class DataWatchdog:
         # 1. Global Silence Check
         silence_duration = now - self.last_global_update
         if silence_duration > self.max_silence_seconds:
-             return WatchdogStatus(
-                 is_alive=False,
-                 last_heartbeat=self.last_global_update,
-                 stalled_duration=silence_duration,
-                 critical_symbols=[],
-                 message=f"CRITICAL: Data feed DEAD. Silence for {silence_duration:.0f}s"
-             )
+            # Idle portfolios can run safely without hard-kill when there are
+            # no active positions requiring streaming freshness guarantees.
+            if not active_positions:
+                return WatchdogStatus(
+                    is_alive=True,
+                    last_heartbeat=self.last_global_update,
+                    stalled_duration=silence_duration,
+                    critical_symbols=[],
+                    message=f"IDLE: No active positions (silence {silence_duration:.0f}s)"
+                )
+            return WatchdogStatus(
+                is_alive=False,
+                last_heartbeat=self.last_global_update,
+                stalled_duration=silence_duration,
+                critical_symbols=[],
+                message=f"CRITICAL: Data feed DEAD. Silence for {silence_duration:.0f}s"
+            )
 
         # 2. Active Position Freshness Check
         stale_symbols = []

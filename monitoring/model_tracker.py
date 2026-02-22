@@ -32,37 +32,42 @@ class ModelPerformanceTracker:
         
         # Prometheus Metrics
         if PROMETHEUS_AVAILABLE:
-            with self._metrics_lock:
-                if self.__class__._shared_model_accuracy is None:
-                    try:
-                        self.__class__._shared_model_accuracy = Gauge(
-                            "apex_ml_model_accuracy_rolling",
-                            "Rolling accuracy of ML model (0-1)",
-                            ["symbol", "window"]
-                        )
-                    except ValueError as exc:
-                        if "Duplicated timeseries" in str(exc):
-                            self.__class__._shared_model_accuracy = REGISTRY._names_to_collectors.get(  # type: ignore[attr-defined]
-                                "apex_ml_model_accuracy_rolling"
+            try:
+                with self._metrics_lock:
+                    if self.__class__._shared_model_accuracy is None:
+                        try:
+                            self.__class__._shared_model_accuracy = Gauge(
+                                "apex_ml_model_accuracy_rolling",
+                                "Rolling accuracy of ML model (0-1)",
+                                ["symbol", "window"]
                             )
-                        else:
-                            raise
-                if self.__class__._shared_prediction_error is None:
-                    try:
-                        self.__class__._shared_prediction_error = Histogram(
-                            "apex_ml_prediction_error",
-                            "Prediction error (predicted - actual)",
-                            ["symbol"]
-                        )
-                    except ValueError as exc:
-                        if "Duplicated timeseries" in str(exc):
-                            self.__class__._shared_prediction_error = REGISTRY._names_to_collectors.get(  # type: ignore[attr-defined]
-                                "apex_ml_prediction_error"
+                        except ValueError as exc:
+                            if "Duplicated timeseries" in str(exc):
+                                self.__class__._shared_model_accuracy = REGISTRY._names_to_collectors.get(  # type: ignore[attr-defined]
+                                    "apex_ml_model_accuracy_rolling"
+                                )
+                            else:
+                                raise
+                    if self.__class__._shared_prediction_error is None:
+                        try:
+                            self.__class__._shared_prediction_error = Histogram(
+                                "apex_ml_prediction_error",
+                                "Prediction error (predicted - actual)",
+                                ["symbol"]
                             )
-                        else:
-                            raise
-            self.model_accuracy = self.__class__._shared_model_accuracy
-            self.prediction_error = self.__class__._shared_prediction_error
+                        except ValueError as exc:
+                            if "Duplicated timeseries" in str(exc):
+                                self.__class__._shared_prediction_error = REGISTRY._names_to_collectors.get(  # type: ignore[attr-defined]
+                                    "apex_ml_prediction_error"
+                                )
+                            else:
+                                raise
+                self.model_accuracy = self.__class__._shared_model_accuracy
+                self.prediction_error = self.__class__._shared_prediction_error
+            except Exception as exc:
+                logger.warning("Model tracker Prometheus metrics disabled: %s", exc)
+                self.model_accuracy = None
+                self.prediction_error = None
         else:
             self.model_accuracy = None
             self.prediction_error = None

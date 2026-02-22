@@ -24,12 +24,6 @@ def _clamp(value: float, lower: float, upper: float) -> float:
 def _parse_dt(value: object) -> Optional[datetime]:
     if not value:
         return None
-
-
-def _normalize_dt(value: datetime) -> datetime:
-    if value.tzinfo is None:
-        return value
-    return value.astimezone(timezone.utc).replace(tzinfo=None)
     try:
         text = str(value).strip()
         if not text:
@@ -37,6 +31,12 @@ def _normalize_dt(value: datetime) -> datetime:
         return datetime.fromisoformat(text.replace("Z", "+00:00"))
     except Exception:
         return None
+
+
+def _normalize_dt(value: datetime) -> datetime:
+    if value.tzinfo is None:
+        return value
+    return value.astimezone(timezone.utc).replace(tzinfo=None)
 
 
 @dataclass(frozen=True)

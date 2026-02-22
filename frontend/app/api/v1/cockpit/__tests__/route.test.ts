@@ -300,3 +300,328 @@ describe("cockpit route — /portfolio/positions fallback", () => {
     expect(fallbackAlert).toBeDefined();
   });
 });
+
+describe("cockpit route — broker/source inference stability", () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+  });
+
+  it("infers broker readiness from portfolio positions when sources endpoint is empty", async () => {
+    mockAllEndpoints(
+      makeStatusData({
+        primary_execution_broker: "alpaca",
+        broker_mode: "both",
+        open_positions: 1,
+      }),
+      {
+        portfolioSources: [],
+        portfolioBalance: { total_equity: 250000, breakdown: [] },
+        portfolioPositions: [
+          {
+            symbol: "TSLA",
+            qty: 4,
+            side: "LONG",
+            avg_cost: 210,
+            current_price: 215,
+            unrealized_pl: 20,
+            unrealized_plpc: 0.024,
+            broker_type: "ibkr",
+            source_id: "ibkr-source-1",
+          },
+        ],
+      },
+    );
+
+    const response = await GET(makeRequest());
+    const body = await response.json();
+
+    expect(body.status.active_broker).toBe("alpaca");
+    const ibkr = body.status.brokers.find((row: { broker: string }) => row.broker === "ibkr");
+    const alpaca = body.status.brokers.find((row: { broker: string }) => row.broker === "alpaca");
+    expect(ibkr).toBeDefined();
+    expect(ibkr.configured).toBe(true);
+    expect(alpaca).toBeDefined();
+    expect(alpaca.configured).toBe(true);
+  });
+});
+
+describe("cockpit route — social audit cache stability", () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+  });
+
+  it("keeps last good social audit snapshot when upstream temporarily fails", async () => {
+    const status = makeStatusData({ primary_execution_broker: "alpaca" });
+    mockFetch
+      .mockResolvedValueOnce(mockUpstream(status)) // /status
+      .mockResolvedValueOnce(mockUpstream([])) // /positions
+      .mockResolvedValueOnce(mockUpstream({ positions: {} })) // /state
+      .mockResolvedValueOnce(mockUpstream({
+        count: 1,
+        events: [
+          {
+            audit_id: "social-1",
+            timestamp: "2026-02-22T12:00:00Z",
+            asset_class: "EQUITY",
+            regime: "neutral",
+            policy_version: "v1",
+            decision_hash: "hash-1",
+            decision: {
+              block_new_entries: false,
+              gross_exposure_multiplier: 1.0,
+              combined_risk_score: 0.15,
+              verified_event_probability: 0.33,
+              prediction_verification_failures: 0,
+              reasons: ["ok"],
+            },
+            verified_events: [],
+          },
+        ],
+      })) // /social-governor
+      .mockResolvedValueOnce(mockUpstream([])) // /portfolio/positions
+      .mockResolvedValueOnce(mockUpstream([])) // /portfolio/sources
+      .mockResolvedValueOnce(mockUpstream({ total_equity: 100000, breakdown: [] })); // /portfolio/balance
+
+    const first = await GET(makeRequest());
+    const firstBody = await first.json();
+    expect(firstBody.social_audit.available).toBe(true);
+    expect(firstBody.social_audit.events).toHaveLength(1);
+
+    mockFetch
+      .mockResolvedValueOnce(mockUpstream(status)) // /status
+      .mockResolvedValueOnce(mockUpstream([])) // /positions
+      .mockResolvedValueOnce(mockUpstream({ positions: {} })) // /state
+      .mockResolvedValueOnce(mockUpstream({ detail: "upstream error" }, false, 500)) // /social-governor
+      .mockResolvedValueOnce(mockUpstream([])) // /portfolio/positions
+      .mockResolvedValueOnce(mockUpstream([])) // /portfolio/sources
+      .mockResolvedValueOnce(mockUpstream({ total_equity: 100000, breakdown: [] })); // /portfolio/balance
+
+    const second = await GET(makeRequest());
+    const secondBody = await second.json();
+    expect(secondBody.social_audit.available).toBe(true);
+    expect(secondBody.social_audit.cached).toBe(true);
+    expect(secondBody.social_audit.events).toHaveLength(1);
+    expect(secondBody.social_audit.warning).toContain("cached");
+  });
+
+  it("falls back to state social_shock decisions when social audit endpoint is unavailable", async () => {
+    const status = makeStatusData({ primary_execution_broker: "alpaca" });
+    mockFetch
+      .mockResolvedValueOnce(mockUpstream(status)) // /status
+      .mockResolvedValueOnce(mockUpstream([])) // /positions
+      .mockResolvedValueOnce(mockUpstream({
+        positions: {},
+        social_shock: {
+          decisions: [
+            {
+              audit_id: "state-fallback-1",
+              timestamp: "2026-02-22T12:00:00Z",
+              asset_class: "CRYPTO",
+              regime: "trend",
+              policy_version: "runtime-v1",
+              decision_hash: "state-hash-1",
+              block_new_entries: false,
+              gross_exposure_multiplier: 0.85,
+              combined_risk_score: 0.66,
+              verified_event_probability: 0.62,
+              prediction_verification_failures: 0,
+              verified_event_count: 2,
+              reasons: ["social attention spike"],
+            },
+          ],
+        },
+      })) // /state
+      .mockResolvedValueOnce(mockUpstream({ detail: "downstream unavailable" }, false, 500)) // /social-governor
+      .mockResolvedValueOnce(mockUpstream([])) // /portfolio/positions
+      .mockResolvedValueOnce(mockUpstream([])) // /portfolio/sources
+      .mockResolvedValueOnce(mockUpstream({ total_equity: 100000, breakdown: [] })); // /portfolio/balance
+
+    const response = await GET(makeRequest("state-social-fallback"));
+    const body = await response.json();
+    expect(body.social_audit.available).toBe(true);
+    expect(body.social_audit.events).toHaveLength(1);
+    expect(body.social_audit.events[0].audit_id).toBe("state-fallback-1");
+    expect(String(body.social_audit.warning)).toContain("state_fallback");
+  });
+});
+
+describe("cockpit route — position snapshot stability", () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+  });
+
+  it("keeps last good positions when /portfolio/positions is transiently unavailable", async () => {
+    const token = "position-cache-token";
+    const status = makeStatusData({
+      status: "online",
+      open_positions: 1,
+      timestamp: new Date().toISOString(),
+    });
+
+    mockFetch
+      .mockResolvedValueOnce(mockUpstream(status)) // /status
+      .mockResolvedValueOnce(mockUpstream([])) // /positions
+      .mockResolvedValueOnce(mockUpstream({ positions: {}, open_positions: 1, timestamp: new Date().toISOString() })) // /state
+      .mockResolvedValueOnce(mockUpstream({ events: [] })) // /social-governor
+      .mockResolvedValueOnce(mockUpstream([
+        {
+          symbol: "AAPL",
+          qty: 10,
+          side: "LONG",
+          avg_cost: 190,
+          current_price: 194,
+          unrealized_pl: 40,
+          unrealized_plpc: 0.02,
+          source_id: "ibkr-1",
+          broker_type: "ibkr",
+        },
+      ])) // /portfolio/positions
+      .mockResolvedValueOnce(mockUpstream([])) // /portfolio/sources
+      .mockResolvedValueOnce(mockUpstream({ total_equity: 100000, breakdown: [] })); // /portfolio/balance
+
+    const first = await GET(makeRequest(token));
+    const firstBody = await first.json();
+    expect(firstBody.positions).toHaveLength(1);
+    expect(firstBody.positions[0].symbol).toBe("AAPL");
+
+    mockFetch
+      .mockResolvedValueOnce(mockUpstream(status)) // /status
+      .mockResolvedValueOnce(mockUpstream([])) // /positions
+      .mockResolvedValueOnce(mockUpstream({ positions: {}, open_positions: 1, timestamp: new Date().toISOString() })) // /state
+      .mockResolvedValueOnce(mockUpstream({ events: [] })) // /social-governor
+      .mockResolvedValueOnce(mockUpstream({ detail: "temporary outage" }, false, 500)) // /portfolio/positions
+      .mockResolvedValueOnce(mockUpstream([])) // /portfolio/sources
+      .mockResolvedValueOnce(mockUpstream({ total_equity: 100000, breakdown: [] })); // /portfolio/balance
+
+    const second = await GET(makeRequest(token));
+    const secondBody = await second.json();
+    expect(secondBody.positions).toHaveLength(1);
+    expect(secondBody.positions[0].symbol).toBe("AAPL");
+    const cacheAlert = secondBody.alerts.find((a: { id: string }) => a.id === "position-cache-fallback");
+    expect(cacheAlert).toBeDefined();
+  });
+});
+
+describe("cockpit route — daily pnl broker-fill source", () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+  });
+
+  it("does not overwrite broker-fill daily pnl with inferred unrealized fallback", async () => {
+    mockAllEndpoints(
+      makeStatusData({
+        daily_pnl: 0,
+        daily_pnl_realized: 0,
+        daily_pnl_source: "broker_fills",
+        open_positions: 1,
+      }),
+      {
+        daemonPositions: [],
+        statePayload: { positions: {}, open_positions: 1, timestamp: new Date().toISOString() },
+        portfolioPositions: [
+          {
+            symbol: "BTC/USD",
+            qty: 1,
+            side: "LONG",
+            avg_cost: 90000,
+            current_price: 90500,
+            unrealized_pl: 500,
+            unrealized_plpc: 0.0055,
+            source_id: "alpaca-1",
+            broker_type: "alpaca",
+          },
+        ],
+      },
+    );
+
+    const response = await GET(makeRequest("daily-pnl-fill-source"));
+    const body = await response.json();
+    expect(body.status.daily_pnl).toBe(0);
+    expect(body.status.daily_pnl_realized).toBe(0);
+    expect(body.status.daily_pnl_source).toBe("broker_fills");
+  });
+});
+
+describe("cockpit route — position parity watchdog", () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+  });
+
+  it("alerts only after mismatch persists for configured streak", async () => {
+    const token = "position-parity-streak";
+    const status = makeStatusData({
+      open_positions: 5,
+      timestamp: new Date().toISOString(),
+    });
+    const mockMismatchCycle = () => {
+      mockFetch
+        .mockResolvedValueOnce(mockUpstream(status)) // /status
+        .mockResolvedValueOnce(mockUpstream([])) // /positions
+        .mockResolvedValueOnce(mockUpstream({ positions: {}, open_positions: 5, timestamp: new Date().toISOString() })) // /state
+        .mockResolvedValueOnce(mockUpstream({ events: [] })) // /social-governor
+        .mockResolvedValueOnce(mockUpstream([
+          {
+            symbol: "AAPL",
+            qty: 1,
+            side: "LONG",
+            avg_cost: 190,
+            current_price: 191,
+            unrealized_pl: 1,
+            unrealized_plpc: 0.005,
+            source_id: "ibkr-1",
+            broker_type: "ibkr",
+          },
+        ])) // /portfolio/positions
+        .mockResolvedValueOnce(mockUpstream([])) // /portfolio/sources
+        .mockResolvedValueOnce(mockUpstream({ total_equity: 100000, breakdown: [] })); // /portfolio/balance
+    };
+
+    mockMismatchCycle();
+    const first = await GET(makeRequest(token));
+    const firstBody = await first.json();
+    expect(firstBody.alerts.find((a: { id: string }) => a.id === "position-parity-watchdog")).toBeUndefined();
+
+    mockMismatchCycle();
+    const second = await GET(makeRequest(token));
+    const secondBody = await second.json();
+    expect(secondBody.alerts.find((a: { id: string }) => a.id === "position-parity-watchdog")).toBeUndefined();
+
+    mockMismatchCycle();
+    const third = await GET(makeRequest(token));
+    const thirdBody = await third.json();
+    const parityAlert = thirdBody.alerts.find((a: { id: string }) => a.id === "position-parity-watchdog");
+    expect(parityAlert).toBeDefined();
+    expect(parityAlert.severity).toBe("warning");
+  });
+});
+
+describe("cockpit route — broker heartbeat projection", () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+  });
+
+  it("projects per-broker heartbeat age into runtime rows", async () => {
+    const tenSecondsAgo = new Date(Date.now() - 10_000).toISOString();
+    mockAllEndpoints(
+      makeStatusData({
+        broker_heartbeats: {
+          alpaca: { last_success_ts: tenSecondsAgo, healthy: true },
+          ibkr: { last_success_ts: tenSecondsAgo, healthy: false },
+        },
+      }),
+      {
+        portfolioSources: [
+          { id: "alpaca-src", broker_type: "alpaca" },
+          { id: "ibkr-src", broker_type: "ibkr" },
+        ],
+      },
+    );
+
+    const response = await GET(makeRequest("broker-heartbeat-row"));
+    const body = await response.json();
+    const alpaca = body.status.brokers.find((row: { broker: string }) => row.broker === "alpaca");
+    expect(alpaca).toBeDefined();
+    expect(typeof alpaca.heartbeat_ts === "string" || alpaca.heartbeat_ts === null).toBe(true);
+    expect(typeof alpaca.stale_age_seconds === "number" || alpaca.stale_age_seconds === null).toBe(true);
+  });
+});

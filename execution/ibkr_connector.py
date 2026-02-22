@@ -864,6 +864,11 @@ class IBKRConnector:
             
             result = {}
             for pos in positions:
+                sec_type = str(getattr(pos.contract, "secType", "")).strip().upper()
+                # Options are tracked separately via get_option_positions()
+                # and must never pollute equity/spot position aggregation.
+                if "OPT" in sec_type:
+                    continue
                 symbol = self._symbol_from_contract(pos.contract)
                 qty = float(pos.position)
                 avg_cost = float(pos.avgCost)
@@ -871,7 +876,8 @@ class IBKRConnector:
                 if qty != 0:
                     result[symbol] = {
                         'qty': qty,
-                        'avg_cost': avg_cost
+                        'avg_cost': avg_cost,
+                        'security_type': sec_type or "EQUITY",
                     }
             
             return result

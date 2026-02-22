@@ -78,15 +78,21 @@ class AdaptiveRegimeDetector:
         self,
         smoothing_alpha: float = 0.15,
         min_regime_duration: int = 3,
+        min_transition_gap: float = 0.02,
+        transition_cooldown_steps: int = 3,
     ):
         self.smoothing_alpha = smoothing_alpha
         self.min_regime_duration = min_regime_duration
+        self.min_transition_gap = max(0.0, float(min_transition_gap))
+        self.transition_cooldown_steps = max(1, int(transition_cooldown_steps))
 
         # State tracking
         self._smoothed_probs: Dict[str, float] = {r: 0.25 for r in REGIMES}
         self._current_regime: str = "neutral"
         self._regime_start: datetime = datetime.now()
         self._regime_age_days: int = 0
+        self._step_counter: int = 0
+        self._last_transition_step: int = -10_000
         self._history: deque = deque(maxlen=500)
         self._previous_assessment: Optional[RegimeAssessment] = None
 
@@ -100,6 +106,7 @@ class AdaptiveRegimeDetector:
         prices: pd.Series,
         universe_data: Optional[Dict[str, pd.DataFrame]] = None,
         vix_level: Optional[float] = None,
+        emit_transition_logs: bool = True,
     ) -> RegimeAssessment:
         """
         Assess market regime using multi-indicator voting.
@@ -114,6 +121,7 @@ class AdaptiveRegimeDetector:
         """
         if len(prices) < 60:
             return self._neutral_assessment()
+        self._step_counter += 1
 
         # Compute all indicator votes
         indicator_scores = self._compute_indicator_scores(
@@ -132,14 +140,26 @@ class AdaptiveRegimeDetector:
 
         # Check min duration before switching
         if primary != self._current_regime:
-            if self._regime_age_days >= self.min_regime_duration:
+            sorted_probs = sorted(smoothed.items(), key=lambda kv: kv[1], reverse=True)
+            prob_gap = (
+                float(sorted_probs[0][1] - sorted_probs[1][1])
+                if len(sorted_probs) > 1 else float(sorted_probs[0][1])
+            )
+            cooldown_ready = (self._step_counter - self._last_transition_step) >= self.transition_cooldown_steps
+            if (
+                self._regime_age_days >= self.min_regime_duration
+                and prob_gap >= self.min_transition_gap
+                and cooldown_ready
+            ):
                 self._current_regime = primary
                 self._regime_start = datetime.now()
                 self._regime_age_days = 0
-                logger.info(
-                    f"Regime transition: -> {primary} (probs: "
-                    f"{', '.join(f'{r}={p:.2f}' for r, p in smoothed.items())})"
-                )
+                self._last_transition_step = self._step_counter
+                if emit_transition_logs:
+                    logger.info(
+                        f"Regime transition: -> {primary} (probs: "
+                        f"{', '.join(f'{r}={p:.2f}' for r, p in smoothed.items())})"
+                    )
             else:
                 primary = self._current_regime
 
@@ -253,7 +273,11 @@ class AdaptiveRegimeDetector:
             v_val = vix_series.iloc[i] if (vix_series is not None and i < len(vix_series)) else None
             
             # Use assess_regime to update internal state and get prediction
-            assessment = self.assess_regime(p_slice, vix_level=v_val)
+            assessment = self.assess_regime(
+                p_slice,
+                vix_level=v_val,
+                emit_transition_logs=False,
+            )
             regimes.iloc[i] = assessment.primary_regime
             
         return regimes

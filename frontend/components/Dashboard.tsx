@@ -121,6 +121,14 @@ type MandateEvaluationResult = {
     lower: number;
     upper: number;
   }>;
+  parsed_mandate?: {
+    target_return_pct?: number;
+    horizon_days?: number;
+    sectors?: string[];
+    asset_classes?: string[];
+    max_drawdown_pct?: number;
+    suitability_profile?: string;
+  };
   disclaimer: string;
 };
 
@@ -235,6 +243,23 @@ function comparePositions(a: CockpitPosition, b: CockpitPosition, key: PositionS
   return Number(a[key]) - Number(b[key]);
 }
 
+function positionRowKey(position: CockpitPosition): string {
+  const symbol = String(position.symbol ?? "").trim().toUpperCase();
+  const source = String(position.source_id ?? "").trim()
+    || String(position.broker_type ?? "").trim().toLowerCase()
+    || "state";
+  const sideRaw = String(position.side ?? (position.qty < 0 ? "SHORT" : "LONG")).trim().toUpperCase();
+  const side = sideRaw === "SHORT" ? "SHORT" : "LONG";
+  const qty = Number.isFinite(Number(position.qty)) ? Math.trunc(Number(position.qty)) : 0;
+  const securityType = String((position as Record<string, unknown>).security_type ?? "").trim().toUpperCase();
+  const expiry = String((position as Record<string, unknown>).expiry ?? "").trim().toUpperCase();
+  const strike = Number.isFinite(Number((position as Record<string, unknown>).strike))
+    ? Number((position as Record<string, unknown>).strike).toFixed(4)
+    : "0.0000";
+  const right = String((position as Record<string, unknown>).right ?? "").trim().toUpperCase();
+  return `${symbol}|${source}|${side}|${securityType}|${expiry}|${strike}|${right}|${qty}`;
+}
+
 
 function mandateBandClass(band: string): string {
   if (band === "green") return "bg-positive/15 text-positive";
@@ -296,6 +321,10 @@ export default function Dashboard({ isPublic = false }: { isPublic?: boolean }) 
   // Position table sorting state
   const [sortKey, setSortKey] = useState<PositionSortKey>("symbol");
   const [sortDirection, setSortDirection] = useState<SortDirection>("asc");
+  const [positionsSnapshot, setPositionsSnapshot] = useState<CockpitPosition[]>([]);
+  const [derivativesSnapshot, setDerivativesSnapshot] = useState<CockpitDerivative[]>([]);
+  const [sleevesSnapshot, setSleevesSnapshot] = useState<SleeveAttribution[]>([]);
+  const [socialAuditSnapshot, setSocialAuditSnapshot] = useState<SocialAuditEvent[]>([]);
 
   // Mandate state
   const [mandateIntent, setMandateIntent] = useState("");
@@ -342,38 +371,73 @@ export default function Dashboard({ isPublic = false }: { isPublic?: boolean }) 
   const wsData = wsMessage?.type === "state_update" ? wsMessage : null;
 
   // Merge Metrics: Prefer WS data, fallback to REST
-  const mergedMetrics = useMemo(
-    () => (wsData
+  const mergedMetrics = useMemo(() => {
+    const cockpitStatus = cockpit?.status;
+    const baseline = cockpitStatus
       ? {
-        status: true,
-        timestamp: wsData.timestamp,
-        capital: wsData.capital,
-        starting_capital: wsData.starting_capital ?? wsData.initial_capital ?? 0,
-        daily_pnl: wsData.daily_pnl,
-        total_pnl: wsData.total_pnl,
-        max_drawdown: wsData.max_drawdown,
-        sharpe_ratio: wsData.sharpe_ratio,
-        win_rate: wsData.win_rate,
-        open_positions: wsData.open_positions,
-        trades_count: wsData.total_trades,
+        status: cockpitStatus.state_fresh,
+        timestamp: cockpitStatus.timestamp,
+        capital: cockpitStatus.capital,
+        starting_capital: cockpitStatus.starting_capital ?? 0,
+        daily_pnl: cockpitStatus.daily_pnl,
+        total_pnl: cockpitStatus.total_pnl,
+        max_drawdown: cockpitStatus.max_drawdown,
+        sharpe_ratio: cockpitStatus.sharpe_ratio,
+        win_rate: cockpitStatus.win_rate,
+        open_positions: cockpitStatus.open_positions,
+        option_positions: cockpitStatus.option_positions,
+        open_positions_total: cockpitStatus.open_positions_total,
+        trades_count: cockpitStatus.total_trades,
       }
-      : metrics ?? (cockpit
-        ? {
-          status: cockpit.status.state_fresh,
-          timestamp: cockpit.status.timestamp,
-          capital: cockpit.status.capital,
-          starting_capital: cockpit.status.starting_capital ?? 0,
-          daily_pnl: cockpit.status.daily_pnl,
-          total_pnl: cockpit.status.total_pnl,
-          max_drawdown: cockpit.status.max_drawdown,
-          sharpe_ratio: cockpit.status.sharpe_ratio,
-          win_rate: cockpit.status.win_rate,
-          open_positions: cockpit.status.open_positions,
-          trades_count: cockpit.status.total_trades,
-        }
-        : undefined)),
-    [wsData, metrics, cockpit],
-  );
+      : metrics;
+    if (!wsData) {
+      return baseline;
+    }
+
+    const baselineRecord = (baseline ?? {}) as Record<string, unknown>;
+    const wsCapital = sanitizeMoney(
+      wsData.aggregated_equity ?? wsData.total_equity ?? wsData.capital,
+      Number.NaN,
+    );
+    const mergeZeroGuard = (primary: unknown, fallback: unknown): number => {
+      const primaryNum = Number(primary);
+      const fallbackNum = Number(fallback);
+      const safePrimary = Number.isFinite(primaryNum) ? primaryNum : 0;
+      const safeFallback = Number.isFinite(fallbackNum) ? fallbackNum : 0;
+      if (Math.abs(safePrimary) <= 1e-9 && Math.abs(safeFallback) > 1e-9) {
+        return safeFallback;
+      }
+      return safePrimary;
+    };
+
+    return {
+      status: true,
+      timestamp: wsData.timestamp ?? baselineRecord.timestamp ?? null,
+      capital: Number.isFinite(wsCapital) ? wsCapital : sanitizeMoney(baselineRecord.capital, 0),
+      starting_capital: sanitizeMoney(
+        wsData.starting_capital ?? wsData.initial_capital,
+        sanitizeMoney(baselineRecord.starting_capital, 0),
+      ),
+      daily_pnl: mergeZeroGuard(wsData.daily_pnl, baselineRecord.daily_pnl),
+      total_pnl: mergeZeroGuard(wsData.total_pnl, baselineRecord.total_pnl),
+      max_drawdown: mergeZeroGuard(wsData.max_drawdown, baselineRecord.max_drawdown),
+      sharpe_ratio: mergeZeroGuard(wsData.sharpe_ratio, baselineRecord.sharpe_ratio),
+      win_rate: mergeZeroGuard(wsData.win_rate, baselineRecord.win_rate),
+      open_positions: Math.max(
+        sanitizeCount(wsData.open_positions, 0),
+        sanitizeCount(baselineRecord.open_positions, 0),
+      ),
+      option_positions: sanitizeCount(baselineRecord.option_positions, 0),
+      open_positions_total: Math.max(
+        sanitizeCount(wsData.open_positions, 0),
+        sanitizeCount(baselineRecord.open_positions_total, 0),
+      ),
+      trades_count: Math.max(
+        sanitizeCount(wsData.total_trades, 0),
+        sanitizeCount(baselineRecord.trades_count, 0),
+      ),
+    };
+  }, [wsData, metrics, cockpit?.status]);
 
   // Fetch aggregated equity from multi-broker balance endpoint
   useEffect(() => {
@@ -465,7 +529,7 @@ export default function Dashboard({ isPublic = false }: { isPublic?: boolean }) 
       }),
     [mergedMetrics, mergedOpenPositions, mergedOptionPositions, mergedOpenPositionsTotal],
   );
-  const wsAggregatedEquity = sanitizeMoney(wsData?.total_equity, Number.NaN);
+  const wsAggregatedEquity = sanitizeMoney(wsData?.aggregated_equity ?? wsData?.total_equity, Number.NaN);
   const capital = Number.isFinite(wsAggregatedEquity) ? wsAggregatedEquity : sanitizedMetrics.capital;
   const dailyPnl = sanitizedMetrics.daily_pnl;
   const totalPnl = sanitizedMetrics.total_pnl;
@@ -477,31 +541,157 @@ export default function Dashboard({ isPublic = false }: { isPublic?: boolean }) 
 
 
   // Parse WS positions to match CockpitPosition interface
+  const cockpitPositions = useMemo(() => cockpit?.positions ?? [], [cockpit?.positions]);
+  const cockpitPositionSourceHints = useMemo(() => {
+    const hints = new Map<string, { source_id: string; broker_type: string }>();
+    for (const position of cockpitPositions) {
+      const symbol = String(position.symbol ?? "").trim().toUpperCase();
+      if (!symbol) continue;
+      const sideRaw = String(position.side ?? (position.qty < 0 ? "SHORT" : "LONG")).trim().toUpperCase();
+      const side = sideRaw === "SHORT" ? "SHORT" : "LONG";
+      const sourceId = String(position.source_id ?? "").trim();
+      const brokerType = String(position.broker_type ?? "").trim().toLowerCase();
+      if (!hints.has(`${symbol}|${side}`)) {
+        hints.set(`${symbol}|${side}`, { source_id: sourceId, broker_type: brokerType });
+      }
+      if (!hints.has(symbol)) {
+        hints.set(symbol, { source_id: sourceId, broker_type: brokerType });
+      }
+    }
+    return hints;
+  }, [cockpitPositions]);
+
   const wsPositions = useMemo(() => {
     if (!wsData?.positions) return null;
     return Object.entries(wsData.positions).map(([symbol, raw]) => {
       const data = (raw && typeof raw === "object") ? (raw as Record<string, unknown>) : {};
       const qty = Math.trunc(sanitizeMoney(data.qty, 0));
+      if (qty === 0) return null;
+      const symbolUpper = String(symbol).trim().toUpperCase();
+      const side = qty < 0 ? "SHORT" : "LONG";
+      const sourceHint = cockpitPositionSourceHints.get(`${symbolUpper}|${side}`)
+        ?? cockpitPositionSourceHints.get(symbolUpper);
+      const sourceId = String(data.source_id ?? sourceHint?.source_id ?? "");
+      const brokerType = String(data.broker_type ?? sourceHint?.broker_type ?? "");
       return {
-        symbol,
+        symbol: symbolUpper,
         qty,
-        side: qty > 0 ? "LONG" : "SHORT",
+        side,
         entry: sanitizeMoney(data.avg_price, 0),
         current: sanitizeMoney(data.current_price, 0),
         pnl: sanitizeMoney(data.pnl, 0),
         pnl_pct: sanitizeMoney(data.pnl_pct, 0),
         signal: sanitizeMoney(data.current_signal, 0),
         signal_direction: String(data.signal_direction ?? "UNKNOWN"),
-        source_id: String(data.source_id ?? ""),
+        broker_type: brokerType,
+        stale: Boolean(data.stale),
+        source_status: String(data.source_status ?? ""),
+        source_id: sourceId,
       };
-    });
-  }, [wsData]);
+    }).filter((row): row is CockpitPosition => row !== null);
+  }, [wsData, cockpitPositionSourceHints]);
 
-  const positions = useMemo(() => wsPositions ?? cockpit?.positions ?? [], [wsPositions, cockpit?.positions]);
-  const derivatives = useMemo(() => cockpit?.derivatives ?? [], [cockpit?.derivatives]);
-  const sleeves = useMemo(() => cockpit?.attribution?.sleeves ?? [], [cockpit?.attribution?.sleeves]);
+  const positionsCandidate = useMemo(() => {
+    if (wsPositions && wsPositions.length > 0) {
+      return wsPositions;
+    }
+    if (cockpitPositions.length > 0) {
+      return cockpitPositions;
+    }
+    return wsPositions ?? cockpitPositions;
+  }, [wsPositions, cockpitPositions]);
+  const positionsFeedDegraded = !apiReachable || Boolean(cockpitError) || Boolean(metricsError) || isStale;
+  const confirmedFlatPositions = !positionsFeedDegraded
+    && mergedOpenPositions === 0
+    && (wsPositions?.length ?? 0) === 0
+    && cockpitPositions.length === 0;
+  useEffect(() => {
+    if (positionsCandidate.length > 0) {
+      setPositionsSnapshot(positionsCandidate);
+      return;
+    }
+    if (confirmedFlatPositions) {
+      setPositionsSnapshot([]);
+    }
+  }, [positionsCandidate, confirmedFlatPositions]);
+  const positions = useMemo(() => {
+    if (positionsCandidate.length > 0) {
+      return positionsCandidate;
+    }
+    if (confirmedFlatPositions) {
+      return [];
+    }
+    return positionsSnapshot;
+  }, [positionsCandidate, confirmedFlatPositions, positionsSnapshot]);
+
+  const cockpitDerivatives = useMemo(() => cockpit?.derivatives ?? [], [cockpit?.derivatives]);
+  const optionPositionsFromStatus = sanitizeCount(cockpit?.status.option_positions, sanitizedMetrics.option_positions);
+  const confirmedFlatDerivatives = !positionsFeedDegraded
+    && optionPositionsFromStatus === 0
+    && cockpitDerivatives.length === 0;
+  useEffect(() => {
+    if (cockpitDerivatives.length > 0) {
+      setDerivativesSnapshot(cockpitDerivatives);
+      return;
+    }
+    if (confirmedFlatDerivatives) {
+      setDerivativesSnapshot([]);
+    }
+  }, [cockpitDerivatives, confirmedFlatDerivatives]);
+  const derivatives = useMemo(() => {
+    if (cockpitDerivatives.length > 0) {
+      return cockpitDerivatives;
+    }
+    if (confirmedFlatDerivatives) {
+      return [];
+    }
+    return derivativesSnapshot;
+  }, [cockpitDerivatives, confirmedFlatDerivatives, derivativesSnapshot]);
+
+  const cockpitSleeves = useMemo(() => cockpit?.attribution?.sleeves ?? [], [cockpit?.attribution?.sleeves]);
+  const confirmedFlatSleeves = !positionsFeedDegraded
+    && openPositions === 0
+    && cockpitSleeves.length === 0;
+  useEffect(() => {
+    if (cockpitSleeves.length > 0) {
+      setSleevesSnapshot(cockpitSleeves);
+      return;
+    }
+    if (confirmedFlatSleeves) {
+      setSleevesSnapshot([]);
+    }
+  }, [cockpitSleeves, confirmedFlatSleeves]);
+  const sleeves = useMemo(() => {
+    if (cockpitSleeves.length > 0) {
+      return cockpitSleeves;
+    }
+    if (confirmedFlatSleeves) {
+      return [];
+    }
+    return sleevesSnapshot;
+  }, [cockpitSleeves, confirmedFlatSleeves, sleevesSnapshot]);
+
   const socialAudit = cockpit?.social_audit;
-  const socialAuditEvents = useMemo(() => socialAudit?.events ?? [], [socialAudit?.events]);
+  const socialAuditBaseEvents = useMemo(() => socialAudit?.events ?? [], [socialAudit?.events]);
+  const socialAuditFeedDegraded = !socialAudit?.available && !socialAudit?.unauthorized;
+  useEffect(() => {
+    if (socialAuditBaseEvents.length > 0) {
+      setSocialAuditSnapshot(socialAuditBaseEvents);
+      return;
+    }
+    if (!socialAuditFeedDegraded) {
+      setSocialAuditSnapshot([]);
+    }
+  }, [socialAuditBaseEvents, socialAuditFeedDegraded]);
+  const socialAuditEvents = useMemo(() => {
+    if (socialAuditBaseEvents.length > 0) {
+      return socialAuditBaseEvents;
+    }
+    if (socialAuditFeedDegraded) {
+      return socialAuditSnapshot;
+    }
+    return [];
+  }, [socialAuditBaseEvents, socialAuditFeedDegraded, socialAuditSnapshot]);
   const socialAuditIsDegradedHttp = !socialAudit?.available && !socialAudit?.unauthorized && (socialAudit?.status_code ?? 0) >= 500;
   const notes = useMemo(() => cockpit?.notes ?? [], [cockpit?.notes]);
   const usp = cockpit?.usp;
@@ -515,20 +705,41 @@ export default function Dashboard({ isPublic = false }: { isPublic?: boolean }) 
     };
   }, [cockpit?.status?.active_broker, cockpit?.status?.brokers]);
 
-  const brokerStateToBadge = useCallback((state: "live" | "stale" | "configured" | "not_configured" | undefined) => {
+  const brokerStateToBadge = useCallback((
+    state: "live" | "stale" | "configured" | "not_configured" | undefined,
+    mode?: "trading" | "idle" | "disabled",
+  ) => {
+    if (mode === "trading" && state && state !== "not_configured") return "ok";
+    if (mode === "idle") return "warn";
     if (state === "live") return "ok";
     if (state === "stale" || state === "configured") return "warn";
     return "down";
   }, []);
 
-  const brokerDetail = useCallback((broker: { status: "live" | "stale" | "configured" | "not_configured"; source_count: number; live_source_count: number } | undefined) => {
+  const brokerDetail = useCallback((broker: {
+    status: "live" | "stale" | "configured" | "not_configured";
+    mode?: "trading" | "idle" | "disabled";
+    source_count: number;
+    live_source_count: number;
+    heartbeat_ts?: string | null;
+    stale_age_seconds?: number | null;
+  } | undefined) => {
     if (!broker) return "not configured";
-    if (broker.status === "live") return `${broker.live_source_count}/${Math.max(1, broker.source_count)} live`;
-    if (broker.status === "stale") return "configured (stale)";
-    if (broker.status === "configured") return "configured (idle)";
+    const heartbeatAge = Number.isFinite(Number(broker.stale_age_seconds))
+      ? `${Math.max(0, Math.trunc(Number(broker.stale_age_seconds)))}s`
+      : "n/a";
+    const heartbeatTime = broker.heartbeat_ts
+      ? String(broker.heartbeat_ts).split("T")[1]?.replace(/\.\d+Z$/, "Z") ?? String(broker.heartbeat_ts)
+      : "unknown";
+    const heartbeatDetail = `${heartbeatAge} @ ${heartbeatTime}`;
+    if (broker.mode === "idle") return `idle (positions/metrics) • hb ${heartbeatDetail}`;
+    if (broker.mode === "trading") return `trading active • hb ${heartbeatDetail}`;
+    if (broker.status === "live") return `${broker.live_source_count}/${Math.max(1, broker.source_count)} live • hb ${heartbeatDetail}`;
+    if (broker.status === "stale") return `configured (stale ${heartbeatDetail})`;
+    if (broker.status === "configured") return `configured (idle) • hb ${heartbeatDetail}`;
     return "not configured";
   }, []);
-  const optionPositions = sanitizeCount(cockpit?.status.option_positions, sanitizedMetrics.option_positions);
+  const optionPositions = optionPositionsFromStatus;
   const totalLines = Math.max(
     sanitizeCount(cockpit?.status.open_positions_total, sanitizedMetrics.open_positions_total),
     openPositions + optionPositions,
@@ -570,7 +781,7 @@ export default function Dashboard({ isPublic = false }: { isPublic?: boolean }) 
         rows: [
           {
             label: "Capital",
-            value: formatCurrency(capital),
+            value: formatCurrencyWithCents(capital),
             hint: "Live account equity",
           },
           {
@@ -930,6 +1141,132 @@ export default function Dashboard({ isPublic = false }: { isPublic?: boolean }) 
     }
   };
 
+  const activatePlanFlow = async () => {
+    if (!mandateResult?.request_id) {
+      setWorkflowError("Run mandate evaluation first.");
+      return;
+    }
+    const parsedMandate = mandateResult.parsed_mandate ?? {};
+    const targetReturnPct = Number(parsedMandate.target_return_pct ?? 0);
+    const horizonDays = Number(parsedMandate.horizon_days ?? 0);
+    const activationContext = Number.isFinite(targetReturnPct) && targetReturnPct > 0 && Number.isFinite(horizonDays) && horizonDays > 0
+      ? `target=${targetReturnPct.toFixed(1)}% horizon=${Math.trunc(horizonDays)}d`
+      : "target/horizon parsed from mandate intent";
+
+    setWorkflowLoading(true);
+    setWorkflowError("");
+    try {
+      let activePack: MandateWorkflowPack | null = workflowPack && workflowPack.status !== "retired"
+        ? workflowPack
+        : null;
+
+      if (!activePack || activePack.request_id !== mandateResult.request_id) {
+        const initiateResponse = await fetch("/api/v1/mandate/workflows/initiate", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            request_id: mandateResult.request_id,
+            note: `Auto-initiated from plan activation (${activationContext}).`,
+          }),
+        });
+        const initiatePayload = (await initiateResponse.json().catch(() => ({}))) as MandateWorkflowPack & { detail?: string };
+        if (initiateResponse.status === 401) {
+          handleSessionExpired();
+          return;
+        }
+        if (initiateResponse.status === 403) {
+          setWorkflowError("Plan activation requires workflow-pack entitlement (Pro+) or admin role.");
+          return;
+        }
+        if (!initiateResponse.ok) {
+          throw new Error(initiatePayload.detail || "Workflow initiation failed.");
+        }
+        activePack = initiatePayload;
+      }
+
+      if (!activePack.signoffs?.pm?.approved) {
+        const pmResponse = await fetch(`/api/v1/mandate/workflows/${encodeURIComponent(activePack.workflow_id)}/signoff`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            role: "pm",
+            note: `Auto PM sign-off (${activationContext}).`,
+          }),
+        });
+        const pmPayload = (await pmResponse.json().catch(() => ({}))) as MandateWorkflowPack & { detail?: string };
+        if (pmResponse.status === 401) {
+          handleSessionExpired();
+          return;
+        }
+        if (pmResponse.status === 403) {
+          setWorkflowError("PM sign-off requires workflow pack access.");
+          return;
+        }
+        if (!pmResponse.ok) {
+          throw new Error(pmPayload.detail || "PM sign-off failed.");
+        }
+        activePack = pmPayload;
+      }
+
+      if (!activePack.signoffs?.compliance?.approved) {
+        const complianceResponse = await fetch(`/api/v1/mandate/workflows/${encodeURIComponent(activePack.workflow_id)}/signoff`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            role: "compliance",
+            note: `Auto compliance sign-off (${activationContext}).`,
+          }),
+        });
+        const compliancePayload = (await complianceResponse.json().catch(() => ({}))) as MandateWorkflowPack & { detail?: string };
+        if (complianceResponse.status === 401) {
+          handleSessionExpired();
+          return;
+        }
+        if (complianceResponse.status === 403) {
+          setWorkflowError("Compliance sign-off requires admin/compliance role.");
+          return;
+        }
+        if (!complianceResponse.ok) {
+          throw new Error(compliancePayload.detail || "Compliance sign-off failed.");
+        }
+        activePack = compliancePayload;
+      }
+
+      if (activePack.status !== "paper_live") {
+        const statusResponse = await fetch(`/api/v1/mandate/workflows/${encodeURIComponent(activePack.workflow_id)}/status`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            status: "paper_live",
+            note: `Applied to paper runtime with ${activationContext}.`,
+          }),
+        });
+        const statusPayload = (await statusResponse.json().catch(() => ({}))) as MandateWorkflowPack & { detail?: string };
+        if (statusResponse.status === 401) {
+          handleSessionExpired();
+          return;
+        }
+        if (statusResponse.status === 403) {
+          setWorkflowError("Policy activation requires workflow pack access.");
+          return;
+        }
+        if (!statusResponse.ok) {
+          throw new Error(statusPayload.detail || "Paper runtime activation failed.");
+        }
+        activePack = statusPayload;
+      }
+
+      setWorkflowPack(activePack);
+      void fetchWorkflowList();
+      void fetchMonthlyRiskReport();
+      void fetchMandateCalibration();
+    } catch (error: unknown) {
+      setWorkflowError(error instanceof Error ? error.message : "Plan activation failed.");
+    } finally {
+      setWorkflowLoading(false);
+    }
+  };
+
   const evaluateMandate = async () => {
     setMandateLoading(true);
     setMandateError("");
@@ -1003,12 +1340,12 @@ export default function Dashboard({ isPublic = false }: { isPublic?: boolean }) 
       },
       {
         label: "Alpaca",
-        state: brokerStateToBadge(brokerRuntime.alpaca?.status),
+        state: brokerStateToBadge(brokerRuntime.alpaca?.status, brokerRuntime.alpaca?.mode),
         detail: brokerDetail(brokerRuntime.alpaca),
       },
       {
         label: "IBKR",
-        state: brokerStateToBadge(brokerRuntime.ibkr?.status),
+        state: brokerStateToBadge(brokerRuntime.ibkr?.status, brokerRuntime.ibkr?.mode),
         detail: brokerDetail(brokerRuntime.ibkr),
       },
     ],
@@ -1226,7 +1563,7 @@ export default function Dashboard({ isPublic = false }: { isPublic?: boolean }) 
               <p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">Capital</p>
               <DollarSign className="h-4 w-4 text-primary" />
             </div>
-            <p className="apex-kpi-value mt-2 text-lg font-semibold text-foreground">{showLoading ? <Skeleton className="h-5 w-20" /> : formatCompactCurrency(capital)}</p>
+            <p className="apex-kpi-value mt-2 text-lg font-semibold text-foreground">{showLoading ? <Skeleton className="h-5 w-20" /> : formatCurrencyWithCents(capital)}</p>
             <p className="mt-1 text-xs text-muted-foreground">Live equity base</p>
           </button>
 
@@ -1567,6 +1904,15 @@ export default function Dashboard({ isPublic = false }: { isPublic?: boolean }) 
                     ))}
                   </ul>
                 </div>
+                <div className="rounded-xl border border-border/80 bg-background/70 p-3">
+                  <p className="text-xs uppercase tracking-wide text-muted-foreground">Parsed Mandate</p>
+                  <p className="apex-kpi-value mt-2 text-sm font-semibold text-foreground">
+                    Target {(Number(mandateResult.parsed_mandate?.target_return_pct ?? 0) || 0).toFixed(1)}%
+                  </p>
+                  <p className="text-xs text-muted-foreground">
+                    Horizon {Math.trunc(Number(mandateResult.parsed_mandate?.horizon_days ?? 0) || 0)}d • DD cap {(Number(mandateResult.parsed_mandate?.max_drawdown_pct ?? 0) || 0).toFixed(1)}%
+                  </p>
+                </div>
 
                 <div className="rounded-xl border border-border/80 bg-background/70 p-3 lg:col-span-2">
                   <p className="text-xs uppercase tracking-wide text-muted-foreground">Sleeve Allocation Draft</p>
@@ -1632,7 +1978,17 @@ export default function Dashboard({ isPublic = false }: { isPublic?: boolean }) 
                     }}
                     disabled={workflowLoading || !mandateResult?.request_id}
                   >
-                    {workflowLoading ? "Initiating..." : "Initiate Workflow (Paywalled)"}
+                    {workflowLoading ? "Initiating..." : "Initiate Workflow"}
+                  </Button>
+                  <Button
+                    size="sm"
+                    className="h-9 rounded-full px-3 text-xs"
+                    onClick={() => {
+                      void activatePlanFlow();
+                    }}
+                    disabled={workflowLoading || !mandateResult?.request_id}
+                  >
+                    {workflowLoading ? "Activating..." : "Activate Plan (Auto)"}
                   </Button>
                   <Button
                     size="sm"
@@ -1895,12 +2251,14 @@ export default function Dashboard({ isPublic = false }: { isPublic?: boolean }) 
               </div>
               <div className="flex flex-wrap items-center gap-2">
                 <span className={`rounded-full px-2 py-0.5 text-xs font-semibold uppercase ${socialAudit?.available
-                  ? "bg-positive/15 text-positive"
+                  ? socialAudit?.cached
+                    ? "bg-warning/15 text-warning"
+                    : "bg-positive/15 text-positive"
                   : socialAudit?.unauthorized
                     ? "bg-warning/15 text-warning"
                     : "bg-negative/15 text-negative"
                   }`}>
-                  {socialAudit?.available ? "live" : socialAudit?.unauthorized ? "restricted" : "degraded"}
+                  {socialAudit?.available ? (socialAudit?.cached ? "cached" : "live") : socialAudit?.unauthorized ? "restricted" : "degraded"}
                 </span>
                 <span className="rounded-full bg-secondary px-2 py-0.5 text-xs font-semibold text-secondary-foreground">
                   {socialAudit?.count ?? 0} rows
@@ -1924,6 +2282,11 @@ export default function Dashboard({ isPublic = false }: { isPublic?: boolean }) 
                   Social audit feed unavailable ({socialAudit?.warning || `http_${socialAudit?.status_code ?? 0}`}).
                 </p>
               )
+            ) : null}
+            {socialAudit?.available && socialAudit?.cached ? (
+              <p className="mb-2 rounded-lg border border-warning/40 bg-warning/10 px-3 py-2 text-xs text-warning">
+                Showing cached social-governor audit snapshot while upstream feed recovers.
+              </p>
             ) : null}
 
             <div className="max-h-[35vh] overflow-auto rounded-xl border border-border/80">
@@ -2054,7 +2417,7 @@ export default function Dashboard({ isPublic = false }: { isPublic?: boolean }) 
               const src = brokerSources.find(s => s.id === selectedSourceId);
               return src ? (
                 <p className="mb-2 rounded-lg border border-positive/30 bg-positive/10 px-3 py-2 text-xs font-medium text-positive">
-                  📂 Viewing: <strong>{src.name}</strong> ({src.broker_type.toUpperCase()} · {src.environment}) — positions scope active
+                  Viewing: <strong>{src.name}</strong> ({src.broker_type.toUpperCase()} · {src.environment}) - positions scope active
                 </p>
               ) : null;
             })()}
@@ -2063,6 +2426,7 @@ export default function Dashboard({ isPublic = false }: { isPublic?: boolean }) 
               <table className="min-w-full text-xs">
                 <thead className="sticky top-0 z-10 bg-background/95 backdrop-blur">
                   <tr className="text-left text-muted-foreground">
+                    <th className="px-3 py-2 font-semibold">Source</th>
                     {([
                       ["symbol", "Symbol"],
                       ["qty", "Qty"],
@@ -2088,13 +2452,18 @@ export default function Dashboard({ isPublic = false }: { isPublic?: boolean }) 
                 <tbody>
                   {sortedPositions.length === 0 ? (
                     <tr>
-                      <td colSpan={7} className="px-3 py-6 text-center text-muted-foreground">
+                      <td colSpan={8} className="px-3 py-6 text-center text-muted-foreground">
                         {showLoading ? "Loading positions..." : "No positions in API state."}
                       </td>
                     </tr>
                   ) : (
                     sortedPositions.map((position) => (
-                      <tr key={`${position.symbol}-${position.side}`} className="border-t border-border/60 hover:bg-secondary/30">
+                      <tr key={positionRowKey(position)} className="border-t border-border/60 hover:bg-secondary/30">
+                        <td className="px-3 py-2 text-[11px] uppercase text-muted-foreground">
+                          {position.broker_type
+                            ? `${String(position.broker_type).toUpperCase()}${position.stale ? " (stale)" : ""}`
+                            : (position.source_id ? position.source_id.slice(0, 8) : "state")}
+                        </td>
                         <td className="px-3 py-2 font-semibold text-foreground">{position.symbol}</td>
                         <td className="apex-kpi-value px-3 py-2 text-foreground">{position.qty}</td>
                         <td className="apex-kpi-value px-3 py-2 text-foreground">{formatCurrencyWithCents(position.entry)}</td>

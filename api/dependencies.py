@@ -41,6 +41,10 @@ DEFAULT_STATE = {
     "positions": {},
     "signals": {},
     "daily_pnl": 0,
+    "daily_pnl_realized": 0,
+    "daily_pnl_unrealized_fallback": 0,
+    "daily_pnl_source": "equity_delta",
+    "daily_pnl_by_broker": {"ibkr": 0, "alpaca": 0},
     "total_pnl": 0,
     "sector_exposure": {},
 }
@@ -132,6 +136,35 @@ def sanitize_execution_metrics(raw: Dict[str, Any]) -> Dict[str, Any]:
     )
 
     daily_pnl = _bounded_float(raw.get("daily_pnl"), -MONEY_ABS_MAX, MONEY_ABS_MAX, fallback=0.0)
+    daily_pnl_realized = _bounded_float(
+        raw.get("daily_pnl_realized", daily_pnl),
+        -MONEY_ABS_MAX,
+        MONEY_ABS_MAX,
+        fallback=daily_pnl,
+    )
+    daily_pnl_unrealized_fallback = _bounded_float(
+        raw.get("daily_pnl_unrealized_fallback"),
+        -MONEY_ABS_MAX,
+        MONEY_ABS_MAX,
+        fallback=0.0,
+    )
+    daily_pnl_source_raw = str(raw.get("daily_pnl_source", "")).strip().lower()
+    daily_pnl_source = daily_pnl_source_raw if daily_pnl_source_raw in {"broker_fills", "equity_delta"} else "equity_delta"
+    daily_pnl_by_broker_raw = raw.get("daily_pnl_by_broker")
+    daily_pnl_by_broker = {"ibkr": 0.0, "alpaca": 0.0}
+    if isinstance(daily_pnl_by_broker_raw, dict):
+        daily_pnl_by_broker["ibkr"] = _bounded_float(
+            daily_pnl_by_broker_raw.get("ibkr"),
+            -MONEY_ABS_MAX,
+            MONEY_ABS_MAX,
+            fallback=0.0,
+        )
+        daily_pnl_by_broker["alpaca"] = _bounded_float(
+            daily_pnl_by_broker_raw.get("alpaca"),
+            -MONEY_ABS_MAX,
+            MONEY_ABS_MAX,
+            fallback=0.0,
+        )
 
     drawdown = _as_finite_float(raw.get("max_drawdown"))
     if drawdown is None:
@@ -168,10 +201,28 @@ def sanitize_execution_metrics(raw: Dict[str, Any]) -> Dict[str, Any]:
         fallback=0,
     )
 
-    return {
+    broker_heartbeats_raw = raw.get("broker_heartbeats")
+    broker_heartbeats: Dict[str, Dict[str, Any]] = {}
+    if isinstance(broker_heartbeats_raw, dict):
+        for broker in ("ibkr", "alpaca"):
+            rec = broker_heartbeats_raw.get(broker)
+            if not isinstance(rec, dict):
+                continue
+            broker_heartbeats[broker] = {
+                "last_success_ts": str(rec.get("last_success_ts")) if rec.get("last_success_ts") else None,
+                "last_error_ts": str(rec.get("last_error_ts")) if rec.get("last_error_ts") else None,
+                "last_error": str(rec.get("last_error")) if rec.get("last_error") else None,
+                "healthy": bool(rec.get("healthy")),
+            }
+
+    payload = {
         "capital": capital,
         "starting_capital": starting_capital,
         "daily_pnl": daily_pnl,
+        "daily_pnl_realized": daily_pnl_realized,
+        "daily_pnl_unrealized_fallback": daily_pnl_unrealized_fallback,
+        "daily_pnl_source": daily_pnl_source,
+        "daily_pnl_by_broker": daily_pnl_by_broker,
         "total_pnl": total_pnl,
         "max_drawdown": drawdown,
         "sharpe_ratio": sharpe_ratio,
@@ -181,6 +232,9 @@ def sanitize_execution_metrics(raw: Dict[str, Any]) -> Dict[str, Any]:
         "open_positions_total": open_positions_total,
         "total_trades": total_trades,
     }
+    if broker_heartbeats:
+        payload["broker_heartbeats"] = broker_heartbeats
+    return payload
 
 def read_price_cache() -> Tuple[Dict[str, float], Optional[int]]:
     """Read current price cache from file with mtime-based caching."""
@@ -261,12 +315,16 @@ def read_trading_state() -> Dict:
                 pos["pnl_pct"] = round(pnl_pct, 2)
                 total_position_pnl += pnl
 
+        daily_source = str(data.get("daily_pnl_source", "")).strip().lower()
+        has_broker_truth_daily = daily_source == "broker_fills" or ("daily_pnl_realized" in data)
+
         # Update total_pnl if we have position P&L data
         if total_position_pnl != 0:
             starting_capital = data.get("starting_capital", data.get("capital", 0))
             if starting_capital > 0:
                 data["total_pnl"] = round(total_position_pnl, 2)
-                data["daily_pnl"] = round(total_position_pnl, 2)  # Approximate as daily
+                if not has_broker_truth_daily:
+                    data["daily_pnl"] = round(total_position_pnl, 2)  # Approximate as daily only when broker-truth is absent
 
         sanitized = _sanitize_floats(data)
         _state_cache_data = sanitized

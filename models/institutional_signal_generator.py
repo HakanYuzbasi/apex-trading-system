@@ -265,6 +265,7 @@ class UltimateSignalGenerator:
         self.enable_deep_learning = enable_deep_learning
         
         self.adaptive_regime_detector = AdaptiveRegimeDetector()
+        self._symbol_regime_detectors: Dict[str, AdaptiveRegimeDetector] = {}
         
         # Feature engineering
         self.feature_engine = FeatureEngine(lookback=lookback)
@@ -851,7 +852,19 @@ class UltimateSignalGenerator:
                 prices = data
 
             # Detect regime (🚀 UPGRADED: Using probability-based detector)
-            assessment: RegimeAssessment = self.adaptive_regime_detector.assess_regime(prices)
+            detector = self._symbol_regime_detectors.get(symbol)
+            if detector is None:
+                detector = AdaptiveRegimeDetector(
+                    smoothing_alpha=self.adaptive_regime_detector.smoothing_alpha,
+                    min_regime_duration=self.adaptive_regime_detector.min_regime_duration,
+                    min_transition_gap=self.adaptive_regime_detector.min_transition_gap,
+                    transition_cooldown_steps=self.adaptive_regime_detector.transition_cooldown_steps,
+                )
+                self._symbol_regime_detectors[symbol] = detector
+            assessment: RegimeAssessment = detector.assess_regime(
+                prices,
+                emit_transition_logs=False,
+            )
             regime = assessment.primary_regime
             current_price = float(prices.iloc[-1])
             

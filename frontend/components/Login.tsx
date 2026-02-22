@@ -10,6 +10,33 @@ import { Label } from "@/components/ui/label";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { useTheme } from "@/components/theme/ThemeProvider";
 
+const DEFAULT_SESSION_COOKIE_MAX_AGE_SECONDS = 24 * 60 * 60;
+
+function decodeJwtPayload(token: string): Record<string, unknown> | null {
+  const parts = token.split(".");
+  if (parts.length < 2) return null;
+  try {
+    const payloadB64 = parts[1].replace(/-/g, "+").replace(/_/g, "/");
+    const padded = payloadB64 + "=".repeat((4 - (payloadB64.length % 4)) % 4);
+    const decoded = atob(padded);
+    return JSON.parse(decoded) as Record<string, unknown>;
+  } catch {
+    return null;
+  }
+}
+
+function computeSessionCookieMaxAgeSeconds(token: string, expiresIn?: unknown): number {
+  if (typeof expiresIn === "number" && Number.isFinite(expiresIn) && expiresIn > 0) {
+    return Math.floor(expiresIn);
+  }
+  const payload = decodeJwtPayload(token);
+  const exp = payload?.exp;
+  if (typeof exp === "number" && Number.isFinite(exp)) {
+    return Math.max(0, Math.floor(exp - Date.now() / 1000));
+  }
+  return DEFAULT_SESSION_COOKIE_MAX_AGE_SECONDS;
+}
+
 export default function Login() {
   const { theme, toggleTheme } = useTheme();
   const [mounted, setMounted] = useState(false);
@@ -48,7 +75,10 @@ export default function Login() {
       }
 
       const data = await res.json();
-      document.cookie = `token=${data.access_token}; path=/; max-age=1800; samesite=lax`;
+      const accessToken = String(data.access_token || "");
+      const maxAge = computeSessionCookieMaxAgeSeconds(accessToken, data.expires_in);
+      const secure = window.location.protocol === "https:" ? "; secure" : "";
+      document.cookie = `token=${encodeURIComponent(accessToken)}; path=/; max-age=${maxAge}; samesite=lax${secure}`;
       router.push("/dashboard");
     } catch (err: unknown) {
       const message = err instanceof Error ? err.message : "Login failed";

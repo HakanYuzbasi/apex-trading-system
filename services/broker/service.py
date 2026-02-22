@@ -3,6 +3,7 @@ import json
 import logging
 import asyncio
 import math
+import time
 from dataclasses import dataclass
 from typing import Optional, Dict, List, Any
 from datetime import datetime
@@ -48,6 +49,16 @@ class BrokerService:
         self._loaded_users: set[str] = set()
         self._equity_cache: Dict[str, BrokerEquitySnapshot] = {}
         self._positions_cache: Dict[str, List[Dict[str, Any]]] = {}
+        self._equity_snapshot_cache: Dict[str, Dict[str, Any]] = {}
+        self._positions_snapshot_cache: Dict[str, Dict[str, Any]] = {}
+        self._equity_locks: Dict[str, asyncio.Lock] = {}
+        self._positions_locks: Dict[str, asyncio.Lock] = {}
+        self._equity_refresh_ttl_seconds: int = int(
+            os.getenv("APEX_BROKER_EQUITY_REFRESH_INTERVAL_SECONDS", "5")
+        )
+        self._positions_refresh_ttl_seconds: int = int(
+            os.getenv("APEX_BROKER_POSITIONS_REFRESH_INTERVAL_SECONDS", "5")
+        )
 
     # ─────────────────────────────────────────
     # Disk persistence helpers
@@ -283,21 +294,40 @@ class BrokerService:
 
     async def get_positions(self, user_id: str) -> List[Dict[str, Any]]:
         """Aggregates open positions across all active broker connections."""
-        connections = await self.list_connections(user_id)
-        active_connections = [conn for conn in connections if conn.is_active]
-        if not active_connections:
-            return []
+        cached = self._positions_snapshot_cache.get(user_id)
+        if self._is_snapshot_fresh(cached, self._positions_refresh_ttl_seconds):
+            return [dict(row) for row in cached.get("positions", [])]
 
-        tasks = [self._fetch_positions_with_fallback(connection=conn) for conn in active_connections]
-        results = await asyncio.gather(*tasks, return_exceptions=True)
-        all_positions: List[Dict[str, Any]] = []
-        for idx, result in enumerate(results):
-            if isinstance(result, Exception):
-                conn = active_connections[idx]
-                logger.exception("Failed to fetch positions for connection %s (%s): %s", conn.id, conn.name, result)
-                continue
-            all_positions.extend(result)
-        return all_positions
+        lock = self._positions_locks.setdefault(user_id, asyncio.Lock())
+        async with lock:
+            cached = self._positions_snapshot_cache.get(user_id)
+            if self._is_snapshot_fresh(cached, self._positions_refresh_ttl_seconds):
+                return [dict(row) for row in cached.get("positions", [])]
+
+            connections = await self.list_connections(user_id)
+            active_connections = [conn for conn in connections if conn.is_active]
+            if not active_connections:
+                self._positions_snapshot_cache[user_id] = {
+                    "positions": [],
+                    "cached_at": time.time(),
+                }
+                return []
+
+            tasks = [self._fetch_positions_with_fallback(connection=conn) for conn in active_connections]
+            results = await asyncio.gather(*tasks, return_exceptions=True)
+            all_positions: List[Dict[str, Any]] = []
+            for idx, result in enumerate(results):
+                if isinstance(result, Exception):
+                    conn = active_connections[idx]
+                    logger.exception("Failed to fetch positions for connection %s (%s): %s", conn.id, conn.name, result)
+                    continue
+                all_positions.extend(result)
+
+            self._positions_snapshot_cache[user_id] = {
+                "positions": [dict(row) for row in all_positions],
+                "cached_at": time.time(),
+            }
+            return all_positions
 
     async def _fetch_positions_with_fallback(self, connection: BrokerConnection) -> List[Dict[str, Any]]:
         """Fetch connection positions with stale-cache fallback."""
@@ -387,6 +417,10 @@ class BrokerService:
                 "source_id": source_id,
                 "broker_type": "alpaca",
                 "symbol": str(pos.symbol),
+                "security_type": "CRYPTO",
+                "expiry": None,
+                "strike": None,
+                "right": None,
                 "qty": qty,
                 "side": str(pos.side.value) if hasattr(pos.side, "value") else str(pos.side),
                 "avg_cost": float(pos.avg_entry_price or 0),
@@ -408,6 +442,26 @@ class BrokerService:
         if sec_type in {"CASH", "CRYPTO"} and symbol and currency:
             return f"{symbol}/{currency}"
         return symbol
+
+    @staticmethod
+    def _normalize_ibkr_expiry(value: Any) -> str:
+        raw = str(value or "").strip()
+        if len(raw) == 8 and raw.isdigit():
+            return f"{raw[:4]}-{raw[4:6]}-{raw[6:8]}"
+        if len(raw) == 6 and raw.isdigit():
+            return f"{raw[:4]}-{raw[4:6]}-01"
+        return raw
+
+    @staticmethod
+    def _normalize_option_right(value: Any) -> str:
+        token = str(value or "").strip().upper()
+        if token == "CALL":
+            return "C"
+        if token == "PUT":
+            return "P"
+        if token in {"C", "P"}:
+            return token
+        return ""
 
     @staticmethod
     def _fetch_ibkr_positions_blocking(
@@ -442,13 +496,18 @@ class BrokerService:
                 if contract is None:
                     continue
                 sec_type = str(getattr(contract, "secType", "")).strip().upper()
-                if "OPT" in sec_type:
-                    continue
                 qty = float(getattr(pos, "position", 0) or 0)
                 if math.isclose(qty, 0.0, abs_tol=1e-12):
                     continue
 
                 symbol = BrokerService._format_ibkr_contract_symbol(contract)
+                expiry = BrokerService._normalize_ibkr_expiry(
+                    getattr(contract, "lastTradeDateOrContractMonth", ""),
+                )
+                right = BrokerService._normalize_option_right(getattr(contract, "right", ""))
+                strike = float(getattr(contract, "strike", 0.0) or 0.0) if "OPT" in sec_type else 0.0
+                if "OPT" in sec_type:
+                    symbol = f"{symbol} {expiry} {strike:g} {right}".strip()
                 con_id = int(getattr(contract, "conId", 0) or 0)
                 portfolio_item = portfolio_by_conid.get(con_id)
                 avg_cost = float(getattr(pos, "avgCost", 0) or 0)
@@ -468,6 +527,10 @@ class BrokerService:
                     "source_id": source_id,
                     "broker_type": "ibkr",
                     "symbol": symbol,
+                    "security_type": sec_type or "EQUITY",
+                    "expiry": expiry or None,
+                    "strike": strike if "OPT" in sec_type else None,
+                    "right": right or None,
                     "qty": qty,
                     "side": "LONG" if qty > 0 else "SHORT",
                     "avg_cost": avg_cost,
@@ -510,14 +573,50 @@ class BrokerService:
 
     async def get_tenant_equity_snapshot(self, tenant_id: str) -> Dict[str, Any]:
         """Aggregate tenant equity with per-source normalized snapshots."""
-        snapshots = await self._collect_equity_snapshots_for_user(tenant_id)
-        total_value = sum(snapshot.value for snapshot in snapshots)
-        return {
-            "tenant_id": tenant_id,
-            "total_equity": float(total_value),
-            "breakdown": [snapshot.__dict__ for snapshot in snapshots],
-            "as_of": datetime.utcnow().isoformat(),
-        }
+        cached = self._equity_snapshot_cache.get(tenant_id)
+        if self._is_snapshot_fresh(cached, self._equity_refresh_ttl_seconds):
+            payload = cached.get("snapshot", {})
+            return dict(payload) if isinstance(payload, dict) else {
+                "tenant_id": tenant_id,
+                "total_equity": 0.0,
+                "breakdown": [],
+                "as_of": datetime.utcnow().isoformat(),
+            }
+
+        lock = self._equity_locks.setdefault(tenant_id, asyncio.Lock())
+        async with lock:
+            cached = self._equity_snapshot_cache.get(tenant_id)
+            if self._is_snapshot_fresh(cached, self._equity_refresh_ttl_seconds):
+                payload = cached.get("snapshot", {})
+                return dict(payload) if isinstance(payload, dict) else {
+                    "tenant_id": tenant_id,
+                    "total_equity": 0.0,
+                    "breakdown": [],
+                    "as_of": datetime.utcnow().isoformat(),
+                }
+
+            snapshots = await self._collect_equity_snapshots_for_user(tenant_id)
+            total_value = sum(snapshot.value for snapshot in snapshots)
+            payload = {
+                "tenant_id": tenant_id,
+                "total_equity": float(total_value),
+                "breakdown": [snapshot.__dict__ for snapshot in snapshots],
+                "as_of": datetime.utcnow().isoformat(),
+            }
+            self._equity_snapshot_cache[tenant_id] = {
+                "snapshot": payload,
+                "cached_at": time.time(),
+            }
+            return payload
+
+    @staticmethod
+    def _is_snapshot_fresh(cached: Optional[Dict[str, Any]], ttl_seconds: int) -> bool:
+        if not cached or ttl_seconds <= 0:
+            return False
+        cached_at = float(cached.get("cached_at", 0) or 0)
+        if cached_at <= 0:
+            return False
+        return (time.time() - cached_at) <= float(ttl_seconds)
 
     async def _collect_equity_snapshots_for_user(self, user_id: str) -> List[BrokerEquitySnapshot]:
         """Collect per-connection equity snapshots with error isolation."""

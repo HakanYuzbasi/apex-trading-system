@@ -57,6 +57,8 @@ class PerformanceTracker:
         """Calculate Sharpe ratio from equity curve."""
         if len(self.equity_curve) < 2:
             return 0.0
+        if self.get_completed_trade_count() == 0:
+            return 0.0
         
         try:
             # Extract values and ensure float
@@ -67,11 +69,13 @@ class PerformanceTracker:
             
             if len(returns) == 0:
                 return 0.0
+            if np.max(np.abs(returns)) < 1e-9:
+                return 0.0
             
             # Annualize (assuming daily data)
             excess_returns = returns - (risk_free_rate / 252)
             
-            if np.std(excess_returns) == 0:
+            if np.std(excess_returns) < 1e-9:
                 return 0.0
             
             sharpe = np.mean(excess_returns) / np.std(excess_returns) * np.sqrt(252)
@@ -152,12 +156,16 @@ class PerformanceTracker:
         """Calculate Sortino ratio (focuses on downside volatility only)."""
         if len(self.equity_curve) < 10:
             return 0.0
+        if self.get_completed_trade_count() == 0:
+            return 0.0
 
         try:
             values = [float(v) for _, v in self.equity_curve]
             returns = np.diff(values) / values[:-1]
 
             if len(returns) == 0:
+                return 0.0
+            if np.max(np.abs(returns)) < 1e-9:
                 return 0.0
 
             # Calculate downside returns only
@@ -174,6 +182,26 @@ class PerformanceTracker:
         except Exception as e:
             logger.error(f"Error calculating Sortino ratio: {e}")
             return 0.0
+
+    def get_completed_trade_count(self) -> int:
+        """Count completed BUY->SELL round-trips."""
+        if len(self.trades) < 2:
+            return 0
+        try:
+            positions = {}
+            completed = 0
+            for trade in self.trades:
+                symbol = trade['symbol']
+                side = str(trade['side']).upper()
+                qty = trade['quantity']
+                if side == 'BUY':
+                    positions.setdefault(symbol, []).append(qty)
+                elif side == 'SELL' and symbol in positions and len(positions[symbol]) > 0:
+                    positions[symbol].pop(0)
+                    completed += 1
+            return completed
+        except Exception:
+            return 0
 
     def get_calmar_ratio(self) -> float:
         """Calculate Calmar ratio (annual return / max drawdown)."""
