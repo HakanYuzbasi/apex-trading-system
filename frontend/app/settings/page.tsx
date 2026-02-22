@@ -100,9 +100,19 @@ export default function SettingsPage() {
 
   if (!isAuthenticated || !user) {
     return (
-      <main className="min-h-screen flex flex-col items-center justify-center p-4">
-        <p className="text-muted-foreground">You must be signed in to view settings.</p>
-        <Link href="/login" className="mt-2 text-primary hover:underline">Sign in</Link>
+      <main className="apex-shell min-h-screen px-4 py-8 sm:px-6 lg:px-10">
+        <div className="mx-auto flex min-h-[70vh] w-full max-w-xl items-center justify-center">
+          <section className="apex-panel w-full rounded-2xl border border-border/80 p-6 text-center sm:p-8">
+            <h1 className="text-xl font-semibold text-foreground">Authentication Required</h1>
+            <p className="mt-2 text-sm text-foreground/70">You must be signed in to view settings.</p>
+            <Link
+              href="/login"
+              className="mt-5 inline-flex h-10 items-center justify-center rounded-xl bg-primary px-4 text-sm font-semibold text-primary-foreground transition hover:opacity-90"
+            >
+              Sign in
+            </Link>
+          </section>
+        </div>
       </main>
     );
   }

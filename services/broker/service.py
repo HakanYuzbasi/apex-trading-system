@@ -2,6 +2,7 @@ import os
 import json
 import logging
 import asyncio
+import math
 from dataclasses import dataclass
 from typing import Optional, Dict, List, Any
 from datetime import datetime
@@ -46,6 +47,7 @@ class BrokerService:
         self._connections: Dict[str, BrokerConnection] = {}
         self._loaded_users: set[str] = set()
         self._equity_cache: Dict[str, BrokerEquitySnapshot] = {}
+        self._positions_cache: Dict[str, List[Dict[str, Any]]] = {}
 
     # ─────────────────────────────────────────
     # Disk persistence helpers
@@ -282,43 +284,208 @@ class BrokerService:
     async def get_positions(self, user_id: str) -> List[Dict[str, Any]]:
         """Aggregates open positions across all active broker connections."""
         connections = await self.list_connections(user_id)
+        active_connections = [conn for conn in connections if conn.is_active]
+        if not active_connections:
+            return []
+
+        tasks = [self._fetch_positions_with_fallback(connection=conn) for conn in active_connections]
+        results = await asyncio.gather(*tasks, return_exceptions=True)
         all_positions: List[Dict[str, Any]] = []
-
-        for conn in connections:
-            if not conn.is_active:
+        for idx, result in enumerate(results):
+            if isinstance(result, Exception):
+                conn = active_connections[idx]
+                logger.exception("Failed to fetch positions for connection %s (%s): %s", conn.id, conn.name, result)
                 continue
-            try:
-                creds = self._decrypt_credentials(conn.credentials["data"])
-                if conn.broker_type == BrokerType.ALPACA:
-                    client = TradingClient(
-                        creds["api_key"],
-                        creds["secret_key"],
-                        paper=(conn.environment == "paper"),
-                    )
-                    raw_positions = client.get_all_positions()
-                    for pos in raw_positions:
-                        all_positions.append({
-                            "source": conn.name,
-                            "source_id": conn.id,
-                            "broker_type": conn.broker_type.value,
-                            "symbol": str(pos.symbol),
-                            "qty": float(pos.qty),
-                            "side": str(pos.side.value) if hasattr(pos.side, "value") else str(pos.side),
-                            "avg_cost": float(pos.avg_entry_price or 0),
-                            "current_price": float(pos.current_price or 0),
-                            "market_value": float(pos.market_value or 0),
-                            "unrealized_pl": float(pos.unrealized_pl or 0),
-                            "unrealized_plpc": float(pos.unrealized_plpc or 0),
-                            "stale": False,
-                            "as_of": datetime.utcnow().isoformat(),
-                            "source_status": "ok",
-                        })
-                elif conn.broker_type == BrokerType.IBKR:
-                    logger.debug(f"IBKR positions not yet supported for connection {conn.id}")
-            except Exception as e:  # SWALLOW: isolate one broker failure from global positions view
-                logger.exception("Failed to fetch positions for connection %s (%s): %s", conn.id, conn.name, e)
-
+            all_positions.extend(result)
         return all_positions
+
+    async def _fetch_positions_with_fallback(self, connection: BrokerConnection) -> List[Dict[str, Any]]:
+        """Fetch connection positions with stale-cache fallback."""
+        try:
+            raw_creds = connection.credentials.get("data", "")
+            credentials = self._decrypt_credentials(raw_creds)
+            positions = await self._fetch_connection_positions(connection, credentials)
+            self._positions_cache[connection.id] = positions
+            return positions
+        except Exception as exc:  # SWALLOW: use last-known positions when broker fetch fails
+            cached = self._positions_cache.get(connection.id)
+            if cached is not None:
+                stale_positions: List[Dict[str, Any]] = []
+                for row in cached:
+                    stale_row = dict(row)
+                    stale_row["stale"] = True
+                    stale_row["source_status"] = "degraded"
+                    stale_positions.append(stale_row)
+                return stale_positions
+            raise ApexBrokerError(
+                code="BROKER_POSITION_FETCH_FAILED",
+                message=f"Unable to fetch positions for connection {connection.id}",
+                context={"connection_id": connection.id, "broker_type": connection.broker_type.value, "error": str(exc)},
+            ) from exc
+
+    _POSITIONS_FETCH_TIMEOUT_SECONDS = 12
+
+    async def _fetch_connection_positions(
+        self,
+        connection: BrokerConnection,
+        credentials: Dict[str, Any],
+    ) -> List[Dict[str, Any]]:
+        as_of = datetime.utcnow().isoformat()
+        if connection.broker_type == BrokerType.ALPACA:
+            return await asyncio.wait_for(
+                asyncio.to_thread(
+                    self._fetch_alpaca_positions_blocking,
+                    source_name=connection.name,
+                    source_id=connection.id,
+                    environment=connection.environment,
+                    credentials=credentials,
+                    as_of=as_of,
+                ),
+                timeout=self._POSITIONS_FETCH_TIMEOUT_SECONDS,
+            )
+
+        if connection.broker_type == BrokerType.IBKR:
+            return await asyncio.wait_for(
+                asyncio.to_thread(
+                    self._fetch_ibkr_positions_blocking,
+                    source_name=connection.name,
+                    source_id=connection.id,
+                    client_id=connection.client_id,
+                    credentials=credentials,
+                    as_of=as_of,
+                ),
+                timeout=self._POSITIONS_FETCH_TIMEOUT_SECONDS,
+            )
+
+        raise ApexBrokerError(
+            code="BROKER_UNSUPPORTED",
+            message=f"Unsupported broker type: {connection.broker_type}",
+            context={"broker_type": str(connection.broker_type)},
+        )
+
+    @staticmethod
+    def _fetch_alpaca_positions_blocking(
+        source_name: str,
+        source_id: str,
+        environment: str,
+        credentials: Dict[str, Any],
+        as_of: str,
+    ) -> List[Dict[str, Any]]:
+        client = TradingClient(
+            credentials["api_key"],
+            credentials["secret_key"],
+            paper=(environment == "paper"),
+        )
+        raw_positions = client.get_all_positions()
+        rows: List[Dict[str, Any]] = []
+        for pos in raw_positions:
+            qty = float(pos.qty or 0)
+            if math.isclose(qty, 0.0, abs_tol=1e-12):
+                continue
+            rows.append({
+                "source": source_name,
+                "source_id": source_id,
+                "broker_type": "alpaca",
+                "symbol": str(pos.symbol),
+                "qty": qty,
+                "side": str(pos.side.value) if hasattr(pos.side, "value") else str(pos.side),
+                "avg_cost": float(pos.avg_entry_price or 0),
+                "current_price": float(pos.current_price or 0),
+                "market_value": float(pos.market_value or 0),
+                "unrealized_pl": float(pos.unrealized_pl or 0),
+                "unrealized_plpc": float(pos.unrealized_plpc or 0),
+                "stale": False,
+                "as_of": as_of,
+                "source_status": "ok",
+            })
+        return rows
+
+    @staticmethod
+    def _format_ibkr_contract_symbol(contract: Any) -> str:
+        sec_type = str(getattr(contract, "secType", "")).strip().upper()
+        symbol = str(getattr(contract, "symbol", "")).strip()
+        currency = str(getattr(contract, "currency", "")).strip().upper()
+        if sec_type in {"CASH", "CRYPTO"} and symbol and currency:
+            return f"{symbol}/{currency}"
+        return symbol
+
+    @staticmethod
+    def _fetch_ibkr_positions_blocking(
+        source_name: str,
+        source_id: str,
+        client_id: Optional[int],
+        credentials: Dict[str, Any],
+        as_of: str,
+    ) -> List[Dict[str, Any]]:
+        host = credentials.get("host", "127.0.0.1")
+        port = int(credentials.get("port", 7497))
+        ib_client_id = int(credentials.get("client_id") or client_id or 1)
+        owned_loop: Optional[asyncio.AbstractEventLoop] = None
+        try:
+            asyncio.get_event_loop()
+        except RuntimeError:
+            owned_loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(owned_loop)
+
+        ib = IB()
+        try:
+            ib.connect(host, port, clientId=ib_client_id, timeout=5, readonly=True)
+            portfolio_by_conid: Dict[int, Any] = {}
+            for item in ib.portfolio():
+                con_id = int(getattr(getattr(item, "contract", None), "conId", 0) or 0)
+                if con_id:
+                    portfolio_by_conid[con_id] = item
+
+            rows: List[Dict[str, Any]] = []
+            for pos in ib.positions():
+                contract = getattr(pos, "contract", None)
+                if contract is None:
+                    continue
+                sec_type = str(getattr(contract, "secType", "")).strip().upper()
+                if "OPT" in sec_type:
+                    continue
+                qty = float(getattr(pos, "position", 0) or 0)
+                if math.isclose(qty, 0.0, abs_tol=1e-12):
+                    continue
+
+                symbol = BrokerService._format_ibkr_contract_symbol(contract)
+                con_id = int(getattr(contract, "conId", 0) or 0)
+                portfolio_item = portfolio_by_conid.get(con_id)
+                avg_cost = float(getattr(pos, "avgCost", 0) or 0)
+                current_price = float(getattr(portfolio_item, "marketPrice", 0) or 0)
+                market_value = float(getattr(portfolio_item, "marketValue", 0) or 0)
+                unrealized_pl = float(getattr(portfolio_item, "unrealizedPNL", 0) or 0)
+
+                if math.isclose(current_price, 0.0, abs_tol=1e-12) and not math.isclose(avg_cost, 0.0, abs_tol=1e-12):
+                    current_price = avg_cost
+                if math.isclose(market_value, 0.0, abs_tol=1e-12):
+                    market_value = qty * current_price
+                basis = abs(qty * avg_cost)
+                unrealized_plpc = (unrealized_pl / basis) if basis > 1e-12 else 0.0
+
+                rows.append({
+                    "source": source_name,
+                    "source_id": source_id,
+                    "broker_type": "ibkr",
+                    "symbol": symbol,
+                    "qty": qty,
+                    "side": "LONG" if qty > 0 else "SHORT",
+                    "avg_cost": avg_cost,
+                    "current_price": current_price,
+                    "market_value": market_value,
+                    "unrealized_pl": unrealized_pl,
+                    "unrealized_plpc": unrealized_plpc,
+                    "stale": False,
+                    "as_of": as_of,
+                    "source_status": "ok",
+                })
+            return rows
+        finally:
+            if ib.isConnected():
+                ib.disconnect()
+            if owned_loop is not None:
+                asyncio.set_event_loop(None)
+                owned_loop.close()
 
     async def list_connection_sources(self, user_id: str) -> List[Dict[str, Any]]:
         """Returns lightweight list of active connections for the account selector dropdown."""

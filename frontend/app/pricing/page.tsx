@@ -174,7 +174,7 @@ export default function PricingPage() {
                     </p>
                   ) : null}
 
-                  <ul className="mt-4 space-y-1.5 text-sm text-muted-foreground">
+                  <ul className="mt-4 space-y-1.5 text-sm text-foreground/75">
                     {plan.feature_highlights.slice(0, 3).map((item) => (
                       <li key={item}>- {item}</li>
                     ))}
@@ -183,13 +183,13 @@ export default function PricingPage() {
                   <div className="mt-5 flex items-center gap-2">
                     <Link
                       href="/login"
-                      className="rounded-lg bg-primary px-3 py-2 text-xs font-semibold text-primary-foreground transition hover:opacity-90"
+                      className="inline-flex h-9 items-center rounded-lg bg-primary px-3 text-xs font-semibold text-primary-foreground transition hover:opacity-90"
                     >
                       Start with {plan.name}
                     </Link>
                     <Link
                       href="/settings"
-                      className="rounded-lg border border-border px-3 py-2 text-xs font-semibold text-foreground transition hover:bg-muted/50"
+                      className="inline-flex h-9 items-center rounded-lg border border-border px-3 text-xs font-semibold text-foreground transition hover:bg-muted/50"
                     >
                       Manage Plan
                     </Link>
@@ -205,12 +205,12 @@ export default function PricingPage() {
           </p>
 
           <div className="overflow-auto rounded-xl border border-border/70">
-            <table className="min-w-full text-sm">
-              <thead className="bg-background/95 text-left text-muted-foreground">
+            <table className="min-w-full text-sm sm:text-[15px]">
+              <thead className="bg-background/95 text-left text-foreground/75">
                 <tr>
-                  <th className="px-3 py-2 font-semibold">Feature</th>
+                  <th className="px-3 py-2.5 font-semibold">Feature</th>
                   {sortedPlans.map((plan) => (
-                    <th key={plan.code} className="px-3 py-2 font-semibold">
+                    <th key={plan.code} className="px-3 py-2.5 font-semibold">
                       {plan.name}
                     </th>
                   ))}
@@ -226,11 +226,11 @@ export default function PricingPage() {
                 ) : (
                   featureKeys.map((feature) => (
                     <tr key={feature} className="border-t border-border/60">
-                      <td className="px-3 py-2 text-foreground">{feature}</td>
+                      <td className="px-3 py-2.5 text-foreground">{feature}</td>
                       {sortedPlans.map((plan) => {
                         const raw = plan.feature_limits?.[feature];
                         return (
-                          <td key={`${plan.code}-${feature}`} className="px-3 py-2 text-muted-foreground">
+                          <td key={`${plan.code}-${feature}`} className="px-3 py-2.5 text-foreground/75">
                             {typeof raw === "number" ? formatLimit(raw) : "-"}
                           </td>
                         );

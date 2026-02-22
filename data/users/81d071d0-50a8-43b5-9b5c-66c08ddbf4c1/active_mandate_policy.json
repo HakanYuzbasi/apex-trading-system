@@ -1,0 +1,29 @@
+{
+  "activated_at": "2026-02-22T13:25:13.689039+00:00",
+  "activated_by": "e2e_admin",
+  "expected_max_drawdown_pct": 13.5,
+  "feasibility_band": "red",
+  "notes": [
+    "E2E validation initiation"
+  ],
+  "policy_snapshot": {
+    "asset_classes": [
+      "equity",
+      "fx"
+    ],
+    "horizon_days": null,
+    "include_options": true,
+    "intent": "Deliver 12% annualized return with max 15% DD, focus on energy and technology, paper mode.",
+    "max_drawdown_pct": null,
+    "recommendation_mode": "POLICY_ONLY",
+    "sectors": [],
+    "suitability_profile": "balanced",
+    "target_return_pct": null
+  },
+  "probability_target_hit": 0.556,
+  "recommendation_mode": "POLICY_ONLY",
+  "request_id": "mdt-74110b5c5133",
+  "status": "paper_live",
+  "tenant_id": "81d071d0-50a8-43b5-9b5c-66c08ddbf4c1",
+  "workflow_id": "mwf-a999cbe1702b"
+}

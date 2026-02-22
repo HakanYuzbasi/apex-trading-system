@@ -73,6 +73,19 @@ type UpstreamResponse = {
   transport_error: boolean;
 };
 
+type BrokerRuntimeStatus = "live" | "stale" | "configured" | "not_configured";
+
+type BrokerRuntime = {
+  broker: "alpaca" | "ibkr";
+  status: BrokerRuntimeStatus;
+  configured: boolean;
+  stale: boolean;
+  source_count: number;
+  live_source_count: number;
+  source_ids: string[];
+  total_equity: number;
+};
+
 function getApiBase(): string {
   return (process.env.NEXT_PUBLIC_API_URL || process.env.APEX_API_URL || DEFAULT_API_BASE).replace(/\/+$/, "");
 }
@@ -219,12 +232,14 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
     return NextResponse.json({ detail: "Not authenticated" }, { status: 401 });
   }
 
-  const [statusResp, positionsResp, stateResp, socialAuditResp, portfolioPositionsResp] = await Promise.all([
+  const [statusResp, positionsResp, stateResp, socialAuditResp, portfolioPositionsResp, portfolioSourcesResp, portfolioBalanceResp] = await Promise.all([
     fetchUpstream("/status", token),
     fetchUpstream("/positions", token),
     fetchUpstream("/state", token),
     fetchUpstream("/api/v1/social-governor/decisions?limit=40", token),
     fetchUpstream("/portfolio/positions", token),
+    fetchUpstream("/portfolio/sources", token),
+    fetchUpstream("/portfolio/balance", token),
   ]);
 
   const statusData = (statusResp.data && typeof statusResp.data === "object" ? statusResp.data : {}) as Record<string, unknown>;
@@ -235,6 +250,13 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
   const portfolioPositions = (Array.isArray(portfolioPositionsResp.data) ? portfolioPositionsResp.data : [])
     .map((row) => normalizePositionRow(row))
     .filter((row): row is PositionRow => row !== null);
+  const portfolioSources = (Array.isArray(portfolioSourcesResp.data) ? portfolioSourcesResp.data : []) as Record<string, unknown>[];
+  const portfolioBalanceData = (portfolioBalanceResp.data && typeof portfolioBalanceResp.data === "object"
+    ? portfolioBalanceResp.data
+    : {}) as Record<string, unknown>;
+  const portfolioBreakdown = (Array.isArray(portfolioBalanceData.breakdown)
+    ? portfolioBalanceData.breakdown
+    : []) as Record<string, unknown>[];
   const statePositions = (stateData.positions && typeof stateData.positions === "object"
     ? stateData.positions
     : {}) as Record<string, Record<string, unknown>>;
@@ -256,6 +278,68 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
   }
   const stateFresh = String(statusData.status || "").toLowerCase() === "online"
     || isFreshTimestamp(stateData.timestamp ?? statusData.timestamp);
+
+  const brokerRuntimeByType = new Map<"alpaca" | "ibkr", BrokerRuntime>();
+  for (const broker of ["alpaca", "ibkr"] as const) {
+    brokerRuntimeByType.set(broker, {
+      broker,
+      status: "not_configured",
+      configured: false,
+      stale: false,
+      source_count: 0,
+      live_source_count: 0,
+      source_ids: [],
+      total_equity: 0,
+    });
+  }
+  for (const source of portfolioSources) {
+    const brokerRaw = String(source.broker_type ?? "").toLowerCase();
+    if (brokerRaw !== "alpaca" && brokerRaw !== "ibkr") {
+      continue;
+    }
+    const current = brokerRuntimeByType.get(brokerRaw as "alpaca" | "ibkr");
+    if (!current) continue;
+    current.configured = true;
+    current.source_count += 1;
+    const sourceId = String(source.id ?? "").trim();
+    if (sourceId) {
+      current.source_ids.push(sourceId);
+    }
+    if (current.status === "not_configured") {
+      current.status = "configured";
+    }
+  }
+  for (const row of portfolioBreakdown) {
+    const brokerRaw = String(row.broker ?? "").toLowerCase();
+    if (brokerRaw !== "alpaca" && brokerRaw !== "ibkr") {
+      continue;
+    }
+    const current = brokerRuntimeByType.get(brokerRaw as "alpaca" | "ibkr");
+    if (!current) continue;
+    current.configured = true;
+    current.source_count = Math.max(current.source_count, 1);
+    const stale = Boolean(row.stale);
+    const sourceId = String(row.source_id ?? "").trim();
+    if (sourceId && !current.source_ids.includes(sourceId)) {
+      current.source_ids.push(sourceId);
+    }
+    const equity = sanitizeMoney(row.value, 0);
+    current.total_equity += equity;
+    if (!stale) {
+      current.live_source_count += 1;
+    } else {
+      current.stale = true;
+    }
+    current.status = !stale ? "live" : current.status === "live" ? "live" : "stale";
+  }
+  const brokers = Array.from(brokerRuntimeByType.values());
+  const liveBrokerCount = brokers.filter((row) => row.status === "live").length;
+  const configuredBrokerCount = brokers.filter((row) => row.configured).length;
+  const activeBroker = liveBrokerCount > 1
+    ? "multi"
+    : brokers.find((row) => row.status === "live")?.broker
+      ?? brokers.find((row) => row.status === "stale")?.broker
+      ?? "none";
   const statusMetrics = sanitizeExecutionMetrics({
     capital: statusData.capital,
     starting_capital: statusData.starting_capital,
@@ -269,18 +353,35 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
     open_positions_total: statusData.open_positions_total,
     total_trades: statusData.total_trades,
   });
+  const combinedCapital = portfolioBalanceResp.ok
+    ? sanitizeMoney(portfolioBalanceData.total_equity, statusMetrics.capital)
+    : statusMetrics.capital;
 
   const inferredStateOpenPositions = Math.max(
     statusMetrics.open_positions,
     sanitizeCount(stateData.open_positions, 0),
     stateEndpointPositions.length,
   );
-  const usePortfolioPositionFallback = portfolioPositions.length > 0
-    && (!stateFresh || inferredStateOpenPositions === 0);
-  const effectivePositions = usePortfolioPositionFallback ? portfolioPositions : stateEndpointPositions;
+  const usePortfolioPositionsPrimary = portfolioPositions.length > 0;
+  const daemonBySymbol = new Map<string, PositionRow>();
+  for (const row of stateEndpointPositions) {
+    if (!daemonBySymbol.has(row.symbol)) {
+      daemonBySymbol.set(row.symbol, row);
+    }
+  }
+  const mergedPortfolioPositions = portfolioPositions.map((row) => {
+    const daemonRow = daemonBySymbol.get(row.symbol);
+    if (!daemonRow) return row;
+    return {
+      ...row,
+      signal: daemonRow.signal,
+      signal_direction: daemonRow.signal_direction,
+    };
+  });
+  const effectivePositions = usePortfolioPositionsPrimary ? mergedPortfolioPositions : stateEndpointPositions;
   const openPositions = Math.max(
     inferredStateOpenPositions,
-    usePortfolioPositionFallback ? portfolioPositions.length : 0,
+    effectivePositions.length,
   );
   const derivativesRaw = Array.isArray(stateData.option_positions_detail)
     ? stateData.option_positions_detail
@@ -333,6 +434,7 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
     openPositions + optionPositions,
   );
   const sharpe = statusMetrics.sharpe_ratio;
+  const totalTrades = statusMetrics.trades_count;
   const drawdown = statusMetrics.max_drawdown;
   const absDrawdown = Math.abs(drawdown);
   const normalizedDrawdownPct = absDrawdown > 1 ? absDrawdown : absDrawdown * 100;
@@ -458,7 +560,7 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
       detail: `Current drawdown -${normalizedDrawdownPct.toFixed(2)}% is approaching policy limits.`,
     });
   }
-  if (statusResp.ok && sharpe < 1.0) {
+  if (statusResp.ok && stateFresh && totalTrades >= 20 && sharpe < 1.0) {
     alerts.push({
       id: "sharpe-warning",
       severity: "warning",
@@ -485,19 +587,19 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
       id: "position-count-mismatch",
       severity: "info",
       source: "state_consistency",
-      title: usePortfolioPositionFallback ? "Position count mismatch (fallback)" : "Position count mismatch",
-      detail: usePortfolioPositionFallback
+      title: usePortfolioPositionsPrimary ? "Position count mismatch (aggregated)" : "Position count mismatch",
+      detail: usePortfolioPositionsPrimary
         ? `Status reports ${openPositions} while /portfolio/positions returned ${effectivePositions.length}.`
         : `Status reports ${openPositions} while positions endpoint returned ${effectivePositions.length}.`,
     });
   }
-  if (usePortfolioPositionFallback) {
+  if (usePortfolioPositionsPrimary) {
     alerts.push({
       id: "portfolio-position-fallback",
       severity: "info",
       source: "broker_aggregation",
-      title: "Using broker portfolio fallback",
-      detail: "Trading state was stale/flat, so open positions were sourced from /portfolio/positions.",
+      title: "Using broker aggregated positions",
+      detail: "Open positions are sourced from /portfolio/positions (Alpaca + IBKR) with daemon signal enrichment.",
     });
   }
 
@@ -511,12 +613,22 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
     });
   }
   if (!socialAuditAvailable && socialAuditWarning) {
+    const socialAlertSeverity: Severity = socialAuditResp.transport_error
+      ? "warning"
+      : socialAuditResp.status >= 500
+        ? "info"
+        : "warning";
+    const socialAlertTitle = socialAuditResp.status >= 500
+      ? "Social audit feed degraded"
+      : "Social audit feed unavailable";
     alerts.push({
       id: "social-audit-unavailable",
-      severity: "warning",
+      severity: socialAlertSeverity,
       source: "social_governor",
-      title: "Social audit feed unavailable",
-      detail: `Cockpit could not load social-governor audit feed (${socialAuditWarning}).`,
+      title: socialAlertTitle,
+      detail: socialAuditResp.status >= 500
+        ? `Social-governor audit API returned ${socialAuditResp.status}; core trading telemetry remains available.`
+        : `Cockpit could not load social-governor audit feed (${socialAuditWarning}).`,
     });
   }
 
@@ -556,7 +668,7 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
       api_reachable: apiReachable,
       state_fresh: stateFresh,
       timestamp: statusData.timestamp ?? null,
-      capital: statusMetrics.capital,
+      capital: combinedCapital,
       starting_capital: statusMetrics.starting_capital,
       daily_pnl: statusMetrics.daily_pnl,
       total_pnl: statusMetrics.total_pnl,
@@ -567,6 +679,10 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
       option_positions: optionPositions,
       open_positions_total: openPositionsTotal,
       total_trades: statusMetrics.trades_count,
+      brokers,
+      active_broker: activeBroker,
+      live_broker_count: liveBrokerCount,
+      configured_broker_count: configuredBrokerCount,
     },
     positions: effectivePositions,
     derivatives,
@@ -594,8 +710,8 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
     notes: [
       `Equity positions: ${openPositions}, option contracts: ${optionPositions}, total lines: ${openPositionsTotal}.`,
       `Derivatives table currently includes ${derivatives.length} option legs exported from IBKR.`,
-      usePortfolioPositionFallback
-        ? "State feed was stale/flat; cockpit fell back to /portfolio/positions for equity rows."
+      usePortfolioPositionsPrimary
+        ? "Primary equity rows are sourced from /portfolio/positions (Alpaca + IBKR) and enriched with daemon signal fields."
         : "Primary equity rows are sourced from daemon /positions plus state reconciliation.",
       `USP engine score: ${uspScore.toFixed(1)}/100 (${uspBand.replaceAll("_", " ")}).`,
     ],

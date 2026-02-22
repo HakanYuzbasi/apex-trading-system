@@ -25,7 +25,10 @@ _SERVICE = MandateCopilotService()
 
 def _normalized_roles(request: Request, user) -> list[str]:
     request_roles = getattr(request.state, "roles", None) or []
-    user_roles = getattr(user, "roles", None) or []
+    try:
+        user_roles = getattr(user, "roles", None) or []
+    except Exception:
+        user_roles = []
     source = request_roles if request_roles else user_roles
     return [str(role).strip().lower() for role in source]
 

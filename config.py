@@ -710,10 +710,32 @@ class ApexConfig:
         "USD/CAD", "NZD/USD"
     ]
 
-    # 3. Crypto Pairs (Top Liquid)
+    # 3. Crypto Pairs (Top Liquid, expanded for Alpaca crypto paper)
     CRYPTO_PAIRS = [
-        "BTC/USD", "ETH/USD", "SOL/USD", "DOGE/USD"
+        "BTC/USD",
+        "ETH/USD",
+        "SOL/USD",
+        "DOGE/USD",
+        "AVAX/USD",
+        "LINK/USD",
+        "MATIC/USD",
+        "ADA/USD",
+        "XRP/USD",
+        "DOT/USD",
+        "LTC/USD",
+        "BCH/USD",
+        "XLM/USD",
+        "ETC/USD",
+        "AAVE/USD",
+        "UNI/USD",
     ]
+    EXTRA_CRYPTO_PAIRS = [
+        token.strip().upper()
+        for token in os.getenv("APEX_EXTRA_CRYPTO_PAIRS", "").split(",")
+        if token.strip()
+    ]
+    if EXTRA_CRYPTO_PAIRS:
+        CRYPTO_PAIRS = list(dict.fromkeys(CRYPTO_PAIRS + EXTRA_CRYPTO_PAIRS))
 
     # 4. Top 100 S&P 500 Components (aligned with SECTOR_MAP)
     # Trimmed to exactly 85 to keep total universe at 100 (4 Indices + 7 Forex + 4 Crypto + 85 Stocks)

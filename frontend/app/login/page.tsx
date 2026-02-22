@@ -140,7 +140,7 @@ function LoginForm() {
               required
               autoComplete="current-password"
               className="block w-full rounded-md border border-input bg-background py-2 pl-10 pr-10 text-sm font-medium text-foreground shadow-inner focus:border-primary focus:outline-none focus:ring-1 focus:ring-primary"
-              placeholder="Enter admin password (APEX_ADMIN_PASSWORD)"
+              placeholder="Enter admin password"
               value={password}
               onChange={(e) => setPassword(e.target.value)}
               disabled={isLoading}
@@ -154,7 +154,7 @@ function LoginForm() {
               {showPassword ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
             </button>
           </div>
-          <p className="text-xs text-muted-foreground">
+          <p className="text-xs text-foreground/70">
             Use your account username and the configured admin password for cockpit access.
           </p>
         </div>
@@ -196,7 +196,7 @@ export default function LoginPage() {
         <div className="absolute -bottom-[20%] -right-[20%] h-[70%] w-[50%] rounded-full bg-secondary/30 blur-[120px]" />
       </div>
 
-      <div className="relative z-10 w-full max-w-md overflow-hidden rounded-2xl border border-border/60 bg-background/80 shadow-2xl backdrop-blur-xl">
+      <div className="relative z-10 w-full max-w-[26rem] overflow-hidden rounded-2xl border border-border/60 bg-background/85 shadow-2xl backdrop-blur-xl">
         <div className="absolute inset-x-0 top-0 h-1 bg-gradient-to-r from-transparent via-primary/50 to-transparent" />
         <div className="p-8">
           <Suspense fallback={

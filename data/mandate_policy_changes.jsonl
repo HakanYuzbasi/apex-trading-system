@@ -2,3 +2,6 @@
 {"timestamp":"2026-02-16T21:41:39.005209+00:00","workflow_id":"mwf-7ce258c3ff60","actor":"admin","from_status":"draft","to_status":"retired","note":"Retired from cockpit review."}
 {"timestamp":"2026-02-16T21:51:14.663139+00:00","workflow_id":"mwf-9d0d5be310bb","actor":"admin","from_status":"none","to_status":"draft","note":"preflight workflow initiation check"}
 {"timestamp":"2026-02-17T20:03:00.324805+00:00","workflow_id":"mwf-9d0d5be310bb","actor":"admin","from_status":"draft","to_status":"retired","note":"Retired from cockpit review."}
+{"timestamp":"2026-02-22T13:25:13.631716+00:00","workflow_id":"mwf-a999cbe1702b","actor":"81d071d0-50a8-43b5-9b5c-66c08ddbf4c1","from_status":"none","to_status":"draft","note":"E2E validation initiation"}
+{"timestamp":"2026-02-22T13:25:13.669367+00:00","workflow_id":"mwf-a999cbe1702b","actor":"e2e_admin","from_status":"draft","to_status":"approved","note":"Auto-approved after required PM + compliance sign-offs."}
+{"timestamp":"2026-02-22T13:25:13.689964+00:00","workflow_id":"mwf-a999cbe1702b","actor":"e2e_admin","from_status":"approved","to_status":"paper_live","note":"E2E promotion to paper runtime for verification"}

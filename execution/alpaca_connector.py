@@ -16,7 +16,7 @@ import asyncio
 import logging
 import time
 from datetime import datetime
-from typing import Dict, Optional, Callable, Any, List
+from typing import Dict, Optional, Callable, Any, List, Set
 
 import httpx
 
@@ -78,6 +78,9 @@ class AlpacaConnector:
 
         # Symbol mapping (APEX -> Alpaca)
         self._pair_map = self._build_pair_map()
+        # Active Alpaca crypto symbols discovered at connect-time (e.g., BTC/USD).
+        self._active_crypto_symbols: Set[str] = set()
+        self._preferred_quote_currencies: tuple[str, ...] = ("USD", "USDT", "USDC")
 
     # ------------------------------------------------------------------
     # Symbol mapping
@@ -103,13 +106,58 @@ class AlpacaConnector:
             return symbol
 
         mapped = self._pair_map.get(parsed.normalized)
-        if mapped:
+        if mapped and (not self._active_crypto_symbols or mapped in self._active_crypto_symbols):
             return mapped
 
         if parsed.asset_class == AssetClass.CRYPTO:
-            return f"{parsed.base}/USD"
+            preferred = [
+                f"{parsed.base}/{quote}"
+                for quote in self._preferred_quote_currencies
+            ]
+            if self._active_crypto_symbols:
+                for candidate in preferred:
+                    if candidate in self._active_crypto_symbols:
+                        return candidate
+            return preferred[0]
 
         return parsed.base
+
+    async def _refresh_active_crypto_symbols(self) -> None:
+        """Discover currently active Alpaca crypto symbols (BTC/USD, ETH/USDT, ...)."""
+        try:
+            data = await self._request(
+                "GET",
+                "/v2/assets",
+                params={"status": "active", "asset_class": "crypto"},
+            )
+        except Exception as exc:
+            logger.debug("Failed to refresh Alpaca crypto symbols: %s", exc)
+            return
+
+        symbols: Set[str] = set()
+        if isinstance(data, list):
+            for row in data:
+                if not isinstance(row, dict):
+                    continue
+                sym = str(row.get("symbol", "")).strip().upper()
+                if not sym:
+                    continue
+                if "/" in sym:
+                    symbols.add(sym)
+                    continue
+                # Normalize condensed symbol format (e.g. BTCUSD -> BTC/USD).
+                for quote in self._preferred_quote_currencies:
+                    if sym.endswith(quote) and len(sym) > len(quote):
+                        base = sym[: -len(quote)]
+                        if base:
+                            symbols.add(f"{base}/{quote}")
+                        break
+        if symbols:
+            self._active_crypto_symbols = symbols
+            logger.info(
+                "Alpaca active crypto symbols loaded: %d pairs",
+                len(self._active_crypto_symbols),
+            )
 
     # Known crypto base assets for reverse mapping
     _CRYPTO_BASES = {
@@ -249,6 +297,7 @@ class AlpacaConnector:
 
             if account.get("crypto_status") == "ACTIVE":
                 logger.info("  Crypto:  ACTIVE")
+                await self._refresh_active_crypto_symbols()
             else:
                 logger.warning(
                     f"  Crypto status: {account.get('crypto_status', 'UNKNOWN')} "
@@ -412,13 +461,39 @@ class AlpacaConnector:
 
     async def _poll_quotes_loop(self, symbols: list) -> None:
         """Background polling loop for crypto quotes."""
+        chunk_size = 25
         while True:
             try:
-                for symbol in symbols:
-                    # Clear cache to force fresh fetch
-                    normalized = normalize_symbol(symbol)
-                    self._price_cache.pop(normalized, None)
-                    await self.get_market_price(symbol)
+                if self.offline_mode or not self._connected or self._client is None:
+                    await asyncio.sleep(15)
+                    continue
+
+                for i in range(0, len(symbols), chunk_size):
+                    batch = symbols[i:i + chunk_size]
+                    alpaca_to_normalized: Dict[str, str] = {}
+                    for symbol in batch:
+                        normalized = normalize_symbol(symbol)
+                        self._price_cache.pop(normalized, None)
+                        alpaca_to_normalized[self._to_alpaca_symbol(symbol)] = normalized
+
+                    data = await self._request(
+                        "GET",
+                        "/v1beta3/crypto/us/latest/quotes",
+                        base_url=self.DATA_BASE_URL,
+                        params={"symbols": ",".join(alpaca_to_normalized.keys())},
+                    )
+                    quotes = data.get("quotes", {}) if isinstance(data, dict) else {}
+                    for alpaca_sym, normalized in alpaca_to_normalized.items():
+                        quote = quotes.get(alpaca_sym, {})
+                        bp = float(quote.get("bp", 0.0) or 0.0)
+                        ap = float(quote.get("ap", 0.0) or 0.0)
+                        if bp > 0 and ap > 0:
+                            self._price_cache[normalized] = (bp + ap) / 2.0
+                            if self.data_callback:
+                                self.data_callback(normalized)
+                        else:
+                            # Fallback to per-symbol fetch to keep legacy behavior.
+                            await self.get_market_price(normalized)
                 await asyncio.sleep(10)
             except asyncio.CancelledError:
                 break

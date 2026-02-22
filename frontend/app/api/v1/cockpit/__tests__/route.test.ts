@@ -50,19 +50,25 @@ function mockAllEndpoints(
     daemonPositions?: unknown[];
     statePayload?: Record<string, unknown>;
     portfolioPositions?: unknown[];
+    portfolioSources?: unknown[];
+    portfolioBalance?: Record<string, unknown>;
   } = {},
 ) {
   const {
     daemonPositions = [],
     statePayload = { positions: {} },
     portfolioPositions = [],
+    portfolioSources = [],
+    portfolioBalance = { total_equity: Number(statusData.capital ?? 0), breakdown: [] },
   } = options;
   mockFetch
     .mockResolvedValueOnce(mockUpstream(statusData))         // /status
     .mockResolvedValueOnce(mockUpstream(daemonPositions))    // /positions
     .mockResolvedValueOnce(mockUpstream(statePayload))       // /state
     .mockResolvedValueOnce(mockUpstream({ events: [] }))     // /social-governor
-    .mockResolvedValueOnce(mockUpstream(portfolioPositions)); // /portfolio/positions
+    .mockResolvedValueOnce(mockUpstream(portfolioPositions)) // /portfolio/positions
+    .mockResolvedValueOnce(mockUpstream(portfolioSources))   // /portfolio/sources
+    .mockResolvedValueOnce(mockUpstream(portfolioBalance));  // /portfolio/balance
 }
 
 describe("cockpit route — drawdown alerts", () => {
@@ -255,7 +261,7 @@ describe("cockpit route — /portfolio/positions fallback", () => {
     expect(fallbackAlert).toBeDefined();
   });
 
-  it("keeps daemon positions when state is fresh and non-flat", async () => {
+  it("keeps portfolio aggregation as primary when portfolio rows are present", async () => {
     mockAllEndpoints(
       makeStatusData({ status: "online", open_positions: 2 }),
       {
@@ -289,8 +295,8 @@ describe("cockpit route — /portfolio/positions fallback", () => {
     const body = await response.json();
 
     expect(body.positions).toHaveLength(1);
-    expect(body.positions[0].symbol).toBe("MSFT");
+    expect(body.positions[0].symbol).toBe("AAPL");
     const fallbackAlert = body.alerts.find((a: { id: string }) => a.id === "portfolio-position-fallback");
-    expect(fallbackAlert).toBeUndefined();
+    expect(fallbackAlert).toBeDefined();
   });
 });

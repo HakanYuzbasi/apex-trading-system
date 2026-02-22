@@ -16,6 +16,8 @@ from uuid import uuid4
 logger = logging.getLogger(__name__)
 
 from config import ApexConfig
+from core.trading_control import request_governor_policy_reload
+from risk.governor_policy import GovernorPolicyRepository, default_policy_for
 from services.mandate_copilot.schemas import (
     FeasibilityBand,
     MandateCalibrationResponse,
@@ -280,6 +282,9 @@ class MandateCopilotService:
         if status == MandateLifecycleStatus.PAPER_LIVE:
             if not all(pack.signoffs.get(req_role, WorkflowSignoff(role=req_role)).approved for req_role in pack.required_signoffs):
                 raise ValueError("All required PM + compliance sign-offs must be completed before paper_live.")
+            activation_note = self._activate_paper_runtime_policy(pack=pack, actor=actor)
+            if activation_note:
+                pack.notes.append(activation_note)
 
         old_status = pack.status
         pack.status = status
@@ -296,6 +301,64 @@ class MandateCopilotService:
             note=note,
         )
         return pack
+
+    def _tenant_data_dir(self, tenant_id: str) -> Path:
+        normalized = str(tenant_id or "admin").strip() or "admin"
+        if normalized == "admin":
+            return ApexConfig.DATA_DIR
+        return ApexConfig.DATA_DIR / "users" / normalized
+
+    def _activate_paper_runtime_policy(self, pack: MandateWorkflowPack, actor: str) -> str:
+        tenant_id = str(pack.created_by or "admin").strip() or "admin"
+        tenant_dir = self._tenant_data_dir(tenant_id)
+        tenant_dir.mkdir(parents=True, exist_ok=True)
+
+        policy_artifact = {
+            "activated_at": _utc_now_iso(),
+            "activated_by": actor,
+            "tenant_id": tenant_id,
+            "workflow_id": pack.workflow_id,
+            "request_id": pack.request_id,
+            "status": "paper_live",
+            "recommendation_mode": pack.recommendation_mode.value,
+            "feasibility_band": pack.feasibility_band.value,
+            "probability_target_hit": float(pack.probability_target_hit),
+            "expected_max_drawdown_pct": float(pack.expected_max_drawdown_pct),
+            "policy_snapshot": dict(pack.policy_snapshot or {}),
+            "notes": list(pack.notes or []),
+        }
+        (tenant_dir / "active_mandate_policy.json").write_text(
+            json.dumps(policy_artifact, indent=2, sort_keys=True),
+            encoding="utf-8",
+        )
+
+        repo = GovernorPolicyRepository(tenant_dir / "governor_policies")
+        policy = default_policy_for("GLOBAL", "default")
+        policy.version = f"mandate-{pack.workflow_id[:10]}"
+        policy.historical_mdd = _clamp(float(pack.expected_max_drawdown_pct) / 100.0, 0.03, 0.30)
+        policy.oos_sharpe = round(max(0.0, float(pack.probability_target_hit)) * 2.0, 4)
+        policy.metadata.update(
+            {
+                "source": "mandate_workflow_pack",
+                "workflow_id": pack.workflow_id,
+                "request_id": pack.request_id,
+                "tenant_id": tenant_id,
+                "activated_by": actor,
+                "activated_at": _utc_now_iso(),
+                "policy_constraints": list(dict(pack.policy_snapshot or {}).get("constraints", [])[:8]),
+            }
+        )
+        repo.upsert_active(policy)
+
+        request_governor_policy_reload(
+            tenant_dir / "trading_control_commands.json",
+            requested_by=actor,
+            reason=f"mandate_workflow_{pack.workflow_id}_paper_live",
+        )
+        return (
+            f"Applied policy snapshot to paper runtime for tenant {tenant_id} "
+            f"(workflow={pack.workflow_id}); governor reload requested."
+        )
 
     def load_recent_audit(self, limit: int = 50) -> List[dict]:
         if limit <= 0 or not Path(AUDIT_FILE).exists():
@@ -767,4 +830,3 @@ class MandateCopilotService:
             if str(row.get("workflow_id", "")) == str(workflow_id):
                 return idx
         return -1
-

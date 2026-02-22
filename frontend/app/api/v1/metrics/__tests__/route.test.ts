@@ -27,27 +27,39 @@ function mockUpstream(data: unknown, ok = true, status = 200): Response {
   } as Response;
 }
 
+function mockMetricsEndpoints(
+  statusData: Record<string, unknown>,
+  options: {
+    totalEquity?: number;
+    portfolioPositions?: unknown[];
+  } = {},
+) {
+  const { totalEquity = Number(statusData.capital ?? 0), portfolioPositions = [] } = options;
+  mockFetch
+    .mockResolvedValueOnce(mockUpstream(statusData))
+    .mockResolvedValueOnce(mockUpstream({ total_equity: totalEquity, breakdown: [] }))
+    .mockResolvedValueOnce(mockUpstream(portfolioPositions));
+}
+
 describe("metrics route — starting_capital passthrough", () => {
   beforeEach(() => {
     jest.clearAllMocks();
   });
 
   it("passes through starting_capital from backend", async () => {
-    mockFetch.mockResolvedValueOnce(
-      mockUpstream({
-        status: "online",
-        timestamp: "2024-01-01T12:00:00Z",
-        capital: 1050000,
-        starting_capital: 1000000,
-        daily_pnl: 5000,
-        total_pnl: 50000,
-        max_drawdown: -0.03,
-        sharpe_ratio: 1.5,
-        win_rate: 0.6,
-        open_positions: 5,
-        total_trades: 42,
-      })
-    );
+    mockMetricsEndpoints({
+      status: "online",
+      timestamp: "2024-01-01T12:00:00Z",
+      capital: 1050000,
+      starting_capital: 1000000,
+      daily_pnl: 5000,
+      total_pnl: 50000,
+      max_drawdown: -0.03,
+      sharpe_ratio: 1.5,
+      win_rate: 0.6,
+      open_positions: 5,
+      total_trades: 42,
+    });
 
     const response = await GET(makeRequest());
     const body = await response.json();
@@ -57,21 +69,19 @@ describe("metrics route — starting_capital passthrough", () => {
   });
 
   it("derives starting_capital from capital and total_pnl when missing", async () => {
-    mockFetch.mockResolvedValueOnce(
-      mockUpstream({
-        status: "online",
-        timestamp: "2024-01-01T12:00:00Z",
-        capital: 500000,
-        // no starting_capital
-        daily_pnl: 1000,
-        total_pnl: 10000,
-        max_drawdown: -0.01,
-        sharpe_ratio: 2.0,
-        win_rate: 0.65,
-        open_positions: 3,
-        total_trades: 20,
-      })
-    );
+    mockMetricsEndpoints({
+      status: "online",
+      timestamp: "2024-01-01T12:00:00Z",
+      capital: 500000,
+      // no starting_capital
+      daily_pnl: 1000,
+      total_pnl: 10000,
+      max_drawdown: -0.01,
+      sharpe_ratio: 2.0,
+      win_rate: 0.65,
+      open_positions: 3,
+      total_trades: 20,
+    });
 
     const response = await GET(makeRequest());
     const body = await response.json();
@@ -80,21 +90,19 @@ describe("metrics route — starting_capital passthrough", () => {
   });
 
   it("handles non-numeric starting_capital by deriving a stable fallback", async () => {
-    mockFetch.mockResolvedValueOnce(
-      mockUpstream({
-        status: "online",
-        timestamp: "2024-01-01T12:00:00Z",
-        capital: 500000,
-        starting_capital: "not_a_number",
-        daily_pnl: 0,
-        total_pnl: 0,
-        max_drawdown: 0,
-        sharpe_ratio: 0,
-        win_rate: 0,
-        open_positions: 0,
-        total_trades: 0,
-      })
-    );
+    mockMetricsEndpoints({
+      status: "online",
+      timestamp: "2024-01-01T12:00:00Z",
+      capital: 500000,
+      starting_capital: "not_a_number",
+      daily_pnl: 0,
+      total_pnl: 0,
+      max_drawdown: 0,
+      sharpe_ratio: 0,
+      win_rate: 0,
+      open_positions: 0,
+      total_trades: 0,
+    });
 
     const response = await GET(makeRequest());
     const body = await response.json();
@@ -115,26 +123,52 @@ describe("metrics route — basic behavior", () => {
   });
 
   it("maps total_trades to trades_count in response", async () => {
-    mockFetch.mockResolvedValueOnce(
-      mockUpstream({
-        status: "online",
-        timestamp: "2024-01-01T12:00:00Z",
-        capital: 500000,
-        starting_capital: 500000,
-        daily_pnl: 0,
-        total_pnl: 0,
-        max_drawdown: 0,
-        sharpe_ratio: 0,
-        win_rate: 0,
-        open_positions: 0,
-        total_trades: 42,
-      })
-    );
+    mockMetricsEndpoints({
+      status: "online",
+      timestamp: "2024-01-01T12:00:00Z",
+      capital: 500000,
+      starting_capital: 500000,
+      daily_pnl: 0,
+      total_pnl: 0,
+      max_drawdown: 0,
+      sharpe_ratio: 0,
+      win_rate: 0,
+      open_positions: 0,
+      total_trades: 42,
+    });
 
     const response = await GET(makeRequest());
     const body = await response.json();
 
     expect(body.trades_count).toBe(42);
+  });
+
+  it("uses combined broker capital and position counts when portfolio endpoints are available", async () => {
+    mockMetricsEndpoints(
+      {
+        status: "online",
+        timestamp: "2024-01-01T12:00:00Z",
+        capital: 100000,
+        starting_capital: 100000,
+        daily_pnl: 0,
+        total_pnl: 0,
+        max_drawdown: 0,
+        sharpe_ratio: 0,
+        win_rate: 0,
+        open_positions: 1,
+        total_trades: 0,
+      },
+      {
+        totalEquity: 1250000.5,
+        portfolioPositions: [{ symbol: "AAPL" }, { symbol: "MSFT" }, { symbol: "TSLA" }],
+      },
+    );
+
+    const response = await GET(makeRequest());
+    const body = await response.json();
+
+    expect(body.capital).toBe(1250000.5);
+    expect(body.open_positions).toBe(3);
   });
 
   it("returns 503 when upstream fetch throws", async () => {
@@ -151,27 +185,27 @@ describe("metrics route — basic behavior", () => {
     mockFetch.mockResolvedValueOnce(
       mockUpstream("Internal Server Error", false, 500)
     );
+    mockFetch.mockResolvedValueOnce(mockUpstream({ total_equity: 0, breakdown: [] }));
+    mockFetch.mockResolvedValueOnce(mockUpstream([]));
 
     const response = await GET(makeRequest());
     expect(response.status).toBe(500);
   });
 
   it("sanitizes absurd KPI outliers from upstream payload", async () => {
-    mockFetch.mockResolvedValueOnce(
-      mockUpstream({
-        status: "online",
-        timestamp: "2024-01-01T12:00:00Z",
-        capital: 950000,
-        starting_capital: 900000,
-        daily_pnl: "oops",
-        total_pnl: 50000,
-        max_drawdown: -9999,
-        sharpe_ratio: "-92962852034076208.00",
-        win_rate: 58,
-        open_positions: -10,
-        total_trades: 8_000_000,
-      })
-    );
+    mockMetricsEndpoints({
+      status: "online",
+      timestamp: "2024-01-01T12:00:00Z",
+      capital: 950000,
+      starting_capital: 900000,
+      daily_pnl: "oops",
+      total_pnl: 50000,
+      max_drawdown: -9999,
+      sharpe_ratio: "-92962852034076208.00",
+      win_rate: 58,
+      open_positions: -10,
+      total_trades: 8_000_000,
+    });
 
     const response = await GET(makeRequest());
     const body = await response.json();

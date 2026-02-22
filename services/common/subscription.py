@@ -15,7 +15,7 @@ Usage:
 """
 
 import logging
-from typing import Optional
+from typing import Optional, Sequence
 
 from fastapi import Depends, HTTPException, Request
 
@@ -33,7 +33,7 @@ logger = logging.getLogger(__name__)
 # Helpers to read user tier (bridged from the auth layer)
 # ---------------------------------------------------------------------------
 
-def _get_user_tier(user) -> SubscriptionTier:
+def _get_user_tier(user, fallback_roles: Optional[Sequence[str]] = None) -> SubscriptionTier:
     """Extract subscription tier from user object.
 
     Works with both the existing api.auth.User dataclass and future
@@ -44,7 +44,11 @@ def _get_user_tier(user) -> SubscriptionTier:
     if tier is None:
         # Legacy User dataclass doesn't have a tier field yet.
         # Admin users get enterprise-level access.
-        roles = getattr(user, "roles", [])
+        roles: Sequence[str]
+        try:
+            roles = getattr(user, "roles", [])
+        except Exception:
+            roles = fallback_roles or []
         if "admin" in roles:
             return SubscriptionTier.ENTERPRISE
         return SubscriptionTier.FREE
@@ -65,7 +69,8 @@ def require_tier(min_tier: SubscriptionTier):
         if user is None:
             raise HTTPException(status_code=401, detail="Not authenticated")
 
-        user_tier = _get_user_tier(user)
+        request_roles = getattr(request.state, "roles", None)
+        user_tier = _get_user_tier(user, fallback_roles=request_roles)
         if TIER_RANK.get(user_tier, 0) < TIER_RANK[min_tier]:
             raise HTTPException(
                 status_code=403,
@@ -97,7 +102,8 @@ def require_feature(feature_key: str):
         if feature is None:
             return user
 
-        user_tier = _get_user_tier(user)
+        request_roles = getattr(request.state, "roles", None)
+        user_tier = _get_user_tier(user, fallback_roles=request_roles)
         if TIER_RANK.get(user_tier, 0) < TIER_RANK[feature.min_tier]:
             raise HTTPException(
                 status_code=403,
