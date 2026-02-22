@@ -990,3 +990,74 @@ if __name__ == "__main__":
     )
     
     print("\n✅ Backtester tests complete!")
+
+    def replay_from_journal(self, journal_path: str) -> Dict[str, Any]:
+        """
+        Deterministic Replay: Reconstructs the exact state of the system
+        and recalculates the P&L using the Write-Ahead Log (WAL).
+        """
+        import json
+        import hashlib
+        from pathlib import Path
+        
+        logger.info(f"⏪ Initiating deterministic replay from journal: {journal_path}")
+        
+        if not Path(journal_path).exists():
+            raise FileNotFoundError(f"Journal not found at {journal_path}")
+            
+        replay_capital = self.initial_capital
+        replay_positions = {}
+        trade_log = []
+        
+        last_hash = hashlib.sha256(b"genesis").hexdigest()
+        tampered = False
+        line_no = 0
+        
+        with open(journal_path, 'r') as f:
+            for line_no, line in enumerate(f, 1):
+                try:
+                    event = json.loads(line)
+                    
+                    # Verify Tamper-Evident Chain
+                    expected_raw = f"{last_hash}|{event['timestamp']}|{event['type']}|{json.dumps(event['payload'], sort_keys=True)}"
+                    expected_hash = hashlib.sha256(expected_raw.encode()).hexdigest()
+                    
+                    if expected_hash != event.get('hash'):
+                        logger.error(f"🚨 CHAIN OF CUSTODY BROKEN AT LINE {line_no}. Journal tampered with!")
+                        tampered = True
+                        break
+                        
+                    last_hash = expected_hash
+                    
+                    # Replay State Mutations
+                    if event["type"] == "POSITION_UPDATE":
+                        sym = event["payload"]["symbol"]
+                        qty = event["payload"]["quantity"]
+                        px = event["payload"].get("price", 0.0)
+                        
+                        prev_qty = replay_positions.get(sym, 0)
+                        replay_positions[sym] = qty
+                        
+                        if prev_qty != qty:
+                            trade_log.append({
+                                "timestamp": event["timestamp"],
+                                "symbol": sym,
+                                "side": "BUY" if qty > prev_qty else "SELL",
+                                "qty_change": abs(qty - prev_qty),
+                                "price": px
+                            })
+                            
+                    elif event["type"] == "CAPITAL_UPDATE":
+                        replay_capital = event["payload"]["capital"]
+                        
+                except Exception as e:
+                    logger.error(f"Replay failed parsing line {line_no}: {e}")
+                    
+        logger.info(f"✅ Replay Complete. Final Capital: ${replay_capital:,.2f}")
+        return {
+            "tampered": tampered,
+            "final_capital": replay_capital,
+            "final_positions": replay_positions,
+            "total_events_processed": line_no,
+            "trade_log": trade_log
+        }

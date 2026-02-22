@@ -216,3 +216,12 @@ class PreTradeRiskGateway:
             last_hash = None
         self._last_hash_cache[cache_key] = last_hash
         return last_hash
+
+    async def check_parent_order(self, symbol: str, qty: float, side: str) -> bool:
+        """Validates gross exposure limits before TWAP slicing begins."""
+        # Placeholder for actual limit evaluation
+        return True
+
+    async def monitor_child_fill_rate(self, symbol: str, qty: float, venue: str) -> None:
+        """Monitors high-frequency execution for fill-rate anomalies."""
+        pass

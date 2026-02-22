@@ -33,6 +33,7 @@ from core.symbols import normalize_symbol, is_market_open, parse_symbol, AssetCl
 from core.broker_dispatch import BrokerDispatch
 from core.risk_orchestration import RiskOrchestration
 from core.state_sync import StateSync
+from data.event_store import EventStore, EventType
 from core.trading_control import (
     read_control_state,
     mark_kill_switch_reset_processed,
@@ -273,6 +274,7 @@ class ApexTradingSystem:
             
         self.broker_dispatch = BrokerDispatch(self.ibkr, self.alpaca)
         self.state_sync = StateSync(self.user_data_dir / "trading_state.json")
+        self.event_store = EventStore(self.user_data_dir)
         
         # Initialize modules
         self.signal_generator = AdvancedSignalGenerator()
@@ -1542,6 +1544,7 @@ class ApexTradingSystem:
     async def initialize(self):
         """Initialize connections and load data."""
         logger.info("🔄 Initializing system...")
+        await self.event_store.start()
         
         # Load risk state (day_start_capital, etc)
         self.risk_manager.load_state()
