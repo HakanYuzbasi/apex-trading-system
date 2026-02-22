@@ -7,7 +7,7 @@ from fastapi import APIRouter, WebSocket, WebSocketDisconnect, Request
 
 from config import ApexConfig
 from api.ws_manager import manager
-from api.dependencies import read_trading_state
+from api.dependencies import _state_is_fresh, read_trading_state, sanitize_execution_metrics
 from api.auth import rate_limit
 
 router = APIRouter(prefix="/public", tags=["Public"])
@@ -20,20 +20,11 @@ async def get_public_metrics(request: Request = None):
     No authentication required.
     """
     state = read_trading_state()
+    safe_metrics = sanitize_execution_metrics(state)
     return {
-        "status": "online" if (state.get("timestamp") and datetime.fromisoformat(state["timestamp"]).timestamp() > datetime.now().timestamp() - ApexConfig.HEALTH_STALENESS_SECONDS) else "offline",
+        "status": "online" if _state_is_fresh(state, ApexConfig.HEALTH_STALENESS_SECONDS) else "offline",
         "timestamp": state.get("timestamp"),
-        "capital": state.get("capital", 0),
-        "starting_capital": state.get("starting_capital", 0),
-        "daily_pnl": state.get("daily_pnl", 0),
-        "total_pnl": state.get("total_pnl", 0),
-        "max_drawdown": state.get("max_drawdown", 0),
-        "sharpe_ratio": state.get("sharpe_ratio", 0),
-        "win_rate": state.get("win_rate", 0),
-        "open_positions": state.get("open_positions", 0),
-        "option_positions": state.get("option_positions", 0),
-        "open_positions_total": state.get("open_positions_total", state.get("open_positions", 0)),
-        "total_trades": state.get("total_trades", 0)
+        **safe_metrics,
     }
 
 @router.get("/cockpit")

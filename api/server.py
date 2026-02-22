@@ -56,6 +56,7 @@ from api.dependencies import (
     _sanitize_floats,
     _state_is_fresh,
     read_trading_state,
+    sanitize_execution_metrics,
 )
 
 try:
@@ -554,29 +555,18 @@ async def get_metrics(request: Request):
 async def get_status(user=Depends(require_user)):
     """Get daemon execution status. Only populated for admins until Phase 9 execution split."""
     if not user.has_role("admin"):
+        safe_metrics = sanitize_execution_metrics({})
         return {
             "status": "online",
             "timestamp": datetime.now().isoformat(),
-            "capital": 0, "starting_capital": 0,
-            "daily_pnl": 0, "total_pnl": 0, "max_drawdown": 0, 
-            "sharpe_ratio": 0, "win_rate": 0, "open_positions": 0, 
-            "option_positions": 0, "open_positions_total": 0, "total_trades": 0
+            **safe_metrics,
         }
     state = read_trading_state()
+    safe_metrics = sanitize_execution_metrics(state)
     return {
         "status": "online" if _state_is_fresh(state, ApexConfig.HEALTH_STALENESS_SECONDS) else "offline",
         "timestamp": state.get("timestamp"),
-        "capital": state.get("capital", 0),
-        "starting_capital": state.get("starting_capital", 0),
-        "daily_pnl": state.get("daily_pnl", 0),
-        "total_pnl": state.get("total_pnl", 0),
-        "max_drawdown": state.get("max_drawdown", 0),
-        "sharpe_ratio": state.get("sharpe_ratio", 0),
-        "win_rate": state.get("win_rate", 0),
-        "open_positions": state.get("open_positions", 0),
-        "option_positions": state.get("option_positions", 0),
-        "open_positions_total": state.get("open_positions_total", state.get("open_positions", 0)),
-        "total_trades": state.get("total_trades", 0)
+        **safe_metrics,
     }
 
 @app.get("/positions")

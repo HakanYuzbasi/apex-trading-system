@@ -26,7 +26,16 @@ export interface WebSocketState {
 }
 
 /** Append the stored JWT token as ?token= so the API accepts the WS connection (unless public). */
-function buildWsUrl(base: string, isPublic?: boolean): string {
+function getStoredAccessToken(): string | null {
+    if (typeof window === "undefined") return null;
+    try {
+        return localStorage.getItem(STORAGE_ACCESS);
+    } catch {
+        return null;
+    }
+}
+
+function buildWsUrl(base: string, isPublic?: boolean): string | null {
     if (typeof window === "undefined") return base;
 
     let targetBase = base;
@@ -38,8 +47,8 @@ function buildWsUrl(base: string, isPublic?: boolean): string {
         return targetBase; // No token needed
     }
 
-    const token = localStorage.getItem(STORAGE_ACCESS);
-    if (!token) return base;
+    const token = getStoredAccessToken();
+    if (!token) return null;
     const sep = targetBase.includes("?") ? "&" : "?";
     return `${targetBase}${sep}token=${encodeURIComponent(token)}`;
 }
@@ -75,6 +84,16 @@ export function useWebSocket(isPublic?: boolean, {
         try {
             const baseWsUrl = process.env.NEXT_PUBLIC_WS_URL || url;
             const wsUrl = buildWsUrl(baseWsUrl, isPublic);
+            if (!wsUrl) {
+                stoppedRef.current = true;
+                setState((s) => ({
+                    ...s,
+                    isConnecting: false,
+                    isConnected: false,
+                    lastError: "Authentication required for private WebSocket.",
+                }));
+                return;
+            }
             const socket = new WebSocket(wsUrl);
 
             socket.onopen = () => {

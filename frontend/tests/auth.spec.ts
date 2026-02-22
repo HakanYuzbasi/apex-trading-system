@@ -144,22 +144,28 @@ test.describe("Authentication Flow", () => {
 
   test("logs in successfully with valid credentials", async ({ page }) => {
     await page.goto("/login");
+    const authButton = page.getByRole("button", { name: "Authenticate" });
+    await expect(authButton).toBeVisible({ timeout: 15000 });
     await page.getByLabel("Username").fill("admin");
     await page.getByLabel("Password / Master Key").fill("password");
-    await page.getByRole("button", { name: "Authenticate" }).click();
+    await expect(authButton).toBeEnabled({ timeout: 10000 });
+    await authButton.click();
 
-    await expect(page).toHaveURL(/\/dashboard$/);
-    await expect(page.getByRole("heading", { name: "Apex Dashboard" })).toBeVisible();
+    await expect(page).toHaveURL(/\/dashboard$/, { timeout: 15000 });
+    await expect(page.getByRole("heading", { name: "Apex Dashboard" })).toBeVisible({ timeout: 15000 });
     await expect(page.getByText("Real-time execution monitoring.")).toBeVisible();
   });
 
   test("logs out successfully", async ({ page }) => {
     await page.goto("/login");
+    const authButton = page.getByRole("button", { name: "Authenticate" });
+    await expect(authButton).toBeVisible({ timeout: 15000 });
     await page.getByLabel("Username").fill("admin");
     await page.getByLabel("Password / Master Key").fill("password");
-    await page.getByRole("button", { name: "Authenticate" }).click();
+    await expect(authButton).toBeEnabled({ timeout: 10000 });
+    await authButton.click();
 
-    await expect(page).toHaveURL(/\/dashboard$/);
+    await expect(page).toHaveURL(/\/dashboard$/, { timeout: 15000 });
     await page.getByRole("button", { name: "Logout" }).click();
     await expect(page).toHaveURL(/\/login$/);
   });

@@ -79,6 +79,9 @@ class PrometheusMetrics:
     - apex_model_*: ML model metrics
     """
 
+    _instance_lock = threading.Lock()
+    _shared_by_registry: Dict[int, "PrometheusMetrics"] = {}
+
     def __init__(self, port: int = 8000, registry: CollectorRegistry = None):
         """
         Initialize Prometheus metrics exporter.
@@ -92,23 +95,35 @@ class PrometheusMetrics:
             self.enabled = False
             return
 
-        self.enabled = True
-        self.port = port
-        self.registry = registry or REGISTRY
-        self._server: Optional[HTTPServer] = None
-        self._server_thread: Optional[threading.Thread] = None
+        target_registry = registry or REGISTRY
+        registry_key = id(target_registry)
+        with self._instance_lock:
+            shared = self._shared_by_registry.get(registry_key)
+            if shared is not None:
+                self.__dict__.update(shared.__dict__)
+                self.port = port
+                logger.debug("Reusing Prometheus metric collectors for registry id=%s", registry_key)
+                return
 
-        # Initialize metrics
-        self._init_portfolio_metrics()
-        self._init_trading_metrics()
-        self._init_risk_metrics()
-        self._init_system_metrics()
-        self._init_model_metrics()
-        self._init_governor_metrics()
-        self._init_pretrade_metrics()
-        self._init_social_metrics()
-        self._init_attribution_metrics()
-        self._init_reconciliation_metrics()
+            self.enabled = True
+            self.port = port
+            self.registry = target_registry
+            self._server: Optional[HTTPServer] = None
+            self._server_thread: Optional[threading.Thread] = None
+
+            # Initialize metrics
+            self._init_portfolio_metrics()
+            self._init_trading_metrics()
+            self._init_risk_metrics()
+            self._init_system_metrics()
+            self._init_model_metrics()
+            self._init_governor_metrics()
+            self._init_pretrade_metrics()
+            self._init_social_metrics()
+            self._init_attribution_metrics()
+            self._init_reconciliation_metrics()
+
+            self._shared_by_registry[registry_key] = self
 
         logger.info(f"📊 Prometheus Metrics initialized on port {port}")
 
@@ -657,6 +672,8 @@ class PrometheusMetrics:
     def start(self):
         """Start the metrics HTTP server."""
         if not self.enabled:
+            return
+        if self._server is not None:
             return
 
         try:

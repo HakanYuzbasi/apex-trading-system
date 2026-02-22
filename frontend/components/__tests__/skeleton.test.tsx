@@ -5,11 +5,11 @@ import { render, screen } from "@testing-library/react";
 import { Skeleton } from "../ui/skeleton";
 
 describe("Skeleton component", () => {
-  it("renders a div with apex-skeleton class", () => {
+  it("renders a span with apex-skeleton class", () => {
     const { container } = render(<Skeleton />);
     const el = container.firstChild as HTMLElement;
     expect(el).toBeInTheDocument();
-    expect(el.tagName).toBe("DIV");
+    expect(el.tagName).toBe("SPAN");
     expect(el.className).toContain("apex-skeleton");
   });
 
@@ -36,7 +36,7 @@ describe("Skeleton component", () => {
   it("renders without className gracefully", () => {
     const { container } = render(<Skeleton />);
     const el = container.firstChild as HTMLElement;
-    // className should be "apex-skeleton " (no extra classes)
-    expect(el.className).toBe("apex-skeleton ");
+    expect(el.className).toContain("apex-skeleton");
+    expect(el.className).toContain("inline-block");
   });
 });

@@ -471,6 +471,14 @@ class BrokerService:
         host = credentials.get("host", "127.0.0.1")
         port = int(credentials.get("port", 7497))
         ib_client_id = int(credentials.get("client_id") or client_id or 1)
+        owned_loop: Optional[asyncio.AbstractEventLoop] = None
+        try:
+            asyncio.get_event_loop()
+        except RuntimeError:
+            # ib_insync resolves the current loop during connect(); worker threads
+            # have no default loop in Python 3.11+, so create one explicitly.
+            owned_loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(owned_loop)
         ib = IB()
         try:
             ib.connect(host, port, clientId=ib_client_id, timeout=5, readonly=True)
@@ -486,6 +494,9 @@ class BrokerService:
         finally:
             if ib.isConnected():
                 ib.disconnect()
+            if owned_loop is not None:
+                asyncio.set_event_loop(None)
+                owned_loop.close()
 
 
 # Singleton instance

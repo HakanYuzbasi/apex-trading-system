@@ -1,0 +1,5 @@
+#!/bin/bash
+set -euo pipefail
+
+BASE_DIR="$(cd "$(dirname "$0")" && pwd)"
+exec "$BASE_DIR/scripts/apex_ctl.sh" "$@"

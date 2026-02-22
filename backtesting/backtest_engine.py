@@ -35,6 +35,30 @@ try:
 except ImportError:
     MARKET_IMPACT_AVAILABLE = False
 
+try:
+    from scipy.stats import norm as _scipy_norm
+    _norm_cdf = _scipy_norm.cdf
+    _norm_ppf = _scipy_norm.ppf
+except ImportError:
+    import math
+
+    def _norm_cdf(x):
+        return 0.5 * (1 + math.erf(x / math.sqrt(2)))
+
+    def _norm_ppf(p):
+        if p <= 0:
+            return float('-inf')
+        if p >= 1:
+            return float('inf')
+        if p < 0.5:
+            return -_norm_ppf(1 - p)
+        t = math.sqrt(-2 * math.log(1 - p))
+        c0, c1, c2 = 2.515517, 0.802853, 0.010328
+        d1, d2, d3 = 1.432788, 0.189269, 0.001308
+        return t - (c0 + c1 * t + c2 * t * t) / (1 + d1 * t + d2 * t * t + d3 * t * t * t)
+
+EULER_MASCHERONI = 0.5772156649
+
 logger = logging.getLogger(__name__)
 
 
@@ -536,12 +560,13 @@ class BacktestEngine:
         sortino = 0
         downside_returns = df['returns'][df['returns'] < 0]
         if len(downside_returns) > 0 and downside_returns.std() > 0:
-            sortino = (df['returns'].mean() / downside_returns.std()) * np.sqrt(252)
+            sortino = (df['returns'].mean() / downside_returns.std()) * np.sqrt(ann_factor)
             
+        cagr = ((1 + total_return) ** (ann_factor / len(df))) - 1 if len(df) > 1 else total_return
         calmar = 0
         if max_drawdown < 0:
-            calmar = total_return / abs(max_drawdown)  # Annualized usually, simplistic here
-            
+            calmar = cagr / abs(max_drawdown)
+
         # Trade Analysis
         win_rate = 0
         profit_factor = 0
@@ -559,13 +584,27 @@ class BacktestEngine:
             profit_factor = gross_profit / gross_loss if gross_loss > 0 else float('inf')
             avg_trade = sum(t.pnl for t in closed_trades) / len(closed_trades)
         
+        # Probabilistic Sharpe Ratio (PSR)
+        psr = 0.0
+        n_obs = len(df)
+        returns_arr = df['returns'].values
+        if n_obs >= 10 and sharpe > 0:
+            skew = float(pd.Series(returns_arr).skew())
+            kurt = float(pd.Series(returns_arr).kurtosis()) + 3
+            sr_per = sharpe / np.sqrt(ann_factor)
+            se_denom = 1 - skew * sr_per + ((kurt - 1) / 4) * sr_per ** 2
+            se_sr = np.sqrt(max(se_denom, 1e-10) / (n_obs - 1))
+            psr = float(_norm_cdf(sr_per / se_sr)) if se_sr > 0 else 0.0
+
         metrics = {
             'total_return': total_return,
-            'cagr': ((1 + total_return) ** (ann_factor/len(df))) - 1 if len(df) > 200 else total_return,
+            'cagr': cagr,
             'sharpe_ratio': sharpe,
+            'probabilistic_sharpe': psr,
             'sortino_ratio': sortino,
             'calmar_ratio': calmar,
             'max_drawdown': max_drawdown,
+            'max_dd_duration': int(max_dd_duration),
             'volatility': volatility,
             'final_equity': df['equity'].iloc[-1],
             'total_trades': len(self.trades),

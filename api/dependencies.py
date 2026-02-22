@@ -5,11 +5,16 @@ import os
 import threading
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, Optional, Tuple
+from typing import Any, Dict, Optional, Tuple
 
 from config import ApexConfig
 
 logger = logging.getLogger("api")
+
+MONEY_ABS_MAX = 1_000_000_000_000.0
+SHARPE_ABS_MAX = 20.0
+COUNT_MAX = 1_000_000
+DRAWDOWN_PERCENT_ABS_MAX = 100.0
 
 # Path to trading state file
 STATE_FILE = ApexConfig.DATA_DIR / "trading_state.json"
@@ -66,6 +71,116 @@ def _sanitize_floats(obj):
     elif isinstance(obj, list):
         return [_sanitize_floats(v) for v in obj]
     return obj
+
+
+def _as_finite_float(value: Any) -> Optional[float]:
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        return None
+    if math.isnan(parsed) or math.isinf(parsed):
+        return None
+    return parsed
+
+
+def _bounded_float(value: Any, minimum: float, maximum: float, fallback: float = 0.0) -> float:
+    parsed = _as_finite_float(value)
+    if parsed is None or parsed < minimum or parsed > maximum:
+        return fallback
+    return parsed
+
+
+def _bounded_int(value: Any, minimum: int, maximum: int, fallback: int = 0) -> int:
+    parsed = _as_finite_float(value)
+    if parsed is None:
+        return fallback
+    rounded = int(parsed)
+    if rounded < minimum or rounded > maximum:
+        return fallback
+    return rounded
+
+
+def sanitize_execution_metrics(raw: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Sanitize top-level execution KPIs for API responses.
+    Rejects non-finite / implausible values and derives stable fallbacks.
+    """
+    capital_raw = _bounded_float(raw.get("capital"), -MONEY_ABS_MAX, MONEY_ABS_MAX, fallback=float("nan"))
+    starting_capital_raw = _bounded_float(
+        raw.get("starting_capital", raw.get("initial_capital")),
+        -MONEY_ABS_MAX,
+        MONEY_ABS_MAX,
+        fallback=float("nan"),
+    )
+    total_pnl_raw = _bounded_float(raw.get("total_pnl"), -MONEY_ABS_MAX, MONEY_ABS_MAX, fallback=float("nan"))
+
+    # Keep these three fields coherent when one is missing/invalid.
+    if math.isnan(capital_raw) and (not math.isnan(starting_capital_raw)) and (not math.isnan(total_pnl_raw)):
+        capital_raw = starting_capital_raw + total_pnl_raw
+    if math.isnan(starting_capital_raw) and (not math.isnan(capital_raw)) and (not math.isnan(total_pnl_raw)):
+        starting_capital_raw = capital_raw - total_pnl_raw
+    if math.isnan(total_pnl_raw) and (not math.isnan(capital_raw)) and (not math.isnan(starting_capital_raw)):
+        total_pnl_raw = capital_raw - starting_capital_raw
+
+    capital = _bounded_float(capital_raw, -MONEY_ABS_MAX, MONEY_ABS_MAX, fallback=0.0)
+    total_pnl = _bounded_float(total_pnl_raw, -MONEY_ABS_MAX, MONEY_ABS_MAX, fallback=0.0)
+    starting_capital = _bounded_float(
+        starting_capital_raw,
+        -MONEY_ABS_MAX,
+        MONEY_ABS_MAX,
+        fallback=max(0.0, capital - total_pnl),
+    )
+
+    daily_pnl = _bounded_float(raw.get("daily_pnl"), -MONEY_ABS_MAX, MONEY_ABS_MAX, fallback=0.0)
+
+    drawdown = _as_finite_float(raw.get("max_drawdown"))
+    if drawdown is None:
+        drawdown = 0.0
+    elif abs(drawdown) > 1.0 and abs(drawdown) > DRAWDOWN_PERCENT_ABS_MAX:
+        drawdown = 0.0
+
+    sharpe_ratio = _bounded_float(raw.get("sharpe_ratio"), -SHARPE_ABS_MAX, SHARPE_ABS_MAX, fallback=0.0)
+
+    win_rate_raw = _as_finite_float(raw.get("win_rate"))
+    if win_rate_raw is None:
+        win_rate = 0.0
+    elif 0.0 <= win_rate_raw <= 1.0:
+        win_rate = win_rate_raw
+    elif 1.0 < win_rate_raw <= 100.0:
+        win_rate = win_rate_raw / 100.0
+    else:
+        win_rate = 0.0
+
+    open_positions = _bounded_int(raw.get("open_positions"), 0, COUNT_MAX, fallback=0)
+    option_positions = _bounded_int(raw.get("option_positions"), 0, COUNT_MAX, fallback=0)
+    open_positions_total = _bounded_int(
+        raw.get("open_positions_total"),
+        0,
+        COUNT_MAX,
+        fallback=open_positions + option_positions,
+    )
+    open_positions_total = max(open_positions_total, open_positions + option_positions)
+
+    total_trades = _bounded_int(
+        raw.get("total_trades", raw.get("trades_count")),
+        0,
+        COUNT_MAX,
+        fallback=0,
+    )
+
+    return {
+        "capital": capital,
+        "starting_capital": starting_capital,
+        "daily_pnl": daily_pnl,
+        "total_pnl": total_pnl,
+        "max_drawdown": drawdown,
+        "sharpe_ratio": sharpe_ratio,
+        "win_rate": win_rate,
+        "open_positions": open_positions,
+        "option_positions": option_positions,
+        "open_positions_total": open_positions_total,
+        "total_trades": total_trades,
+    }
 
 def read_price_cache() -> Tuple[Dict[str, float], Optional[int]]:
     """Read current price cache from file with mtime-based caching."""

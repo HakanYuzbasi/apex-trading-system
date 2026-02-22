@@ -126,7 +126,8 @@ class ColoredConsoleFormatter(logging.Formatter):
     """
     Human-readable colored console formatter.
 
-    Uses ANSI color codes for terminal output.
+    Uses ANSI color codes only when stdout is a real terminal (TTY).
+    Falls back to plain text when output is piped or captured.
     """
 
     COLORS = {
@@ -138,8 +139,18 @@ class ColoredConsoleFormatter(logging.Formatter):
     }
     RESET = '\033[0m'
 
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._use_color = hasattr(sys.stdout, 'isatty') and sys.stdout.isatty()
+
     def format(self, record: logging.LogRecord) -> str:
-        color = self.COLORS.get(record.levelname, '')
+        if self._use_color:
+            color = self.COLORS.get(record.levelname, '')
+            reset = self.RESET
+        else:
+            color = ''
+            reset = ''
+
         timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
         req_ctx = _safe_request_context()
         req_id = req_ctx.get("request_id")
@@ -155,7 +166,7 @@ class ColoredConsoleFormatter(logging.Formatter):
 
         # Format: timestamp - level - logger - message
         formatted = (
-            f"{timestamp} - {color}{record.levelname:8}{self.RESET} - "
+            f"{timestamp} - {color}{record.levelname:8}{reset} - "
             f"{record.name}{context_suffix} - {record.getMessage()}"
         )
 

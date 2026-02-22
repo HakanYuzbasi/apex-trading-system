@@ -1,3 +1,6 @@
-export function Skeleton({ className, ...props }: React.HTMLAttributes<HTMLDivElement>) {
-  return <div aria-hidden="true" className={`apex-skeleton ${className ?? ""}`} {...props} />;
+import type { HTMLAttributes } from "react";
+
+export function Skeleton({ className, ...props }: HTMLAttributes<HTMLSpanElement>) {
+  const classes = ["apex-skeleton", "inline-block", "align-middle", className].filter(Boolean).join(" ");
+  return <span aria-hidden="true" className={classes} {...props} />;
 }

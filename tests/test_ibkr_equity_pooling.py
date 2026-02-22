@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import threading
 from datetime import datetime
 
 import pytest
@@ -117,3 +118,49 @@ def test_fetch_ibkr_equity_blocking_connection_failure(monkeypatch: pytest.Monke
 
     with pytest.raises(RuntimeError, match="connect failed"):
         BrokerService._fetch_ibkr_equity_blocking({"host": "127.0.0.1", "port": 7497, "client_id": 1}, client_id=1)
+
+
+def test_fetch_ibkr_equity_blocking_creates_event_loop_in_worker_thread(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class SummaryRow:
+        def __init__(self, tag: str, value: str) -> None:
+            self.tag = tag
+            self.value = value
+
+    class FakeIB:
+        def __init__(self) -> None:
+            self._connected = False
+
+        def connect(self, host: str, port: int, clientId: int, timeout: int, readonly: bool) -> None:  # noqa: N803
+            self._connected = True
+
+        def accountSummary(self):  # noqa: N802
+            return [SummaryRow("NetLiquidation", "888.0")]
+
+        def isConnected(self) -> bool:  # noqa: N802
+            return self._connected
+
+        def disconnect(self) -> None:
+            self._connected = False
+
+    monkeypatch.setattr("services.broker.service.IB", FakeIB)
+    result: dict[str, float] = {}
+    failure: dict[str, BaseException] = {}
+
+    def run_fetch() -> None:
+        try:
+            result["value"] = BrokerService._fetch_ibkr_equity_blocking(
+                {"host": "127.0.0.1", "port": 7497, "client_id": 1},
+                client_id=1,
+            )
+        except BaseException as exc:  # pragma: no cover - assertion surface
+            failure["error"] = exc
+
+    thread = threading.Thread(target=run_fetch)
+    thread.start()
+    thread.join(timeout=3)
+
+    assert thread.is_alive() is False
+    assert "error" not in failure
+    assert result["value"] == 888.0

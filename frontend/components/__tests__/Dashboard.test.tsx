@@ -167,4 +167,22 @@ describe("Dashboard", () => {
     expect(logoutMock).toHaveBeenCalledTimes(1);
     expect(pushMock).toHaveBeenCalledWith("/login");
   });
+
+  test("sanitizes extreme metric outliers before rendering KPI cards", () => {
+    mockUseMetrics.mockReturnValue({
+      metrics: {
+        ...mockMetrics,
+        sharpe_ratio: Number("-92962852034076208"),
+        win_rate: 58,
+        max_drawdown: -9999,
+      },
+      isLoading: false,
+      isError: false,
+      error: undefined,
+    });
+
+    render(<Dashboard />);
+    expect(screen.queryByText("-92962852034076208.00")).not.toBeInTheDocument();
+    expect(screen.getAllByText("0.00").length).toBeGreaterThan(0);
+  });
 });

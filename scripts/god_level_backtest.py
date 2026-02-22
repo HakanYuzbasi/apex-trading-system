@@ -312,8 +312,12 @@ class GodLevelBacktester:
             all_dates.update(df.index.tolist())
         all_dates = sorted(all_dates)
 
-        if len(all_dates) < self.WARMUP_DAYS + 60:
-            logger.error("Insufficient data for backtest")
+        min_required = self.WALK_FORWARD_TRAIN_DAYS + self.WALK_FORWARD_TEST_DAYS
+        if len(all_dates) < min_required:
+            logger.error(
+                "Insufficient data for backtest: %d days available, need %d",
+                len(all_dates), min_required,
+            )
             return None
 
         # Run backtest
@@ -373,8 +377,13 @@ class GodLevelBacktester:
             self.risk_manager.update_capital(self.initial_capital)
 
         # Walk-forward periods
+        # start_idx = first test-period start.  The training window preceding it
+        # is dates[max(0, start_idx - WALK_FORWARD_TRAIN_DAYS) : start_idx].
+        # We need enough training bars (>= lookback + forward_window + margin)
+        # for the signal generator to produce samples.  Using
+        # WALK_FORWARD_TRAIN_DAYS guarantees a full-size first training window.
         total_days = len(all_dates)
-        start_idx = self.WARMUP_DAYS
+        start_idx = max(self.WARMUP_DAYS, self.WALK_FORWARD_TRAIN_DAYS)
 
         period_num = 0
         while start_idx + self.WALK_FORWARD_TEST_DAYS < total_days:

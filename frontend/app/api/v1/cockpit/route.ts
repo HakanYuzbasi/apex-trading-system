@@ -1,4 +1,9 @@
 import { NextRequest, NextResponse } from "next/server";
+import {
+  sanitizeCount,
+  sanitizeExecutionMetrics,
+  sanitizeMoney,
+} from "@/lib/metricGuards";
 
 const DEFAULT_API_BASE = "http://127.0.0.1:8000";
 
@@ -20,6 +25,19 @@ type DerivativeRow = {
   quantity: number;
   side: string;
   avg_cost: number;
+};
+
+type PositionRow = {
+  symbol: string;
+  qty: number;
+  side: string;
+  entry: number;
+  current: number;
+  pnl: number;
+  pnl_pct: number;
+  signal: number;
+  signal_direction: string;
+  source_id?: string;
 };
 
 type UspScorecard = {
@@ -172,22 +190,51 @@ function clamp(value: number, min: number, max: number): number {
   return Math.min(max, Math.max(min, value));
 }
 
+function normalizePositionRow(row: unknown): PositionRow | null {
+  const rec = (row && typeof row === "object" ? row : {}) as Record<string, unknown>;
+  const symbol = String(rec.symbol ?? "").trim().toUpperCase();
+  if (!symbol) {
+    return null;
+  }
+  const qty = asNumber(rec.qty, 0);
+  const sideRaw = String(rec.side ?? (qty < 0 ? "SHORT" : "LONG")).toUpperCase();
+  const side = sideRaw === "SHORT" ? "SHORT" : "LONG";
+  return {
+    symbol,
+    qty,
+    side,
+    entry: asNumber(rec.entry ?? rec.avg_price ?? rec.avg_cost, 0),
+    current: asNumber(rec.current ?? rec.current_price, 0),
+    pnl: asNumber(rec.pnl ?? rec.unrealized_pl, 0),
+    pnl_pct: asNumber(rec.pnl_pct ?? rec.unrealized_plpc, 0),
+    signal: asNumber(rec.signal ?? rec.current_signal, 0),
+    signal_direction: String(rec.signal_direction ?? "UNKNOWN"),
+    source_id: rec.source_id ? String(rec.source_id) : undefined,
+  };
+}
+
 export async function GET(request: NextRequest): Promise<NextResponse> {
   const token = request.cookies.get("token")?.value;
   if (!token) {
     return NextResponse.json({ detail: "Not authenticated" }, { status: 401 });
   }
 
-  const [statusResp, positionsResp, stateResp, socialAuditResp] = await Promise.all([
+  const [statusResp, positionsResp, stateResp, socialAuditResp, portfolioPositionsResp] = await Promise.all([
     fetchUpstream("/status", token),
     fetchUpstream("/positions", token),
     fetchUpstream("/state", token),
     fetchUpstream("/api/v1/social-governor/decisions?limit=40", token),
+    fetchUpstream("/portfolio/positions", token),
   ]);
 
   const statusData = (statusResp.data && typeof statusResp.data === "object" ? statusResp.data : {}) as Record<string, unknown>;
   const stateData = (stateResp.data && typeof stateResp.data === "object" ? stateResp.data : {}) as Record<string, unknown>;
-  const positionsData = Array.isArray(positionsResp.data) ? positionsResp.data : [];
+  const stateEndpointPositions = (Array.isArray(positionsResp.data) ? positionsResp.data : [])
+    .map((row) => normalizePositionRow(row))
+    .filter((row): row is PositionRow => row !== null);
+  const portfolioPositions = (Array.isArray(portfolioPositionsResp.data) ? portfolioPositionsResp.data : [])
+    .map((row) => normalizePositionRow(row))
+    .filter((row): row is PositionRow => row !== null);
   const statePositions = (stateData.positions && typeof stateData.positions === "object"
     ? stateData.positions
     : {}) as Record<string, Record<string, unknown>>;
@@ -209,10 +256,31 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
   }
   const stateFresh = String(statusData.status || "").toLowerCase() === "online"
     || isFreshTimestamp(stateData.timestamp ?? statusData.timestamp);
+  const statusMetrics = sanitizeExecutionMetrics({
+    capital: statusData.capital,
+    starting_capital: statusData.starting_capital,
+    daily_pnl: statusData.daily_pnl,
+    total_pnl: statusData.total_pnl,
+    max_drawdown: statusData.max_drawdown,
+    sharpe_ratio: statusData.sharpe_ratio,
+    win_rate: statusData.win_rate,
+    open_positions: statusData.open_positions,
+    option_positions: statusData.option_positions,
+    open_positions_total: statusData.open_positions_total,
+    total_trades: statusData.total_trades,
+  });
+
+  const inferredStateOpenPositions = Math.max(
+    statusMetrics.open_positions,
+    sanitizeCount(stateData.open_positions, 0),
+    stateEndpointPositions.length,
+  );
+  const usePortfolioPositionFallback = portfolioPositions.length > 0
+    && (!stateFresh || inferredStateOpenPositions === 0);
+  const effectivePositions = usePortfolioPositionFallback ? portfolioPositions : stateEndpointPositions;
   const openPositions = Math.max(
-    asNumber(statusData.open_positions, 0),
-    asNumber(stateData.open_positions, 0),
-    positionsData.length,
+    inferredStateOpenPositions,
+    usePortfolioPositionFallback ? portfolioPositions.length : 0,
   );
   const derivativesRaw = Array.isArray(stateData.option_positions_detail)
     ? stateData.option_positions_detail
@@ -255,17 +323,17 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
     );
   });
   const optionPositions = Math.max(
-    asNumber(statusData.option_positions, 0),
-    asNumber(stateData.option_positions, 0),
+    statusMetrics.option_positions,
+    sanitizeCount(stateData.option_positions, 0),
     derivatives.length,
   );
   const openPositionsTotal = Math.max(
-    asNumber(statusData.open_positions_total, 0),
-    asNumber(stateData.open_positions_total, 0),
+    statusMetrics.open_positions_total,
+    sanitizeCount(stateData.open_positions_total, 0),
     openPositions + optionPositions,
   );
-  const sharpe = asNumber(statusData.sharpe_ratio, 0);
-  const drawdown = asNumber(statusData.max_drawdown, 0);
+  const sharpe = statusMetrics.sharpe_ratio;
+  const drawdown = statusMetrics.max_drawdown;
   const absDrawdown = Math.abs(drawdown);
   const normalizedDrawdownPct = absDrawdown > 1 ? absDrawdown : absDrawdown * 100;
 
@@ -282,10 +350,10 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
   const bySleeveRaw = (attributionRaw.by_sleeve && typeof attributionRaw.by_sleeve === "object"
     ? attributionRaw.by_sleeve
     : {}) as Record<string, Record<string, unknown>>;
-  const attributionGrossPnl = asNumber(attributionRaw.gross_pnl, 0);
-  const attributionNetPnl = asNumber(attributionRaw.net_pnl, 0);
-  const attributionExecutionDrag = asNumber(attributionRaw.modeled_execution_drag, 0);
-  const attributionSlippageDrag = asNumber(attributionRaw.modeled_slippage_drag, 0);
+  const attributionGrossPnl = sanitizeMoney(attributionRaw.gross_pnl, 0);
+  const attributionNetPnl = sanitizeMoney(attributionRaw.net_pnl, 0);
+  const attributionExecutionDrag = sanitizeMoney(attributionRaw.modeled_execution_drag, 0);
+  const attributionSlippageDrag = sanitizeMoney(attributionRaw.modeled_slippage_drag, 0);
   const socialAuditData = (socialAuditResp.data && typeof socialAuditResp.data === "object"
     ? socialAuditResp.data
     : {}) as Record<string, unknown>;
@@ -322,11 +390,11 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
 
   const sleeves = Object.entries(bySleeveRaw).map(([sleeve, row]) => ({
     sleeve,
-    trades: asNumber(row.trades),
-    net_pnl: asNumber(row.net_pnl),
-    gross_pnl: asNumber(row.gross_pnl),
-    modeled_execution_drag: asNumber(row.modeled_execution_drag),
-    modeled_slippage_drag: asNumber(row.modeled_slippage_drag),
+    trades: sanitizeCount(row.trades),
+    net_pnl: sanitizeMoney(row.net_pnl),
+    gross_pnl: sanitizeMoney(row.gross_pnl),
+    modeled_execution_drag: sanitizeMoney(row.modeled_execution_drag),
+    modeled_slippage_drag: sanitizeMoney(row.modeled_slippage_drag),
     execution_drag_pct_of_gross: asNumber(row.execution_drag_pct_of_gross),
     avg_holding_hours: asNumber(row.avg_holding_hours),
   }));
@@ -334,11 +402,11 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
   if (sleeves.length === 0) {
     sleeves.push({
       sleeve: "equities_sleeve",
-      trades: asNumber(attributionRaw.closed_trades),
-      net_pnl: asNumber(attributionRaw.net_pnl),
-      gross_pnl: asNumber(attributionRaw.gross_pnl),
-      modeled_execution_drag: asNumber(attributionRaw.modeled_execution_drag),
-      modeled_slippage_drag: asNumber(attributionRaw.modeled_slippage_drag),
+      trades: sanitizeCount(attributionRaw.closed_trades),
+      net_pnl: sanitizeMoney(attributionRaw.net_pnl),
+      gross_pnl: sanitizeMoney(attributionRaw.gross_pnl),
+      modeled_execution_drag: sanitizeMoney(attributionRaw.modeled_execution_drag),
+      modeled_slippage_drag: sanitizeMoney(attributionRaw.modeled_slippage_drag),
       execution_drag_pct_of_gross: 0,
       avg_holding_hours: 0,
     });
@@ -412,13 +480,24 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
     }
   }
 
-  if (positionsResp.ok && openPositions !== positionsData.length) {
+  if (positionsResp.ok && openPositions !== effectivePositions.length) {
     alerts.push({
       id: "position-count-mismatch",
       severity: "info",
       source: "state_consistency",
-      title: "Position count mismatch",
-      detail: `Status reports ${openPositions} while positions endpoint returned ${positionsData.length}.`,
+      title: usePortfolioPositionFallback ? "Position count mismatch (fallback)" : "Position count mismatch",
+      detail: usePortfolioPositionFallback
+        ? `Status reports ${openPositions} while /portfolio/positions returned ${effectivePositions.length}.`
+        : `Status reports ${openPositions} while positions endpoint returned ${effectivePositions.length}.`,
+    });
+  }
+  if (usePortfolioPositionFallback) {
+    alerts.push({
+      id: "portfolio-position-fallback",
+      severity: "info",
+      source: "broker_aggregation",
+      title: "Using broker portfolio fallback",
+      detail: "Trading state was stale/flat, so open positions were sourced from /portfolio/positions.",
     });
   }
 
@@ -477,19 +556,19 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
       api_reachable: apiReachable,
       state_fresh: stateFresh,
       timestamp: statusData.timestamp ?? null,
-      capital: asNumber(statusData.capital),
-      starting_capital: asNumber(statusData.starting_capital),
-      daily_pnl: asNumber(statusData.daily_pnl),
-      total_pnl: asNumber(statusData.total_pnl),
+      capital: statusMetrics.capital,
+      starting_capital: statusMetrics.starting_capital,
+      daily_pnl: statusMetrics.daily_pnl,
+      total_pnl: statusMetrics.total_pnl,
       max_drawdown: drawdown,
       sharpe_ratio: sharpe,
-      win_rate: asNumber(statusData.win_rate),
+      win_rate: statusMetrics.win_rate,
       open_positions: openPositions,
       option_positions: optionPositions,
       open_positions_total: openPositionsTotal,
-      total_trades: asNumber(statusData.total_trades),
+      total_trades: statusMetrics.trades_count,
     },
-    positions: positionsData,
+    positions: effectivePositions,
     derivatives,
     attribution: {
       closed_trades: asNumber(attributionRaw.closed_trades),
@@ -515,6 +594,9 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
     notes: [
       `Equity positions: ${openPositions}, option contracts: ${optionPositions}, total lines: ${openPositionsTotal}.`,
       `Derivatives table currently includes ${derivatives.length} option legs exported from IBKR.`,
+      usePortfolioPositionFallback
+        ? "State feed was stale/flat; cockpit fell back to /portfolio/positions for equity rows."
+        : "Primary equity rows are sourced from daemon /positions plus state reconciliation.",
       `USP engine score: ${uspScore.toFixed(1)}/100 (${uspBand.replaceAll("_", " ")}).`,
     ],
   });

@@ -159,7 +159,7 @@ class AlpacaConnector:
         params: Optional[dict] = None,
     ) -> Any:
         """Make authenticated API request with retry."""
-        if not self._client:
+        if not self._client or not self._connected:
             raise ConnectionError("Not connected. Call connect() first.")
 
         url = f"{base_url or self.base_url}{path}"
@@ -196,6 +196,11 @@ class AlpacaConnector:
                         continue
                     return {}
             except (httpx.RequestError, asyncio.TimeoutError) as e:
+                if "client has been closed" in str(e).lower():
+                    self._connected = False
+                    self._client = None
+                    logger.warning("Alpaca HTTP client was closed; marking connector disconnected")
+                    return {}
                 if attempt < max_retries:
                     logger.warning(
                         f"Alpaca request failed (attempt {attempt + 1}): {e}"
@@ -265,11 +270,13 @@ class AlpacaConnector:
         """Disconnect from Alpaca."""
         if self._quote_task and not self._quote_task.done():
             self._quote_task.cancel()
-        if self._client:
+        client = self._client
+        self._client = None
+        if client:
             # Schedule async close
             try:
                 loop = asyncio.get_running_loop()
-                loop.create_task(self._client.aclose())
+                loop.create_task(client.aclose())
             except RuntimeError:
                 pass
         self._connected = False
@@ -298,6 +305,8 @@ class AlpacaConnector:
                 return cached
 
             if self.offline_mode:
+                return self._fallback_price(normalized)
+            if not self._connected or self._client is None:
                 return self._fallback_price(normalized)
 
             alpaca_sym = self._to_alpaca_symbol(symbol)
@@ -334,6 +343,8 @@ class AlpacaConnector:
         try:
             normalized = normalize_symbol(symbol)
             if self.offline_mode:
+                return {}
+            if not self._connected or self._client is None:
                 return {}
 
             alpaca_sym = self._to_alpaca_symbol(symbol)

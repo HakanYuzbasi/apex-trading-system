@@ -44,12 +44,25 @@ function makeStatusData(overrides: Record<string, unknown> = {}) {
   };
 }
 
-function mockAllEndpoints(statusData: Record<string, unknown>) {
+function mockAllEndpoints(
+  statusData: Record<string, unknown>,
+  options: {
+    daemonPositions?: unknown[];
+    statePayload?: Record<string, unknown>;
+    portfolioPositions?: unknown[];
+  } = {},
+) {
+  const {
+    daemonPositions = [],
+    statePayload = { positions: {} },
+    portfolioPositions = [],
+  } = options;
   mockFetch
-    .mockResolvedValueOnce(mockUpstream(statusData))        // /status
-    .mockResolvedValueOnce(mockUpstream([]))                 // /positions
-    .mockResolvedValueOnce(mockUpstream({ positions: {} }))  // /state
-    .mockResolvedValueOnce(mockUpstream({ events: [] }));    // /social-governor
+    .mockResolvedValueOnce(mockUpstream(statusData))         // /status
+    .mockResolvedValueOnce(mockUpstream(daemonPositions))    // /positions
+    .mockResolvedValueOnce(mockUpstream(statePayload))       // /state
+    .mockResolvedValueOnce(mockUpstream({ events: [] }))     // /social-governor
+    .mockResolvedValueOnce(mockUpstream(portfolioPositions)); // /portfolio/positions
 }
 
 describe("cockpit route — drawdown alerts", () => {
@@ -125,7 +138,7 @@ describe("cockpit route — starting_capital passthrough", () => {
     expect(body.status.starting_capital).toBe(1000000);
   });
 
-  it("defaults starting_capital to 0 when missing from upstream", async () => {
+  it("derives starting_capital when missing from upstream", async () => {
     const data = makeStatusData();
     delete (data as Record<string, unknown>).starting_capital;
     mockAllEndpoints(data);
@@ -133,7 +146,7 @@ describe("cockpit route — starting_capital passthrough", () => {
     const response = await GET(makeRequest());
     const body = await response.json();
 
-    expect(body.status.starting_capital).toBe(0);
+    expect(body.status.starting_capital).toBe(1000000);
   });
 });
 
@@ -176,5 +189,108 @@ describe("cockpit route — sharpe alert", () => {
 
     const alert = body.alerts.find((a: { id: string }) => a.id === "sharpe-warning");
     expect(alert).toBeUndefined();
+  });
+
+  it("sanitizes absurd sharpe outliers before alerting and response output", async () => {
+    mockAllEndpoints(
+      makeStatusData({
+        sharpe_ratio: "-92962852034076208.00",
+        win_rate: 65,
+        open_positions: -3,
+      }),
+    );
+
+    const response = await GET(makeRequest());
+    const body = await response.json();
+
+    expect(body.status.sharpe_ratio).toBe(0);
+    expect(body.status.win_rate).toBeCloseTo(0.65, 8);
+    expect(body.status.open_positions).toBe(0);
+    const alert = body.alerts.find((a: { id: string }) => a.id === "sharpe-warning");
+    expect(alert).toBeDefined();
+    expect(alert.detail).toContain("0.00");
+  });
+});
+
+describe("cockpit route — /portfolio/positions fallback", () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+  });
+
+  it("uses /portfolio/positions when state is stale and daemon positions are flat", async () => {
+    mockAllEndpoints(
+      makeStatusData({ status: "offline", open_positions: 0 }),
+      {
+        daemonPositions: [],
+        statePayload: { positions: {}, open_positions: 0, timestamp: "2020-01-01T00:00:00Z" },
+        portfolioPositions: [
+          {
+            symbol: "AAPL",
+            qty: 10,
+            side: "LONG",
+            avg_cost: 190.12,
+            current_price: 194.2,
+            unrealized_pl: 40.8,
+            unrealized_plpc: 0.021,
+            source_id: "ibkr-1",
+          },
+        ],
+      },
+    );
+
+    const response = await GET(makeRequest());
+    const body = await response.json();
+
+    expect(body.status.open_positions).toBe(1);
+    expect(body.positions).toHaveLength(1);
+    expect(body.positions[0]).toMatchObject({
+      symbol: "AAPL",
+      qty: 10,
+      entry: 190.12,
+      current: 194.2,
+      pnl: 40.8,
+      source_id: "ibkr-1",
+    });
+    const fallbackAlert = body.alerts.find((a: { id: string }) => a.id === "portfolio-position-fallback");
+    expect(fallbackAlert).toBeDefined();
+  });
+
+  it("keeps daemon positions when state is fresh and non-flat", async () => {
+    mockAllEndpoints(
+      makeStatusData({ status: "online", open_positions: 2 }),
+      {
+        daemonPositions: [
+          {
+            symbol: "MSFT",
+            qty: 2,
+            side: "LONG",
+            entry: 410,
+            current: 411,
+            pnl: 2,
+            pnl_pct: 0.0048,
+          },
+        ],
+        statePayload: { positions: { MSFT: { qty: 2 } }, open_positions: 2, timestamp: new Date().toISOString() },
+        portfolioPositions: [
+          {
+            symbol: "AAPL",
+            qty: 10,
+            side: "LONG",
+            avg_cost: 190,
+            current_price: 194,
+            unrealized_pl: 40,
+            unrealized_plpc: 0.02,
+          },
+        ],
+      },
+    );
+
+    const response = await GET(makeRequest());
+    const body = await response.json();
+
+    expect(body.positions).toHaveLength(1);
+    expect(body.positions[0].symbol).toBe("MSFT");
+    const fallbackAlert = body.alerts.find((a: { id: string }) => a.id === "portfolio-position-fallback");
+    expect(fallbackAlert).toBeUndefined();
   });
 });

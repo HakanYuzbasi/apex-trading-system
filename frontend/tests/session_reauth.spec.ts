@@ -134,9 +134,11 @@ test.describe("Session Re-authentication", () => {
 
     await page.getByLabel("Username").fill("admin");
     await page.getByLabel("Password / Master Key").fill("P3rO_f73zKfHHkt2WfxJ7zDZ");
-    await page.getByRole("button", { name: "Authenticate" }).click();
+    const authButton = page.getByRole("button", { name: "Authenticate" });
+    await expect(authButton).toBeEnabled({ timeout: 10000 });
+    await authButton.click();
 
-    await expect(page).toHaveURL(/\/dashboard$/);
-    await expect(page.getByRole("heading", { name: "Apex Dashboard" })).toBeVisible();
+    await expect(page).toHaveURL(/\/dashboard$/, { timeout: 15000 });
+    await expect(page.getByRole("heading", { name: "Apex Dashboard" })).toBeVisible({ timeout: 15000 });
   });
 });

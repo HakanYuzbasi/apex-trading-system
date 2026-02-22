@@ -39,6 +39,11 @@ import PositionsTable from "@/components/dashboard/PositionsTable";
 import { Skeleton } from "@/components/ui/skeleton";
 import { useWebSocket } from "@/hooks/useWebSocket";
 import {
+  sanitizeCount,
+  sanitizeExecutionMetrics,
+  sanitizeMoney,
+} from "@/lib/metricGuards";
+import {
   MAX_POSITIONS,
   DRAWDOWN_BUDGET_PCT,
   SHARPE_TARGET,
@@ -337,35 +342,38 @@ export default function Dashboard({ isPublic = false }: { isPublic?: boolean }) 
   const wsData = wsMessage?.type === "state_update" ? wsMessage : null;
 
   // Merge Metrics: Prefer WS data, fallback to REST
-  const mergedMetrics = wsData
-    ? {
-      status: true,
-      timestamp: wsData.timestamp,
-      capital: wsData.capital,
-      starting_capital: wsData.starting_capital ?? wsData.initial_capital ?? 0,
-      daily_pnl: wsData.daily_pnl,
-      total_pnl: wsData.total_pnl,
-      max_drawdown: wsData.max_drawdown,
-      sharpe_ratio: wsData.sharpe_ratio,
-      win_rate: wsData.win_rate,
-      open_positions: wsData.open_positions,
-      trades_count: wsData.total_trades,
-    }
-    : metrics ?? (cockpit
+  const mergedMetrics = useMemo(
+    () => (wsData
       ? {
-        status: cockpit.status.state_fresh,
-        timestamp: cockpit.status.timestamp,
-        capital: cockpit.status.capital,
-        starting_capital: cockpit.status.starting_capital ?? 0,
-        daily_pnl: cockpit.status.daily_pnl,
-        total_pnl: cockpit.status.total_pnl,
-        max_drawdown: cockpit.status.max_drawdown,
-        sharpe_ratio: cockpit.status.sharpe_ratio,
-        win_rate: cockpit.status.win_rate,
-        open_positions: cockpit.status.open_positions,
-        trades_count: cockpit.status.total_trades,
+        status: true,
+        timestamp: wsData.timestamp,
+        capital: wsData.capital,
+        starting_capital: wsData.starting_capital ?? wsData.initial_capital ?? 0,
+        daily_pnl: wsData.daily_pnl,
+        total_pnl: wsData.total_pnl,
+        max_drawdown: wsData.max_drawdown,
+        sharpe_ratio: wsData.sharpe_ratio,
+        win_rate: wsData.win_rate,
+        open_positions: wsData.open_positions,
+        trades_count: wsData.total_trades,
       }
-      : undefined);
+      : metrics ?? (cockpit
+        ? {
+          status: cockpit.status.state_fresh,
+          timestamp: cockpit.status.timestamp,
+          capital: cockpit.status.capital,
+          starting_capital: cockpit.status.starting_capital ?? 0,
+          daily_pnl: cockpit.status.daily_pnl,
+          total_pnl: cockpit.status.total_pnl,
+          max_drawdown: cockpit.status.max_drawdown,
+          sharpe_ratio: cockpit.status.sharpe_ratio,
+          win_rate: cockpit.status.win_rate,
+          open_positions: cockpit.status.open_positions,
+          trades_count: cockpit.status.total_trades,
+        }
+        : undefined)),
+    [wsData, metrics, cockpit],
+  );
 
   // Fetch aggregated equity from multi-broker balance endpoint
   useEffect(() => {
@@ -378,8 +386,8 @@ export default function Dashboard({ isPublic = false }: { isPublic?: boolean }) 
         }
         if (res.ok) {
           const data = await res.json() as { total_equity: number; breakdown?: { source: string }[] };
-          setAggregatedEquity(data.total_equity);
-          setBrokerCount(data.breakdown?.length ?? 1);
+          setAggregatedEquity(sanitizeMoney(data.total_equity, 0));
+          setBrokerCount(Math.max(1, sanitizeCount(data.breakdown?.length ?? 1, 1)));
         }
       } catch {
         // silently skip — not critical
@@ -432,14 +440,40 @@ export default function Dashboard({ isPublic = false }: { isPublic?: boolean }) 
   const stateFresh = wsConnected || (cockpit?.status.state_fresh ?? Boolean(mergedMetrics?.status));
   const isDisconnected = !showLoading && !apiReachable;
   const isStale = apiReachable && !stateFresh;
-  const capital = Number((wsData ? (wsData.total_equity ?? wsData.capital) : mergedMetrics?.capital) ?? 0);
-  const dailyPnl = Number(mergedMetrics?.daily_pnl ?? 0);
-  const totalPnl = Number(mergedMetrics?.total_pnl ?? 0);
-  const sharpe = Number(mergedMetrics?.sharpe_ratio ?? 0);
-  const winRate = Number(mergedMetrics?.win_rate ?? 0);
-  const openPositions = Number(mergedMetrics?.open_positions ?? 0);
-  const tradesCount = Number(mergedMetrics?.trades_count ?? 0);
-  const drawdownPct = normalizeDrawdownPct(Number(mergedMetrics?.max_drawdown ?? 0));
+  const mergedMetricRecord = (mergedMetrics ?? {}) as Record<string, unknown>;
+  const mergedOpenPositions = Math.max(
+    sanitizeCount(mergedMetricRecord.open_positions, 0),
+    sanitizeCount(cockpit?.status.open_positions, 0),
+    sanitizeCount(cockpit?.positions?.length, 0),
+  );
+  const mergedOptionPositions = Math.max(
+    sanitizeCount(mergedMetricRecord.option_positions, 0),
+    sanitizeCount(cockpit?.status.option_positions, 0),
+  );
+  const mergedOpenPositionsTotal = Math.max(
+    sanitizeCount(mergedMetricRecord.open_positions_total, 0),
+    sanitizeCount(cockpit?.status.open_positions_total, 0),
+    mergedOpenPositions + mergedOptionPositions,
+  );
+  const sanitizedMetrics = useMemo(
+    () =>
+      sanitizeExecutionMetrics({
+        ...(mergedMetrics ?? {}),
+        open_positions: mergedOpenPositions,
+        option_positions: mergedOptionPositions,
+        open_positions_total: mergedOpenPositionsTotal,
+      }),
+    [mergedMetrics, mergedOpenPositions, mergedOptionPositions, mergedOpenPositionsTotal],
+  );
+  const wsAggregatedEquity = sanitizeMoney(wsData?.total_equity, Number.NaN);
+  const capital = Number.isFinite(wsAggregatedEquity) ? wsAggregatedEquity : sanitizedMetrics.capital;
+  const dailyPnl = sanitizedMetrics.daily_pnl;
+  const totalPnl = sanitizedMetrics.total_pnl;
+  const sharpe = sanitizedMetrics.sharpe_ratio;
+  const winRate = sanitizedMetrics.win_rate;
+  const openPositions = sanitizedMetrics.open_positions;
+  const tradesCount = sanitizedMetrics.trades_count;
+  const drawdownPct = normalizeDrawdownPct(sanitizedMetrics.max_drawdown);
 
 
   // Parse WS positions to match CockpitPosition interface
@@ -447,16 +481,16 @@ export default function Dashboard({ isPublic = false }: { isPublic?: boolean }) 
     if (!wsData?.positions) return null;
     return Object.entries(wsData.positions).map(([symbol, raw]) => {
       const data = (raw && typeof raw === "object") ? (raw as Record<string, unknown>) : {};
-      const qty = Number(data.qty ?? 0);
+      const qty = Math.trunc(sanitizeMoney(data.qty, 0));
       return {
         symbol,
         qty,
         side: qty > 0 ? "LONG" : "SHORT",
-        entry: Number(data.avg_price ?? 0),
-        current: Number(data.current_price ?? 0),
-        pnl: Number(data.pnl ?? 0),
-        pnl_pct: Number(data.pnl_pct ?? 0),
-        signal: Number(data.current_signal ?? 0),
+        entry: sanitizeMoney(data.avg_price, 0),
+        current: sanitizeMoney(data.current_price, 0),
+        pnl: sanitizeMoney(data.pnl, 0),
+        pnl_pct: sanitizeMoney(data.pnl_pct, 0),
+        signal: sanitizeMoney(data.current_signal, 0),
         signal_direction: String(data.signal_direction ?? "UNKNOWN"),
         source_id: String(data.source_id ?? ""),
       };
@@ -470,10 +504,13 @@ export default function Dashboard({ isPublic = false }: { isPublic?: boolean }) 
   const socialAuditEvents = useMemo(() => socialAudit?.events ?? [], [socialAudit?.events]);
   const notes = useMemo(() => cockpit?.notes ?? [], [cockpit?.notes]);
   const usp = cockpit?.usp;
-  const optionPositions = cockpit?.status.option_positions ?? 0;
-  const totalLines = cockpit?.status.open_positions_total ?? openPositions + optionPositions;
+  const optionPositions = sanitizeCount(cockpit?.status.option_positions, sanitizedMetrics.option_positions);
+  const totalLines = Math.max(
+    sanitizeCount(cockpit?.status.open_positions_total, sanitizedMetrics.open_positions_total),
+    openPositions + optionPositions,
+  );
 
-  const startingCapital = Number(mergedMetrics?.starting_capital) || Math.max(1, capital - totalPnl);
+  const startingCapital = Math.max(1, sanitizedMetrics.starting_capital || (capital - totalPnl));
   const returnPct = startingCapital > 0 ? totalPnl / startingCapital : 0;
   const pnlPerTrade = tradesCount > 0 ? totalPnl / tradesCount : 0;
   const avgPositionSize = openPositions > 0 ? capital / openPositions : 0;

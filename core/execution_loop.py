@@ -193,6 +193,7 @@ class ApexTradingSystem:
     - Transaction cost tracking
     - Sector exposure limits
     """
+    _banner_printed = False
     
     def __init__(self, tenant_id: str = "default", broker_service=None):
         self.tenant_id = tenant_id
@@ -1098,6 +1099,9 @@ class ApexTradingSystem:
             logger.debug(f"Error writing heartbeat: {e}")
 
     def print_banner(self):
+        if ApexTradingSystem._banner_printed:
+            return
+        ApexTradingSystem._banner_printed = True
         print("""
 ╔═══════════════════════════════════════════════════════════════╗
 ║     █████╗ ██████╗ ███████╗██╗  ██╗                           ║

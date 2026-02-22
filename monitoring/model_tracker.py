@@ -4,11 +4,12 @@ import numpy as np
 from collections import deque
 from typing import Dict, Optional, List
 from datetime import datetime
+import threading
 
 logger = logging.getLogger("apex.monitoring.model_tracker")
 
 try:
-    from prometheus_client import Gauge, Histogram
+    from prometheus_client import Gauge, Histogram, REGISTRY
     PROMETHEUS_AVAILABLE = True
 except ImportError:
     PROMETHEUS_AVAILABLE = False
@@ -20,6 +21,10 @@ class ModelPerformanceTracker:
     to realized future returns.
     """
 
+    _metrics_lock = threading.Lock()
+    _shared_model_accuracy = None
+    _shared_prediction_error = None
+
     def __init__(self, window_size: int = 100):
         self.window_size = window_size
         self.predictions: Dict[str, deque] = {}  # symbol -> deque of (timestamp, prediction, horizon_price)
@@ -27,16 +32,37 @@ class ModelPerformanceTracker:
         
         # Prometheus Metrics
         if PROMETHEUS_AVAILABLE:
-            self.model_accuracy = Gauge(
-                "apex_ml_model_accuracy_rolling",
-                "Rolling accuracy of ML model (0-1)",
-                ["symbol", "window"]
-            )
-            self.prediction_error = Histogram(
-                "apex_ml_prediction_error",
-                "Prediction error (predicted - actual)",
-                ["symbol"]
-            )
+            with self._metrics_lock:
+                if self.__class__._shared_model_accuracy is None:
+                    try:
+                        self.__class__._shared_model_accuracy = Gauge(
+                            "apex_ml_model_accuracy_rolling",
+                            "Rolling accuracy of ML model (0-1)",
+                            ["symbol", "window"]
+                        )
+                    except ValueError as exc:
+                        if "Duplicated timeseries" in str(exc):
+                            self.__class__._shared_model_accuracy = REGISTRY._names_to_collectors.get(  # type: ignore[attr-defined]
+                                "apex_ml_model_accuracy_rolling"
+                            )
+                        else:
+                            raise
+                if self.__class__._shared_prediction_error is None:
+                    try:
+                        self.__class__._shared_prediction_error = Histogram(
+                            "apex_ml_prediction_error",
+                            "Prediction error (predicted - actual)",
+                            ["symbol"]
+                        )
+                    except ValueError as exc:
+                        if "Duplicated timeseries" in str(exc):
+                            self.__class__._shared_prediction_error = REGISTRY._names_to_collectors.get(  # type: ignore[attr-defined]
+                                "apex_ml_prediction_error"
+                            )
+                        else:
+                            raise
+            self.model_accuracy = self.__class__._shared_model_accuracy
+            self.prediction_error = self.__class__._shared_prediction_error
         else:
             self.model_accuracy = None
             self.prediction_error = None

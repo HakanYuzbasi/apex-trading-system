@@ -56,7 +56,7 @@ describe("metrics route — starting_capital passthrough", () => {
     expect(body.capital).toBe(1050000);
   });
 
-  it("defaults starting_capital to 0 when missing from upstream", async () => {
+  it("derives starting_capital from capital and total_pnl when missing", async () => {
     mockFetch.mockResolvedValueOnce(
       mockUpstream({
         status: "online",
@@ -76,10 +76,10 @@ describe("metrics route — starting_capital passthrough", () => {
     const response = await GET(makeRequest());
     const body = await response.json();
 
-    expect(body.starting_capital).toBe(0);
+    expect(body.starting_capital).toBe(490000);
   });
 
-  it("handles non-numeric starting_capital gracefully", async () => {
+  it("handles non-numeric starting_capital by deriving a stable fallback", async () => {
     mockFetch.mockResolvedValueOnce(
       mockUpstream({
         status: "online",
@@ -99,7 +99,7 @@ describe("metrics route — starting_capital passthrough", () => {
     const response = await GET(makeRequest());
     const body = await response.json();
 
-    expect(body.starting_capital).toBe(0);
+    expect(body.starting_capital).toBe(500000);
   });
 });
 
@@ -154,5 +154,35 @@ describe("metrics route — basic behavior", () => {
 
     const response = await GET(makeRequest());
     expect(response.status).toBe(500);
+  });
+
+  it("sanitizes absurd KPI outliers from upstream payload", async () => {
+    mockFetch.mockResolvedValueOnce(
+      mockUpstream({
+        status: "online",
+        timestamp: "2024-01-01T12:00:00Z",
+        capital: 950000,
+        starting_capital: 900000,
+        daily_pnl: "oops",
+        total_pnl: 50000,
+        max_drawdown: -9999,
+        sharpe_ratio: "-92962852034076208.00",
+        win_rate: 58,
+        open_positions: -10,
+        total_trades: 8_000_000,
+      })
+    );
+
+    const response = await GET(makeRequest());
+    const body = await response.json();
+
+    expect(body.capital).toBe(950000);
+    expect(body.starting_capital).toBe(900000);
+    expect(body.daily_pnl).toBe(0);
+    expect(body.max_drawdown).toBe(0);
+    expect(body.sharpe_ratio).toBe(0);
+    expect(body.win_rate).toBeCloseTo(0.58, 8);
+    expect(body.open_positions).toBe(0);
+    expect(body.trades_count).toBe(0);
   });
 });
