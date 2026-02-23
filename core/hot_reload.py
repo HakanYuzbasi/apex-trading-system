@@ -49,7 +49,7 @@ class ConfigChange:
     old_value: Any
     new_value: Any
     change_type: ConfigChangeType
-    timestamp: datetime = field(default_factory=datetime.now)
+    timestamp: datetime = field(default_factory=datetime.utcnow)
     applied: bool = False
     deferred: bool = False
     reason: Optional[str] = None
@@ -347,7 +347,7 @@ class HotReloadManager:
                 "old_value": c.old_value,
                 "new_value": c.new_value,
                 "change_type": c.change_type.value,
-                "timestamp": c.timestamp.isoformat(),
+                "timestamp": c.timestamp.isoformat() + "Z",
                 "applied": c.applied,
                 "deferred": c.deferred,
                 "reason": c.reason

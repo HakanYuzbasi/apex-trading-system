@@ -1,26 +1,173 @@
 {
   "schema_version": "1.0",
-  "generated_at": "2026-02-22T23:00:00",
+  "generated_at": "2026-02-23T19:40:57.369330",
   "freshness_sla_seconds": 1800,
   "sources": {
     "X": {
+      "source": "X",
+      "adapter_mode": "file",
+      "fetched_at": "2026-02-22T23:00:00",
       "freshness_ts": "2026-02-22T23:00:00",
-      "quality": { "status": "missing" }
+      "fresh_until": "2026-02-22T23:30:00",
+      "sample_size": 50,
+      "quality": {
+        "status": "stale",
+        "score": 0.2091875,
+        "flags": [
+          "stale_data"
+        ]
+      }
     },
     "TIKTOK": {
+      "source": "TIKTOK",
+      "adapter_mode": "file",
+      "fetched_at": "2026-02-22T23:00:00",
       "freshness_ts": "2026-02-22T23:00:00",
-      "quality": { "status": "missing" }
+      "fresh_until": "2026-02-22T23:30:00",
+      "sample_size": 50,
+      "quality": {
+        "status": "stale",
+        "score": 0.2091875,
+        "flags": [
+          "stale_data"
+        ]
+      }
     },
     "INSTAGRAM": {
+      "source": "INSTAGRAM",
+      "adapter_mode": "file",
+      "fetched_at": "2026-02-22T23:00:00",
       "freshness_ts": "2026-02-22T23:00:00",
-      "quality": { "status": "missing" }
+      "fresh_until": "2026-02-22T23:30:00",
+      "sample_size": 50,
+      "quality": {
+        "status": "stale",
+        "score": 0.2091875,
+        "flags": [
+          "stale_data"
+        ]
+      }
     },
     "YOUTUBE": {
+      "source": "YOUTUBE",
+      "adapter_mode": "file",
+      "fetched_at": "2026-02-22T23:00:00",
       "freshness_ts": "2026-02-22T23:00:00",
-      "quality": { "status": "missing" }
+      "fresh_until": "2026-02-22T23:30:00",
+      "sample_size": 50,
+      "quality": {
+        "status": "stale",
+        "score": 0.2091875,
+        "flags": [
+          "stale_data"
+        ]
+      }
+    },
+    "NEWS_AGG": {
+      "source": "NEWS_AGG",
+      "adapter_mode": "aggregator",
+      "fetched_at": "2026-02-23T19:40:57.369330",
+      "freshness_ts": "2026-02-23T19:40:57.369330",
+      "fresh_until": "2026-02-23T20:10:57.369330",
+      "sample_size": 0,
+      "quality": {
+        "status": "degraded",
+        "score": 0.37,
+        "flags": [
+          "low_symbol_coverage",
+          "no_news_returned"
+        ]
+      }
+    },
+    "MARKET": {
+      "source": "MARKET",
+      "adapter_mode": "market",
+      "fetched_at": "2026-02-23T19:40:57.369330",
+      "freshness_ts": "2026-02-23T19:40:57.369330",
+      "fresh_until": "2026-02-23T20:10:57.369330",
+      "sample_size": 15,
+      "quality": {
+        "status": "ok",
+        "score": 0.76,
+        "flags": []
+      }
     }
   },
-  "platforms": {},
+  "platforms": {
+    "X": {
+      "attention_z": 0.0,
+      "sentiment_score": 0.0,
+      "confidence": 0.02625,
+      "freshness_ts": "2026-02-22T23:00:00",
+      "quality_flags": [
+        "stale_data"
+      ]
+    },
+    "TIKTOK": {
+      "attention_z": 0.0,
+      "sentiment_score": 0.0,
+      "confidence": 0.02625,
+      "freshness_ts": "2026-02-22T23:00:00",
+      "quality_flags": [
+        "stale_data"
+      ]
+    },
+    "INSTAGRAM": {
+      "attention_z": 0.0,
+      "sentiment_score": 0.0,
+      "confidence": 0.02625,
+      "freshness_ts": "2026-02-22T23:00:00",
+      "quality_flags": [
+        "stale_data"
+      ]
+    },
+    "YOUTUBE": {
+      "attention_z": 0.0,
+      "sentiment_score": 0.0,
+      "confidence": 0.02625,
+      "freshness_ts": "2026-02-22T23:00:00",
+      "quality_flags": [
+        "stale_data"
+      ]
+    },
+    "NEWS_AGG": {
+      "attention_z": 0.0,
+      "sentiment_score": -0.149378273492891,
+      "confidence": 0.2,
+      "freshness_ts": "2026-02-23T19:40:57.369330",
+      "quality_flags": [
+        "low_symbol_coverage",
+        "no_news_returned"
+      ]
+    },
+    "MARKET": {
+      "attention_z": 8.0,
+      "sentiment_score": -0.4666666666666667,
+      "confidence": 0.6,
+      "freshness_ts": "2026-02-23T19:40:57.369330",
+      "quality_flags": []
+    }
+  },
   "asset_classes": {},
-  "prediction_events": []
+  "prediction_events": [],
+  "validation": {
+    "valid": true,
+    "has_usable_feeds": false,
+    "source_status": {
+      "X": "stale",
+      "TIKTOK": "stale",
+      "INSTAGRAM": "stale",
+      "YOUTUBE": "stale"
+    },
+    "usable_sources": [],
+    "stale_sources": [],
+    "warnings": [
+      {
+        "level": "warning",
+        "code": "all_sources_unusable",
+        "message": "all social feeds are missing/stale; runtime should fail-open for entry blocking"
+      }
+    ],
+    "errors": []
+  }
 }

@@ -389,7 +389,10 @@ class IBKRConnector:
                     current_client_id = await lease_manager.allocate(self.client_id if id_attempt == 0 else None)
                     self._active_client_id = current_client_id
                     
-                    await self.ib.connectAsync(self.host, self.port, clientId=current_client_id)
+                    await asyncio.wait_for(
+                        self.ib.connectAsync(self.host, self.port, clientId=current_client_id),
+                        timeout=getattr(ApexConfig, "IBKR_CONNECT_TIMEOUT", 10)
+                    )
                     
                     # Start heartbeat task to keep lease alive
                     if getattr(self, "_heartbeat_task", None) is None:
@@ -669,27 +672,45 @@ class IBKRConnector:
             
             # Store the stream for future use
             self.tickers[normalized] = ticker
-            
-            # Wait for price data to arrive (max 3 seconds)
-            for _ in range(30):
-                await asyncio.sleep(0.1)
+
+            # Immediate check for Delayed-Frozen Type 4 availability
+            if not ApexConfig.USE_LIVE_MARKET_DATA:
                 price = ticker.marketPrice()
+                if not pd.isna(price) and price > 0:
+                    return float(price)
                 
-                # Try all available price fields
-                if pd.isna(price) or price <= 0:
-                    if ticker.last and ticker.last > 0:
-                        price = ticker.last
-                    elif ticker.close and ticker.close > 0:
-                        price = ticker.close
-                    elif ticker.bid and ticker.ask and ticker.bid > 0 and ticker.ask > 0:
-                        price = (ticker.bid + ticker.ask) / 2.0
-                
-                if price > 0:
+                # Check last/close safely with pd.isna
+                last = getattr(ticker, 'last', 0)
+                close = getattr(ticker, 'close', 0)
+                if not pd.isna(last) and last > 0: return float(last)
+                if not pd.isna(close) and close > 0: return float(close)
+            
+            # Wait for price data to arrive (max 2 seconds - reverted from 10s)
+            for _ in range(20):
+                await asyncio.sleep(0.1)
+                if not pd.isna(price) and price > 0:
                     logger.debug(f"✅ Got streaming price for {normalized}: ${price:.2f}")
                     return float(price)
+                
+                # Try all available price fields safely
+                last = getattr(ticker, 'last', 0)
+                close = getattr(ticker, 'close', 0)
+                if not pd.isna(last) and last > 0:
+                    price = float(last)
+                elif not pd.isna(close) and close > 0:
+                    price = float(close)
+                else:
+                    bid = getattr(ticker, 'bid', 0)
+                    ask = getattr(ticker, 'ask', 0)
+                    if not pd.isna(bid) and not pd.isna(ask) and bid > 0 and ask > 0:
+                        price = (float(bid) + float(ask)) / 2.0
+                
+                if not pd.isna(price) and price > 0:
+                    logger.debug(f"✅ Got fallback streaming price for {normalized}: ${price:.2f}")
+                    return float(price)
             
-            # Still no price after 3 seconds - fall back to data provider
-            logger.warning(f"⚠️  No streaming price for {normalized} after 3s")
+            # Still no price after 2 seconds - fall back to data provider
+            logger.warning(f"⚠️  No streaming price for {normalized} after 2s")
             price = self._fallback_price(normalized, reason="ibkr_no_stream_price")
             if price > 0:
                 return float(price)
@@ -1401,6 +1422,7 @@ class IBKRConnector:
         Returns:
             Option contract or None if not found
         """
+        expiry = str(expiry).replace("-", "").replace("/", "") # Format: YYYYMMDD
         cache_key = f"{symbol}_{expiry}_{strike}_{right}_{trading_class}"
 
         if cache_key in self.contracts:
@@ -1503,6 +1525,7 @@ class IBKRConnector:
         Returns:
             Dict with bid, ask, last, delta, gamma, theta, vega, iv
         """
+        expiry = str(expiry).replace("-", "").replace("/", "")
         try:
             contract = await self.get_option_contract(symbol, expiry, strike, right)
             if not contract:
@@ -1698,17 +1721,22 @@ class IBKRConnector:
 
             result = {}
             for pos in positions:
-                if pos.contract.secType == 'OPT':
+                if getattr(pos.contract, 'secType', '') == 'OPT':
                     contract = pos.contract
-                    key = f"{contract.symbol}_{contract.lastTradeDateOrContractMonth}_{contract.strike}_{contract.right}"
+                    expiry_val = getattr(contract, 'lastTradeDateOrContractMonth', None)
+                    if not expiry_val:
+                        continue
+                    import re
+                    expiry = re.sub(r'[^0-9]', '', str(expiry_val).strip()) # Normalize strictly to YYYYMMDD
+                    key = f"{contract.symbol}_{expiry}_{contract.strike}_{contract.right}"
 
                     result[key] = {
                         'symbol': contract.symbol,
-                        'expiry': contract.lastTradeDateOrContractMonth,
+                        'expiry': expiry,
                         'strike': contract.strike,
                         'right': contract.right,
-                        'quantity': int(pos.position),
-                        'avg_cost': pos.avgCost
+                        'quantity': int(getattr(pos, 'position', 0)),
+                        'avg_cost': getattr(pos, 'avgCost', 0.0)
                     }
 
                     pos_type = "LONG" if pos.position > 0 else "SHORT"
@@ -1747,7 +1775,8 @@ class IBKRConnector:
         """
         # Get current position
         positions = await self.get_option_positions()
-        key = f"{symbol}_{expiry}_{strike}_{right}"
+        norm_expiry = str(expiry).replace("-", "").replace("/", "")
+        key = f"{symbol}_{norm_expiry}_{strike}_{right}"
 
         if key not in positions:
             logger.warning(f"⚠️  Cannot close {key}: Position not found")

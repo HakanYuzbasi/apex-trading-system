@@ -30,6 +30,11 @@ _config_logger = logging.getLogger(__name__)
 
 
 class ApexConfig:
+    # --- EXECUTION & SMART ORDER ROUTING ---
+    SOR_ENABLED = True               # Use Limit mid-pegging instead of Market orders
+    SOR_MAX_URGENCY_STEPS = 3        # Number of times to adjust price toward the ask/bid
+    SOR_STEP_DELAY_SECONDS = 10      # How long to wait at each price level before adjusting
+
     # --- PHASE B: DYNAMIC LIMITS ---
     CORRELATION_DYNAMIC_ENABLED = True
     DRAWDOWN_DYNAMIC_TIERS_ENABLED = True
@@ -74,6 +79,7 @@ class ApexConfig:
     )
     IBKR_FX_EXCHANGE: str = os.getenv("APEX_IBKR_FX_EXCHANGE", "IDEALPRO")
     IBKR_CRYPTO_EXCHANGE: str = os.getenv("APEX_IBKR_CRYPTO_EXCHANGE", "PAXOS")
+    IBKR_CONNECT_TIMEOUT: int = int(os.getenv("APEX_IBKR_CONNECT_TIMEOUT", "10"))
 
     # ═══════════════════════════════════════════════════════════════
     # FX/CRYPTO PAPER TRADING TUNING (OPTIMIZE FOR OBSERVABILITY)
@@ -222,8 +228,8 @@ class ApexConfig:
     INITIAL_CAPITAL: int = int(
         os.getenv("APEX_INITIAL_CAPITAL", os.getenv("INITIAL_CAPITAL", "1100000"))
     )
-    POSITION_SIZE_USD = 20_000  # $20K per position (~1.8% of capital)
-    MAX_POSITIONS = 40  # Increased from 15 for better capital utilization
+    POSITION_SIZE_USD = float(os.getenv("APEX_POSITION_SIZE_USD", "20000"))  # Default $20k
+    MAX_POSITIONS = 10  # Increased from 15 for better capital utilization
     MAX_SHARES_PER_POSITION = 500  # Cap max shares per position
     MIN_HEDGE_NOTIONAL = 50_000  # Only hedge positions larger than $50k to save on costs
     
@@ -423,7 +429,7 @@ class ApexConfig:
     # SIGNAL THRESHOLDS (QUALITY FOCUS - Reduced noise)    # ML Configuration
     # ═══════════════════════════════════════════════════════════════
     MIN_SIGNAL_THRESHOLD = 0.18      # Lowered from 0.25 to let moderate signals through
-    MIN_CONFIDENCE = 0.25            # Lowered from 0.35 (soft filters stack 0.85x*0.90x penalties)
+    MIN_CONFIDENCE = 0.55            # Lowered from 0.35 (soft filters stack 0.85x*0.90x penalties)
     CRYPTO_SIGNAL_THRESHOLD_MULTIPLIER: float = float(
         os.getenv("APEX_CRYPTO_SIGNAL_THRESHOLD_MULTIPLIER", "0.60")
     )
@@ -471,7 +477,7 @@ class ApexConfig:
     SIGNAL_THRESHOLDS_BY_REGIME = {
         'strong_bull': 0.15,    # Lowered from 0.20
         'bull': 0.18,          # Lowered from 0.23
-        'neutral': 0.20,       # Lowered from 0.28
+        'neutral': 0.15,       # Lowered from 0.28
         'bear': 0.18,          # Lowered from 0.25
         'strong_bear': 0.15,   # Lowered from 0.22
         'volatile': 0.22       # Lowered from 0.30
@@ -580,7 +586,7 @@ class ApexConfig:
 
     # Exit Quality Guard - Exit signal validation
     EXIT_QUALITY_GUARD_ENABLED = True
-    EXIT_MIN_CONFIDENCE = 0.30            # Min confidence for signal-based exits
+    EXIT_MIN_CONFIDENCE = 0.55            # Min confidence for signal-based exits
     EXIT_MAX_RETRY_ATTEMPTS = 20          # Never give up (was 5)
     EXIT_BACKOFF_BASE_SECONDS = 30        # Exponential backoff base
     EXIT_HARD_STOP_PNL = -0.03            # -3% hard stop bypasses validation
@@ -1106,3 +1112,5 @@ if __name__ == "__main__":
         print("✅ Configuration validated successfully")
     else:
         print("❌ Configuration validation failed")
+
+    BROKER_MODE = "both"

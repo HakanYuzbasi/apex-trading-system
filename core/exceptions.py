@@ -110,7 +110,7 @@ class ErrorContext:
     def to_dict(self) -> Dict[str, Any]:
         return {
             'error_code': self.error_code.value,
-            'timestamp': self.timestamp.isoformat(),
+            'timestamp': self.timestamp.isoformat() + "Z",
             'symbol': self.symbol,
             'order_id': self.order_id,
             **self.additional_data
@@ -562,14 +562,14 @@ class CircuitBreakerOpenError(RiskError):
                 error_code=ErrorCode.CIRCUIT_BREAKER_OPEN,
                 additional_data={
                     'reason': reason,
-                    'triggered_at': triggered_at.isoformat() if triggered_at else None,
+                    'triggered_at': triggered_at.isoformat() + "Z" if triggered_at else None,
                     'cooldown_seconds': cooldown_seconds
                 }
             ),
             cause
         )
         self.reason = reason
-        self.triggered_at = triggered_at or datetime.now()
+        self.triggered_at = triggered_at or datetime.utcnow()
         self.cooldown_seconds = cooldown_seconds
 
 

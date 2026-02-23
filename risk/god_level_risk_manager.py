@@ -100,6 +100,24 @@ class GodLevelRiskManager:
 
         logger.info("God Level Risk Manager initialized")
 
+    def _calculate_chandelier_stops(self, entry_price: float, atr: float, signal_strength: float, regime: str):
+        """Calculates Volatility-Adjusted Chandelier Exits."""
+        atr_mult = 2.5 if regime in ["volatile", "high_volatility", "bear"] else 3.0
+        strength_adj = 1.0 + (abs(signal_strength) * 0.5)
+        final_mult = atr_mult * strength_adj
+        if signal_strength > 0:
+            stop_loss = entry_price - (atr * final_mult)
+            take_profit = entry_price + (atr * final_mult * 2.0)
+        else:
+            stop_loss = entry_price + (atr * final_mult)
+            take_profit = entry_price - (atr * final_mult * 2.0)
+        max_stop_pct = 0.15
+        if signal_strength > 0:
+            stop_loss = max(stop_loss, entry_price * (1.0 - max_stop_pct))
+        else:
+            stop_loss = min(stop_loss, entry_price * (1.0 + max_stop_pct))
+        return round(stop_loss, 4), round(take_profit, 4)
+
     def calculate_position_size(
         self,
         symbol: str,

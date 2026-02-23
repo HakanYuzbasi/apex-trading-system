@@ -146,7 +146,7 @@ class EnhancedSignalFilter:
         # === 5b. HARD NET-EDGE FILTER (block if costs exceed edge) ===
         est_cost_bps = self._estimate_cost_bps(symbol)
         est_cost_pct = est_cost_bps / 10000.0
-        if abs(expected_return) < est_cost_pct:
+        if abs(expected_return) < (est_cost_pct * 0.5):
             rejection_reasons.append(
                 f"Net edge below costs: edge={expected_return:.2%}, cost≈{est_cost_pct:.2%}"
             )

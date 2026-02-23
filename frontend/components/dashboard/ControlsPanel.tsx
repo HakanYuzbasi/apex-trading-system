@@ -1,6 +1,7 @@
 "use client";
 
 import { ReactNode, useState, useEffect, useRef } from "react";
+import { createPortal } from "react-dom";
 
 export type ControlsPanelProps = {
   children?: ReactNode;
@@ -69,7 +70,7 @@ function SlideToConfirm({ onConfirm }: { onConfirm: () => void }) {
         style={{ left: `${progress}%`, transform: `translateX(-${progress}%)` }}
         className="absolute h-10 w-12 bg-red-600 rounded-full flex items-center justify-center text-white cursor-grab active:cursor-grabbing z-10 shadow-[0_0_15px_rgba(220,38,38,0.6)] transition-transform duration-75 hover:bg-red-500"
       >
-        <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="m13 17 5-5-5-5M6 17l5-5-5-5"/></svg>
+        <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="m13 17 5-5-5-5M6 17l5-5-5-5" /></svg>
       </button>
     </div>
   );
@@ -91,13 +92,16 @@ function CommandPalette({ isOpen, setIsOpen }: { isOpen: boolean, setIsOpen: (v:
     return () => document.removeEventListener("keydown", down);
   }, [isOpen, setIsOpen]);
 
-  if (!isOpen) return null;
+  const [mounted, setMounted] = useState(false);
+  useEffect(() => setMounted(true), []);
 
-  return (
-    <div className="fixed inset-0 z-50 bg-black/60 backdrop-blur-sm flex items-start justify-center pt-[20vh]">
+  if (!isOpen || !mounted) return null;
+
+  return createPortal(
+    <div className="fixed inset-0 z-[9999] bg-black/60 backdrop-blur-sm flex items-start justify-center pt-[20vh]">
       <div className="bg-slate-900 w-full max-w-lg rounded-xl shadow-2xl border border-slate-700 overflow-hidden">
         <div className="p-4 border-b border-slate-800 flex items-center gap-3">
-          <svg className="w-5 h-5 text-slate-400" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/></svg>
+          <svg className="w-5 h-5 text-slate-400" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><circle cx="11" cy="11" r="8" /><path d="m21 21-4.3-4.3" /></svg>
           <input
             type="text"
             autoFocus
@@ -111,20 +115,21 @@ function CommandPalette({ isOpen, setIsOpen }: { isOpen: boolean, setIsOpen: (v:
         <div className="p-2 max-h-64 overflow-y-auto text-sm">
           <div className="px-3 py-1.5 text-xs font-semibold text-slate-500 uppercase tracking-wider">System Actions</div>
           <button onClick={() => setIsOpen(false)} className="w-full text-left px-3 py-2.5 text-slate-300 hover:bg-slate-800 hover:text-white rounded-md flex items-center gap-3 transition-colors">
-            <span className="bg-red-500/20 text-red-400 p-1.5 rounded"><svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M18 6 6 18M6 6l12 12"/></svg></span>
+            <span className="bg-red-500/20 text-red-400 p-1.5 rounded"><svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M18 6 6 18M6 6l12 12" /></svg></span>
             Trigger Fail-Safe Mode
           </button>
           <button onClick={() => setIsOpen(false)} className="w-full text-left px-3 py-2.5 text-slate-300 hover:bg-slate-800 hover:text-white rounded-md flex items-center gap-3 transition-colors">
-            <span className="bg-blue-500/20 text-blue-400 p-1.5 rounded"><svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M21 12a9 9 0 1 1-9-9c2.52 0 4.93 1 6.74 2.74L21 8"/><path d="M21 3v5h-5"/></svg></span>
+            <span className="bg-blue-500/20 text-blue-400 p-1.5 rounded"><svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M21 12a9 9 0 1 1-9-9c2.52 0 4.93 1 6.74 2.74L21 8" /><path d="M21 3v5h-5" /></svg></span>
             Flatten Portfolio (Liquidate)
           </button>
           <button onClick={() => setIsOpen(false)} className="w-full text-left px-3 py-2.5 text-slate-300 hover:bg-slate-800 hover:text-white rounded-md flex items-center gap-3 transition-colors">
-            <span className="bg-emerald-500/20 text-emerald-400 p-1.5 rounded"><svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M12 2v20M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6"/></svg></span>
+            <span className="bg-emerald-500/20 text-emerald-400 p-1.5 rounded"><svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M12 2v20M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6" /></svg></span>
             Force Macro Risk Check
           </button>
         </div>
       </div>
-    </div>
+    </div>,
+    document.body
   );
 }
 
@@ -145,7 +150,7 @@ export default function ControlsPanel({ children, onKillSwitch }: ControlsPanelP
           onClick={() => setCmdOpen(true)}
           className="flex items-center gap-2 px-3 py-2 bg-slate-800/80 hover:bg-slate-700 text-slate-300 text-sm rounded-lg transition-colors border border-slate-700 shadow-sm"
         >
-          <svg className="w-4 h-4 text-slate-400" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="m21 21-4.3-4.3"/><circle cx="11" cy="11" r="8"/></svg>
+          <svg className="w-4 h-4 text-slate-400" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="m21 21-4.3-4.3" /><circle cx="11" cy="11" r="8" /></svg>
           Command Palette
           <kbd className="ml-2 font-mono text-[10px] text-slate-400 bg-slate-950 px-1.5 py-0.5 rounded border border-slate-700">⌘K</kbd>
         </button>

@@ -182,6 +182,9 @@ logging.getLogger('yfinance').setLevel(logging.CRITICAL)
 logging.getLogger('httpx').setLevel(logging.WARNING)
 
 
+
+from execution.smart_order_router import SmartOrderRouter
+from config import ApexConfig
 class ApexTradingSystem:
     """
     Main trading system with comprehensive risk controls.
@@ -848,6 +851,7 @@ class ApexTradingSystem:
             "top_scores": [],
         }
         self._dynamic_crypto_symbols: List[str] = []
+        self._failed_symbols: set = set()
         self.equity_outlier_guard = EquityOutlierGuard(
             enabled=ApexConfig.EQUITY_OUTLIER_GUARD_ENABLED,
             max_step_move_pct=ApexConfig.EQUITY_OUTLIER_MAX_STEP_MOVE_PCT,
@@ -1049,7 +1053,7 @@ class ApexTradingSystem:
             self.risk_manager.starting_capital = baseline
             self.risk_manager.peak_capital = baseline
             self.risk_manager.day_start_capital = baseline
-            self.risk_manager.current_day = datetime.now().strftime("%Y-%m-%d")
+            self.risk_manager._current_day = datetime.now().strftime("%Y-%m-%d")
             self._last_good_total_equity = float(baseline)
             if self.drawdown_breaker:
                 self.drawdown_breaker.reset_peak(baseline)
@@ -1079,7 +1083,7 @@ class ApexTradingSystem:
 
     @staticmethod
     def _now_iso_utc() -> str:
-        return datetime.utcnow().isoformat()
+        return datetime.utcnow().isoformat() + "Z"
 
     @staticmethod
     def _normalize_broker_name(broker_name: str) -> str:
@@ -1236,7 +1240,7 @@ class ApexTradingSystem:
         self._daily_realized_pnl_total += float(realized_net)
         self._daily_realized_fill_events.append(
             {
-                "timestamp": (filled_at or datetime.utcnow()).isoformat(),
+                "timestamp": (filled_at or datetime.utcnow()).isoformat() + "Z",
                 "broker": broker,
                 "symbol": symbol,
                 "side": side_token,
@@ -1360,7 +1364,7 @@ class ApexTradingSystem:
 
         rotated = non_crypto + selected_crypto
         self._crypto_rotation_snapshot = {
-            "timestamp": datetime.utcnow().isoformat(),
+            "timestamp": datetime.utcnow().isoformat() + "Z",
             "selected": selected_crypto,
             "top_scores": [
                 {
@@ -1398,8 +1402,8 @@ class ApexTradingSystem:
 
     def _runtime_symbols(self) -> List[str]:
         """Static universe + runtime-discovered symbols (e.g., Alpaca crypto)."""
-        base = list(ApexConfig.SYMBOLS)
-        extras = [s for s in self._dynamic_crypto_symbols if s not in base]
+        base = [s for s in ApexConfig.SYMBOLS if s not in self._failed_symbols]
+        extras = [s for s in self._dynamic_crypto_symbols if s not in base and s not in self._failed_symbols]
         return base + extras
 
     def _get_est_hour(self) -> float:
@@ -1463,7 +1467,7 @@ class ApexTradingSystem:
         trading system is hung or crashed.
         """
         data = {
-            'timestamp': datetime.now().isoformat(),
+            'timestamp': datetime.utcnow().isoformat() + "Z",
             'position_count': self.position_count,
             'capital': self.capital,
             'is_trading': True,
@@ -1782,6 +1786,9 @@ class ApexTradingSystem:
                 if not data.empty:
                     self.historical_data[symbol] = data
                     loaded += 1
+                else:
+                    logger.warning(f"⚠️  No historical data for {symbol}, removing from runtime universe")
+                    self._failed_symbols.add(symbol)
             except Exception as e:
                 logger.debug(f"   Failed to load {symbol}: {e}")
         
@@ -3059,7 +3066,7 @@ class ApexTradingSystem:
         try:
             self._governor_tune_state_file.parent.mkdir(parents=True, exist_ok=True)
             data = {
-                asset_class: ts.isoformat()
+                asset_class: ts.isoformat() + "Z"
                 for asset_class, ts in self._governor_last_tune_at.items()
             }
             with open(self._governor_tune_state_file, "w", encoding="utf-8") as f:
@@ -5115,7 +5122,7 @@ class ApexTradingSystem:
                             options_logger.info(
                                 "event=options_hedge_skip symbol=%s reason=retry_backoff until=%s",
                                 symbol,
-                                hedge_retry_after.isoformat(),
+                                hedge_retry_after.isoformat() + "Z",
                             )
                         else:
                             logger.info(f"🛡️ Auto-hedging {symbol}: ${position_value:,.2f} position")
@@ -5150,7 +5157,7 @@ class ApexTradingSystem:
                                 options_logger.info(
                                     "event=options_hedge_skip symbol=%s reason=trade_failed retry_after=%s",
                                     symbol,
-                                    self._options_retry_after[hedge_retry_key].isoformat(),
+                                    self._options_retry_after[hedge_retry_key].isoformat() + "Z",
                                 )
                     else:
                         options_logger.info(
@@ -5176,7 +5183,7 @@ class ApexTradingSystem:
                             options_logger.info(
                                 "event=options_cc_skip symbol=%s reason=retry_backoff until=%s",
                                 symbol,
-                                cc_retry_after.isoformat(),
+                                cc_retry_after.isoformat() + "Z",
                             )
                             continue
                         logger.info(f"💰 Selling covered call on {symbol}: {qty} shares")
@@ -5210,7 +5217,7 @@ class ApexTradingSystem:
                             options_logger.info(
                                 "event=options_cc_skip symbol=%s reason=trade_failed retry_after=%s",
                                 symbol,
-                                self._options_retry_after[cc_retry_key].isoformat(),
+                                self._options_retry_after[cc_retry_key].isoformat() + "Z",
                             )
                     else:
                         options_logger.info(
@@ -5827,7 +5834,7 @@ class ApexTradingSystem:
                                 'SELL' if signal_data['signal'] > -0.60 else
                                 'STRONG SELL',
                     'strength_pct': abs(signal_data['signal']) * 100,
-                    'timestamp': datetime.now().isoformat()
+                    'timestamp': datetime.utcnow().isoformat() + "Z"
                 }
             except:
                 pass
@@ -5842,7 +5849,7 @@ class ApexTradingSystem:
                 entry_time = self.position_entry_times.get(symbol, datetime.now())
                 metadata[symbol] = {
                     'entry_price': self.position_entry_prices[symbol],
-                    'entry_time': entry_time.isoformat() if isinstance(entry_time, datetime) else entry_time,
+                    'entry_time': entry_time.isoformat() + "Z" if isinstance(entry_time, datetime) else entry_time,
                     'entry_signal': self.position_entry_signals.get(symbol, 0.0),
                     'peak_price': self.position_peak_prices.get(symbol, self.position_entry_prices[symbol])
                 }
@@ -5909,7 +5916,8 @@ class ApexTradingSystem:
                 avg_cost: float,
             ) -> None:
                 symbol_norm = str(symbol or "").strip().upper()
-                expiry_norm = str(expiry or "").strip()
+                import re
+                expiry_norm = re.sub(r'[^0-9]', '', str(expiry or "").strip()) # Normalize strictly to YYYYMMDD
                 if not symbol_norm or not expiry_norm:
                     return
                 try:
@@ -6005,7 +6013,7 @@ class ApexTradingSystem:
             daily_pnl_source = "broker_fills" if broker_truth_daily_enabled else "equity_delta"
             
             state = {
-                'timestamp': datetime.now().isoformat(),
+                'timestamp': datetime.utcnow().isoformat() + "Z",
                 'capital': float(current_value),
                 'initial_capital': float(ApexConfig.INITIAL_CAPITAL),
                 'starting_capital': float(self.risk_manager.starting_capital),
@@ -6116,7 +6124,7 @@ class ApexTradingSystem:
                         'current_price': float(price),
                         'pnl': float(pnl),
                         'pnl_pct': float(pnl_pct),
-                        'entry_time': entry_time.isoformat() if isinstance(entry_time, datetime) else entry_time,
+                        'entry_time': entry_time.isoformat() + "Z" if isinstance(entry_time, datetime) else entry_time,
                         'current_signal': current_signals.get(symbol, {}).get('signal', 0),
                         'signal_direction': current_signals.get(symbol, {}).get('direction', 'UNKNOWN'),
                         'source_id': source_id
@@ -6370,7 +6378,7 @@ class ApexTradingSystem:
                                 self._write_heartbeat_payload(
                                     {
                                         'status': 'DEAD',
-                                        'timestamp': now.isoformat(),
+                                        'timestamp': datetime.utcnow().isoformat() + "Z",
                                         'cycle_count': cycle,
                                         'broker_heartbeats': self._broker_heartbeat_payload(),
                                     }
@@ -6389,30 +6397,43 @@ class ApexTradingSystem:
 
                     # Cache positions at start of each cycle (avoids race conditions)
                     if self.ibkr or self.alpaca:
-                        merged = {}
-                        if self.ibkr:
+                        async def fetch_ibkr():
+                            if not self.ibkr: return {}
                             try:
-                                merged.update(await self.ibkr.get_all_positions())
+                                pos = await asyncio.wait_for(self.ibkr.get_all_positions(), timeout=15)
                                 self._mark_broker_heartbeat("ibkr", success=True)
-                            except Exception as ibkr_pos_exc:
-                                self._mark_broker_heartbeat("ibkr", success=False, error=str(ibkr_pos_exc))
-                                logger.debug("IBKR cycle position snapshot failed: %s", ibkr_pos_exc)
-                        if self.alpaca:
-                            # Only take crypto positions from Alpaca to avoid
-                            # overwriting IBKR equity positions with stale Alpaca data
+                                return pos
+                            except Exception as e:
+                                self._mark_broker_heartbeat("ibkr", success=False, error=str(e))
+                                logger.debug("IBKR cycle position snapshot failed: %s", e)
+                                return {}
+
+                        async def fetch_alpaca():
+                            if not self.alpaca: return {}
                             try:
-                                alpaca_positions = await self.alpaca.get_all_positions()
+                                pos = await asyncio.wait_for(self.alpaca.get_all_positions(), timeout=15)
                                 self._mark_broker_heartbeat("alpaca", success=True)
-                                for sym, qty in alpaca_positions.items():
+                                result = {}
+                                for sym, qty in pos.items():
                                     try:
                                         parsed = parse_symbol(sym)
                                         if parsed.asset_class == AssetClass.CRYPTO:
-                                            merged[sym] = qty
+                                            result[sym] = qty
                                     except ValueError:
-                                        merged[sym] = qty
-                            except Exception as alpaca_pos_exc:
-                                self._mark_broker_heartbeat("alpaca", success=False, error=str(alpaca_pos_exc))
-                                logger.debug("Alpaca cycle position snapshot failed: %s", alpaca_pos_exc)
+                                        result[sym] = qty
+                                return result
+                            except Exception as e:
+                                self._mark_broker_heartbeat("alpaca", success=False, error=str(e))
+                                logger.debug("Alpaca cycle position snapshot failed: %s", e)
+                                return {}
+
+                        # Parallel execution
+                        ibkr_pos, alpaca_pos = await asyncio.gather(fetch_ibkr(), fetch_alpaca())
+                        
+                        merged = {}
+                        merged.update(ibkr_pos)
+                        merged.update(alpaca_pos)
+
                         self._cached_ibkr_positions = merged
                         self.positions = merged.copy()
                         self._sync_cost_basis_with_positions()
@@ -6756,7 +6777,3 @@ class ApexTradingSystem:
             logger.info("=" * 80)
 
 
-async def main():
-    """Main entry point."""
-    system = ApexTradingSystem()
-    await system.run()

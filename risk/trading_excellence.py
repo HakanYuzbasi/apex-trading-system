@@ -83,7 +83,7 @@ class TradingExcellenceManager:
 
     # Signal mismatch thresholds
     WEAK_MISMATCH_THRESHOLD = 0.10      # Signal drops below 10%
-    MODERATE_MISMATCH_THRESHOLD = 0.05  # Signal drops below 5%
+    MODERATE_MISMATCH_THRESHOLD = -0.05  # Signal drops below 5%
     STRONG_MISMATCH_THRESHOLD = -0.15   # Signal flips opposite
     CRITICAL_MISMATCH_THRESHOLD = -0.30 # Strong opposite signal
     CRITICAL_CONFIDENCE_THRESHOLD = 0.70 # High confidence opposite signal

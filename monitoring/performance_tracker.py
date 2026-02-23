@@ -56,8 +56,6 @@ class PerformanceTracker:
         """Calculate Sharpe ratio from equity curve."""
         if len(self.equity_curve) < 2:
             return 0.0
-        if self.get_completed_trade_count() == 0:
-            return 0.0
         
         try:
             # Extract values and ensure float
@@ -153,9 +151,7 @@ class PerformanceTracker:
 
     def get_sortino_ratio(self, risk_free_rate: float = 0.02) -> float:
         """Calculate Sortino ratio (focuses on downside volatility only)."""
-        if len(self.equity_curve) < 10:
-            return 0.0
-        if self.get_completed_trade_count() == 0:
+        if len(self.equity_curve) < 2:
             return 0.0
 
         try:

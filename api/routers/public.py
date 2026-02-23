@@ -36,7 +36,7 @@ async def get_public_cockpit(request: Request = None):
         "status": {
             "api_reachable": True,
             "state_fresh": True,
-            "timestamp": state.get("timestamp", datetime.now().isoformat()),
+            "timestamp": state.get("timestamp", datetime.utcnow().isoformat() + "Z"),
             "capital": state.get("capital", 0),
             "starting_capital": state.get("starting_capital", 0),
             "daily_pnl": state.get("daily_pnl", 0),
@@ -87,7 +87,7 @@ async def public_websocket_endpoint(websocket: WebSocket):
                 if current_timestamp != last_timestamp:
                     update = {
                         "type": "state_update",
-                        "timestamp": current_timestamp or datetime.now().isoformat(),
+                        "timestamp": current_timestamp or datetime.utcnow().isoformat() + "Z",
                         "capital": current_state.get("capital", 0),
                         "positions": current_state.get("positions", {}),
                         "daily_pnl": current_state.get("daily_pnl", 0),

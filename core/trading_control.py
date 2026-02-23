@@ -75,7 +75,7 @@ def request_kill_switch_reset(filepath: Path, requested_by: str, reason: str) ->
         {
             "kill_switch_reset_requested": True,
             "request_id": f"ksr-{uuid4().hex[:12]}",
-            "requested_at": datetime.utcnow().isoformat(),
+            "requested_at": datetime.utcnow().isoformat() + "Z",
             "requested_by": requested_by,
             "reason": reason,
             "processed_at": None,
@@ -96,7 +96,7 @@ def mark_kill_switch_reset_processed(
     state.update(
         {
             "kill_switch_reset_requested": False,
-            "processed_at": datetime.utcnow().isoformat(),
+            "processed_at": datetime.utcnow().isoformat() + "Z",
             "processed_by": processed_by,
             "processing_note": note,
         }
@@ -111,7 +111,7 @@ def request_governor_policy_reload(filepath: Path, requested_by: str, reason: st
         {
             "governor_policy_reload_requested": True,
             "governor_policy_reload_request_id": f"gpr-{uuid4().hex[:12]}",
-            "governor_policy_reload_requested_at": datetime.utcnow().isoformat(),
+            "governor_policy_reload_requested_at": datetime.utcnow().isoformat() + "Z",
             "governor_policy_reload_requested_by": requested_by,
             "governor_policy_reload_reason": reason,
             "governor_policy_reload_processed_at": None,
@@ -132,7 +132,7 @@ def mark_governor_policy_reload_processed(
     state.update(
         {
             "governor_policy_reload_requested": False,
-            "governor_policy_reload_processed_at": datetime.utcnow().isoformat(),
+            "governor_policy_reload_processed_at": datetime.utcnow().isoformat() + "Z",
             "governor_policy_reload_processed_by": processed_by,
             "governor_policy_reload_processing_note": note,
         }
@@ -152,7 +152,7 @@ def request_equity_reconciliation_latch(
         {
             "equity_reconciliation_latch_requested": True,
             "equity_reconciliation_latch_request_id": f"erl-{uuid4().hex[:12]}",
-            "equity_reconciliation_latch_requested_at": datetime.utcnow().isoformat(),
+            "equity_reconciliation_latch_requested_at": datetime.utcnow().isoformat() + "Z",
             "equity_reconciliation_latch_requested_by": requested_by,
             "equity_reconciliation_latch_reason": reason,
             "equity_reconciliation_latch_target_block_entries": bool(block_entries),
@@ -174,7 +174,7 @@ def mark_equity_reconciliation_latch_processed(
     state.update(
         {
             "equity_reconciliation_latch_requested": False,
-            "equity_reconciliation_latch_processed_at": datetime.utcnow().isoformat(),
+            "equity_reconciliation_latch_processed_at": datetime.utcnow().isoformat() + "Z",
             "equity_reconciliation_latch_processed_by": processed_by,
             "equity_reconciliation_latch_processing_note": note,
         }

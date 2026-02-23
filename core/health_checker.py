@@ -47,7 +47,7 @@ class HealthCheck:
             "name": self.name,
             "status": self.status.value,
             "message": self.message,
-            "last_check": self.last_check.isoformat(),
+            "last_check": self.last_check.isoformat() + "Z" if self.last_check.tzinfo else self.last_check.isoformat() + "Z",
             "details": self.details,
             "duration_ms": self.duration_ms
         }
@@ -147,14 +147,14 @@ class HealthChecker:
 
         for name, check_func in self._checks.items():
             try:
-                start_time = datetime.now()
+                start_time = datetime.utcnow()
 
                 if asyncio.iscoroutinefunction(check_func):
                     result = await check_func()
                 else:
                     result = check_func()
 
-                duration = (datetime.now() - start_time).total_seconds() * 1000
+                duration = (datetime.utcnow() - start_time).total_seconds() * 1000
                 result.duration_ms = duration
                 results[name] = result
 
@@ -164,11 +164,11 @@ class HealthChecker:
                     name=name,
                     status=HealthStatus.UNHEALTHY,
                     message=f"Check failed: {str(e)}",
-                    last_check=datetime.now()
+                    last_check=datetime.utcnow()
                 )
 
         self._results = results
-        self._last_full_check = datetime.now()
+        self._last_full_check = datetime.utcnow()
         return results
 
     async def check_one(self, name: str) -> Optional[HealthCheck]:
@@ -190,7 +190,7 @@ class HealthChecker:
                 name=name,
                 status=HealthStatus.UNHEALTHY,
                 message=f"Check failed: {str(e)}",
-                last_check=datetime.now()
+                last_check=datetime.utcnow()
             )
 
     def get_overall_status(self) -> HealthStatus:
@@ -220,7 +220,7 @@ class HealthChecker:
         """Get health check summary."""
         return {
             "status": self.get_overall_status().value,
-            "last_check": self._last_full_check.isoformat() if self._last_full_check else None,
+            "last_check": self._last_full_check.isoformat() + "Z" if self._last_full_check else None,
             "checks": {
                 name: check.to_dict()
                 for name, check in self._results.items()
@@ -248,7 +248,7 @@ class HealthChecker:
                 name="broker_connection",
                 status=HealthStatus.UNKNOWN,
                 message="IBKR connector not configured",
-                last_check=datetime.now()
+                last_check=datetime.utcnow()
             )
 
         try:
@@ -259,7 +259,7 @@ class HealthChecker:
                     name="broker_connection",
                     status=HealthStatus.HEALTHY,
                     message="Connected to IBKR",
-                    last_check=datetime.now(),
+                    last_check=datetime.utcnow(),
                     details={
                         "host": self.ibkr_connector.host,
                         "port": self.ibkr_connector.port,
@@ -271,7 +271,7 @@ class HealthChecker:
                     name="broker_connection",
                     status=HealthStatus.UNHEALTHY,
                     message="Disconnected from IBKR",
-                    last_check=datetime.now()
+                    last_check=datetime.utcnow()
                 )
 
         except Exception as e:
@@ -279,7 +279,7 @@ class HealthChecker:
                 name="broker_connection",
                 status=HealthStatus.UNHEALTHY,
                 message=f"Error checking connection: {str(e)}",
-                last_check=datetime.now()
+                last_check=datetime.utcnow()
             )
 
     async def _check_data_freshness(self) -> HealthCheck:
@@ -289,19 +289,19 @@ class HealthChecker:
                 name="market_data_freshness",
                 status=HealthStatus.UNKNOWN,
                 message="No market data received yet",
-                last_check=datetime.now()
+                last_check=datetime.utcnow()
             )
 
-        staleness = (datetime.now() - self.last_market_data_update).total_seconds()
+        staleness = (datetime.utcnow() - self.last_market_data_update).total_seconds()
 
         if staleness > self.config.data_staleness_threshold_seconds:
             return HealthCheck(
                 name="market_data_freshness",
                 status=HealthStatus.DEGRADED,
                 message=f"Market data is stale ({staleness:.0f}s old)",
-                last_check=datetime.now(),
+                last_check=datetime.utcnow(),
                 details={
-                    "last_update": self.last_market_data_update.isoformat(),
+                    "last_update": self.last_market_data_update.isoformat() + "Z",
                     "staleness_seconds": staleness
                 }
             )
@@ -310,7 +310,7 @@ class HealthChecker:
             name="market_data_freshness",
             status=HealthStatus.HEALTHY,
             message=f"Market data is fresh ({staleness:.0f}s old)",
-            last_check=datetime.now(),
+            last_check=datetime.utcnow(),
             details={
                 "last_update": self.last_market_data_update.isoformat(),
                 "staleness_seconds": staleness
@@ -337,7 +337,7 @@ class HealthChecker:
                 name="memory_usage",
                 status=status,
                 message=message,
-                last_check=datetime.now(),
+                last_check=datetime.utcnow(),
                 details={
                     "percent_used": percent_used,
                     "total_gb": memory.total / (1024 ** 3),
@@ -351,7 +351,7 @@ class HealthChecker:
                 name="memory_usage",
                 status=HealthStatus.UNKNOWN,
                 message=f"Error checking memory: {str(e)}",
-                last_check=datetime.now()
+                last_check=datetime.utcnow()
             )
 
     def _check_disk(self) -> HealthCheck:
@@ -374,7 +374,7 @@ class HealthChecker:
                 name="disk_space",
                 status=status,
                 message=message,
-                last_check=datetime.now(),
+                last_check=datetime.utcnow(),
                 details={
                     "percent_used": percent_used,
                     "total_gb": disk.total / (1024 ** 3),
@@ -388,7 +388,7 @@ class HealthChecker:
                 name="disk_space",
                 status=HealthStatus.UNKNOWN,
                 message=f"Error checking disk: {str(e)}",
-                last_check=datetime.now()
+                last_check=datetime.utcnow()
             )
 
     def _check_log_directory(self) -> HealthCheck:
@@ -401,14 +401,14 @@ class HealthChecker:
 
             # Try to write a test file
             test_file = log_dir / ".health_check"
-            test_file.write_text(datetime.now().isoformat())
+            test_file.write_text(datetime.utcnow().isoformat() + "Z")
             test_file.unlink()
 
             return HealthCheck(
                 name="log_directory",
                 status=HealthStatus.HEALTHY,
                 message="Log directory is writable",
-                last_check=datetime.now(),
+                last_check=datetime.utcnow(),
                 details={"path": str(log_dir.absolute())}
             )
 
@@ -417,20 +417,20 @@ class HealthChecker:
                 name="log_directory",
                 status=HealthStatus.DEGRADED,
                 message=f"Log directory issue: {str(e)}",
-                last_check=datetime.now()
+                last_check=datetime.utcnow()
             )
 
     def record_market_data_update(self):
         """Record that market data was received."""
-        self.last_market_data_update = datetime.now()
+        self.last_market_data_update = datetime.utcnow()
 
     def record_trade(self):
         """Record that a trade occurred."""
-        self.last_trade_time = datetime.now()
+        self.last_trade_time = datetime.utcnow()
 
     def record_signal(self):
         """Record that a signal was generated."""
-        self.last_signal_time = datetime.now()
+        self.last_signal_time = datetime.utcnow()
 
 
 # FastAPI endpoint integration
@@ -471,7 +471,7 @@ def create_health_endpoints(app, health_checker: HealthChecker):
     @app.get("/health/live")
     async def liveness():
         """Liveness probe - is the process running."""
-        return {"status": "alive", "timestamp": datetime.now().isoformat()}
+        return {"status": "alive", "timestamp": datetime.utcnow().isoformat() + "Z"}
 
     @app.get("/health/ready")
     async def readiness():
@@ -483,7 +483,7 @@ def create_health_endpoints(app, health_checker: HealthChecker):
             content=json.dumps({
                 "ready": is_ready,
                 "status": status.value,
-                "timestamp": datetime.now().isoformat()
+                "timestamp": datetime.utcnow().isoformat() + "Z"
             }),
             media_type="application/json",
             status_code=200 if is_ready else 503

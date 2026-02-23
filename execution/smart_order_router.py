@@ -1,55 +1,85 @@
-"""
-execution/smart_order_router.py
-Venue-aware order router mapping liquidity depth and routing based on fees & execution speed.
-"""
 import logging
-from typing import Dict
+import asyncio
+from typing import Callable, Awaitable, Optional, Dict, Any
 
 logger = logging.getLogger(__name__)
 
-class Venue:
-    def __init__(self, name: str, fee_bps: float, avg_latency_ms: float):
-        self.name = name
-        self.fee_bps = fee_bps
-        self.avg_latency_ms = avg_latency_ms
-        self.book_depth = 0.0 # Dynamic depth tracked via websockets
-        
-    def update_depth(self, depth: float):
-        self.book_depth = depth
-
 class SmartOrderRouter:
-    def __init__(self):
-        # Configuration mapping for available liquidity venues
-        self.venues: Dict[str, Venue] = {
-            "IBKR": Venue("IBKR", fee_bps=0.5, avg_latency_ms=25.0),
-            "ALPACA": Venue("ALPACA", fee_bps=1.0, avg_latency_ms=50.0),
-        }
-        logger.info("🛣️ Venue-Aware Smart Order Router initialized.")
+    """
+    APEX Institutional Smart Order Router (SOR)
+    Implements Adaptive Pegging: Starts at the Mid-Price and gradually increases
+    urgency to cross the spread only if necessary.
+    """
+    def __init__(self, max_urgency_steps: int = 3, step_delay_seconds: int = 10):
+        self.max_steps = max_urgency_steps
+        self.step_delay = step_delay_seconds
 
-    def update_venue_depth(self, venue_name: str, symbol: str, depth: float):
-        if venue_name in self.venues:
-            self.venues[venue_name].update_depth(depth)
-
-    def route_order(self, symbol: str, qty: float, side: str) -> str:
+    async def execute_adaptive_order(
+        self,
+        symbol: str,
+        qty: float,
+        side: str,
+        bid: float,
+        ask: float,
+        place_order_fn: Callable[[float, str], Awaitable[Optional[str]]],
+        check_status_fn: Callable[[str], Awaitable[str]],
+        cancel_order_fn: Callable[[str], Awaitable[bool]]
+    ) -> bool:
         """
-        Determine optimal venue based on liquidity depth, fees, and latency.
-        """
-        best_venue = None
-        best_score = -float('inf')
+        Executes the order using dynamic limits.
         
-        for name, venue in self.venues.items():
-            # Higher depth is good; fee and latency are bad
-            depth_score = venue.book_depth if venue.book_depth > 0 else 10000.0
+        :param place_order_fn: Async callback taking (price, order_type) -> order_id
+        :param check_status_fn: Async callback taking (order_id) -> status string ('FILLED', 'OPEN')
+        :param cancel_order_fn: Async callback taking (order_id) -> boolean success
+        """
+        mid_price = (bid + ask) / 2.0
+        spread = ask - bid
+        
+        # Protect against zero-spread or crossed books
+        if spread <= 0.0001:
+            logger.info(f"SOR [{symbol}] Spread too tight. Sweeping book instantly.")
+            await place_order_fn(ask if side.upper() == "BUY" else bid, "MARKET")
+            return True
+
+        current_order_id = None
+        
+        # --- EXECUTION LOOP ---
+        for step in range(self.max_steps):
+            urgency = step / max(1, (self.max_steps - 1))
             
-            # Heavy penalty if order size sweeps beyond top of book
-            penalty = (qty - depth_score) * 10 if qty > depth_score else 0
-            
-            score = depth_score - (venue.fee_bps * 100) - venue.avg_latency_ms - penalty
-            
-            if score > best_score:
-                best_score = score
-                best_venue = name
+            # Calculate peg price based on urgency
+            if side.upper() == "BUY":
+                # Step 0: Mid-price. Step Max: Ask
+                limit_price = round(mid_price + (spread * 0.5 * urgency), 4)
+            else:
+                # Step 0: Mid-price. Step Max: Bid
+                limit_price = round(mid_price - (spread * 0.5 * urgency), 4)
                 
-        selected_venue = best_venue or "IBKR"
-        logger.debug(f"🔀 Routed {side} {qty} {symbol} to {selected_venue}")
-        return selected_venue
+            phase_name = "Passive Mid-Peg" if step == 0 else f"Urgent Peg ({int(urgency*100)}%)"
+            logger.info(f"SOR [{symbol}] {side} {qty} - Phase {step+1}: {phase_name} @ {limit_price}")
+            
+            # Cancel previous tier if it exists
+            if current_order_id:
+                await cancel_order_fn(current_order_id)
+                
+            # Place new limit order
+            current_order_id = await place_order_fn(limit_price, "LIMIT")
+            if not current_order_id:
+                logger.error(f"SOR [{symbol}] Failed to place limit order.")
+                return False
+                
+            # Wait for fill (Patience Timer)
+            for _ in range(self.step_delay):
+                await asyncio.sleep(1)
+                status = await check_status_fn(current_order_id)
+                if status.upper() in ["FILLED", "EXECUTED"]:
+                    logger.info(f"✅ SOR [{symbol}] Filled elegantly at {limit_price}! Spread captured.")
+                    return True
+                    
+        # --- FALLBACK: SWEEP THE BOOK ---
+        logger.warning(f"⏳ SOR [{symbol}] {side} patience exhausted. Sweeping the book to guarantee execution.")
+        if current_order_id:
+            await cancel_order_fn(current_order_id)
+            
+        await place_order_fn(0.0, "MARKET")
+        return True

@@ -392,11 +392,15 @@ class TokenBlacklist:
     async def revoke(self, token: str, expires_at: Optional[datetime] = None):
         """Add a token to the blacklist."""
         exp_ts = (expires_at or datetime.utcnow() + timedelta(hours=24)).timestamp()
-        redis_client = await self._get_redis_or_none()
-        if redis_client is not None:
-            ttl = max(1, int(exp_ts - time.time()))
-            await redis_client.setex(f"{self._prefix}{token}", ttl, "1")
-            return
+        try:
+            redis_client = await self._get_redis_or_none()
+            if redis_client is not None:
+                ttl = max(1, int(exp_ts - time.time()))
+                await redis_client.setex(f"{self._prefix}{token}", ttl, "1")
+                return
+        except Exception as e:
+            logger.warning("Redis revoke failed, falling back to in-memory: %s", e)
+
         async with self._lock:
             self._fallback_revoked[token] = exp_ts
             now = time.time()
@@ -406,9 +410,13 @@ class TokenBlacklist:
 
     async def is_revoked(self, token: str) -> bool:
         """Check if a token has been revoked."""
-        redis_client = await self._get_redis_or_none()
-        if redis_client is not None:
-            return await redis_client.exists(f"{self._prefix}{token}") == 1
+        try:
+            redis_client = await self._get_redis_or_none()
+            if redis_client is not None:
+                return await redis_client.exists(f"{self._prefix}{token}") == 1
+        except Exception as e:
+            logger.debug("Redis is_revoked check failed, using in-memory: %s", e)
+
         async with self._lock:
             return token in self._fallback_revoked and self._fallback_revoked[token] > time.time()
 

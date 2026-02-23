@@ -31,7 +31,7 @@ export default function ExplainableAIChart({ shapData, symbol }: ExplainableAICh
   const maxAbsValue = Math.max(...chartData.map((d) => Math.abs(d.value)), 0.01);
 
   return (
-    <div className="apex-panel rounded-2xl p-5 shadow-sm w-full h-full flex flex-col justify-center">
+    <div className="bg-card border border-border rounded-2xl p-5 shadow-sm w-full h-full flex flex-col justify-center">
       <div className="mb-4 flex items-center justify-between">
         <div className="flex items-center gap-2">
           <BrainCircuit className="h-5 w-5 text-primary" />

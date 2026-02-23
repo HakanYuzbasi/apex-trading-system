@@ -345,5 +345,11 @@ def _state_is_fresh(state: Dict, threshold_seconds: int) -> bool:
     if not ts:
         return False
     now = datetime.now(ts.tzinfo) if ts.tzinfo else datetime.utcnow()
+    # Ensure both are offset-aware if possible, or both naive
+    if ts.tzinfo and not now.tzinfo:
+        now = now.replace(tzinfo=ts.tzinfo)
+    elif not ts.tzinfo and now.tzinfo:
+        now = now.astimezone(None).replace(tzinfo=None)
+    
     age = (now - ts).total_seconds()
     return age <= threshold_seconds

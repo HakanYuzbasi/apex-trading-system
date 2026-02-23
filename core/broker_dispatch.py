@@ -34,7 +34,7 @@ class BrokerDispatch:
                     message="IBKR adapter is not configured",
                     context={"broker": broker},
                 )
-            result = await self._execute(self._ibkr.place_order, **order_kwargs)
+            result = await self._execute(self._ibkr.execute_order, **order_kwargs)
             return BrokerDispatchResult(broker="ibkr", success=True, payload={"result": result})
 
         if broker == "alpaca":
@@ -44,7 +44,7 @@ class BrokerDispatch:
                     message="Alpaca adapter is not configured",
                     context={"broker": broker},
                 )
-            result = await self._execute(self._alpaca.place_order, **order_kwargs)
+            result = await self._execute(self._alpaca.execute_order, **order_kwargs)
             return BrokerDispatchResult(broker="alpaca", success=True, payload={"result": result})
 
         raise ApexBrokerError(

@@ -819,7 +819,7 @@ class AlpacaConnector:
 
         self.execution_metrics["slippage_history"].append(
             {
-                "timestamp": datetime.now().isoformat(),
+                "timestamp": datetime.utcnow().isoformat() + "Z",
                 "symbol": symbol,
                 "expected_price": expected_price,
                 "fill_price": fill_price,

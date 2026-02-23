@@ -7,6 +7,7 @@ Used for session caching, feature-flag caching, and per-user rate limiting.
 import os
 import json
 import logging
+import asyncio
 from datetime import date
 from typing import Any, Optional
 
@@ -15,6 +16,7 @@ logger = logging.getLogger(__name__)
 REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379/0")
 
 _redis = None
+_redis_lock = asyncio.Lock()
 _REDIS_AVAILABLE = False
 
 try:
@@ -29,19 +31,30 @@ async def get_redis():
     global _redis
     if not _REDIS_AVAILABLE:
         return None
-    if _redis is None:
-        _redis = aioredis.from_url(
-            REDIS_URL,
-            encoding="utf-8",
-            decode_responses=True,
-            socket_connect_timeout=5,
-        )
+    
+    if _redis is not None:
+        return _redis
+
+    async with _redis_lock:
+        # Double-check after acquiring lock
+        if _redis is not None:
+            return _redis
+            
         try:
-            await _redis.ping()
+            client = aioredis.from_url(
+                REDIS_URL,
+                encoding="utf-8",
+                decode_responses=True,
+                socket_connect_timeout=2,
+                socket_timeout=2,
+            )
+            await client.ping()
+            _redis = client
             logger.info("Redis connected: %s", REDIS_URL.split("@")[-1] if "@" in REDIS_URL else REDIS_URL)
         except Exception as e:
             logger.warning("Redis connection failed (%s) - caching disabled", e)
             _redis = None
+            
     return _redis
 
 
