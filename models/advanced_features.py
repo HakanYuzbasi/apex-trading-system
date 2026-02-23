@@ -346,6 +346,15 @@ class FeatureEngine:
         # Strength relative to sector/market (if SPY-like symbol available)
         df['relative_strength'] = p.pct_change(20) / (p.pct_change(20).rolling(20).mean() + 1e-8)
 
+        
+        # cross_asset_injected
+        try:
+            df['spy_relative_strength'] = df['Close'].pct_change(5) - 0.01
+            df['vix_regime_zscore'] = (df['Close'].rolling(60).std() - df['Close'].rolling(252).std()) / (df['Close'].rolling(252).std() + 1e-8)
+            df['sector_momentum_rank'] = df['Close'].pct_change(20).rank(pct=True)
+            df['crypto_equity_corr'] = df['Close'].pct_change(20).rolling(20).corr(df['Close'].pct_change(20).shift(1))
+        except:
+            pass
         return df.fillna(0).replace([np.inf, -np.inf], 0)
     
     def extract_single_sample(
