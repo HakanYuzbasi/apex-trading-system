@@ -11,23 +11,21 @@ Phase 3: Autonomous Money Machine
 
 import pytest
 from datetime import datetime, timedelta, time
-from unittest.mock import MagicMock, patch
-import numpy as np
 
 from risk.macro_event_shield import (
-    MacroEventShield, MacroEvent, EventType, EventImpact, MacroState
+    MacroEventShield, EventType, EventImpact
 )
 from risk.overnight_risk_guard import (
-    OvernightRiskGuard, MarketPhase, OvernightRiskAssessment
+    OvernightRiskGuard, MarketPhase
 )
 from risk.profit_ratchet import (
-    ProfitRatchet, ProfitTier, RatchetState, PartialExitRecommendation
+    ProfitRatchet, ProfitTier
 )
 from risk.liquidity_guard import (
-    LiquidityGuard, LiquidityRegime, LiquidityMetrics, MarketLiquidityState
+    LiquidityGuard, LiquidityRegime, MarketLiquidityState
 )
 from risk.position_aging_manager import (
-    PositionAgingManager, AgingTier, PositionAge, AgingRecommendation
+    PositionAgingManager, AgingTier
 )
 
 
@@ -580,7 +578,7 @@ class TestPositionAgingManager:
         self.manager.update_position("AAPL", 102.0)
         self.manager.update_position("AAPL", 103.0)
 
-        age = self.manager.update_position("AAPL", 104.0)
+        self.manager.update_position("AAPL", 104.0)
         # Velocity should be positive (gaining)
         # Note: velocity calculation depends on time between updates
 
@@ -653,7 +651,7 @@ class TestPhase3Integration:
 
     def test_liquidity_affects_overnight_assessment(self):
         """Liquidity conditions could affect overnight risk."""
-        overnight = OvernightRiskGuard()
+        OvernightRiskGuard()
         liquidity = LiquidityGuard()
 
         # Wide spreads late in day = higher overnight risk

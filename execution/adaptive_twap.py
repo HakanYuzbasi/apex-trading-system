@@ -11,12 +11,10 @@ State-of-the-art execution algorithm.
 """
 
 import numpy as np
-import pandas as pd
-from typing import Dict, List, Optional, Tuple, Callable
+from typing import Dict, List, Optional, Tuple
 from datetime import datetime, timedelta
 from dataclasses import dataclass, field
 from enum import Enum
-import asyncio
 import logging
 
 logger = logging.getLogger(__name__)

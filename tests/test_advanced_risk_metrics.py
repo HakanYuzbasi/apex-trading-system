@@ -6,7 +6,6 @@ Tests for CVaR, Sortino, Calmar, Omega ratios and other advanced risk metrics.
 import pytest
 import numpy as np
 import pandas as pd
-from datetime import datetime, timedelta
 
 
 class TestAdvancedRiskMetrics:

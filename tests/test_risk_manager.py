@@ -11,8 +11,6 @@ Tests for the risk management system including:
 import pytest
 import pandas as pd
 import numpy as np
-from datetime import datetime, timedelta
-from unittest.mock import MagicMock, patch
 
 
 # Test fixtures
@@ -296,13 +294,11 @@ class TestCorrelationRisk:
 
     def test_portfolio_correlation_limit(self):
         """Test portfolio correlation limit enforcement."""
-        max_avg_correlation = 0.7
 
         # Simulate portfolio correlations
         correlations = [0.8, 0.6, 0.75, 0.65]
         avg_correlation = np.mean(correlations)
 
-        exceeds_limit = avg_correlation > max_avg_correlation
 
         # In this case, average is 0.7, exactly at limit
         assert avg_correlation == pytest.approx(0.7, rel=0.01)

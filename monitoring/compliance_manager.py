@@ -10,10 +10,9 @@ COMPLIANCE & AUDIT TRAIL
 import json
 import logging
 import hashlib
-from typing import Dict, List, Optional
+from typing import Dict, Optional
 from datetime import datetime
 from pathlib import Path
-import pandas as pd
 
 from core.logging_config import setup_logging
 
@@ -40,7 +39,7 @@ class ComplianceManager:
         self.compliance_checks = []
         self.violations = []
         
-        logger.info(f"✅ Compliance Manager initialized")
+        logger.info("✅ Compliance Manager initialized")
         logger.info(f"   Audit logs: {self.audit_dir}")
     
     def pre_trade_check(
@@ -389,7 +388,7 @@ Compliance Violations: {len(date_violations)}
             'total_trades_logged': len(self.trade_log)
         }
         
-        logger.info(f"📊 Compliance Statistics:")
+        logger.info("📊 Compliance Statistics:")
         logger.info(f"   Total Checks: {stats['total_checks']}")
         logger.info(f"   Approval Rate: {stats['approval_rate']*100:.1f}%")
         logger.info(f"   Violations: {stats['total_violations']}")

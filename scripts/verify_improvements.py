@@ -2,9 +2,6 @@
 import logging
 import sys
 import os
-import pandas as pd
-import numpy as np
-from datetime import datetime
 
 # Add project root to path
 sys.path.append(os.getcwd())
@@ -14,7 +11,7 @@ from monitoring.model_tracker import ModelPerformanceTracker
 
 def test_logging_suppression():
     print("Testing logging suppression...")
-    logger = setup_logging()
+    setup_logging()
     
     uvicorn_logger = logging.getLogger("uvicorn.access")
     if uvicorn_logger.level == logging.WARNING:

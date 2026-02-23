@@ -12,16 +12,13 @@ backward compatibility for the singleton "system" account.
 """
 
 import logging
-from typing import Dict, Tuple, List, Optional
+from typing import Dict, Tuple
 import pandas as pd
-import asyncio
 
-from config import ApexConfig
 from risk.risk_session import RiskSession, CircuitBreaker
 
 # Services
 from services.broker.service import broker_service
-from models.broker import BrokerType
 
 logger = logging.getLogger(__name__)
 

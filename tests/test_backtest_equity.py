@@ -12,9 +12,9 @@ Validates:
 import pytest
 import pandas as pd
 import numpy as np
-from datetime import datetime, timedelta
+from datetime import datetime
 
-from backtesting.backtest_engine import BacktestEngine, _DataView
+from backtesting.backtest_engine import BacktestEngine
 
 
 # ---------------------------------------------------------------------------
@@ -213,7 +213,7 @@ class TestNoDoubleCounting:
 
         fill_price = 100.0 * (1 + 50 / 10000)  # 100.50
         expected_cash = 100_000 - 100 * fill_price
-        expected_pos_val = 100 * engine.positions["AAPL"].current_price
+        100 * engine.positions["AAPL"].current_price
 
         assert engine.cash == pytest.approx(expected_cash, abs=0.01)
         # Position records the fill price, so current_price = fill_price

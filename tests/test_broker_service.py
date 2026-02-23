@@ -1,6 +1,6 @@
 import pytest
 import asyncio
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 from services.broker.service import BrokerService
 from models.broker import BrokerType
 

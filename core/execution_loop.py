@@ -33,7 +33,7 @@ from core.symbols import normalize_symbol, is_market_open, parse_symbol, AssetCl
 from core.broker_dispatch import BrokerDispatch
 from core.risk_orchestration import RiskOrchestration
 from core.state_sync import StateSync
-from data.event_store import EventStore, EventType
+from data.event_store import EventStore
 from core.trading_control import (
     read_control_state,
     mark_kill_switch_reset_processed,
@@ -45,6 +45,7 @@ from risk.risk_manager import RiskManager
 from portfolio.portfolio_optimizer import PortfolioOptimizer
 from data.market_data import MarketDataFetcher
 from data.social.validator import validate_social_risk_inputs
+from data.social.contract import write_social_risk_inputs
 from monitoring.performance_tracker import PerformanceTracker
 from monitoring.live_monitor import LiveMonitor
 from config import ApexConfig
@@ -67,8 +68,8 @@ from monitoring.institutional_metrics import (
 from risk.god_level_risk_manager import GodLevelRiskManager
 from portfolio.correlation_manager import CorrelationManager
 from execution.advanced_order_executor import AdvancedOrderExecutor
-from models.god_level_signal_generator import GodLevelSignalGenerator, MarketRegime
-from models.enhanced_signal_filter import EnhancedSignalFilter, create_enhanced_filter
+from models.god_level_signal_generator import GodLevelSignalGenerator
+from models.enhanced_signal_filter import create_enhanced_filter
 from execution.options_trader import OptionsTrader, OptionType, OptionStrategy
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -76,11 +77,11 @@ from execution.options_trader import OptionsTrader, OptionType, OptionStrategy
 # ═══════════════════════════════════════════════════════════════════════════════
 from risk.vix_regime_manager import VIXRegimeManager, VIXRegime
 from models.cross_sectional_momentum import CrossSectionalMomentum
-from data.sentiment_analyzer import SentimentAnalyzer, VolumePriceSentiment
+from data.sentiment_analyzer import SentimentAnalyzer
 from execution.arrival_price_benchmark import ArrivalPriceBenchmark
 from monitoring.health_dashboard import HealthDashboard, HealthStatus
 from monitoring.data_quality import DataQualityMonitor
-from risk.dynamic_exit_manager import DynamicExitManager, get_exit_manager, ExitUrgency
+from risk.dynamic_exit_manager import get_exit_manager
 from monitoring.signal_outcome_tracker import SignalOutcomeTracker
 from monitoring.prometheus_metrics import PrometheusMetrics
 from monitoring.performance_attribution import PerformanceAttributionTracker
@@ -105,7 +106,6 @@ from risk.drawdown_cascade_breaker import DrawdownCascadeBreaker, DrawdownTier
 from execution.execution_shield import (
     ExecutionShield,
     ExecutionAlgo,
-    Urgency as ExecUrgency,
 )
 from risk.macro_shield import MacroShield
 from monitoring.data_watchdog import DataWatchdog
@@ -114,11 +114,11 @@ from core.logging_config import setup_logging
 # ═══════════════════════════════════════════════════════════════════════════════
 # SIGNAL FORTRESS PHASE 3 - Autonomous Money Machine
 # ═══════════════════════════════════════════════════════════════════════════════
-from risk.macro_event_shield import MacroEventShield, EventType
-from risk.overnight_risk_guard import OvernightRiskGuard, MarketPhase
-from risk.profit_ratchet import ProfitRatchet, ProfitTier
-from risk.liquidity_guard import LiquidityGuard, LiquidityRegime
-from risk.position_aging_manager import PositionAgingManager, AgingTier
+from risk.macro_event_shield import MacroEventShield
+from risk.overnight_risk_guard import OvernightRiskGuard
+from risk.profit_ratchet import ProfitRatchet
+from risk.liquidity_guard import LiquidityGuard
+from risk.position_aging_manager import PositionAgingManager
 from risk.trading_excellence import TradingExcellenceManager, quick_mismatch_check, ProfitAction
 from risk.performance_governor import PerformanceGovernor, GovernorSnapshot, GovernorTier
 from risk.governor_policy import (
@@ -904,7 +904,7 @@ class ApexTradingSystem:
         logger.info(f"💵 Position Size: ${ApexConfig.POSITION_SIZE_USD:,}")
         logger.info(f"🛡️  Max Shares/Position: {ApexConfig.MAX_SHARES_PER_POSITION}")
         logger.info(f"⏱️  Trade Cooldown: {ApexConfig.TRADE_COOLDOWN_SECONDS}s")
-        logger.info(f"📱 Dashboard: Enabled")
+        logger.info("📱 Dashboard: Enabled")
         logger.info("✅ All modules initialized!")
         logger.info("=" * 80)
 
@@ -1943,10 +1943,10 @@ class ApexTradingSystem:
                     mismatches.append(f"{symbol}: Local={local_qty}, IBKR={ibkr_qty}")
             
             if mismatches:
-                logger.warning(f"⚠️ Position mismatches detected:")
+                logger.warning("⚠️ Position mismatches detected:")
                 for mismatch in mismatches:
                     logger.warning(f"   {mismatch}")
-                logger.warning(f"   → Syncing to IBKR values")
+                logger.warning("   → Syncing to IBKR values")
             
             # Replace our tracking with IBKR truth
             self.positions = actual_positions.copy()
@@ -2032,7 +2032,7 @@ class ApexTradingSystem:
                     if sym not in self.position_entry_times:
                         self.position_entry_times[sym] = datetime.now()
             
-            logger.debug(f"✅ Alpaca position sync complete")
+            logger.debug("✅ Alpaca position sync complete")
             self._mark_broker_heartbeat("alpaca", success=True)
             self._sync_cost_basis_with_positions()
         except Exception as e:
@@ -2602,6 +2602,22 @@ class ApexTradingSystem:
             self._social_inputs_payload = {}
             self._social_input_validation = {}
             return
+
+        # Build/refresh social risk inputs file (TTL: skip if file is <15 min old)
+        try:
+            rebuild = True
+            if self._social_feed_path.exists():
+                age_s = (datetime.utcnow() - datetime.utcfromtimestamp(self._social_feed_path.stat().st_mtime)).total_seconds()
+                rebuild = age_s > 900  # 15-minute TTL
+            if rebuild:
+                write_social_risk_inputs(
+                    data_dir=ApexConfig.DATA_DIR,
+                    output_path=self._social_feed_path,
+                )
+                logger.info("📡 Social risk inputs rebuilt → %s", self._social_feed_path)
+        except Exception as exc:
+            logger.debug("Social risk input build skipped: %s", exc)
+
         if not self._social_feed_path.exists():
             self._social_inputs_payload = {}
             self._social_input_validation = {
@@ -3502,7 +3518,6 @@ class ApexTradingSystem:
             # SOTA: Get News Sentiment
             sent_result = self.sentiment_analyzer.analyze(symbol)
             sent_signal = sent_result.sentiment_score
-            sent_conf = sent_result.confidence
 
             if self.use_institutional:
                 # Institutional signal generator with full metadata (passing full data + context)
@@ -5494,6 +5509,14 @@ class ApexTradingSystem:
             self.performance_tracker.record_equity(current_value)
             perf_snapshot = self._performance_snapshot
             if self.performance_governor:
+                self.performance_governor.set_regime_targets(
+                    regime=self._current_regime or "neutral",
+                    base_sharpe=ApexConfig.PERFORMANCE_TARGET_SHARPE,
+                    base_sortino=ApexConfig.PERFORMANCE_TARGET_SORTINO,
+                    multipliers=ApexConfig.GOVERNOR_REGIME_TARGET_MULTIPLIERS,
+                    min_sharpe=ApexConfig.GOVERNOR_MIN_TARGET_SHARPE,
+                    min_sortino=ApexConfig.GOVERNOR_MIN_TARGET_SORTINO,
+                )
                 perf_snapshot = self.performance_governor.update(current_value, datetime.now())
                 self._performance_snapshot = perf_snapshot
 
@@ -5590,14 +5613,14 @@ class ApexTradingSystem:
 
             # Institutional risk metrics
             if self.use_institutional:
-                logger.info(f"🏛️  INSTITUTIONAL RISK:")
+                logger.info("🏛️  INSTITUTIONAL RISK:")
                 logger.info(f"   Portfolio Vol: {portfolio_risk.portfolio_volatility:.1%} | VaR(95%): ${portfolio_risk.var_95:,.0f}")
                 logger.info(f"   Risk Level: {portfolio_risk.risk_level.value.upper()} | Risk Mult: {portfolio_risk.risk_multiplier:.2f}")
                 logger.info(f"   Gross Exp: ${portfolio_risk.gross_exposure:,.0f} | Net Exp: ${portfolio_risk.net_exposure:,.0f}")
                 logger.info(f"   Concentration (HHI): {portfolio_risk.herfindahl_index:.3f}")
 
             if sector_exp:
-                logger.info(f"🏢 Sector Exposure:")
+                logger.info("🏢 Sector Exposure:")
                 for sector, pct in sorted(sector_exp.items(), key=lambda x: x[1], reverse=True):
                     logger.info(f"   {sector}: {pct*100:.1f}%")
             
@@ -5616,7 +5639,7 @@ class ApexTradingSystem:
                         price = self.price_cache.get(symbol, 0)
                         
                         if price:
-                            value = abs(qty) * price
+                            abs(qty) * price
                             entry = self.position_entry_prices.get(symbol, price)
                             
                             if qty > 0:
@@ -6046,7 +6069,7 @@ class ApexTradingSystem:
                 from sqlalchemy import select
                 
                 async with db_session() as session:
-                    stmt = select(BrokerConnectionModel).where(BrokerConnectionModel.is_active == True)
+                    stmt = select(BrokerConnectionModel).where(BrokerConnectionModel.is_active)
                     result = await session.execute(stmt)
                     for row in result.scalars().all():
                         if row.broker_type not in active_sources:
@@ -6135,7 +6158,7 @@ class ApexTradingSystem:
             self.risk_manager.save_state()
             self.save_price_cache()
 
-            logger.debug(f"📊 Dashboard state exported")
+            logger.debug("📊 Dashboard state exported")
         
         except Exception as e:
             logger.error(f"❌ Dashboard export error: {e}")
@@ -6309,8 +6332,8 @@ class ApexTradingSystem:
             logger.info(f"   Interval: {ApexConfig.CHECK_INTERVAL_SECONDS}s")
             logger.info(f"   Hours: {ApexConfig.TRADING_HOURS_START:.1f} - {ApexConfig.TRADING_HOURS_END:.1f} EST")
             logger.info(f"   🛡️  Protection: {ApexConfig.TRADE_COOLDOWN_SECONDS}s cooldown")
-            logger.info(f"   🚀 Parallel processing enabled")
-            logger.info(f"   📱 Dashboard: streamlit run dashboard/streamlit_app.py")
+            logger.info("   🚀 Parallel processing enabled")
+            logger.info("   📱 Dashboard: streamlit run dashboard/streamlit_app.py")
             logger.info("")
             
             self.is_running = True
@@ -6442,7 +6465,7 @@ class ApexTradingSystem:
                         self.inst_risk_manager.set_market_volatility(vix_state.current_vix / 100.0)
 
                     # Update Health Dashboard
-                    health_checks = self.health_dashboard.run_all_checks(
+                    self.health_dashboard.run_all_checks(
                         current_capital=self.capital,
                         peak_capital=max(float(self.risk_manager.peak_capital or 0.0), float(self.capital or 0.0)),
                         positions=self.positions
@@ -6605,7 +6628,6 @@ class ApexTradingSystem:
                                         positions_list, self.historical_data
                                     )
                                     if corr_data is not None:
-                                        import numpy as np
                                         corr_arr = corr_data.values
                                         n = len(corr_arr)
                                         correlations = [corr_arr[i, j] for i in range(n) for j in range(i+1, n)]

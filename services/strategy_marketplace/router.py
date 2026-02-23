@@ -7,7 +7,7 @@ strategy discovery, engagement, and management.
 from typing import List, Optional
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, HTTPException, Query, status
 from .service import StrategyMarketplaceService
 from .schemas import (
     StrategyListing,
@@ -19,7 +19,6 @@ from .schemas import (
     StrategyStatus
 )
 from utils.performance_monitor import PerformanceMonitor
-from utils.error_tracker import ErrorTracker
 
 
 router = APIRouter(

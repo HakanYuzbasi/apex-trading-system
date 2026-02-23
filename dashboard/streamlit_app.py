@@ -5,11 +5,9 @@ Professional dark theme with consistent styling
 
 import streamlit as st
 import pandas as pd
-import numpy as np
 import plotly.graph_objects as go
-import plotly.express as px
 from plotly.subplots import make_subplots
-from datetime import datetime, timedelta
+from datetime import datetime
 import json
 import time
 from pathlib import Path
@@ -342,7 +340,7 @@ class ApexDashboard:
                     name='Portfolio Value',
                     line={'color': self.COLORS['primary'], 'width': 3},
                     fill='tozeroy',
-                    fillcolor=f'rgba(102, 126, 234, 0.15)',
+                    fillcolor='rgba(102, 126, 234, 0.15)',
                     hovertemplate='<b>%{x}</b><br>Value: $%{y:,.2f}<extra></extra>'
                 ),
                 row=1, col=1
@@ -357,7 +355,7 @@ class ApexDashboard:
                     name='Drawdown',
                     line={'color': self.COLORS['danger'], 'width': 2},
                     fill='tozeroy',
-                    fillcolor=f'rgba(255, 107, 107, 0.15)',
+                    fillcolor='rgba(255, 107, 107, 0.15)',
                     hovertemplate='<b>%{x}</b><br>Drawdown: %{y:.2f}%<extra></extra>'
                 ),
                 row=2, col=1
@@ -716,7 +714,7 @@ python main.py
             )
         
         with col3:
-            sharpe_color = "normal" if state['sharpe_ratio'] >= 1.5 else "inverse"
+            "normal" if state['sharpe_ratio'] >= 1.5 else "inverse"
             st.metric(
                 "📊 Sharpe Ratio",
                 f"{state['sharpe_ratio']:.2f}",
@@ -796,7 +794,7 @@ python main.py
                     signal = pos.get('current_signal', 0)
                     confidence = pos.get('signal_confidence', 0)
                     direction = pos.get('signal_direction', 'UNKNOWN')
-                    strength = pos.get('signal_strength', 0)
+                    pos.get('signal_strength', 0)
                     
                     # Signal emoji
                     if signal > 0.40:
@@ -840,7 +838,7 @@ python main.py
                 
                 total_value = sum([pos['qty'] * pos['current_price'] for pos in state['positions'].values()])
                 total_pnl = sum([pos.get('pnl', 0) for pos in state['positions'].values()])
-                avg_pnl_pct = (total_pnl / (total_value - total_pnl)) * 100 if (total_value - total_pnl) > 0 else 0
+                (total_pnl / (total_value - total_pnl)) * 100 if (total_value - total_pnl) > 0 else 0
                 avg_signal = sum([pos.get('current_signal', 0) for pos in state['positions'].values()]) / len(state['positions'])
                 avg_confidence = sum([pos.get('signal_confidence', 0) for pos in state['positions'].values()]) / len(state['positions'])
                 

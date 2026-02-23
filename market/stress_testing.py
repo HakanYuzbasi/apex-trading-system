@@ -9,9 +9,7 @@ STRESS TESTING FRAMEWORK
 import numpy as np
 import pandas as pd
 import logging
-from typing import Dict, List
-from datetime import datetime, timedelta
-from scipy import stats
+from typing import Dict
 
 from core.logging_config import setup_logging
 
@@ -143,7 +141,7 @@ class StressTestingEngine:
         }
         
         logger.info(f"\n{'='*60}")
-        logger.info(f"📊 STRESS TEST SUMMARY")
+        logger.info("📊 STRESS TEST SUMMARY")
         logger.info(f"{'='*60}")
         logger.info(f"Survival Rate: {survival_rate*100:.0f}%")
         logger.info(f"Average Drawdown: {avg_drawdown*100:.1f}%")
@@ -288,7 +286,7 @@ class StressTestingEngine:
         }
         
         logger.info(f"\n{'='*60}")
-        logger.info(f"🎲 MONTE CARLO RESULTS")
+        logger.info("🎲 MONTE CARLO RESULTS")
         logger.info(f"{'='*60}")
         logger.info(f"Median Outcome: ${median_case:,.0f}")
         logger.info(f"Best Case (95%): ${result['distribution']['percentile_95']:,.0f}")

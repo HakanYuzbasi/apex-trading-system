@@ -1,6 +1,5 @@
 import pytest
 import asyncio
-import time
 from execution.ibkr_lease_manager import IBKRLeaseManager
 
 @pytest.fixture

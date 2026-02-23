@@ -4,11 +4,9 @@ Fetches real market data using Yahoo Finance (yfinance)
 """
 
 import logging
-from datetime import datetime, timedelta
-from typing import Dict, Optional, List
+from datetime import datetime
+from typing import Dict, List
 import pandas as pd
-import numpy as np
-from functools import lru_cache
 import threading
 import time
 

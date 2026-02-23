@@ -5,7 +5,7 @@ Central location for all constants used throughout the trading system.
 Avoid magic numbers scattered through the codebase.
 """
 
-from enum import Enum, auto
+from enum import Enum
 from typing import Dict, Set
 
 

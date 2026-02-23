@@ -8,7 +8,7 @@ or shuts down loops dynamically.
 
 import asyncio
 import logging
-from typing import Dict, Optional, Set
+from typing import Dict, Optional
 from datetime import datetime
 
 from core.execution_loop import ApexTradingSystem

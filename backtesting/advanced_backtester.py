@@ -1,3 +1,4 @@
+from typing import Dict, Any
 """
 backtesting/advanced_backtester.py
 PROFESSIONAL BACKTESTING ENGINE
@@ -10,8 +11,8 @@ PROFESSIONAL BACKTESTING ENGINE
 import numpy as np
 import pandas as pd
 import logging
-from typing import Dict, List, Tuple, Optional
-from datetime import datetime, timedelta
+from typing import List, Optional
+from datetime import datetime
 from collections import defaultdict
 
 from core.symbols import AssetClass, parse_symbol, is_market_open

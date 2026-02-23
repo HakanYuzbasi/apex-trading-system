@@ -24,10 +24,9 @@ Also tracks:
 
 import logging
 from typing import Dict, List, Optional, Tuple
-from dataclasses import dataclass, field
-from datetime import datetime, timedelta
+from dataclasses import dataclass
+from datetime import datetime
 from enum import IntEnum
-import numpy as np
 
 logger = logging.getLogger(__name__)
 

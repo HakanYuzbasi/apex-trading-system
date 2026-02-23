@@ -4,7 +4,6 @@ from datetime import datetime
 from sqlalchemy import (
     Column, String, DateTime, JSON, ForeignKey
 )
-from sqlalchemy.orm import relationship
 from services.common.db import Base
 
 def _uuid() -> str:

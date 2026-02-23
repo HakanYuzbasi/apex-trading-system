@@ -14,7 +14,7 @@ to reduce code duplication and ensure consistency.
 import numpy as np
 import pandas as pd
 from abc import ABC, abstractmethod
-from typing import Dict, List, Optional, Tuple, Any, Union
+from typing import Dict, Optional, Tuple, Union
 from dataclasses import dataclass
 from datetime import datetime
 from enum import Enum
@@ -498,7 +498,7 @@ class BaseSignalGenerator(ABC):
         # Calculate metrics
         cumulative_return = (prices.iloc[-1] / prices.iloc[-window] - 1)
         volatility = recent_returns.std() * np.sqrt(252)
-        avg_return = recent_returns.mean() * 252
+        recent_returns.mean() * 252
 
         # High volatility regime
         if volatility > 0.35:

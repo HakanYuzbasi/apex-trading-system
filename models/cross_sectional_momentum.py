@@ -65,7 +65,7 @@ class CrossSectionalMomentum:
         self._last_ranking_time: Optional[datetime] = None
         self._ranking_cache_minutes: int = 60  # Recalculate hourly
         
-        logger.info(f"CrossSectionalMomentum initialized")
+        logger.info("CrossSectionalMomentum initialized")
         logger.info(f"  Lookback: {lookback_months}m, Skip: {skip_months}m")
         logger.info(f"  Top {top_quantile*100:.0f}% / Bottom {bottom_quantile*100:.0f}%")
     

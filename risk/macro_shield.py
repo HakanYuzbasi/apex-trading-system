@@ -13,7 +13,7 @@ Key Features:
 import json
 import logging
 from datetime import datetime, timedelta
-from typing import List, Dict, Optional, NamedTuple
+from typing import List, Optional, NamedTuple
 from pathlib import Path
 
 from config import ApexConfig

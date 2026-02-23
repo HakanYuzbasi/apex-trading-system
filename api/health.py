@@ -3,7 +3,6 @@
 from fastapi import APIRouter, Response, status
 from datetime import datetime
 import psutil
-import asyncio
 from typing import Dict, Any
 import sys
 

@@ -18,12 +18,11 @@ Usage:
 
 import numpy as np
 import pandas as pd
-from typing import Dict, List, Tuple, Optional
+from typing import Dict, List, Optional
 from dataclasses import dataclass
 from enum import Enum
 from datetime import datetime
 import logging
-import json
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
@@ -150,7 +149,7 @@ class RegimeDetector:
         # Ensure model directory exists
         self.model_dir.mkdir(parents=True, exist_ok=True)
 
-        logger.info(f"📈 Regime Detector initialized")
+        logger.info("📈 Regime Detector initialized")
         logger.info(f"   Regimes: {n_regimes}")
         logger.info(f"   Lookback: {lookback_days} days")
         logger.info(f"   HMM Available: {HMM_AVAILABLE}")
@@ -168,7 +167,6 @@ class RegimeDetector:
         if len(prices) < 60:
             return np.array([])
 
-        features = []
         returns = prices.pct_change().dropna()
 
         # 1. Rolling returns

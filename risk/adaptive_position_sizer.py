@@ -7,7 +7,6 @@ DYNAMIC POSITION SIZING BASED ON MARKET CONDITIONS
 """
 
 import numpy as np
-import pandas as pd
 import logging
 from typing import Dict
 
@@ -265,7 +264,7 @@ if __name__ == "__main__":
         )
         
         print(f"  Position Size: ${result['position_size']:,.0f} ({result['multiplier']:.2f}x)")
-        print(f"  Components:")
+        print("  Components:")
         for key, value in result['components'].items():
             print(f"    {key:12s}: {value:.2f}x")
     

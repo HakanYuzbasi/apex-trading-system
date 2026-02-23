@@ -19,8 +19,8 @@ if str(PROJECT_ROOT) not in sys.path:
 import numpy as np
 import pandas as pd
 from typing import Dict, List, Tuple, Optional
-from datetime import datetime, timedelta
-from dataclasses import dataclass, field
+from datetime import datetime
+from dataclasses import dataclass
 from collections import defaultdict
 import logging
 import warnings
@@ -784,7 +784,6 @@ class GodLevelBacktester:
             # Simple sizing
             position_value = min(self.capital * 0.05, self.capital / self.MAX_POSITIONS)
             shares = int(position_value / entry_price)
-            atr_pct = 0.02
             stop_loss = entry_price * (1 - 0.05) if signal > 0 else entry_price * (1 + 0.05)
             take_profit = entry_price * (1 + 0.15) if signal > 0 else entry_price * (1 - 0.15)
             trailing_stop_pct = 0.03
@@ -1322,7 +1321,7 @@ class GodLevelBacktester:
             'prob_beat_benchmark': sum(1 for r in final_returns if r > 10) / n_simulations * 100
         }
 
-        logger.info(f"  Monte Carlo Results:")
+        logger.info("  Monte Carlo Results:")
         logger.info(f"    Expected Return: {results['return_mean']:.1f}% (5th-95th: {results['return_5th']:.1f}% to {results['return_95th']:.1f}%)")
         logger.info(f"    Expected Max DD: {results['max_dd_mean']:.1f}% (95th percentile: {results['max_dd_95th']:.1f}%)")
         logger.info(f"    Probability of Profit: {results['prob_positive']:.1f}%")

@@ -1,8 +1,6 @@
 """Tests for structured logging utility."""
 
-import pytest
 import json
-from datetime import datetime
 from utils.structured_logger import (
     get_logger,
     StructuredFormatter,
@@ -12,7 +10,6 @@ from utils.structured_logger import (
     clear_context,
 )
 import logging
-from io import StringIO
 
 
 class TestStructuredFormatter:

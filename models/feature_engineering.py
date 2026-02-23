@@ -45,7 +45,7 @@ Production-ready with error handling.
 import numpy as np
 import pandas as pd
 import logging
-from typing import Dict, Tuple, Optional
+from typing import Tuple
 from sklearn.preprocessing import StandardScaler
 
 from core.logging_config import setup_logging

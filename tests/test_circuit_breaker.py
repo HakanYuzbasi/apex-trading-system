@@ -1,8 +1,6 @@
 # tests/test_circuit_breaker.py - Circuit breaker and stress test scenarios
 
 import pytest
-import asyncio
-from unittest.mock import AsyncMock, MagicMock
 from models.risk_management import CircuitBreaker
 import numpy as np
 

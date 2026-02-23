@@ -5,17 +5,16 @@ tests/test_sota_modules.py - Verification tests for SOTA improvements.
 import unittest
 import pandas as pd
 import numpy as np
-from datetime import datetime, timedelta
+from datetime import datetime
 import tempfile
 import shutil
 from pathlib import Path
 
 from risk.vix_regime_manager import VIXRegimeManager, VIXRegime
 from models.cross_sectional_momentum import CrossSectionalMomentum
-from data.sentiment_analyzer import SentimentAnalyzer
 from execution.arrival_price_benchmark import ArrivalPriceBenchmark
 from portfolio.black_litterman import BlackLittermanOptimizer
-from monitoring.data_quality import DataQualityMonitor, DataQualityIssue
+from monitoring.data_quality import DataQualityMonitor
 from monitoring.health_dashboard import HealthDashboard, HealthStatus
 from models.online_learner import OnlineLearner, DriftDetector
 from models.pairs_trader import PairsTrader
@@ -165,7 +164,7 @@ class TestBlackLitterman(unittest.TestCase):
         self.assertIn('B', result.posterior_weights)
         
         # Verify result structure
-        self.assertTrue(result.confidence_adjusted == False)
+        self.assertTrue(not result.confidence_adjusted)
 
 
 class TestOnlineLearner(unittest.TestCase):

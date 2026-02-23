@@ -1,9 +1,6 @@
 
 import json
-import pandas as pd
-from pathlib import Path
 import yfinance as yf
-from datetime import datetime, timedelta
 
 from config import ApexConfig
 

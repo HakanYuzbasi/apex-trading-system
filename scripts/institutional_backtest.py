@@ -17,10 +17,9 @@ Version: 1.0.0
 
 import numpy as np
 import pandas as pd
-from typing import Dict, List, Optional, Tuple, Any
-from dataclasses import dataclass, field
+from typing import Dict, List, Optional, Tuple
+from dataclasses import dataclass
 from datetime import datetime, timedelta
-from enum import Enum
 import logging
 import sys
 from pathlib import Path
@@ -31,7 +30,7 @@ from core.logging_config import setup_logging
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from models.institutional_signal_generator import InstitutionalSignalGenerator, SignalOutput
-from risk.institutional_risk_manager import InstitutionalRiskManager, RiskConfig
+from risk.institutional_risk_manager import InstitutionalRiskManager
 
 logger = logging.getLogger(__name__)
 

@@ -10,26 +10,21 @@ Comprehensive test suite including:
 
 import pytest
 import numpy as np
-import pandas as pd
-from datetime import datetime, timedelta
-from typing import Dict, List
-import asyncio
+from datetime import datetime
 import time
 
 # Import modules to test
 from risk.portfolio_stress_test import (
-    PortfolioStressTest, StressScenario, ScenarioType,
-    StressTestResult
+    PortfolioStressTest, StressTestResult
 )
 from backtesting.market_impact import (
-    MarketImpactModel, MarketConditions, ExecutionCosts,
-    calculate_realistic_slippage
+    MarketImpactModel, MarketConditions, ExecutionCosts
 )
 from monitoring.alert_manager import (
     AlertManager, AlertSeverity, AlertCategory, Alert
 )
 from core.config_profiles import (
-    TradingProfile, ProfileType, PROFILES, DynamicConfigAdjuster
+    ProfileType, PROFILES, DynamicConfigAdjuster
 )
 
 

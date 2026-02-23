@@ -22,7 +22,6 @@ import argparse
 import pandas as pd
 from datetime import datetime, timedelta
 from typing import Dict, List
-import logging
 import yfinance as yf
 
 from models.institutional_signal_generator import UltimateSignalGenerator
@@ -126,7 +125,7 @@ def train_production_models(
     # Train
     logger.info("\n🚀 Starting training with enhanced features...")
     logger.info(f"   Total symbols: {len(historical_data)}")
-    logger.info(f"   Total features: 67 (35 baseline + 32 enhanced)")
+    logger.info("   Total features: 67 (35 baseline + 32 enhanced)")
     logger.info(f"   Deep learning: {enable_deep_learning}")
     logger.info(f"   Model directory: {model_dir}")
     
@@ -162,7 +161,7 @@ def train_production_models(
                 key=lambda x: x[1],
                 reverse=True
             )[:5]
-            logger.info(f"  Top 5 Features:")
+            logger.info("  Top 5 Features:")
             for feat, imp in top_features:
                 logger.info(f"    {feat:25s}: {imp:.4f}")
     
@@ -203,7 +202,7 @@ def validate_models(generator: UltimateSignalGenerator, test_data: Dict[str, pd.
         logger.info(f"\n✅ Validated {len(results)} symbols")
         logger.info(f"   Avg Confidence: {df_results['confidence'].mean():.2%}")
         logger.info(f"   Avg Data Quality: {df_results['data_quality'].mean():.2%}")
-        logger.info(f"\n   Regime Distribution:")
+        logger.info("\n   Regime Distribution:")
         for regime, count in df_results['regime'].value_counts().items():
             logger.info(f"     {regime:12s}: {count:3d} ({count/len(results):.1%})")
     
@@ -272,12 +271,12 @@ def main():
         logger.info("="*80)
         logger.info(f"Models saved to: {args.model_dir}")
         logger.info(f"Training date: {generator.training_date}")
-        logger.info(f"\n🚀 Next steps:")
-        logger.info(f"   1. Review training metrics above")
-        logger.info(f"   2. Update main.py to use new models")
-        logger.info(f"   3. Monitor live performance for 1-2 weeks")
-        logger.info(f"   4. Compare against baseline (51-56% accuracy)")
-        logger.info(f"   5. Document results in ENHANCED_FEATURES.md")
+        logger.info("\n🚀 Next steps:")
+        logger.info("   1. Review training metrics above")
+        logger.info("   2. Update main.py to use new models")
+        logger.info("   3. Monitor live performance for 1-2 weeks")
+        logger.info("   4. Compare against baseline (51-56% accuracy)")
+        logger.info("   5. Document results in ENHANCED_FEATURES.md")
         
         return 0
         

@@ -14,9 +14,9 @@ after signal generation. Provides:
 
 import logging
 import json
-from datetime import datetime, timedelta
+from datetime import datetime
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional
 from dataclasses import dataclass, field, asdict
 from collections import defaultdict
 import numpy as np
@@ -185,7 +185,7 @@ class SignalOutcomeTracker:
         # Load existing data
         self._load_state()
 
-        logger.info(f"SignalOutcomeTracker initialized")
+        logger.info("SignalOutcomeTracker initialized")
         logger.info(f"  Lookback windows: {self.lookback_windows} days")
         logger.info(f"  Target returns: {[f'{t*100}%' for t in self.target_returns]}")
         logger.info(f"  Active signals: {len(self.active_signals)}")
@@ -633,36 +633,36 @@ class SignalOutcomeTracker:
 
             logger.info("")
             logger.info("QUALITY METRICS:")
-            logger.info(f"  Directional Accuracy:")
+            logger.info("  Directional Accuracy:")
             logger.info(f"    1-day:  {metrics.accuracy_1d*100:.1f}%")
             logger.info(f"    5-day:  {metrics.accuracy_5d*100:.1f}%")
             logger.info(f"    10-day: {metrics.accuracy_10d*100:.1f}%")
             logger.info(f"    20-day: {metrics.accuracy_20d*100:.1f}%")
 
-            logger.info(f"  Average Returns:")
+            logger.info("  Average Returns:")
             logger.info(f"    BUY signals (10d):  {metrics.avg_return_10d_buy*100:+.2f}%")
             logger.info(f"    SELL signals (10d): {metrics.avg_return_10d_sell*100:+.2f}%")
 
-            logger.info(f"  MFE/MAE Analysis:")
+            logger.info("  MFE/MAE Analysis:")
             logger.info(f"    Avg MFE (10d): {metrics.avg_mfe_10d*100:+.2f}%")
             logger.info(f"    Avg MAE (10d): {metrics.avg_mae_10d*100:+.2f}%")
             logger.info(f"    MFE/MAE Ratio: {metrics.mfe_mae_ratio:.2f}")
 
-            logger.info(f"  Target Hit Rates:")
+            logger.info("  Target Hit Rates:")
             logger.info(f"    5% in 5 days:  {metrics.hit_rate_5pct_5d*100:.1f}%")
             logger.info(f"    10% in 10 days: {metrics.hit_rate_10pct_10d*100:.1f}%")
 
-            logger.info(f"  Quality Distribution:")
+            logger.info("  Quality Distribution:")
             logger.info(f"    High quality (>70%): {metrics.high_quality_pct*100:.1f}%")
             logger.info(f"    Low quality (<30%):  {metrics.low_quality_pct*100:.1f}%")
 
             if detailed and metrics.accuracy_by_regime:
-                logger.info(f"  Accuracy by Regime:")
+                logger.info("  Accuracy by Regime:")
                 for regime, acc in metrics.accuracy_by_regime.items():
                     logger.info(f"    {regime}: {acc*100:.1f}%")
 
             if detailed and metrics.accuracy_by_confidence:
-                logger.info(f"  Accuracy by Confidence:")
+                logger.info("  Accuracy by Confidence:")
                 for bucket, acc in metrics.accuracy_by_confidence.items():
                     logger.info(f"    {bucket}: {acc*100:.1f}%")
 

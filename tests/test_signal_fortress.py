@@ -13,7 +13,7 @@ import pytest
 import numpy as np
 import pandas as pd
 from datetime import datetime, timedelta
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 
 # ════════════════════════════════════════════════════════════════════
@@ -698,7 +698,7 @@ class TestSignalFortressIntegration:
             assert total == pytest.approx(1.0, abs=0.02)
 
             # Invariant 2: Primary regime has highest probability
-            max_regime = max(result.regime_probabilities, key=result.regime_probabilities.get)
+            max(result.regime_probabilities, key=result.regime_probabilities.get)
             # (may not always match due to smoothing & min duration, but probability should be positive)
             assert result.regime_probabilities[result.primary_regime] > 0
 

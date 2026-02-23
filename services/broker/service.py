@@ -566,7 +566,7 @@ class BrokerService:
 
             result = await session.execute(
                 select(distinct(BrokerConnectionModel.user_id)).where(
-                    BrokerConnectionModel.is_active == True
+                    BrokerConnectionModel.is_active
                 )
             )
             return [row[0] for row in result.all() if row[0]]

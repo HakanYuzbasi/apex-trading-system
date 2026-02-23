@@ -1,9 +1,8 @@
 import pytest
-import time
 from datetime import datetime, timedelta
 from api.auth import (
     User, create_access_token, verify_token,
-    RateLimiter, hash_password, verify_password
+    RateLimiter
 )
 
 # -----------------------------------------------------------------------------

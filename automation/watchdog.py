@@ -24,7 +24,6 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Optional, Dict, Any
 import json
-import threading
 import time
 
 # Add parent directory to path
@@ -374,7 +373,7 @@ class TradingWatchdog:
         """Restart the trading process."""
         if not self._can_restart():
             self.alerts.send_alert('critical', 'Restart Rate Limit',
-                f'Too many restarts in last hour. Manual intervention required.')
+                'Too many restarts in last hour. Manual intervention required.')
             logger.error("❌ Restart rate limit exceeded!")
             return
 

@@ -1,6 +1,5 @@
 """Database connection pooling utility for efficient database access."""
 
-import asyncio
 from contextlib import asynccontextmanager
 from typing import Optional, AsyncGenerator
 import logging

@@ -199,7 +199,7 @@ async def migrate_state_to_db(dry_run: bool = False):
     print("=" * 60)
     print("✅ MIGRATION COMPLETE!")
     print("=" * 60)
-    print(f"📊 Summary:")
+    print("📊 Summary:")
     print(f"   User: {user.email}")
     print(f"   Portfolio: {portfolio.name}")
     print(f"   Balance: ${portfolio.balance:,.2f}")

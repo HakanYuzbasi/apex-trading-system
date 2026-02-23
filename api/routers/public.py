@@ -1,12 +1,9 @@
 import asyncio
-import json
 from datetime import datetime
-from pathlib import Path
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect, Request
 
 from config import ApexConfig
-from api.ws_manager import manager
 from api.dependencies import _state_is_fresh, read_trading_state, sanitize_execution_metrics
 from api.auth import rate_limit
 

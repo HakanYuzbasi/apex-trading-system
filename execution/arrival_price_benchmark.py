@@ -10,10 +10,9 @@ State-of-the-art execution analysis for trading systems.
 """
 
 import numpy as np
-import pandas as pd
 from typing import Dict, List, Optional, Tuple
 from datetime import datetime, timedelta
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 import logging
 
 logger = logging.getLogger(__name__)

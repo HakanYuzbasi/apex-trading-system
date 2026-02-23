@@ -8,9 +8,6 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from config import ApexConfig
 from models.broker import BrokerType
 from services.broker.service import broker_service
-import services.auth.models
-import services.trading.models
-import services.audit.models
 
 async def seed_tenant():
     # Only seed if there are no existing tenants
@@ -26,7 +23,7 @@ async def seed_tenant():
         print("❌ ALPACA_API_KEY or ALPACA_SECRET_KEY not fully configured in environment. Skipping seed.")
         return
         
-    print(f"🌱 Seeding initial tenant broker connection...")
+    print("🌱 Seeding initial tenant broker connection...")
     
     try:
         # Create a default connection for the default user

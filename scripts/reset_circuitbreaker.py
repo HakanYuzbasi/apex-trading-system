@@ -89,7 +89,7 @@ def main():
     print(f"   Day Start Capital: ${state['day_start_capital']:,.2f}")
     print(f"   Peak Capital: ${state['peak_capital']:,.2f}")
     print(f"   Current Day: {today}")
-    print(f"   Circuit Breaker: RESET")
+    print("   Circuit Breaker: RESET")
     print()
     print("✅ Circuit breaker has been reset!")
     print()

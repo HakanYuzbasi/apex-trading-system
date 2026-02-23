@@ -92,7 +92,7 @@ class AdvancedOrderExecutor:
                 success = await self.broker_dispatch.submit_order(symbol, side, qty, limit_price, venue=venue)
                 if success:
                     return True
-            except Exception as e:
+            except Exception:
                 pass # Unfilled or rejected
             
             # Dynamic Queue Positioning Logic

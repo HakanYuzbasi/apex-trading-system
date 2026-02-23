@@ -7,7 +7,7 @@ import numpy as np
 # Add project root to path
 sys.path.append(os.getcwd())
 
-from models.regime_common import get_regime, _GLOBAL_DETECTOR
+from models.regime_common import get_regime
 
 def test_singleton_behavior():
     print("Testing get_regime singleton behavior...")
@@ -17,7 +17,7 @@ def test_singleton_behavior():
     
     # First call
     print("Calling get_regime(1)...")
-    r1 = get_regime(prices)
+    get_regime(prices)
     
     # Check if singleton is set
     from models.regime_common import _GLOBAL_DETECTOR as DETECTOR_1
@@ -28,7 +28,7 @@ def test_singleton_behavior():
     
     # Second call
     print("Calling get_regime(2)...")
-    r2 = get_regime(prices)
+    get_regime(prices)
     
     from models.regime_common import _GLOBAL_DETECTOR as DETECTOR_2
     

@@ -18,7 +18,6 @@ except ImportError:  # pragma: no cover
     fcntl = None  # type: ignore[assignment]
 
 from config import ApexConfig, assert_live_trading_confirmation
-from core.execution_loop import ApexTradingSystem
 from scripts.check_secrets import validate_secrets
 
 logger = logging.getLogger(__name__)

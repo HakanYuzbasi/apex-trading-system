@@ -11,7 +11,7 @@ Features:
 import numpy as np
 import pandas as pd
 from typing import Dict, List, Optional, Tuple
-from datetime import datetime, timedelta
+from datetime import datetime
 import logging
 
 from config import ApexConfig
@@ -42,9 +42,9 @@ class PortfolioOptimizer:
         self.last_rebalance_time: Optional[datetime] = None
         self.rebalance_history: List[Dict] = []
 
-        logger.info(f"📊 Portfolio Optimizer initialized")
+        logger.info("📊 Portfolio Optimizer initialized")
         if ApexConfig.REBALANCE_ENABLED:
-            logger.info(f"   Rebalancing: ENABLED")
+            logger.info("   Rebalancing: ENABLED")
             logger.info(f"   Drift Threshold: {ApexConfig.REBALANCE_DRIFT_THRESHOLD*100:.1f}%")
             logger.info(f"   Min Interval: {ApexConfig.REBALANCE_MIN_INTERVAL_HOURS}h")
 

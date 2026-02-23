@@ -245,7 +245,7 @@ class BlackLittermanOptimizer:
         symbols: List[str]
     ) -> Dict[str, float]:
         """Calculate posterior returns using Black-Litterman formula."""
-        n = len(symbols)
+        len(symbols)
         
         # Convert to arrays
         pi = np.array([prior_returns.get(s, 0) for s in symbols])

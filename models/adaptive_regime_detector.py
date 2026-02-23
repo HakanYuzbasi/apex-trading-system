@@ -15,7 +15,7 @@ Key improvements over the old RegimeDetector:
 
 import numpy as np
 import pandas as pd
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, Optional
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum

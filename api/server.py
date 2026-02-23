@@ -12,7 +12,7 @@ import os
 import threading
 import time
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional
 from uuid import uuid4
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Depends, Request, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -54,7 +54,6 @@ from api.dependencies import (
     SOCIAL_DECISION_AUDIT_LEGACY_FILE,
     STATE_FILE,
     _mtime_ns,
-    _sanitize_floats,
     _state_is_fresh,
     read_trading_state,
     sanitize_execution_metrics,

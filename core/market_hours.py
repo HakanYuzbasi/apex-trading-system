@@ -5,7 +5,7 @@ Market session logic and trading hours validation.
 
 from datetime import datetime
 import pytz
-from typing import Union, Dict, Any, Optional
+from typing import Union, Dict, Any
 
 from config import ApexConfig
 from core.symbols import AssetClass, ParsedSymbol, parse_symbol

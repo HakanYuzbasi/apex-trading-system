@@ -1,10 +1,7 @@
-import os
 import uuid
 import time
-import asyncio
 import logging
 from datetime import datetime, timedelta, timezone
-from pathlib import Path
 from fastapi import APIRouter, HTTPException, BackgroundTasks
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
@@ -13,8 +10,6 @@ import numpy as np
 
 from config import ApexConfig
 from backtesting.advanced_backtester import AdvancedBacktester
-from core.request_context import request_context
-from api.auth import require_user, Depends
 
 logger = logging.getLogger("api.backtest")
 

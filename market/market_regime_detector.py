@@ -21,7 +21,7 @@ The system adapts trading parameters based on detected regime:
 import numpy as np
 import pandas as pd
 import logging
-from typing import Dict, Optional, Tuple
+from typing import Dict
 from datetime import datetime
 
 from core.logging_config import setup_logging

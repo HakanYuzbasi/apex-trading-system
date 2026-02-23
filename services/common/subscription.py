@@ -17,7 +17,7 @@ Usage:
 import logging
 from typing import Optional, Sequence
 
-from fastapi import Depends, HTTPException, Request
+from fastapi import HTTPException, Request
 
 from services.common.schemas import (
     FEATURE_MATRIX,

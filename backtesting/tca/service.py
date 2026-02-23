@@ -1,7 +1,7 @@
-\"\"\"
+"""
 World-Class Transaction Cost Analysis (TCA) Service Implementation.
 Provides institutional-grade execution insights and slippage analysis.
-\"\"\"
+"""
 
 import numpy as np
 from typing import List, Dict, Any
@@ -21,17 +21,17 @@ from utils.error_tracker import ErrorTracker
 
 class TCAService:
     def __init__(self):
-        self.logger = StructuredLogger(\"TCAService\")
+        self.logger = StructuredLogger("TCAService")
         self.perf_monitor = PerformanceMonitor()
         self.error_tracker = ErrorTracker()
 
-    @PerformanceMonitor.track_latency(\"analyze_trade_slippage\")
+    @PerformanceMonitor.track_latency("analyze_trade_slippage")
     async def analyze_trade_slippage(self, trade: TradeExecution) -> SlippageMetrics:
-        \"\"\"Analyze slippage for a single trade execution.\"\"\"
+        """Analyze slippage for a single trade execution."""
         try:
             # Calculate slippage in Basis Points (bps)
             # Side: 1 for Buy, -1 for Sell
-            side_multiplier = 1 if trade.side.upper() == \"BUY\" else -1
+            side_multiplier = 1 if trade.side.upper() == "BUY" else -1
             
             arrival_slippage = (trade.execution_price - trade.arrival_price) / trade.arrival_price * 10000 * side_multiplier
             benchmark_slippage = (trade.execution_price - trade.benchmark_price) / trade.benchmark_price * 10000 * side_multiplier
@@ -47,9 +47,9 @@ class TCAService:
             self.error_tracker.capture_exception(e)
             raise
 
-    @PerformanceMonitor.track_latency(\"estimate_market_impact\")
+    @PerformanceMonitor.track_latency("estimate_market_impact")
     async def estimate_market_impact(self, symbol: str, quantity: float, avg_daily_volume: float) -> MarketImpactEstimate:
-        \"\"\"Estimate market impact using square-root model.\"\"\"
+        """Estimate market impact using square-root model."""
         # Participation rate
         participation_rate = quantity / avg_daily_volume if avg_daily_volume > 0 else 1.0
         
@@ -65,9 +65,9 @@ class TCAService:
         )
 
     async def generate_tca_report(self, trades: List[TradeExecution]) -> TCAReport:
-        \"\"\"Generate a comprehensive TCA report for a set of trades.\"\"\"
+        """Generate a comprehensive TCA report for a set of trades."""
         if not trades:
-            raise ValueError(\"No trades provided for analysis\")
+            raise ValueError("No trades provided for analysis")
             
         metrics_list = []
         total_slippage = 0.0
@@ -92,11 +92,11 @@ class TCAService:
         
         recommendations = []
         if avg_slippage > 10:
-            recommendations.append(\"High slippage detected. Consider using dark pools or passive limit orders.\")
+            recommendations.append("High slippage detected. Consider using dark pools or passive limit orders.")
         if impact.participation_rate > 0.1:
-            recommendations.append(\"Participation rate is high. Consider stretching execution over longer period.\")
+            recommendations.append("Participation rate is high. Consider stretching execution over longer period.")
         if not recommendations:
-            recommendations.append(\"Execution quality is within optimal institutional bounds.\")
+            recommendations.append("Execution quality is within optimal institutional bounds.")
 
         return TCAReport(
             report_id=str(uuid4()),

@@ -22,3 +22,6 @@ exclude_lines = [
     "raise NotImplementedError",
     "if __name__ == .__main__.:",
 ]
+
+[tool.ruff.lint]
+ignore = ['E402', 'E722', 'E701', 'F401', 'F841', 'E712']

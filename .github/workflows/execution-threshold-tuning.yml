@@ -25,6 +25,7 @@ jobs:
 
       - name: Run daily execution tuner
         run: |
+          mkdir -p artifacts logs data
           python scripts/tune_execution_thresholds.py \
             --log-dir logs \
             --attribution-file data/performance_attribution.json \

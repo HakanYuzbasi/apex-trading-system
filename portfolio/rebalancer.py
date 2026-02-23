@@ -7,10 +7,9 @@ AUTOMATIC PORTFOLIO REBALANCING
 """
 
 import numpy as np
-import pandas as pd
 import logging
 from typing import Dict, List, Tuple
-from datetime import datetime, timedelta
+from datetime import datetime
 
 from core.logging_config import setup_logging
 

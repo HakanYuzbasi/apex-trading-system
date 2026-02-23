@@ -14,7 +14,7 @@ If ANY source is beyond max age, signal is blocked entirely.
 
 from typing import Dict, Optional, Tuple
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta
+from datetime import datetime
 import logging
 
 logger = logging.getLogger(__name__)

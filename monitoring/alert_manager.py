@@ -14,15 +14,14 @@ Supports multiple notification channels:
 - Email notifications (optional)
 """
 
-import asyncio
 import logging
 import json
-from datetime import datetime, timedelta
+from datetime import datetime
 from string import Formatter
 
 from config import ApexConfig
-from typing import Dict, List, Optional, Callable, Any, Union
-from dataclasses import dataclass, field, asdict
+from typing import Dict, List, Optional, Callable, Any
+from dataclasses import dataclass, field
 from enum import Enum
 from collections import defaultdict
 from pathlib import Path

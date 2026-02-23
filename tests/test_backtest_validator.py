@@ -1,5 +1,4 @@
 """Tests for Backtest Validator service functions."""
-import pytest
 import numpy as np
 
 from services.backtest_validator.service import (

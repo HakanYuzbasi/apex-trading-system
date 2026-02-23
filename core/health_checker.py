@@ -13,11 +13,10 @@ Exposes health endpoints for monitoring and alerting.
 
 import asyncio
 import logging
-import os
 import psutil
-from dataclasses import dataclass, field, asdict
-from datetime import datetime, timedelta
-from typing import Dict, Any, Optional, List, Callable
+from dataclasses import dataclass, field
+from datetime import datetime
+from typing import Dict, Any, Optional, Callable
 from enum import Enum
 from pathlib import Path
 
@@ -454,7 +453,7 @@ def create_health_endpoints(app, health_checker: HealthChecker):
     @app.get("/health")
     async def health():
         """Overall health check."""
-        results = await health_checker.check_all()
+        await health_checker.check_all()
         summary = health_checker.get_summary()
 
         status_code = 200

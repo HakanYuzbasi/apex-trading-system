@@ -14,8 +14,7 @@ Also monitors drawdown velocity:
 - >2% per day → jump up two tiers
 """
 
-import numpy as np
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from enum import IntEnum
@@ -57,6 +56,16 @@ class DrawdownCascadeBreaker:
     Monitors portfolio drawdown and velocity, escalating through
     defensive tiers to protect capital during adverse conditions.
     """
+
+    
+    def _dynamic_tiers(self, realized_vol_20d: float, base_tiers=[0.03, 0.05, 0.07, 0.10]):
+        from config import ApexConfig
+        if not getattr(ApexConfig, 'DRAWDOWN_DYNAMIC_TIERS_ENABLED', False) or not realized_vol_20d:
+            return base_tiers
+            
+        # Vol-scaled tiers with 0.7x floor
+        vol_ratio = max(0.7, min(realized_vol_20d / 0.12, 2.0))
+        return [t * vol_ratio for t in base_tiers]
 
     def __init__(
         self,

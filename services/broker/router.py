@@ -6,7 +6,7 @@ import logging
 
 from api.auth import require_user, User
 from core.exceptions import ApexBrokerError
-from models.broker import BrokerConnection, BrokerType
+from models.broker import BrokerType
 from services.broker.service import broker_service
 
 router = APIRouter(prefix="/brokers", tags=["brokers"])

@@ -14,7 +14,7 @@ This wraps existing signal generators to produce higher-quality, filtered signal
 
 import numpy as np
 import pandas as pd
-from typing import Dict, Optional, Tuple, List
+from typing import Dict, Optional
 from datetime import datetime
 import logging
 
@@ -263,7 +263,7 @@ class EnhancedSignalFilter:
             }
 
         # Check volume trend matches signal direction
-        volume_trend = (recent_volume - avg_volume_20) / avg_volume_20 if avg_volume_20 > 0 else 0
+        (recent_volume - avg_volume_20) / avg_volume_20 if avg_volume_20 > 0 else 0
 
         # Strong signal: high volume (>1.5x) with matching trend
         strong = volume_ratio > 1.5

@@ -9,8 +9,7 @@ WALK-FORWARD VALIDATION & HYPERPARAMETER OPTIMIZATION
 import numpy as np
 import pandas as pd
 import logging
-from typing import Dict, List, Tuple, Any
-from datetime import datetime, timedelta
+from typing import Dict, List, Any
 from sklearn.model_selection import TimeSeriesSplit
 from sklearn.ensemble import RandomForestClassifier
 import optuna
@@ -66,7 +65,7 @@ class MLValidator:
         Returns:
             Validation results with metrics
         """
-        logger.info(f"🔄 Starting walk-forward validation...")
+        logger.info("🔄 Starting walk-forward validation...")
         logger.info(f"   Splits: {n_splits}, Train: {train_size}, Test: {test_size}")
         
         results = []
@@ -125,7 +124,7 @@ class MLValidator:
         overfitting_pct = sum(r['overfitting'] for r in results) / len(results) * 100
         
         logger.info(f"\n{'='*60}")
-        logger.info(f"📊 WALK-FORWARD VALIDATION RESULTS")
+        logger.info("📊 WALK-FORWARD VALIDATION RESULTS")
         logger.info(f"{'='*60}")
         logger.info(f"Average Train Score: {avg_train_score:.3f}")
         logger.info(f"Average Test Score:  {avg_test_score:.3f}")
@@ -209,7 +208,7 @@ class MLValidator:
         Returns:
             Best hyperparameters found
         """
-        logger.info(f"🔧 Starting hyperparameter optimization...")
+        logger.info("🔧 Starting hyperparameter optimization...")
         logger.info(f"   Trials: {n_trials}, Timeout: {timeout}s")
         
         def objective(trial):
@@ -250,10 +249,10 @@ class MLValidator:
         best_score = study.best_value
         
         logger.info(f"\n{'='*60}")
-        logger.info(f"🏆 OPTIMIZATION COMPLETE")
+        logger.info("🏆 OPTIMIZATION COMPLETE")
         logger.info(f"{'='*60}")
         logger.info(f"Best Test Score: {best_score:.3f}")
-        logger.info(f"Best Parameters:")
+        logger.info("Best Parameters:")
         for param, value in best_params.items():
             logger.info(f"   {param}: {value}")
         logger.info(f"{'='*60}\n")
@@ -276,7 +275,7 @@ class MLValidator:
                 'importance': importance
             }).sort_values('importance', ascending=False)
             
-            logger.info(f"\n🎯 Top 10 Most Important Features:")
+            logger.info("\n🎯 Top 10 Most Important Features:")
             for i, row in importance_df.head(10).iterrows():
                 logger.info(f"   {row['feature']:30s}: {row['importance']:.4f}")
             

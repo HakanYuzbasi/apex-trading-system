@@ -121,6 +121,24 @@ class PerformanceGovernor:
             reasons=["Warming up: insufficient performance samples"],
         )
 
+    def set_regime_targets(
+        self,
+        regime: str,
+        base_sharpe: float,
+        base_sortino: float,
+        multipliers: Optional[Dict[str, float]] = None,
+        min_sharpe: float = 0.4,
+        min_sortino: float = 0.5,
+    ) -> None:
+        """Adjust targets for current regime with a floor."""
+        mult = (multipliers or {}).get(regime, 1.0)
+        self.target_sharpe = max(min_sharpe, base_sharpe * mult)
+        self.target_sortino = max(min_sortino, base_sortino * mult)
+        logger.debug(
+            "Governor targets adjusted for %s: sharpe=%.2f, sortino=%.2f (mult=%.1f)",
+            regime, self.target_sharpe, self.target_sortino, mult,
+        )
+
     def get_snapshot(self) -> GovernorSnapshot:
         """Get current controls without updating state."""
         return self._snapshot

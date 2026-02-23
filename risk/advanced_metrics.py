@@ -11,7 +11,7 @@ Implementation of advanced risk and performance metrics including:
 """
 import numpy as np
 import pandas as pd
-from typing import Union, Optional
+from typing import Union
 from scipy import stats
 
 

@@ -1,4 +1,3 @@
-import pytest
 from datetime import datetime
 import pytz
 from core.market_hours import is_market_open
@@ -10,40 +9,40 @@ def test_market_hours_equity():
     dt_open = datetime(2023, 10, 23, 10, 0, 0, tzinfo=pytz.timezone("America/New_York"))
     # 2023-10-23 is a Monday
     
-    assert is_market_open("AAPL", dt_open) == True
-    assert legacy_is_market_open("AAPL", dt_open) == True
+    assert is_market_open("AAPL", dt_open)
+    assert legacy_is_market_open("AAPL", dt_open)
 
     # Monday 9:00 AM EST - CLOSED
     dt_closed = datetime(2023, 10, 23, 9, 0, 0, tzinfo=pytz.timezone("America/New_York"))
-    assert is_market_open("AAPL", dt_closed) == False
-    assert legacy_is_market_open("AAPL", dt_closed) == False
+    assert not is_market_open("AAPL", dt_closed)
+    assert not legacy_is_market_open("AAPL", dt_closed)
 
     # Saturday - CLOSED
     dt_sat = datetime(2023, 10, 21, 12, 0, 0, tzinfo=pytz.timezone("America/New_York"))
-    assert is_market_open("AAPL", dt_sat) == False
+    assert not is_market_open("AAPL", dt_sat)
 
 def test_market_hours_crypto():
     """Test crypto market hours (24/7)."""
     # Sunday midnight
     dt = datetime(2023, 10, 22, 0, 0, 0, tzinfo=pytz.timezone("America/New_York"))
     
-    assert is_market_open("BTC/USD", dt) == True
-    assert is_market_open("CRYPTO:BTC/USDT", dt) == True
+    assert is_market_open("BTC/USD", dt)
+    assert is_market_open("CRYPTO:BTC/USDT", dt)
 
 def test_market_hours_forex():
     """Test forex market hours."""
     # Tuesday 10 AM - OPEN
     dt_open = datetime(2023, 10, 24, 10, 0, 0, tzinfo=pytz.timezone("America/New_York"))
-    assert is_market_open("FX:EUR/USD", dt_open) == True
+    assert is_market_open("FX:EUR/USD", dt_open)
     
     # Saturday noon - CLOSED
     dt_closed = datetime(2023, 10, 21, 12, 0, 0, tzinfo=pytz.timezone("America/New_York"))
-    assert is_market_open("FX:EUR/USD", dt_closed) == False
+    assert not is_market_open("FX:EUR/USD", dt_closed)
     
     # Sunday 4 PM EST - CLOSED
     dt_sun_closed = datetime(2023, 10, 22, 16, 0, 0, tzinfo=pytz.timezone("America/New_York"))
-    assert is_market_open("FX:EUR/USD", dt_sun_closed) == False
+    assert not is_market_open("FX:EUR/USD", dt_sun_closed)
     
     # Sunday 6 PM EST - OPEN
     dt_sun_open = datetime(2023, 10, 22, 18, 0, 0, tzinfo=pytz.timezone("America/New_York"))
-    assert is_market_open("FX:EUR/USD", dt_sun_open) == True
+    assert is_market_open("FX:EUR/USD", dt_sun_open)

@@ -1,4 +1,3 @@
-router.py
 """World-Class Pydantic Schemas for Social Trading.
 
 Provides comprehensive data validation and serialization for trader profiles,
@@ -8,7 +7,7 @@ social feeds, and copy trading signals with strict type safety.
 from datetime import datetime
 from decimal import Decimal
 from enum import Enum
-from typing import Dict, List, Optional, Set
+from typing import Optional
 from uuid import UUID, uuid4
 
 from pydantic import BaseModel, Field, condecimal, conint, constr
@@ -67,12 +66,10 @@ class SocialFeedPost(BaseModel):
     # Engagement
     likes_count: conint(ge=0) = 0
     comments_count: conint(ge=0) = 0
-    shareservice.py
-    s_count: conint(ge=0) = 0
+    shares_count: conint(ge=0) = 0
     
     created_at: datetime = Field(default_factory=datetime.utcnow)
-    uservice.py
-    pdated_at: datetime = Field(default_factory=datetime.utcnow)
+    updated_at: datetime = Field(default_factory=datetime.utcnow)
 
 
 class CopyTradingSignal(BaseModel):

@@ -10,7 +10,6 @@ This script:
 
 import json
 import sys
-import os
 from pathlib import Path
 from datetime import datetime
 
@@ -33,7 +32,7 @@ def get_current_equity_from_ibkr():
         equity = connector.get_total_equity()
         cash = connector.get_cash_balance()
         
-        print(f"✅ IBKR Connection successful")
+        print("✅ IBKR Connection successful")
         print(f"   Total Equity: ${equity:,.2f}")
         print(f"   Cash Balance: ${cash:,.2f}")
         
@@ -58,7 +57,7 @@ def get_current_equity_from_alpaca():
         account = connector.api.get_account()
         equity = float(account.equity)
         
-        print(f"✅ Alpaca Connection successful")
+        print("✅ Alpaca Connection successful")
         print(f"   Total Equity: ${equity:,.2f}")
         
         return equity
@@ -79,7 +78,7 @@ def fix_risk_state(actual_equity: float):
     with open(risk_state_file, 'r') as f:
         state = json.load(f)
     
-    print(f"\n📊 Current Risk State:")
+    print("\n📊 Current Risk State:")
     print(f"   Day Start Capital: ${state['day_start_capital']:,.2f}")
     print(f"   Peak Capital: ${state['peak_capital']:,.2f}")
     print(f"   Starting Capital: ${state['starting_capital']:,.2f}")
@@ -110,10 +109,10 @@ def fix_risk_state(actual_equity: float):
     with open(risk_state_file, 'w') as f:
         json.dump(state, f, indent=2)
     
-    print(f"\n✅ Fixed Risk State:")
+    print("\n✅ Fixed Risk State:")
     print(f"   Day Start Capital: ${state['day_start_capital']:,.2f}")
     print(f"   Peak Capital: ${state['peak_capital']:,.2f}")
-    print(f"   Circuit Breaker: RESET")
+    print("   Circuit Breaker: RESET")
     
     return True
 

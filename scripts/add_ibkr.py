@@ -8,12 +8,9 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from config import ApexConfig
 from models.broker import BrokerType
 from services.broker.service import broker_service
-import services.auth.models
-import services.trading.models
-import services.audit.models
 
 async def add_ibkr():
-    print(f"🌱 Adding IBKR tenant broker connection...")
+    print("🌱 Adding IBKR tenant broker connection...")
     
     # Check if we already have it
     connections = await broker_service.list_connections("default_user")

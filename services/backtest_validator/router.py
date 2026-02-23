@@ -1,7 +1,6 @@
 """Backtest Validator API - POST /validate, GET /jobs, GET /jobs/{id}/report."""
 
 import logging
-from typing import List
 
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
 from sqlalchemy import select
@@ -12,7 +11,6 @@ from services.backtest_validator.schemas import JobListResponse, JobListItem, Va
 from services.backtest_validator.service import BacktestValidatorService
 from services.common.db import get_db
 from services.common.file_upload import parse_upload
-from services.common.schemas import JobStatus
 from services.common.subscription import require_feature
 
 logger = logging.getLogger(__name__)

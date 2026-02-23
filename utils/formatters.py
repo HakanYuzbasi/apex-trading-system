@@ -5,8 +5,7 @@ Functions for formatting prices, quantities, percentages, durations,
 and other values for display.
 """
 
-from datetime import datetime, timedelta
-from typing import Optional, Union
+from datetime import datetime
 
 
 def format_price(price: float, currency: str = "USD", decimals: int = 2) -> str:

@@ -9,8 +9,7 @@ AdaptiveRegimeDetector, replacing ad-hoc implementations across the codebase.
 """
 
 import pandas as pd
-from typing import Optional
-from .adaptive_regime_detector import AdaptiveRegimeDetector, RegimeAssessment
+from .adaptive_regime_detector import AdaptiveRegimeDetector
 
 # Global singleton to prevent re-initialization overhead (logs, CPU)
 _GLOBAL_DETECTOR = None

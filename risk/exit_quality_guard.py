@@ -20,9 +20,9 @@ Resilient retry with exponential backoff:
 - Attempt 6+: Retry every 5 min (never give up)
 """
 
-from typing import Dict, List, Optional, Tuple
-from dataclasses import dataclass, field
-from datetime import datetime, timedelta
+from typing import Dict, List, Optional
+from dataclasses import dataclass
+from datetime import datetime
 from enum import Enum
 import logging
 

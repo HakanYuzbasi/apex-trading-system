@@ -17,7 +17,7 @@ Environment variables can override defaults:
 import os
 import logging
 from pathlib import Path
-from typing import Set, Dict, List
+from typing import Dict, List
 
 # Load .env file automatically (allows overriding any setting without shell exports)
 try:
@@ -30,6 +30,10 @@ _config_logger = logging.getLogger(__name__)
 
 
 class ApexConfig:
+    # --- PHASE B: DYNAMIC LIMITS ---
+    CORRELATION_DYNAMIC_ENABLED = True
+    DRAWDOWN_DYNAMIC_TIERS_ENABLED = True
+
     """
     Central configuration for APEX Trading System.
 
@@ -272,6 +276,14 @@ class ApexConfig:
     PERFORMANCE_GOV_LOOKBACK_POINTS: int = int(os.getenv("APEX_PERFORMANCE_GOV_LOOKBACK_POINTS", "200"))
     PERFORMANCE_GOV_RECOVERY_POINTS: int = int(os.getenv("APEX_PERFORMANCE_GOV_RECOVERY_POINTS", "3"))
     PERFORMANCE_GOV_POINTS_PER_YEAR: int = int(os.getenv("APEX_PERFORMANCE_GOV_POINTS_PER_YEAR", "3276"))
+
+    # Dynamic governor targets — regime multipliers with floor
+    GOVERNOR_REGIME_TARGET_MULTIPLIERS: Dict = {
+        "strong_bull": 1.2, "bull": 1.0, "neutral": 0.8,
+        "bear": 0.6, "volatile": 0.5,
+    }
+    GOVERNOR_MIN_TARGET_SHARPE: float = 0.4
+    GOVERNOR_MIN_TARGET_SORTINO: float = 0.5
     GOVERNOR_POLICY_SCOPE: str = os.getenv("APEX_GOVERNOR_POLICY_SCOPE", "asset_class_regime")
     GOVERNOR_TUNE_CADENCE_DEFAULT: str = os.getenv("APEX_GOVERNOR_TUNE_CADENCE_DEFAULT", "weekly")
     GOVERNOR_TUNE_CADENCE_CRYPTO: str = os.getenv("APEX_GOVERNOR_TUNE_CADENCE_CRYPTO", "daily")
@@ -296,6 +308,10 @@ class ApexConfig:
     # Social-media shock governor (attention/sentiment + verified prediction odds)
     SOCIAL_SHOCK_GOVERNOR_ENABLED: bool = os.getenv(
         "APEX_SOCIAL_SHOCK_GOVERNOR_ENABLED", "true"
+    ).lower() == "true"
+    # Kill switch for dynamic adapters (NEWS_AGG, MARKET) — set False to disable
+    SOCIAL_DYNAMIC_ADAPTERS_ENABLED: bool = os.getenv(
+        "APEX_SOCIAL_DYNAMIC_ADAPTERS_ENABLED", "true"
     ).lower() == "true"
     SOCIAL_RISK_ATTENTION_TRIGGER_Z: float = float(
         os.getenv("APEX_SOCIAL_RISK_ATTENTION_TRIGGER_Z", "1.0")
@@ -471,6 +487,11 @@ class ApexConfig:
         "neutral": {"institutional": 1.0, "god_level": 1.0, "advanced": 1.0},
         "volatile": {"institutional": 0.9, "god_level": 1.1, "advanced": 1.0},
     }
+
+    # Model Weight Differentiation
+    MODEL_WEIGHT_TEMPERATURE: float = 3.0       # Power scaling for inverse-MSE weights
+    MODEL_WEIGHT_ACCURACY_BONUS: bool = True     # Include directional accuracy in weighting
+    MODEL_OVERFIT_RATIO_THRESHOLD: float = 2.5   # val/train ratio gate (excludes GP at 2.63x)
 
     # Signal Quality Filters (relaxed for more activity)
     MIN_MODEL_AGREEMENT = 0.50      # 50% agreement (majority rule)

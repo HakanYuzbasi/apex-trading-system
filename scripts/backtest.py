@@ -7,10 +7,9 @@ import argparse
 import sys
 import time
 from pathlib import Path
-from datetime import datetime, timedelta
 import pandas as pd
 import numpy as np
-from typing import Dict, List, Tuple, Optional
+from typing import Dict, List, Tuple
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
@@ -71,7 +70,7 @@ class ApexBacktester:
         num_batches = (total_symbols + self.BATCH_SIZE - 1) // self.BATCH_SIZE
 
         print(f"  {total_symbols} symbols will be processed in {num_batches} batches ({self.BATCH_SIZE} max per batch)")
-        print(f"  Snapshot mode reduces subscription overhead")
+        print("  Snapshot mode reduces subscription overhead")
 
         for batch_num in range(num_batches):
             start_idx = batch_num * self.BATCH_SIZE
@@ -90,7 +89,7 @@ class ApexBacktester:
             if batch_num < num_batches - 1:
                 time.sleep(self.BATCH_DELAY)
 
-        print(f"  Proper cleanup ensures slots are freed")
+        print("  Proper cleanup ensures slots are freed")
         return all_data
 
     def _fetch_single_symbol(self, symbol: str, start_date: str, end_date: str) -> pd.DataFrame:
@@ -117,7 +116,7 @@ class ApexBacktester:
 
             return data
 
-        except Exception as e:
+        except Exception:
             return pd.DataFrame()
 
     def calculate_market_regime(self, spy_data: pd.DataFrame, date_idx: int) -> float:
@@ -329,7 +328,7 @@ class ApexBacktester:
             confidence = float(signal_data.get('confidence', 0.0))
 
             return signal, confidence
-        except Exception as e:
+        except Exception:
             return 0.0, 0.0
 
     def rank_signals(self, signals: List[Tuple[str, float, float, float]]) -> List[Tuple[str, float, float, float]]:

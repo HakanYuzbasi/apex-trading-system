@@ -18,11 +18,9 @@ Also implements "Game Over" protection:
 
 import logging
 from typing import Dict, List, Optional, Set, Tuple
-from dataclasses import dataclass, field
-from datetime import datetime, timedelta, time
+from dataclasses import dataclass
+from datetime import datetime, timedelta
 from enum import Enum
-from collections import defaultdict
-import calendar
 
 logger = logging.getLogger(__name__)
 

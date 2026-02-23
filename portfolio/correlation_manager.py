@@ -353,7 +353,7 @@ class CorrelationManager:
         concentrated = len(issues) > 0
         
         if concentrated:
-            logger.warning(f"⚠️  Concentration risk detected:")
+            logger.warning("⚠️  Concentration risk detected:")
             for issue in issues:
                 logger.warning(f"   - {issue}")
         

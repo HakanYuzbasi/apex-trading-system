@@ -11,8 +11,7 @@ Features:
 """
 
 import numpy as np
-import pandas as pd
-from typing import Dict, List, Optional, Tuple, Any
+from typing import Dict, List
 import logging
 from dataclasses import dataclass
 
@@ -99,7 +98,7 @@ class SmartRebalancer:
                 
             # Estimated Cost
             # Cost = Commission + Impact
-            cost = trade_val * (self.commission_cost + self.impact_cost)
+            trade_val * (self.commission_cost + self.impact_cost)
             
             # Estimated Benefit (Alpha)
             # Assumption: The 'Target' portfolio outperforms 'Current' by some margin

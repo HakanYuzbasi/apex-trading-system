@@ -2,7 +2,6 @@
 execution/transaction_cost_optimizer.py
 Calculates execution impact and optimal chunk sizes for Parent Orders.
 """
-import math
 import logging
 
 logger = logging.getLogger(__name__)

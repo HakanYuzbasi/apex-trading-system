@@ -128,14 +128,14 @@ class AdvancedSignalGenerator:
         if isinstance(data, pd.Series):
             p = data
             df = pd.DataFrame(index=p.index)
-            v, h, l, o = None, None, None, None
+            v, h, low_px, _o = None, None, None, None
         else:
             p = data['Close']
             df = pd.DataFrame(index=p.index)
             v = data.get('Volume')
             h = data.get('High')
-            l = data.get('Low')
-            o = data.get('Open')
+            low_px = data.get('Low')
+            data.get('Open')
 
         returns = p.pct_change()
         
@@ -215,8 +215,8 @@ class AdvancedSignalGenerator:
             df['obv_momentum'] = 0.0
 
         # 13. Intraday Features (if available)
-        if h is not None and l is not None:
-            df['intraday_volat'] = (h - l) / p.replace(0, np.nan)
+        if h is not None and low_px is not None:
+            df['intraday_volat'] = (h - low_px) / p.replace(0, np.nan)
         else:
             df['intraday_volat'] = 0.0
 

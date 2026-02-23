@@ -38,6 +38,7 @@ jobs:
 
       - name: Run daily social ingestion + calibration
         run: |
+          mkdir -p artifacts/social-risk-daily data/governor_policies
           ACTIVATE_FLAG="--activate"
           if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ "${{ inputs.activate }}" = "false" ]; then
             ACTIVATE_FLAG="--no-activate"

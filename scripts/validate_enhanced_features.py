@@ -18,11 +18,10 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import numpy as np
 import pandas as pd
-from datetime import datetime, timedelta
+from datetime import datetime
 from models.institutional_signal_generator import (
     UltimateSignalGenerator,
-    FeatureEngine,
-    RegimeDetector
+    FeatureEngine
 )
 from core.logging_config import setup_logging
 
@@ -216,7 +215,7 @@ def test_regime_specific_training():
                 key=lambda x: x[1],
                 reverse=True
             )[:10]
-            print(f"  Top 10 Features:")
+            print("  Top 10 Features:")
             for feat, importance in top_features:
                 print(f"    {feat:25s}: {importance:.4f}")
     
@@ -254,7 +253,7 @@ def test_signal_generation():
         momentum_rank=0.6
     )
     
-    print(f"\n✅ Signal Generated:")
+    print("\n✅ Signal Generated:")
     print(f"  Symbol:              {signal.symbol}")
     print(f"  Signal:              {signal.signal:+.3f}")
     print(f"  Confidence:          {signal.confidence:.3f}")
@@ -262,7 +261,7 @@ def test_signal_generation():
     print(f"  ML Prediction:       {signal.ml_prediction:+.3f}")
     print(f"  ML Std:              {signal.ml_std:.3f}")
     print(f"  Data Quality:        {signal.data_quality:.1%}")
-    print(f"\n  Component Signals:")
+    print("\n  Component Signals:")
     print(f"    Momentum:          {signal.momentum_signal:+.3f}")
     print(f"    Mean Reversion:    {signal.mean_reversion_signal:+.3f}")
     print(f"    Trend:             {signal.trend_signal:+.3f}")
@@ -291,7 +290,7 @@ def main():
     print("ENHANCED FEATURE ENGINEERING VALIDATION")
     print("="*80)
     print(f"Timestamp: {datetime.now()}")
-    print(f"Expected Accuracy Gain: +8-14%")
+    print("Expected Accuracy Gain: +8-14%")
     
     try:
         # Test 1: Feature extraction
@@ -301,7 +300,7 @@ def main():
         generator, performance = test_regime_specific_training()
         
         # Test 3: Signal generation
-        signal = test_signal_generation()
+        test_signal_generation()
         
         # Test 4: Comparison analysis
         compare_baseline_vs_enhanced()
@@ -312,7 +311,7 @@ def main():
         print("="*80)
         print(f"✅ Feature extraction: {len(features_df.columns)} features")
         print(f"✅ Regime-specific training: {len(performance)} regimes")
-        print(f"✅ Signal generation: Working")
+        print("✅ Signal generation: Working")
         
         print("\n📊 Performance by Regime:")
         for regime, perf in performance.items():

@@ -17,9 +17,8 @@ Exit philosophy:
 """
 
 import numpy as np
-import pandas as pd
 from typing import Dict, Optional, Tuple
-from datetime import datetime, timedelta
+from datetime import datetime
 from dataclasses import dataclass
 from enum import Enum
 import logging
@@ -164,7 +163,7 @@ class DynamicExitManager:
             pnl_pct = (entry_price / current_price - 1)
 
         holding_days = (datetime.now() - entry_time).days
-        holding_hours = (datetime.now() - entry_time).total_seconds() / 3600
+        (datetime.now() - entry_time).total_seconds() / 3600
 
         # === 1. REGIME ADJUSTMENTS ===
         regime_adj = self.REGIME_ADJUSTMENTS.get(regime, self.REGIME_ADJUSTMENTS['neutral'])

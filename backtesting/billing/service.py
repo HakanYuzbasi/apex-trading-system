@@ -1,20 +1,17 @@
-router.py
 """World-Class Billing Service Implementation.
 
 Integrates with Stripe for payment processing, manages subscription lifecycles,
 and enforces tiered feature access across the platform.
 """
 
-import asyncio
 from datetime import datetime, timedelta
 from decimal import Decimal
-from typing import Dict, List, Optional
+from typing import Dict, List
 from uuid import UUID
 
 from .schemas import (
     SubscriptionPlan,
     UserSubscription,
-    PlanTier,
     Invoice,
     UsageMetric
 )

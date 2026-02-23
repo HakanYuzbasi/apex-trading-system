@@ -4,7 +4,7 @@ import time
 import functools
 import asyncio
 from typing import Dict, Any, Optional, List, Callable
-from datetime import datetime, timedelta
+from datetime import datetime
 from collections import defaultdict
 import statistics
 import logging
@@ -174,7 +174,7 @@ def monitor_performance(name: Optional[str] = None):
             try:
                 result = await func(*args, **kwargs)
                 return result
-            except Exception as e:
+            except Exception:
                 success = False
                 raise
             finally:
@@ -196,7 +196,7 @@ def monitor_performance(name: Optional[str] = None):
             try:
                 result = func(*args, **kwargs)
                 return result
-            except Exception as e:
+            except Exception:
                 success = False
                 raise
             finally:

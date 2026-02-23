@@ -12,8 +12,7 @@ Provides alerts and status checks.
 """
 
 import json
-import numpy as np
-from typing import Dict, List, Optional, Tuple, Any
+from typing import Dict, List, Optional, Any
 from datetime import datetime, timedelta
 from dataclasses import dataclass, field
 from pathlib import Path

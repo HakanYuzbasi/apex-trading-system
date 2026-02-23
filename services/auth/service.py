@@ -306,7 +306,7 @@ class AuthService:
         result = await self.db.execute(
             select(ApiKeyModel).where(
                 ApiKeyModel.key_hash == key_hash,
-                ApiKeyModel.is_active == True,
+                ApiKeyModel.is_active,
             )
         )
         api_key = result.scalar_one_or_none()

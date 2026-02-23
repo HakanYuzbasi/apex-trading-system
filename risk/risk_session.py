@@ -10,7 +10,7 @@ Encapsulates the risk state for a single user/session, including:
 import logging
 import json
 from datetime import datetime, timedelta
-from typing import Dict, Tuple, List, Optional
+from typing import Dict, Tuple, List
 from pathlib import Path
 
 from config import ApexConfig

@@ -23,8 +23,7 @@ Grafana Dashboard:
 
 import threading
 import time
-from datetime import datetime
-from typing import Dict, Optional, List
+from typing import Dict, Optional
 from http.server import HTTPServer, BaseHTTPRequestHandler
 import logging
 import json

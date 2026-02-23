@@ -9,7 +9,6 @@ Usage:
 
 from pydantic import BaseSettings, SecretStr, validator, Field
 from typing import Optional, Literal
-import os
 from pathlib import Path
 
 
@@ -201,4 +200,3 @@ if __name__ == "__main__":
     print(f"Circuit Breaker: {config.CIRCUIT_BREAKER_THRESHOLD:.1%}")
     print(f"Max Open Positions: {config.MAX_OPEN_POSITIONS}")
     print(f"{'='*50}\n")
-config_secure.py

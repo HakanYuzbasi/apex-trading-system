@@ -17,7 +17,7 @@ Version: 1.0.0
 
 import numpy as np
 import pandas as pd
-from typing import Dict, List, Optional, Tuple, Any
+from typing import Dict, List, Optional, Tuple
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from enum import Enum
@@ -264,7 +264,7 @@ class InstitutionalRiskManager:
 
         # 1. BASE SIZE - percentage of capital
         base_value = self.current_capital * self.config.max_position_pct
-        base_shares = int(base_value / price) if price > 0 else 0
+        int(base_value / price) if price > 0 else 0
 
         # 2. SIGNAL-ADJUSTED SIZE
         # Scale by signal strength and confidence with a floor

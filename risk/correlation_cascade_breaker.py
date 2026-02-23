@@ -55,6 +55,19 @@ class CorrelationCascadeBreaker:
     diversification fails.
     """
 
+    
+    def _get_dynamic_thresholds(self, vix_level: float = None):
+        from config import ApexConfig
+        if not getattr(ApexConfig, 'CORRELATION_DYNAMIC_ENABLED', False) or vix_level is None:
+            return (0.40, 0.60, 0.80)  # Fallback to static
+            
+        if vix_level > 30:
+            return (0.35, 0.55, 0.75)  # High VIX: tighten
+        elif vix_level > 20:
+            return (0.50, 0.70, 0.85)  # Normal
+        else:
+            return (0.60, 0.80, 0.90)  # Low VIX: relax
+
     def __init__(
         self,
         elevated_threshold: float = 0.40,

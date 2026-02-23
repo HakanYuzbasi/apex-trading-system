@@ -1,5 +1,4 @@
 """Tests for Execution Simulator service functions."""
-import pytest
 
 from services.execution_simulator.service import simulate_execution, _fallback_simulate
 from services.execution_simulator.schemas import SimulateRequest, AlgoResult, SimulateResponse

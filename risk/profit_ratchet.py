@@ -22,9 +22,8 @@ Additional features:
 import logging
 from typing import Dict, List, Optional, Tuple
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta
+from datetime import datetime
 from enum import IntEnum
-import numpy as np
 
 logger = logging.getLogger(__name__)
 
@@ -376,7 +375,6 @@ class ProfitRatchet:
     def get_diagnostics(self) -> Dict:
         """Return ratchet state for monitoring."""
         tier_counts = {tier.name: 0 for tier in ProfitTier}
-        total_locked = 0.0
 
         for symbol, pos in self._positions.items():
             tier = pos["highest_tier_reached"]

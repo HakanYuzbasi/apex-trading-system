@@ -16,7 +16,7 @@ Based on academic research:
 
 import numpy as np
 import pandas as pd
-from typing import Optional, Dict, Tuple
+from typing import Optional, Dict
 from dataclasses import dataclass
 from datetime import datetime, time
 import logging
@@ -126,7 +126,7 @@ class MarketImpactModel:
         Returns:
             ExecutionCosts with detailed breakdown
         """
-        order_value = abs(order_size_shares) * price
+        abs(order_size_shares) * price
 
         # 1. Spread Cost (half spread for crossing)
         spread_bps = max(conditions.bid_ask_spread_bps, self.MIN_SPREAD_BPS)
@@ -239,7 +239,6 @@ class MarketImpactModel:
         if t is None:
             return 1.0
 
-        hour_minute = (t.hour, t.minute)
 
         # Find nearest scheduled time
         closest_factor = 1.0

@@ -12,7 +12,7 @@ These features transform good trading into excellent trading.
 
 import logging
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import datetime
 from enum import Enum
 from typing import Dict, List, Optional, Tuple
 
@@ -156,11 +156,9 @@ class TradingExcellenceManager:
         # Calculate P&L
         if position_side == 'LONG':
             pnl_pct = (current_price / entry_price - 1) * 100
-            expected_signal_direction = 'bullish'
             signal_aligned = signal > 0
         else:  # SHORT
             pnl_pct = (entry_price / current_price - 1) * 100
-            expected_signal_direction = 'bearish'
             signal_aligned = signal < 0
 
         # Determine signal direction
@@ -305,7 +303,6 @@ class TradingExcellenceManager:
         reason = "Position within normal parameters"
 
         # Check signal alignment
-        signal_aligned = (position_side == 'LONG' and signal > 0) or (position_side == 'SHORT' and signal < 0)
         signal_weak = abs(signal) < 0.15
         signal_opposite = (position_side == 'LONG' and signal < -0.10) or (position_side == 'SHORT' and signal > 0.10)
 

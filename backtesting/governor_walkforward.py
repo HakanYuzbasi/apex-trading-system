@@ -7,7 +7,7 @@ Walk-forward tuner for governor policy controls with asset-class + regime scope.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import datetime
 from itertools import product
 from typing import Dict, Iterable, List, Sequence, Tuple
 

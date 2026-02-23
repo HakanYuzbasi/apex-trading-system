@@ -7,13 +7,12 @@ Reuses:
 - PDF report generation
 """
 
-import io
 import logging
 import os
 import uuid
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Optional
 
 import numpy as np
 

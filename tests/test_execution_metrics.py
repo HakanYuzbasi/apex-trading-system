@@ -1,9 +1,6 @@
-import pytest
-import time
-from pathlib import Path
 from execution.metrics_store import ExecutionMetricsStore
 from execution.ibkr_connector import IBKRConnector
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 def test_metrics_store(tmp_path):
     """Test ExecutionMetricsStore functionality."""

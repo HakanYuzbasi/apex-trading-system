@@ -5,10 +5,8 @@ with distributed support via Redis.
 """
 
 import time
-import asyncio
-from typing import Optional, Dict, List, Tuple
+from typing import Optional, Dict, Tuple
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta
 from collections import deque
 import redis.asyncio as redis
 from fastapi import HTTPException, Request
@@ -296,7 +294,7 @@ class RateLimitMiddleware:
         # Add rate limit headers to response
         response = await call_next(request)
         response.headers["X-RateLimit-Limit"] = str(info.get("limit", 0))
-        response.headers["X-RateLimit-Remaining"] = str(info.get("remaining", 0))rate_limiter.py
+        response.headers["X-RateLimit-Remaining"] = str(info.get("remaining", 0))
         
         response.headers["X-RateLimit-Reset"] = str(info.get("reset", 0))
         

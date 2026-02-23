@@ -14,10 +14,8 @@ import pandas as pd
 import numpy as np
 import plotly.graph_objects as go
 import plotly.express as px
-from datetime import datetime, timedelta
-from typing import Dict, List, Optional
-import os
-import json
+from datetime import datetime
+from typing import Dict, Optional
 
 # Setup page config (must be first streamlit command if run directly)
 # st.set_page_config(layout="wide", page_title="APEX Advanced Dashboard")

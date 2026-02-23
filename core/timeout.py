@@ -173,7 +173,6 @@ async def run_with_timeout_and_retry(
     Returns:
         Result of coroutine or fallback value
     """
-    last_error = None
 
     for attempt in range(max_retries + 1):
         try:
@@ -181,8 +180,7 @@ async def run_with_timeout_and_retry(
                 coro_factory(),
                 timeout=timeout
             )
-        except asyncio.TimeoutError as e:
-            last_error = e
+        except asyncio.TimeoutError:
             if attempt < max_retries:
                 logger.warning(
                     f"Timeout in {operation_name} (attempt {attempt + 1}/{max_retries + 1}), retrying..."

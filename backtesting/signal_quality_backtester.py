@@ -13,13 +13,10 @@ This module extends the backtesting framework to:
 
 import pandas as pd
 import numpy as np
-from typing import Dict, List, Optional, Tuple, Any, Callable
-from datetime import datetime, timedelta
+from typing import Dict, List, Optional, Callable
+from datetime import datetime
 from dataclasses import dataclass, field
-from collections import defaultdict
 import logging
-from pathlib import Path
-import json
 
 from config import ApexConfig
 
@@ -206,7 +203,7 @@ class SignalQualityBacktester:
         # Signal generator
         self.signal_generator: Optional[Callable] = None
 
-        logger.info(f"SignalQualityBacktester initialized")
+        logger.info("SignalQualityBacktester initialized")
         logger.info(f"  Windows: {self.lookback_windows}")
         logger.info(f"  Targets: {self.target_returns}")
 
@@ -591,7 +588,7 @@ class SignalQualityBacktester:
             edge_attr = f'edge_{window}d'
 
             correct_signals = [s for s in signals
-                             if getattr(s, correct_attr) == True and getattr(s, return_attr) is not None]
+                             if getattr(s, correct_attr) and getattr(s, return_attr) is not None]
             if correct_signals:
                 avg_edge = np.mean([getattr(s, return_attr) for s in correct_signals])
                 setattr(report, edge_attr, avg_edge)
@@ -728,53 +725,53 @@ class SignalQualityBacktester:
         logger.info("SIGNAL QUALITY ANALYSIS REPORT")
         logger.info("=" * 80)
 
-        logger.info(f"\nSIGNAL SUMMARY:")
+        logger.info("\nSIGNAL SUMMARY:")
         logger.info(f"  Total Signals: {report.total_signals}")
         logger.info(f"    Buy: {report.buy_signals} | Sell: {report.sell_signals} | Neutral: {report.neutral_signals}")
 
-        logger.info(f"\nDIRECTIONAL ACCURACY:")
+        logger.info("\nDIRECTIONAL ACCURACY:")
         logger.info(f"  1-day:  {report.accuracy_1d*100:.1f}%")
         logger.info(f"  5-day:  {report.accuracy_5d*100:.1f}%")
         logger.info(f"  10-day: {report.accuracy_10d*100:.1f}%")
 
-        logger.info(f"\nAVERAGE RETURNS:")
+        logger.info("\nAVERAGE RETURNS:")
         logger.info(f"  1-day:  {report.avg_return_1d*100:+.2f}%")
         logger.info(f"  5-day:  {report.avg_return_5d*100:+.2f}% (std: {report.std_return_5d*100:.2f}%)")
         logger.info(f"  10-day: {report.avg_return_10d*100:+.2f}% (std: {report.std_return_10d*100:.2f}%)")
         logger.info(f"  20-day: {report.avg_return_20d*100:+.2f}%")
 
-        logger.info(f"\nMFE/MAE ANALYSIS:")
+        logger.info("\nMFE/MAE ANALYSIS:")
         logger.info(f"  5-day:  MFE={report.avg_mfe_5d*100:+.2f}% | MAE={report.avg_mae_5d*100:+.2f}% | Ratio={report.mfe_mae_ratio_5d:.2f}")
         logger.info(f"  10-day: MFE={report.avg_mfe_10d*100:+.2f}% | MAE={report.avg_mae_10d*100:+.2f}% | Ratio={report.mfe_mae_ratio_10d:.2f}")
 
-        logger.info(f"\nEDGE (Avg return when correct):")
+        logger.info("\nEDGE (Avg return when correct):")
         logger.info(f"  1-day:  {report.edge_1d*100:+.2f}%")
         logger.info(f"  5-day:  {report.edge_5d*100:+.2f}%")
         logger.info(f"  10-day: {report.edge_10d*100:+.2f}%")
 
-        logger.info(f"\nTARGET ACHIEVEMENT:")
+        logger.info("\nTARGET ACHIEVEMENT:")
         logger.info(f"  Hit 2% in 5 days:  {report.hit_rate_2pct_5d*100:.1f}%")
         logger.info(f"  Hit 5% in 10 days: {report.hit_rate_5pct_10d*100:.1f}%")
         logger.info(f"  Avg time to 2%: {report.avg_time_to_2pct:.1f} days")
         logger.info(f"  Avg time to 5%: {report.avg_time_to_5pct:.1f} days")
 
-        logger.info(f"\nQUALITY DISTRIBUTION:")
+        logger.info("\nQUALITY DISTRIBUTION:")
         logger.info(f"  High (>70%):   {report.pct_high_quality*100:.1f}%")
         logger.info(f"  Medium:        {report.pct_medium_quality*100:.1f}%")
         logger.info(f"  Low (<40%):    {report.pct_low_quality*100:.1f}%")
 
-        logger.info(f"\nACCURACY BY CONFIDENCE:")
+        logger.info("\nACCURACY BY CONFIDENCE:")
         logger.info(f"  Low (<0.4):    {report.accuracy_low_conf*100:.1f}%")
         logger.info(f"  Medium:        {report.accuracy_med_conf*100:.1f}%")
         logger.info(f"  High (>=0.7):  {report.accuracy_high_conf*100:.1f}%")
 
-        logger.info(f"\nACCURACY BY SIGNAL STRENGTH:")
+        logger.info("\nACCURACY BY SIGNAL STRENGTH:")
         logger.info(f"  Weak (<0.3):     {report.accuracy_weak*100:.1f}%")
         logger.info(f"  Moderate:        {report.accuracy_moderate*100:.1f}%")
         logger.info(f"  Strong (>=0.6):  {report.accuracy_strong*100:.1f}%")
 
         if report.accuracy_by_regime:
-            logger.info(f"\nACCURACY BY REGIME:")
+            logger.info("\nACCURACY BY REGIME:")
             for regime, acc in report.accuracy_by_regime.items():
                 ret = report.return_by_regime.get(regime, 0)
                 logger.info(f"  {regime}: {acc*100:.1f}% (avg ret: {ret*100:+.2f}%)")

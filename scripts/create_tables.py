@@ -6,9 +6,6 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 # Import all models to ensure they register with Base.metadata
 from services.common.db import get_engine, Base
-import services.auth.models
-import services.trading.models
-import services.audit.models
 
 async def create_tables():
     engine = get_engine()

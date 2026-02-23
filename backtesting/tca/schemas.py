@@ -4,11 +4,11 @@ from datetime import datetime
 from enum import Enum
 
 class BenchmarkType(str, Enum):
-    VWAP = \"VWAP\"
-    TWAP = \"TWAP\"
-    ARRIVAL = \"ARRIVAL\"
-    CLOSE = \"CLOSE\"
-    OPEN = \"OPEN\"
+    VWAP = "VWAP"
+    TWAP = "TWAP"
+    ARRIVAL = "ARRIVAL"
+    CLOSE = "CLOSE"
+    OPEN = "OPEN"
 
 class TradeExecution(BaseModel):
     trade_id: str
@@ -20,7 +20,7 @@ class TradeExecution(BaseModel):
     benchmark_price: float
     timestamp: datetime
     fees: float = 0.0
-    venue: str = \"OTC\"
+    venue: str = "OTC"
 
 class SlippageMetrics(BaseModel):
     arrival_slippage_bps: float

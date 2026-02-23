@@ -1,11 +1,10 @@
 import pandas as pd
 import numpy as np
 from models.adaptive_regime_detector import AdaptiveRegimeDetector
-from models.institutional_signal_generator import MarketRegime
 
 def test_regime_detection():
     # Create synthetic test data with a clear trend
-    dates = pd.date_range('2024-01-01', periods=200, freq='D')
+    pd.date_range('2024-01-01', periods=200, freq='D')
     
     # 1. Neutral portion
     prices_neutral = 100 + np.random.randn(60)

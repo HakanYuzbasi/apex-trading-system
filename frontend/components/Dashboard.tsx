@@ -36,6 +36,7 @@ import AlertsFeed from "@/components/dashboard/AlertsFeed";
 import ControlsPanel from "@/components/dashboard/ControlsPanel";
 import EquityPanel from "@/components/dashboard/EquityPanel";
 import PositionsTable from "@/components/dashboard/PositionsTable";
+import ExplainableAIChart from "@/components/dashboard/ExplainableAIChart";
 import { Skeleton } from "@/components/ui/skeleton";
 import { useWebSocket } from "@/hooks/useWebSocket";
 import {
@@ -369,6 +370,15 @@ export default function Dashboard({ isPublic = false }: { isPublic?: boolean }) 
 
   // Parse WebSocket message
   const wsData = wsMessage?.type === "state_update" ? wsMessage : null;
+
+  // Extract SHAP values from WS or fall back to mock data for demonstration
+  const activeShapData = (wsData as any)?.shap_values ?? {
+    "Price Momentum (Feature #2)": 0.45,
+    "Volatility Profile (Feature #1)": -0.12,
+    "RSI State (Feature #4)": 0.08,
+    "MACD Action (Feature #0)": -0.05,
+    "Statistical Z-Score (Feature #3)": 0.02
+  };
 
   // Merge Metrics: Prefer WS data, fallback to REST
   const mergedMetrics = useMemo(() => {
@@ -1453,7 +1463,7 @@ export default function Dashboard({ isPublic = false }: { isPublic?: boolean }) 
                 <ShieldCheck className="h-3.5 w-3.5" />
                 APEX Trading System
               </p>
-              <h1 className="text-3xl font-semibold tracking-tight text-foreground">Apex Dashboard</h1>
+              <h1 className="text-4xl font-extrabold tracking-tight bg-clip-text text-transparent bg-gradient-to-r from-sky-400 via-indigo-400 to-emerald-400 drop-shadow-sm pb-1">Apex Trading Terminal</h1>
               <p className="text-sm text-muted-foreground">Real-time execution monitoring.</p>
               <p className="text-xs text-muted-foreground">Desk sync: {nowLabel}</p>
               {aggregatedEquity !== null && (
@@ -1465,16 +1475,19 @@ export default function Dashboard({ isPublic = false }: { isPublic?: boolean }) 
             </div>
 
             <ControlsPanel>
-              <span
-                className={`inline-flex items-center gap-2 rounded-full px-3 py-1 text-xs font-semibold ${isDisconnected
-                  ? "bg-destructive/15 text-destructive"
+                            <span
+                className={`inline-flex items-center gap-2.5 rounded-full px-3.5 py-1.5 text-xs font-bold uppercase tracking-widest border ${isDisconnected
+                  ? "bg-negative/10 text-negative border-negative/30 shadow-[0_0_15px_rgba(239,68,68,0.2)]"
                   : isStale
-                    ? "bg-warning/15 text-warning"
-                    : "bg-positive/15 text-positive"
+                    ? "bg-warning/10 text-warning border-warning/30 shadow-[0_0_15px_rgba(245,158,11,0.2)]"
+                    : "bg-positive/10 text-positive border-positive/30 shadow-[0_0_15px_rgba(74,222,128,0.2)]"
                   }`}
               >
-                {isDisconnected ? <WifiOff className="h-3.5 w-3.5" /> : <Wifi className="h-3.5 w-3.5" />}
-                {isDisconnected ? "Disconnected" : isStale ? "Connected (Stale)" : "Connected"}
+                <div className="live-ping">
+                  <span className={`live-ping-anim ${isDisconnected ? 'hidden' : ''}`}></span>
+                  <span className="live-ping-dot"></span>
+                </div>
+                {isDisconnected ? "System Offline" : isStale ? "Feed Stale" : "Live Engine"}
               </span>
               <Button variant="outline" className="rounded-xl" onClick={() => window.location.reload()}>
                 <RefreshCw className="h-4 w-4" />
@@ -1722,6 +1735,11 @@ export default function Dashboard({ isPublic = false }: { isPublic?: boolean }) 
               </div>
             </dl>
           </article>
+        </section>
+
+        {/* --- EXPLAINABLE AI SHAP CHART INJECTION --- */}
+        <section className="apex-fade-up mb-4 w-full">
+          <ExplainableAIChart shapData={activeShapData} symbol="System Aggregate" />
         </section>
 
         <section className="grid grid-cols-1 gap-4">

@@ -3,7 +3,7 @@ execution/smart_order_router.py
 Venue-aware order router mapping liquidity depth and routing based on fees & execution speed.
 """
 import logging
-from typing import Dict, Optional
+from typing import Dict
 
 logger = logging.getLogger(__name__)
 

@@ -94,7 +94,7 @@ def check_signals():
     print(f"Would trigger trades:  {len(would_trade)}")
 
     if would_trade:
-        print(f"\nSymbols ready to trade:")
+        print("\nSymbols ready to trade:")
         for symbol, signal, conf, direction in would_trade:
             print(f"  {symbol}: {direction} (signal={signal:.3f}, confidence={conf:.3f})")
     else:

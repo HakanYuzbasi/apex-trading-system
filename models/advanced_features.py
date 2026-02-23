@@ -17,7 +17,7 @@ Features:
 import numpy as np
 import pandas as pd
 import logging
-from typing import List, Dict, Optional, Union, Tuple, Any
+from typing import List, Optional, Union, Tuple
 
 logger = logging.getLogger(__name__)
 
@@ -62,14 +62,14 @@ class FeatureEngine:
             df = pd.DataFrame(index=p.index)
             v = None
             h = None
-            l = None
+            low_px = None
             o = None
         else:
             p = data['Close']
             df = pd.DataFrame(index=p.index)
             v = data.get('Volume')
             h = data.get('High')
-            l = data.get('Low')
+            low_px = data.get('Low')
             o = data.get('Open')
 
         returns = p.pct_change()
@@ -159,8 +159,8 @@ class FeatureEngine:
             df['obv_zscore'] = (obv - obv.rolling(20).mean()) / obv.rolling(20).std().replace(0, np.nan)
             
             # MFI (Money Flow Index) - Simplified
-            if h is not None and l is not None:
-                tp = (h + l + p) / 3
+            if h is not None and low_px is not None:
+                tp = (h + low_px + p) / 3
                 mf = tp * v
                 pos_mf = mf.where(tp > tp.shift(1), 0).rolling(14).sum()
                 neg_mf = mf.where(tp < tp.shift(1), 0).rolling(14).sum()
@@ -174,10 +174,10 @@ class FeatureEngine:
             df['mfi_14'] = 0.0
         
         # 8. NEW: Intraday Features (if available)
-        if h is not None and l is not None:
-            df['intraday_range'] = (h - l) / p.replace(0, np.nan)
+        if h is not None and low_px is not None:
+            df['intraday_range'] = (h - low_px) / p.replace(0, np.nan)
             if o is not None:
-                df['body_size'] = (p - o) / (h - l).replace(0, np.nan)
+                df['body_size'] = (p - o) / (h - low_px).replace(0, np.nan)
             else:
                 df['body_size'] = 0.0
         else:
@@ -190,13 +190,13 @@ class FeatureEngine:
         
         # 9. VOLATILITY DYNAMICS (Expected gain: +2-3%)
         # Realized volatility (intraday range-based)
-        if h is not None and l is not None:
-            df['rv_today'] = np.log(h / l.replace(0, np.nan))
+        if h is not None and low_px is not None:
+            df['rv_today'] = np.log(h / low_px.replace(0, np.nan))
             df['rv_yesterday'] = df['rv_today'].shift(1)
             df['rv_ratio'] = df['rv_today'] / (df['rv_yesterday'] + 1e-8)  # Expansion ratio
             
             # Parkinson volatility (more efficient than close-to-close)
-            df['parkinson_vol'] = np.sqrt((1/(4*np.log(2))) * (np.log(h/l.replace(0, np.nan)))**2)
+            df['parkinson_vol'] = np.sqrt((1/(4*np.log(2))) * (np.log(h/low_px.replace(0, np.nan)))**2)
             df['parkinson_accel'] = df['parkinson_vol'].diff()  # Acceleration
         else:
             df['rv_today'] = 0.0
@@ -230,13 +230,13 @@ class FeatureEngine:
             df['illiquidity_surge'] = 1.0
         
         # Closing auction pressure (institutions showing hand)
-        if h is not None and l is not None and o is not None:
-            df['close_pressure'] = (p - o) / ((h - l) + 1e-8)
+        if h is not None and low_px is not None and o is not None:
+            df['close_pressure'] = (p - o) / ((h - low_px) + 1e-8)
             df['close_pressure_5d'] = df['close_pressure'].rolling(5).mean()
             
             # Intraday momentum persistence
             df['am_momentum'] = (h - o) / (o + 1e-8)  # Morning strength
-            df['pm_momentum'] = (p - l) / (l + 1e-8)   # Afternoon strength
+            df['pm_momentum'] = (p - low_px) / (low_px + 1e-8)   # Afternoon strength
             df['session_reversal'] = df['am_momentum'] * df['pm_momentum']  # Negative = reversal
         else:
             df['close_pressure'] = 0.0

@@ -14,8 +14,7 @@ Usage:
 """
 
 import numpy as np
-import pandas as pd
-from typing import Dict, List, Optional, Any, Tuple, Callable
+from typing import Dict, List, Optional, Any
 from dataclasses import dataclass
 from datetime import datetime
 import logging
@@ -179,7 +178,7 @@ class HyperparameterTuner:
         # Ensure results directory exists
         self.results_dir.mkdir(parents=True, exist_ok=True)
 
-        logger.info(f"🔧 Hyperparameter Tuner initialized")
+        logger.info("🔧 Hyperparameter Tuner initialized")
         logger.info(f"   Model: {model_type}")
         logger.info(f"   Scoring: {scoring}")
         logger.info(f"   Train samples: {len(X_train)}, Val samples: {len(self.X_val)}")
@@ -353,7 +352,7 @@ class HyperparameterTuner:
         start_time = datetime.now()
         study_name = study_name or f"{self.model_type}_{start_time.strftime('%Y%m%d_%H%M%S')}"
 
-        logger.info(f"🔍 Starting hyperparameter optimization")
+        logger.info("🔍 Starting hyperparameter optimization")
         logger.info(f"   Trials: {n_trials}")
         logger.info(f"   Study: {study_name}")
 
@@ -382,7 +381,7 @@ class HyperparameterTuner:
         best_params = self.study.best_params
         best_score = self.study.best_value
 
-        logger.info(f"✅ Optimization complete")
+        logger.info("✅ Optimization complete")
         logger.info(f"   Best score: {best_score:.4f}")
         logger.info(f"   Best params: {best_params}")
 

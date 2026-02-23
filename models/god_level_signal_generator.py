@@ -6,12 +6,11 @@ With market regime detection, multi-timeframe analysis, and adaptive confidence 
 
 import numpy as np
 import pandas as pd
-from typing import Dict, List, Tuple, Optional
+from typing import Dict, List, Tuple
 from datetime import datetime
 from enum import Enum
 import logging
 import warnings
-import os
 import pickle
 from pathlib import Path
 
@@ -19,7 +18,13 @@ warnings.filterwarnings('ignore')
 logger = logging.getLogger(__name__)
 
 # Check available ML libraries
-ML_LIBS = {'sklearn': False, 'xgboost': False, 'lightgbm': False}
+ML_LIBS = {'sklearn': False, 'xgboost': False, 'lightgbm': False, 'shap': False}
+
+try:
+    import shap
+    ML_LIBS['shap'] = True
+except ImportError:
+    pass
 
 try:
     from sklearn.ensemble import RandomForestRegressor, GradientBoostingRegressor
@@ -67,6 +72,7 @@ class GodLevelSignalGenerator:
         self.feature_scaler = RobustScaler() if ML_LIBS['sklearn'] else None
         self.models = {}
         self.models_trained = False
+        self.explainers = {}
         self.feature_importance = {}
         self.regime_history = []
         self.model_dir = Path(model_dir)
@@ -78,7 +84,7 @@ class GodLevelSignalGenerator:
         # Try to load existing models
         self.load_models()
 
-        logger.info(f"God Level Signal Generator initialized")
+        logger.info("God Level Signal Generator initialized")
         logger.info(f"  ML Libraries: sklearn={ML_LIBS['sklearn']}, xgboost={ML_LIBS['xgboost']}, lightgbm={ML_LIBS['lightgbm']}")
 
     def _init_models(self):
@@ -433,8 +439,8 @@ class GodLevelSignalGenerator:
         recent = prices.iloc[-40:]
 
         # Find local minima and maxima
-        min_idx = recent.idxmin()
-        max_idx = recent.idxmax()
+        recent.idxmin()
+        recent.idxmax()
 
         # Simple pattern detection
         first_half = recent.iloc[:20]
@@ -596,6 +602,7 @@ class GodLevelSignalGenerator:
 
         # Calculate feature importance (average across models)
         self._calculate_feature_importance()
+        self._init_explainers()
 
         self.models_trained = True
         self.save_models()
@@ -633,6 +640,7 @@ class GodLevelSignalGenerator:
             self.feature_scaler = model_data['scaler']
             self.feature_importance = model_data.get('importance', {})
             self.models_trained = True
+            self._init_explainers()
             
             trained_at = model_data.get('trained_at', 'unknown')
             logger.info(f"✅ God Level models loaded from disk (trained at: {trained_at})")
@@ -640,6 +648,19 @@ class GodLevelSignalGenerator:
         except Exception as e:
             logger.error(f"❌ Failed to load models: {e}")
             return False
+
+    def _init_explainers(self):
+        """Initialize SHAP TreeExplainers for Explainable AI (XAI)."""
+        if not ML_LIBS.get('shap'):
+            return
+        logger.info("🧠 Initializing XAI (SHAP) Explainers...")
+        for name, model in self.models.items():
+            try:
+                if name in ['xgb', 'rf', 'lgb']:
+                    # TreeExplainer is lightning fast for ensemble trees
+                    self.explainers[name] = shap.TreeExplainer(model)
+            except Exception as e:
+                logger.debug(f"Could not init SHAP for {name}: {e}")
 
     def _calculate_feature_importance(self):
         """Calculate and store feature importance."""
@@ -719,6 +740,27 @@ class GodLevelSignalGenerator:
 
         signal = float(np.clip(signal, -1, 1))
 
+        # XAI: Explainable AI SHAP Values Calculation
+        shap_explanation = {}
+        if self.models_trained and ML_LIBS.get('shap') and 'xgb' in self.explainers:
+            try:
+                # Get waterfall values for this specific market tick
+                shap_vals = self.explainers['xgb'].shap_values(features_scaled)[0]
+                
+                # Extract Top 5 driving factors (absolute magnitude)
+                top_indices = np.argsort(np.abs(shap_vals))[-5:]
+                
+                # Human-readable bucket categories for the frontend UI
+                feature_categories = ["Price Momentum", "RSI State", "MACD Action", "Bollinger Pos", "Volatility Profile", "Moving Average", "Trend Strength", "S/R Levels", "Chart Pattern", "Statistical Z-Score"]
+                
+                for idx in reversed(top_indices):
+                    val = float(shap_vals[idx])
+                    cat_idx = min(idx // 5, len(feature_categories) - 1)
+                    feat_name = f"{feature_categories[cat_idx]} (Feature #{idx})"
+                    shap_explanation[feat_name] = val
+            except Exception as e:
+                logger.debug(f"Failed to calculate SHAP: {e}")
+
         # 5. Calculate adaptive confidence
         confidence = self._calculate_adaptive_confidence(components, ml_predictions, regime)
 
@@ -727,6 +769,7 @@ class GodLevelSignalGenerator:
             'confidence': confidence,
             'regime': regime.value,
             'components': components,
+            'shap_values': shap_explanation,
             'timestamp': datetime.now()
         }
 
@@ -737,6 +780,7 @@ class GodLevelSignalGenerator:
             'confidence': 0.0,
             'regime': MarketRegime.NEUTRAL.value,
             'components': {},
+            'shap_values': {},
             'timestamp': datetime.now()
         }
 

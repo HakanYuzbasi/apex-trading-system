@@ -12,12 +12,11 @@ Features:
 - Notification system for config changes
 """
 
-import asyncio
 import json
 import logging
 import os
 import threading
-from dataclasses import dataclass, field, asdict
+from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, Any, Optional, Callable, List, Set

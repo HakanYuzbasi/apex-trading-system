@@ -6,7 +6,7 @@ Common data manipulation functions for financial time series data.
 
 import numpy as np
 import pandas as pd
-from typing import List, Dict, Optional, Union, Tuple
+from typing import List, Dict, Union, Tuple
 
 
 def calculate_returns(

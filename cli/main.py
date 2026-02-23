@@ -482,7 +482,7 @@ async def stats():
         await database.connect()
 
         # Get counts
-        trades = await database.get_trades(limit=1)
+        await database.get_trades(limit=1)
         console.print(f"Database: {database.backend.db_path}")
 
         # Get file size

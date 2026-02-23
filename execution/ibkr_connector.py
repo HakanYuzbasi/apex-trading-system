@@ -27,7 +27,6 @@ except Exception:
 import pandas as pd
 
 from config import ApexConfig
-from pathlib import Path
 from execution.metrics_store import ExecutionMetricsStore
 from core.symbols import AssetClass, parse_symbol, normalize_symbol, is_market_open
 
@@ -1775,27 +1774,6 @@ class IBKRConnector:
             quantity=close_qty
         )
 
-    def get_portfolio_market_values(self) -> Dict[str, float]:
-        """
-        Get market value of all positions from IBKR portfolio updates.
-        Returns dict {key: marketValue} for OPTIONS.
-        Key format matches get_option_positions: Symbol_Expiry_Strike_Right
-        """
-        try:
-            # portfolio() returns list of PortfolioItem
-            # PortfolioItem(contract, position, marketPrice, marketValue, averageCost, unrealizedPNL, realizedPNL, account)
-            items = self.ib.portfolio()
-            result = {}
-            for item in items:
-                contract = item.contract
-                if contract.secType == 'OPT':
-                    key = f"{contract.symbol}_{contract.lastTradeDateOrContractMonth}_{contract.strike}_{contract.right}"
-                    result[key] = item.marketValue
-            
-            return result
-        except Exception as e:
-            logger.error(f"❌ Error getting portfolio values: {e}")
-            return {}
     def __del__(self):
         """Cleanup on deletion."""
         self.disconnect()

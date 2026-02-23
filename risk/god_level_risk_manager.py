@@ -12,7 +12,6 @@ Advanced risk management with:
 import numpy as np
 import pandas as pd
 from typing import Dict, List, Tuple, Optional
-from datetime import datetime, timedelta
 from dataclasses import dataclass
 from enum import Enum
 import logging
@@ -133,8 +132,8 @@ class GodLevelRiskManager:
         stop_loss = entry_price * (1 - stop_distance_pct) if signal_strength > 0 else entry_price * (1 + stop_distance_pct)
         risk_per_share = abs(entry_price - stop_loss)
 
-        # 3. Kelly criterion for optimal bet size
-        kelly_fraction = self._calculate_kelly_fraction(signal_strength, confidence)
+        # 3. Kelly criterion for optimal bet size (regime-adaptive)
+        kelly_fraction = self._calculate_kelly_fraction(signal_strength, confidence, regime)
 
         # 4. Volatility-adjusted position size
         vol_adjusted_size = self._volatility_adjusted_size(atr_pct)
@@ -306,31 +305,23 @@ class GodLevelRiskManager:
 
         return base_multiplier * signal_adjustment
 
-    def _calculate_kelly_fraction(self, signal_strength: float, confidence: float) -> float:
+    def _calculate_kelly_fraction(self, signal_strength: float, confidence: float, regime: str = "neutral", outcome_stats=None) -> float:
         """
-        Calculate Kelly criterion fraction.
-        Kelly = (W * p - L * q) / W
-        Where:
-        - p = probability of winning (confidence)
-        - q = probability of losing (1 - p)
-        - W = average win size
-        - L = average loss size
+        Calculate regime-adaptive Kelly fraction for position sizing.
         """
-        # Estimate win probability from confidence
-        win_prob = 0.5 + (confidence * abs(signal_strength)) * 0.3  # 50-80% range
-        win_prob = min(max(win_prob, 0.4), 0.75)  # Clamp to realistic range
-
-        # Estimate win/loss ratio from signal strength
-        win_loss_ratio = 1.0 + abs(signal_strength) * 0.5  # 1.0-1.5 range
-
-        # Kelly formula
-        kelly = (win_prob * win_loss_ratio - (1 - win_prob)) / win_loss_ratio
-
-        # Half-Kelly for safety (full Kelly is too aggressive)
-        kelly = kelly * 0.5
-
-        # Clamp to reasonable range
-        return float(max(min(kelly, 0.25), 0.02))
+        if outcome_stats and getattr(outcome_stats, 'n', 0) >= 20:
+            win_prob = outcome_stats.win_rate
+            win_loss = outcome_stats.avg_win / max(abs(outcome_stats.avg_loss), 0.001)
+        else:
+            win_prob = 0.4  # Flat conservative fallback
+            win_loss = 1.0 + abs(signal_strength) * 0.5
+            
+        kelly = (win_prob * win_loss - (1 - win_prob)) / max(win_loss, 0.001)
+        regime_scale = {"strong_bull": 0.85, "bull": 0.75, "neutral": 0.60, "bear": 0.50, "strong_bear": 0.40, "volatile": 0.25}
+        
+        # Clamp to 0.02 minimum for warm-up phases where win_prob=0.4 makes kelly negative
+        import numpy as np
+        return float(np.clip(kelly * 0.5 * regime_scale.get(regime, 0.5), 0.02, 0.25))
 
     def _volatility_adjusted_size(self, atr_pct: float) -> float:
         """Reduce position size for high volatility stocks."""

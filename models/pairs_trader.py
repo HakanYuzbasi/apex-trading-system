@@ -16,7 +16,6 @@ import numpy as np
 import pandas as pd
 from typing import Dict, List, Optional, Tuple, Any
 from dataclasses import dataclass
-from datetime import datetime
 import logging
 import statsmodels.api as sm
 from statsmodels.tsa.stattools import coint, adfuller

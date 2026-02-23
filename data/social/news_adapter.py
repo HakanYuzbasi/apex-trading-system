@@ -13,7 +13,7 @@ from __future__ import annotations
 import logging
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import List, Optional
 
 from data.social.adapters import SourceSnapshot, SocialSourceAdapter, _clamp
 

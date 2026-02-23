@@ -5,7 +5,7 @@ Reuses SmartOrderRouter.select_algorithm and MarketImpactModel.calculate_executi
 """
 
 import logging
-from typing import Any, Dict, List
+from typing import Any, Dict
 
 logger = logging.getLogger(__name__)
 

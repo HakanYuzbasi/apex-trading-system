@@ -8,7 +8,7 @@ disk I/O and improve API response times.
 import functools
 import time
 import threading
-from typing import Any, Callable, Dict, Optional, Tuple
+from typing import Any, Callable, Dict, Tuple
 
 
 class TTLCache:

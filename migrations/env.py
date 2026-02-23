@@ -5,7 +5,6 @@ Reads the database URL from the environment (same as services/common/db.py).
 """
 
 import asyncio
-import os
 from logging.config import fileConfig
 
 from alembic import context

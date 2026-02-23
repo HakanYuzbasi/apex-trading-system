@@ -2,7 +2,7 @@
 import logging
 import numpy as np
 from collections import deque
-from typing import Dict, Optional, List
+from typing import Dict, Optional
 from datetime import datetime
 import threading
 

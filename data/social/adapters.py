@@ -12,7 +12,7 @@ import os
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 from urllib.error import URLError
 from urllib.request import Request, urlopen
 
@@ -298,9 +298,30 @@ class YouTubeAdapter(SocialSourceAdapter):
 
 
 def default_social_adapters(data_dir: Path) -> List[SocialSourceAdapter]:
-    return [
+    adapters: List[SocialSourceAdapter] = [
         XAdapter(data_dir=data_dir),
         TikTokAdapter(data_dir=data_dir),
         InstagramAdapter(data_dir=data_dir),
         YouTubeAdapter(data_dir=data_dir),
     ]
+
+    # Dynamic adapters — guarded by SOCIAL_DYNAMIC_ADAPTERS_ENABLED kill switch
+    try:
+        from config import ApexConfig
+        enabled = getattr(ApexConfig, "SOCIAL_DYNAMIC_ADAPTERS_ENABLED", True)
+    except Exception:
+        enabled = True
+
+    if enabled:
+        try:
+            from data.social.news_adapter import NewsAggregatorAdapter
+            adapters.append(NewsAggregatorAdapter(data_dir=data_dir))
+        except Exception:
+            pass
+        try:
+            from data.social.market_adapter import MarketSentimentAdapter
+            adapters.append(MarketSentimentAdapter(data_dir=data_dir))
+        except Exception:
+            pass
+
+    return adapters

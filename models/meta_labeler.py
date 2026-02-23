@@ -12,11 +12,11 @@ This separates the problem of "direction" from "confidence/sizing".
 
 import numpy as np
 import pandas as pd
-from typing import Dict, List, Optional, Tuple, Any
+from typing import Dict, Optional
 from dataclasses import dataclass
 import logging
-from sklearn.base import BaseEstimator, ClassifierMixin
-from sklearn.ensemble import RandomForestClassifier, GradientBoostingClassifier
+from sklearn.base import BaseEstimator
+from sklearn.ensemble import RandomForestClassifier
 from sklearn.metrics import accuracy_score, precision_score, roc_auc_score
 
 logger = logging.getLogger(__name__)

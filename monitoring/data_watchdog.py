@@ -12,9 +12,8 @@ Checks:
 
 import time
 import logging
-from typing import Dict, List, Optional, Set
-from dataclasses import dataclass, field
-from datetime import datetime, timedelta
+from typing import Dict, List
+from dataclasses import dataclass
 
 logger = logging.getLogger(__name__)
 

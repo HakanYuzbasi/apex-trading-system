@@ -12,7 +12,6 @@ Features:
 - Alert thresholds with notifications
 """
 
-import asyncio
 import logging
 from collections import deque
 from dataclasses import dataclass, field

@@ -1,6 +1,5 @@
 # tests/test_signals.py - FIXED & IMPROVED
 
-import pytest
 import numpy as np
 import pandas as pd
 from models.signal_generator import SignalGenerator

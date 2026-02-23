@@ -15,10 +15,9 @@ import functools
 import logging
 import time
 import warnings
-from collections import defaultdict
 from datetime import datetime, timedelta
 from threading import Lock
-from typing import Any, Callable, Dict, Optional, Type, Union
+from typing import Any, Callable, Dict
 
 logger = logging.getLogger(__name__)
 
@@ -103,7 +102,7 @@ def cache_result(ttl_seconds: float = 60.0, maxsize: int = 128):
 
         def cleanup():
             """Remove expired entries."""
-            now = datetime.now()
+            datetime.now()
             expired = [k for k, v in cache.items() if v.is_expired]
             for k in expired:
                 del cache[k]

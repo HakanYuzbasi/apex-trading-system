@@ -1,6 +1,5 @@
 """WebSocket integration tests for the APEX Trading API."""
 import pytest
-import json
 from unittest.mock import patch, MagicMock
 from fastapi.testclient import TestClient
 

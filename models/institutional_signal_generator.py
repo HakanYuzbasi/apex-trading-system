@@ -19,7 +19,7 @@ import numpy as np
 import pandas as pd
 from typing import Dict, List, Optional, Tuple, Any, Union
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta
+from datetime import datetime
 from enum import Enum
 import logging
 import hashlib
@@ -423,7 +423,7 @@ class UltimateSignalGenerator:
         # 🚀 GLOBAL STEP: Compute Cross-Sectional Momentum Ranks
         logger.info("Computing global cross-sectional momentum ranks...")
         # Get all dates
-        all_dates = sorted(list(set().union(*[df.index for df in historical_features.values()])))
+        sorted(list(set().union(*[df.index for df in historical_features.values()])))
         
         # Compute 20d returns for all symbols to use for ranking
         all_20d_returns = {}
@@ -770,11 +770,21 @@ class UltimateSignalGenerator:
         return models
     
     def updateRegimeWeights(self, regime: str, metrics: List[TrainingMetrics]):
-        """Update model weights based on validation MSE (inverse weighting).
+        """Update model weights using temperature-scaled inverse MSE + accuracy bonus.
 
-        Models with val_mse > 3x the median are excluded (overfitting gate).
-        Models with val/train MSE ratio > 5x are also excluded.
+        Gates:
+        - val_mse > 3x median → excluded (peer comparison)
+        - val/train ratio > MODEL_OVERFIT_RATIO_THRESHOLD → excluded (overfitting)
+
+        Weight formula:
+          score = (1/val_mse)^TEMPERATURE * (1 + accuracy_bonus)
+          accuracy_bonus = max(0, (dir_acc - 0.50)) * 2.0   [if enabled]
         """
+        from config import ApexConfig
+        temperature = getattr(ApexConfig, "MODEL_WEIGHT_TEMPERATURE", 3.0)
+        use_accuracy = getattr(ApexConfig, "MODEL_WEIGHT_ACCURACY_BONUS", True)
+        overfit_ratio = getattr(ApexConfig, "MODEL_OVERFIT_RATIO_THRESHOLD", 2.5)
+
         # Compute median val_mse as baseline
         val_mses = [m.val_mse for m in metrics if m.val_mse > 0]
         if not val_mses:
@@ -784,7 +794,7 @@ class UltimateSignalGenerator:
         median_val_mse = float(np.median(val_mses))
         overfit_threshold = median_val_mse * 3.0
 
-        inv_mse = {}
+        scores = {}
         excluded = []
         for m in metrics:
             # Gate 1: val_mse too large relative to peers
@@ -792,29 +802,36 @@ class UltimateSignalGenerator:
                 excluded.append(m.model_name)
                 continue
             # Gate 2: val/train ratio too high (severe overfitting)
-            if m.train_mse > 0 and m.val_mse / m.train_mse > 5.0:
+            if m.train_mse > 0 and m.val_mse / m.train_mse > overfit_ratio:
                 excluded.append(m.model_name)
                 continue
             if m.val_mse > 0:
-                inv_mse[m.model_name] = 1.0 / m.val_mse
+                base = (1.0 / m.val_mse) ** temperature
             else:
-                inv_mse[m.model_name] = 1.0
+                base = 1.0
+
+            # Accuracy bonus: models with better directional accuracy get a boost
+            if use_accuracy and hasattr(m, "directional_accuracy"):
+                acc_bonus = max(0.0, (m.directional_accuracy - 0.50)) * 2.0
+                base *= (1.0 + acc_bonus)
+
+            scores[m.model_name] = base
 
         if excluded:
             logger.warning(f"  Excluded overfit models from {regime}: {excluded}")
 
-        if not inv_mse:
+        if not scores:
             # Fallback: use all models with uniform weights
-            inv_mse = {m.model_name: 1.0 / max(m.val_mse, 1e-10) for m in metrics}
+            scores = {m.model_name: (1.0 / max(m.val_mse, 1e-10)) ** temperature for m in metrics}
 
-        total = sum(inv_mse.values())
-        self.regime_weights[regime] = {name: weight / total for name, weight in inv_mse.items()}
+        total = sum(scores.values())
+        self.regime_weights[regime] = {name: score / total for name, score in scores.items()}
         # Set excluded models to zero weight
         for name in excluded:
             self.regime_weights[regime][name] = 0.0
 
-        logger.info(f"  Model weights for {regime}:")
-        for name, weight in self.regime_weights[regime].items():
+        logger.info(f"  Model weights for {regime} (temp={temperature:.1f}, acc_bonus={use_accuracy}):")
+        for name, weight in sorted(self.regime_weights[regime].items(), key=lambda x: -x[1]):
             if weight > 0:
                 logger.info(f"    {name}: {weight:.2%}")
             else:
@@ -1458,7 +1475,7 @@ if __name__ == "__main__":
     print("Generating test signal...")
     signal = generator.generate_signal('AAPL', test_data['AAPL']['Close'])
     
-    print(f"\nOutput:")
+    print("\nOutput:")
     print(f"  Symbol:              {signal.symbol}")
     print(f"  Signal:              {signal.signal:+.3f}")
     print(f"  Confidence:          {signal.confidence:.3f}")

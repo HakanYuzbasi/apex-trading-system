@@ -16,8 +16,8 @@ Usage:
 
 import asyncio
 import logging
-from datetime import datetime, timedelta
-from typing import Dict, List, Optional, Set, Tuple
+from datetime import datetime
+from typing import Dict, List, Optional, Set
 from dataclasses import dataclass, field
 from enum import Enum
 import json
@@ -146,7 +146,7 @@ class PositionReconciler:
         # Ensure data directory exists
         self.data_dir.mkdir(parents=True, exist_ok=True)
 
-        logger.info(f"📊 Position Reconciler initialized")
+        logger.info("📊 Position Reconciler initialized")
         logger.info(f"   Interval: {reconcile_interval_minutes} minutes")
         logger.info(f"   Auto-resolve threshold: {auto_resolve_threshold*100:.1f}%")
 
@@ -288,7 +288,7 @@ class PositionReconciler:
 
                 # Check if critical
                 if result.is_critical:
-                    logger.error(f"🚨 CRITICAL: Position value mismatch > 5%!")
+                    logger.error("🚨 CRITICAL: Position value mismatch > 5%!")
                     for callback in self._on_critical_callbacks:
                         try:
                             callback(result)

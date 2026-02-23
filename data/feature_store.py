@@ -19,8 +19,8 @@ Usage:
 
 import numpy as np
 import pandas as pd
-from typing import Dict, List, Optional, Any, Callable, Tuple
-from dataclasses import dataclass, field
+from typing import Dict, List, Optional, Any, Tuple
+from dataclasses import dataclass
 from datetime import datetime, timedelta
 import hashlib
 import hmac

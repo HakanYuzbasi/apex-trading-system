@@ -15,8 +15,8 @@ Features:
 import numpy as np
 import pandas as pd
 import logging
-from typing import Dict, Optional, List, Tuple
-from datetime import datetime, timedelta
+from typing import Dict, List
+from datetime import datetime
 import pickle
 import os
 from collections import deque
@@ -25,7 +25,7 @@ from sklearn.ensemble import RandomForestClassifier, GradientBoostingClassifier
 from sklearn.linear_model import LogisticRegression
 from sklearn.preprocessing import StandardScaler
 from sklearn.impute import SimpleImputer
-from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score
+from sklearn.metrics import accuracy_score
 import xgboost as xgb
 import lightgbm as lgb
 from joblib import dump, load

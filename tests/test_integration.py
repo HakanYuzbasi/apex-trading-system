@@ -6,11 +6,10 @@ Tests complete workflows from signal to execution.
 """
 
 import pytest
-import asyncio
 import pandas as pd
 import numpy as np
-from datetime import datetime, timedelta
-from unittest.mock import MagicMock, AsyncMock, patch
+from datetime import datetime
+from unittest.mock import MagicMock, AsyncMock
 
 
 @pytest.fixture

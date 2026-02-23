@@ -5,7 +5,7 @@ Monitors data staleness and alerts when prices or market data become outdated.
 """
 
 import logging
-from datetime import datetime, timedelta
+from datetime import datetime
 from typing import Dict, Optional
 from monitoring.alert_aggregator import send_alert, AlertSeverity
 

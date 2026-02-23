@@ -1,8 +1,7 @@
 import pytest
 import asyncio
-from unittest.mock import MagicMock, patch, AsyncMock
+from unittest.mock import patch, AsyncMock
 from risk.risk_manager import RiskManager
-from risk.risk_session import RiskSession
 
 @pytest.fixture
 def risk_manager():

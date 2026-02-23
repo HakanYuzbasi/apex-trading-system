@@ -11,8 +11,7 @@ Tests for portfolio optimization including:
 import pytest
 import pandas as pd
 import numpy as np
-from datetime import datetime, timedelta
-from unittest.mock import MagicMock, patch
+from datetime import datetime
 
 
 @pytest.fixture
@@ -96,7 +95,7 @@ class TestMeanVarianceOptimization:
     def test_minimum_variance_portfolio(self, returns_data):
         """Test minimum variance portfolio construction."""
         cov_matrix = returns_data.cov()
-        n_assets = len(returns_data.columns)
+        len(returns_data.columns)
 
         # Simple minimum variance (equal risk contribution approximation)
         inv_var = 1 / np.diag(cov_matrix)
@@ -114,7 +113,7 @@ class TestMeanVarianceOptimization:
         # Simple approximation using excess returns / variance
         excess_returns = mean_returns - risk_free_rate / 252
         inv_cov = np.linalg.inv(cov_matrix)
-        ones = np.ones(len(mean_returns))
+        np.ones(len(mean_returns))
 
         # Optimal weights (unconstrained)
         raw_weights = inv_cov @ excess_returns
@@ -130,7 +129,7 @@ class TestRiskParity:
     def test_equal_risk_contribution(self, returns_data):
         """Test equal risk contribution portfolio."""
         cov_matrix = returns_data.cov() * 252
-        n_assets = len(returns_data.columns)
+        len(returns_data.columns)
 
         # Inverse volatility weighting as approximation
         vols = np.sqrt(np.diag(cov_matrix))
@@ -178,7 +177,7 @@ class TestRebalancing:
             for symbol in current_weights
         }
 
-        needs_rebalance = any(d > threshold for d in deviations.values())
+        any(d > threshold for d in deviations.values())
 
         # AAPL deviates by 5%, which is at threshold
         assert deviations['AAPL'] == pytest.approx(0.05, abs=0.001)
@@ -226,7 +225,7 @@ class TestConstraints:
 
     def test_long_only_constraint(self, returns_data):
         """Test long-only constraint enforcement."""
-        n_assets = len(returns_data.columns)
+        len(returns_data.columns)
         weights = np.array([0.3, 0.25, 0.2, 0.15, 0.10])
 
         # All weights should be non-negative

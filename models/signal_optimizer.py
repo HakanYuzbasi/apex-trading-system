@@ -5,17 +5,14 @@ Optimizes signal generation for maximum accuracy and minimum latency.
 
 import numpy as np
 import pandas as pd
-from typing import Dict, List, Tuple, Optional, Any, Union
-from dataclasses import dataclass, field
-from datetime import datetime, timedelta
+from typing import Dict, Tuple, Optional, Any
+from dataclasses import dataclass
 import logging
-from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor
+from concurrent.futures import ThreadPoolExecutor
 import asyncio
-from functools import lru_cache, wraps
+from functools import wraps
 import time
 import hashlib
-import pickle
-from pathlib import Path
 
 logger = logging.getLogger(__name__)
 

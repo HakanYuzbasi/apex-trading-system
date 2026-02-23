@@ -14,15 +14,14 @@ import pytest
 import numpy as np
 import pandas as pd
 from datetime import datetime, timedelta
-from unittest.mock import MagicMock
 
 # Import all Phase 2 components
-from risk.black_swan_guard import BlackSwanGuard, ThreatLevel, CrashDetection
-from monitoring.signal_decay_shield import SignalDecayShield, FreshnessReport
-from risk.exit_quality_guard import ExitQualityGuard, ExitValidation, RetryStrategy, OrderType
+from risk.black_swan_guard import BlackSwanGuard, ThreatLevel
+from monitoring.signal_decay_shield import SignalDecayShield
+from risk.exit_quality_guard import ExitQualityGuard, OrderType
 from risk.correlation_cascade_breaker import CorrelationCascadeBreaker, CorrelationRegime, CorrelationState
-from risk.drawdown_cascade_breaker import DrawdownCascadeBreaker, DrawdownTier, DrawdownState
-from execution.execution_shield import ExecutionShield, ExecutionAlgo, Urgency, ExecutionStrategy
+from risk.drawdown_cascade_breaker import DrawdownCascadeBreaker, DrawdownTier
+from execution.execution_shield import ExecutionShield, ExecutionAlgo, Urgency
 
 
 # ═══════════════════════════════════════════════════════════════════════════════

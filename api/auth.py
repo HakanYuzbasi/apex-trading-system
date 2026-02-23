@@ -278,7 +278,7 @@ class DatabaseUserStore:
                 key_result = await session.execute(
                     select(ApiKeyModel).where(
                         ApiKeyModel.key_hash == key_hash,
-                        ApiKeyModel.is_active == True,
+                        ApiKeyModel.is_active,
                     )
                 )
                 key = key_result.scalar_one_or_none()
