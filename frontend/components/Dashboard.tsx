@@ -252,12 +252,12 @@ function positionRowKey(position: CockpitPosition): string {
   const sideRaw = String(position.side ?? (position.qty < 0 ? "SHORT" : "LONG")).trim().toUpperCase();
   const side = sideRaw === "SHORT" ? "SHORT" : "LONG";
   const qty = Number.isFinite(Number(position.qty)) ? Math.trunc(Number(position.qty)) : 0;
-  const securityType = String((position as Record<string, unknown>).security_type ?? "").trim().toUpperCase();
-  const expiry = String((position as Record<string, unknown>).expiry ?? "").trim().toUpperCase();
-  const strike = Number.isFinite(Number((position as Record<string, unknown>).strike))
-    ? Number((position as Record<string, unknown>).strike).toFixed(4)
+  const securityType = String((position as unknown as Record<string, unknown>).security_type ?? "").trim().toUpperCase();
+  const expiry = String((position as unknown as Record<string, unknown>).expiry ?? "").trim().toUpperCase();
+  const strike = Number.isFinite(Number((position as unknown as Record<string, unknown>).strike))
+    ? Number((position as unknown as Record<string, unknown>).strike).toFixed(4)
     : "0.0000";
-  const right = String((position as Record<string, unknown>).right ?? "").trim().toUpperCase();
+  const right = String((position as unknown as Record<string, unknown>).right ?? "").trim().toUpperCase();
   return `${symbol}|${source}|${side}|${securityType}|${expiry}|${strike}|${right}|${qty}`;
 }
 
@@ -372,7 +372,7 @@ export default function Dashboard({ isPublic = false }: { isPublic?: boolean }) 
   const wsData = wsMessage?.type === "state_update" ? wsMessage : null;
 
   // Extract SHAP values from WS or fall back to mock data for demonstration
-  const activeShapData = (wsData as any)?.shap_values ?? {
+  const activeShapData = ((wsData as unknown as Record<string, unknown>)?.shap_values as Record<string, number>) ?? {
     "Price Momentum (Feature #2)": 0.45,
     "Volatility Profile (Feature #1)": -0.12,
     "RSI State (Feature #4)": 0.08,
@@ -598,7 +598,7 @@ export default function Dashboard({ isPublic = false }: { isPublic?: boolean }) 
         source_status: String(data.source_status ?? ""),
         source_id: sourceId,
       };
-    }).filter((row): row is CockpitPosition => row !== null);
+    }).filter((row) => row !== null) as CockpitPosition[];
   }, [wsData, cockpitPositionSourceHints]);
 
   const positionsCandidate = useMemo(() => {

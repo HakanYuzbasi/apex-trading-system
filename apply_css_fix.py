@@ -1,7 +1,7 @@
 import os
 
 def fix_globals_css():
-    path = "app/globals.css"
+    path = "frontend/app/globals.css"
     if not os.path.exists(path):
         print(f"⚠️ Could not find {path}.")
         return
@@ -9,7 +9,6 @@ def fix_globals_css():
     with open(path, "r", encoding="utf-8") as f:
         content = f.read()
 
-    # Replace the problematic Tailwind v4 @apply directive with native CSS
     target = "@apply bg-background text-foreground antialiased;"
     replacement = """/* Replaced @apply for Tailwind v4 compatibility */
     background-color: hsl(var(--background));
@@ -21,7 +20,7 @@ def fix_globals_css():
         content = content.replace(target, replacement)
         with open(path, "w", encoding="utf-8") as f:
             f.write(content)
-        print("✅ Fixed @apply bg-background in globals.css")
+        print(f"✅ Fixed @apply bg-background in {path}")
     else:
         print("⚠️ Target @apply string not found or already fixed.")
 

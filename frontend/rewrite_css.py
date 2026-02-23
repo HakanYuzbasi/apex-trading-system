@@ -1,4 +1,13 @@
-@tailwind base;
+import os
+
+def rewrite_globals_css():
+    path = "app/globals.css"
+    if not os.path.exists(path):
+        print(f"⚠️ Could not find {path}.")
+        return
+
+    # Keep their original Tailwind directives, but use pure CSS for our custom theme
+    css_content = """@tailwind base;
 @tailwind components;
 @tailwind utilities;
 
@@ -164,3 +173,10 @@
     background-color: currentColor;
   }
 }
+"""
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(css_content)
+    print("✅ Successfully removed all @apply directives and injected pure CSS.")
+
+if __name__ == "__main__":
+    rewrite_globals_css()
