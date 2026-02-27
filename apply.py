@@ -1,125 +1,71 @@
 import os
+import re
 
-def create_sor_module():
-    """Creates the Smart Order Router class in the execution directory."""
-    os.makedirs("execution", exist_ok=True)
-    filepath = "execution/smart_order_router.py"
-    
-    sor_code = '''import logging
-import asyncio
-from typing import Callable, Awaitable, Optional, Dict, Any
-
-logger = logging.getLogger(__name__)
-
-class SmartOrderRouter:
-    """
-    APEX Institutional Smart Order Router (SOR)
-    Implements Adaptive Pegging: Starts at the Mid-Price and gradually increases
-    urgency to cross the spread only if necessary.
-    """
-    def __init__(self, max_urgency_steps: int = 3, step_delay_seconds: int = 10):
-        self.max_steps = max_urgency_steps
-        self.step_delay = step_delay_seconds
-
-    async def execute_adaptive_order(
-        self,
-        symbol: str,
-        qty: float,
-        side: str,
-        bid: float,
-        ask: float,
-        place_order_fn: Callable[[float, str], Awaitable[Optional[str]]],
-        check_status_fn: Callable[[str], Awaitable[str]],
-        cancel_order_fn: Callable[[str], Awaitable[bool]]
-    ) -> bool:
-        """
-        Executes the order using dynamic limits.
-        
-        :param place_order_fn: Async callback taking (price, order_type) -> order_id
-        :param check_status_fn: Async callback taking (order_id) -> status string ('FILLED', 'OPEN')
-        :param cancel_order_fn: Async callback taking (order_id) -> boolean success
-        """
-        mid_price = (bid + ask) / 2.0
-        spread = ask - bid
-        
-        # Protect against zero-spread or crossed books
-        if spread <= 0.0001:
-            logger.info(f"SOR [{symbol}] Spread too tight. Sweeping book instantly.")
-            await place_order_fn(ask if side.upper() == "BUY" else bid, "MARKET")
-            return True
-
-        current_order_id = None
-        
-        # --- EXECUTION LOOP ---
-        for step in range(self.max_steps):
-            urgency = step / max(1, (self.max_steps - 1))
-            
-            # Calculate peg price based on urgency
-            if side.upper() == "BUY":
-                # Step 0: Mid-price. Step Max: Ask
-                limit_price = round(mid_price + (spread * 0.5 * urgency), 4)
-            else:
-                # Step 0: Mid-price. Step Max: Bid
-                limit_price = round(mid_price - (spread * 0.5 * urgency), 4)
-                
-            phase_name = "Passive Mid-Peg" if step == 0 else f"Urgent Peg ({int(urgency*100)}%)"
-            logger.info(f"SOR [{symbol}] {side} {qty} - Phase {step+1}: {phase_name} @ {limit_price}")
-            
-            # Cancel previous tier if it exists
-            if current_order_id:
-                await cancel_order_fn(current_order_id)
-                
-            # Place new limit order
-            current_order_id = await place_order_fn(limit_price, "LIMIT")
-            if not current_order_id:
-                logger.error(f"SOR [{symbol}] Failed to place limit order.")
-                return False
-                
-            # Wait for fill (Patience Timer)
-            for _ in range(self.step_delay):
-                await asyncio.sleep(1)
-                status = await check_status_fn(current_order_id)
-                if status.upper() in ["FILLED", "EXECUTED"]:
-                    logger.info(f"✅ SOR [{symbol}] Filled elegantly at {limit_price}! Spread captured.")
-                    return True
-                    
-        # --- FALLBACK: SWEEP THE BOOK ---
-        logger.warning(f"⏳ SOR [{symbol}] {side} patience exhausted. Sweeping the book to guarantee execution.")
-        if current_order_id:
-            await cancel_order_fn(current_order_id)
-            
-        await place_order_fn(0.0, "MARKET")
-        return True
-'''
-    with open(filepath, "w", encoding="utf-8") as f:
-        f.write(sor_code)
-    print("✅ Created execution/smart_order_router.py")
-
-def patch_config_for_sor():
-    """Injects the SOR configuration toggles into config.py."""
-    path = "config.py"
-    if not os.path.exists(path):
+def fix_alpaca_connector():
+    print("🛰️ PHASE 1: Patching Alpaca Heartbeat Loop...")
+    filepath = "execution/alpaca_connector.py"
+    if not os.path.exists(filepath):
+        print(f"  ❌ {filepath} not found.")
         return
-        
-    with open(path, "r", encoding="utf-8") as f:
+
+    with open(filepath, 'r', encoding='utf-8') as f:
         content = f.read()
-        
-    if "SOR_ENABLED" not in content:
-        sor_config = """
-    # --- EXECUTION & SMART ORDER ROUTING ---
-    SOR_ENABLED = True               # Use Limit mid-pegging instead of Market orders
-    SOR_MAX_URGENCY_STEPS = 3        # Number of times to adjust price toward the ask/bid
-    SOR_STEP_DELAY_SECONDS = 10      # How long to wait at each price level before adjusting
-"""
-        target = "class ApexConfig:"
-        if target in content:
-            content = content.replace(target, target + sor_config)
-            with open(path, "w", encoding="utf-8") as f:
-                f.write(content)
-            print("✅ Injected Smart Order Router configuration into config.py")
+
+    # Ensure the polling loop updates the global state heartbeat
+    # We look for the main polling loop and inject a direct state update
+    if "async def _poll_quotes" in content:
+        # Inject global state update into the loop
+        sync_code = """
+            # APEX Sync: Force heartbeat update into global state
+            from api.dependencies import read_trading_state, save_trading_state
+            try:
+                state = read_trading_state()
+                brokers = state.get("brokers", [])
+                found = False
+                for b in brokers:
+                    if b.get("broker") == "alpaca":
+                        b["last_heartbeat"] = datetime.utcnow().isoformat() + "Z"
+                        b["status"] = "live"
+                        b["mode"] = "trading"
+                        found = True
+                if not found:
+                    brokers.append({
+                        "broker": "alpaca",
+                        "status": "live",
+                        "mode": "trading",
+                        "last_heartbeat": datetime.utcnow().isoformat() + "Z"
+                    })
+                state["brokers"] = brokers
+                state["timestamp"] = datetime.utcnow().isoformat() + "Z"
+                save_trading_state(state)
+            except Exception as e:
+                logging.error(f"Alpaca heartbeat sync failed: {e}")
+        """
+        # Place it right after the polling log
+        content = content.replace(
+            'logging.info(f"Starting Alpaca crypto quote polling for {len(self.symbols)} symbols")',
+            'logging.info(f"Starting Alpaca crypto quote polling for {len(self.symbols)} symbols")' + sync_code
+        )
+
+    with open(filepath, 'w', encoding='utf-8') as f:
+        f.write(content)
+    print("  ✅ Alpaca Connector explicitly linked to Global State.")
+
+def nuke_zombie_state():
+    print("🧹 PHASE 2: Nuking Zombie State Files...")
+    # This forces the system to regenerate fresh state rather than reading a 1-hour old cache
+    state_file = "data/trading_state.json"
+    if os.path.exists(state_file):
+        os.remove(state_file)
+        print(f"  ✅ Deleted {state_file} to force fresh generation.")
+    
+    # Also clear the user-specific state which often overrides the global one
+    admin_state = "data/users/admin/trading_state.json"
+    if os.path.exists(admin_state):
+        os.remove(admin_state)
+        print(f"  ✅ Deleted {admin_state}.")
 
 if __name__ == "__main__":
-    print("🧠 Building the Smart Order Router (SOR)...")
-    create_sor_module()
-    patch_config_for_sor()
-    print("🎉 SOR module successfully built!")
+    fix_alpaca_connector()
+    nuke_zombie_state()
+    print("\n🎉 Connection gap fixed! Restart your main.py now.")

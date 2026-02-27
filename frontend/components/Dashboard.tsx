@@ -409,15 +409,13 @@ export default function Dashboard({ isPublic = false }: { isPublic?: boolean }) 
       wsData.aggregated_equity ?? wsData.total_equity ?? wsData.capital,
       Number.NaN,
     );
-    const mergeZeroGuard = (primary: unknown, fallback: unknown): number => {
-      const primaryNum = Number(primary);
-      const fallbackNum = Number(fallback);
-      const safePrimary = Number.isFinite(primaryNum) ? primaryNum : 0;
-      const safeFallback = Number.isFinite(fallbackNum) ? fallbackNum : 0;
-      if (Math.abs(safePrimary) <= 1e-9 && Math.abs(safeFallback) > 1e-9) {
-        return safeFallback;
+    const safeWsValue = (primary: unknown, fallback: unknown): number => {
+      if (primary !== undefined && primary !== null) {
+        const num = Number(primary);
+        return Number.isFinite(num) ? num : 0;
       }
-      return safePrimary;
+      const fNum = Number(fallback);
+      return Number.isFinite(fNum) ? fNum : 0;
     };
 
     return {
@@ -428,24 +426,15 @@ export default function Dashboard({ isPublic = false }: { isPublic?: boolean }) 
         wsData.starting_capital ?? wsData.initial_capital,
         sanitizeMoney(baselineRecord.starting_capital, 0),
       ),
-      daily_pnl: mergeZeroGuard(wsData.daily_pnl, baselineRecord.daily_pnl),
-      total_pnl: mergeZeroGuard(wsData.total_pnl, baselineRecord.total_pnl),
-      max_drawdown: mergeZeroGuard(wsData.max_drawdown, baselineRecord.max_drawdown),
-      sharpe_ratio: mergeZeroGuard(wsData.sharpe_ratio, baselineRecord.sharpe_ratio),
-      win_rate: mergeZeroGuard(wsData.win_rate, baselineRecord.win_rate),
-      open_positions: Math.max(
-        sanitizeCount(wsData.open_positions, 0),
-        sanitizeCount(baselineRecord.open_positions, 0),
-      ),
-      option_positions: sanitizeCount(baselineRecord.option_positions, 0),
-      open_positions_total: Math.max(
-        sanitizeCount(wsData.open_positions, 0),
-        sanitizeCount(baselineRecord.open_positions_total, 0),
-      ),
-      trades_count: Math.max(
-        sanitizeCount(wsData.total_trades, 0),
-        sanitizeCount(baselineRecord.trades_count, 0),
-      ),
+      daily_pnl: safeWsValue(wsData.daily_pnl, baselineRecord.daily_pnl),
+      total_pnl: safeWsValue(wsData.total_pnl, baselineRecord.total_pnl),
+      max_drawdown: safeWsValue(wsData.max_drawdown, baselineRecord.max_drawdown),
+      sharpe_ratio: safeWsValue(wsData.sharpe_ratio, baselineRecord.sharpe_ratio),
+      win_rate: safeWsValue(wsData.win_rate, baselineRecord.win_rate),
+      open_positions: safeWsValue(wsData.open_positions, baselineRecord.open_positions),
+      option_positions: safeWsValue(wsData.option_positions, baselineRecord.option_positions),
+      open_positions_total: safeWsValue(wsData.open_positions_total ?? wsData.open_positions, baselineRecord.open_positions_total),
+      trades_count: safeWsValue(wsData.total_trades, baselineRecord.trades_count),
     };
   }, [wsData, metrics, cockpit?.status]);
 
@@ -515,20 +504,15 @@ export default function Dashboard({ isPublic = false }: { isPublic?: boolean }) 
   const isDisconnected = !showLoading && !apiReachable;
   const isStale = apiReachable && !stateFresh;
   const mergedMetricRecord = (mergedMetrics ?? {}) as Record<string, unknown>;
-  const mergedOpenPositions = Math.max(
-    sanitizeCount(mergedMetricRecord.open_positions, 0),
-    sanitizeCount(cockpit?.status.open_positions, 0),
-    sanitizeCount(cockpit?.positions?.length, 0),
-  );
-  const mergedOptionPositions = Math.max(
-    sanitizeCount(mergedMetricRecord.option_positions, 0),
-    sanitizeCount(cockpit?.status.option_positions, 0),
-  );
-  const mergedOpenPositionsTotal = Math.max(
-    sanitizeCount(mergedMetricRecord.open_positions_total, 0),
-    sanitizeCount(cockpit?.status.open_positions_total, 0),
-    mergedOpenPositions + mergedOptionPositions,
-  );
+  const mergedOpenPositions = sanitizeCount(wsData?.open_positions ?? cockpit?.status.open_positions ?? cockpit?.positions?.length, 0);
+  
+  // Clean, non-duplicate calculation for options
+  const _finalRawDerivs = cockpit?.derivatives || [];
+  const _finalUniqueKeys = new Set(_finalRawDerivs.map((l: any) => `${l.symbol}_${String(l.expiry).replace(/-/g, "")}_${Number(l.strike).toFixed(2)}_${l.right}`));
+  const mergedOptionPositions = _finalUniqueKeys.size > 0 ? _finalUniqueKeys.size : sanitizeCount(wsData?.option_positions ?? cockpit?.status.option_positions, 0);
+  
+  const mergedOpenPositionsTotal = mergedOpenPositions + mergedOptionPositions;
+
   const sanitizedMetrics = useMemo(
     () =>
       sanitizeExecutionMetrics({
@@ -540,7 +524,7 @@ export default function Dashboard({ isPublic = false }: { isPublic?: boolean }) 
     [mergedMetrics, mergedOpenPositions, mergedOptionPositions, mergedOpenPositionsTotal],
   );
   const wsAggregatedEquity = sanitizeMoney(wsData?.aggregated_equity ?? wsData?.total_equity, Number.NaN);
-  const capital = Number.isFinite(wsAggregatedEquity) ? wsAggregatedEquity : sanitizedMetrics.capital;
+  const capital = aggregatedEquity !== null ? aggregatedEquity : (Number.isFinite(wsAggregatedEquity) ? wsAggregatedEquity : sanitizedMetrics.capital);
   const dailyPnl = sanitizedMetrics.daily_pnl;
   const totalPnl = sanitizedMetrics.total_pnl;
   const sharpe = sanitizedMetrics.sharpe_ratio;
@@ -649,13 +633,38 @@ export default function Dashboard({ isPublic = false }: { isPublic?: boolean }) 
     }
   }, [cockpitDerivatives, confirmedFlatDerivatives]);
   const derivatives = useMemo(() => {
-    if (cockpitDerivatives.length > 0) {
-      return cockpitDerivatives;
+    const rawList = cockpitDerivatives.length > 0 
+      ? cockpitDerivatives 
+      : (confirmedFlatDerivatives ? [] : derivativesSnapshot);
+
+    // Deduplicate mismatched date formats (e.g., 2026-03-13 vs 20260313)
+    const deduped = new Map<string, CockpitDerivative>();
+
+    for (const leg of rawList) {
+      // Standardize expiry to YYYYMMDD for matching
+      const normExpiry = String(leg.expiry).replace(/-/g, "");
+      const normStrike = Number(leg.strike).toFixed(2);
+      const key = `${leg.symbol}_${normExpiry}_${normStrike}_${leg.right}`;
+
+      if (deduped.has(key)) {
+        const existing = deduped.get(key)!;
+        // Prefer the clean dashed format for the UI display
+        const displayExpiry = leg.expiry.includes("-") ? leg.expiry : (existing.expiry.includes("-") ? existing.expiry : leg.expiry);
+        
+        // Take the absolute highest quantity to prevent partial-sync ghost deflation
+        const bestQty = Math.abs(leg.quantity) > Math.abs(existing.quantity) ? leg.quantity : existing.quantity;
+        
+        deduped.set(key, { 
+          ...existing, 
+          expiry: displayExpiry,
+          quantity: bestQty
+        });
+      } else {
+        deduped.set(key, { ...leg });
+      }
     }
-    if (confirmedFlatDerivatives) {
-      return [];
-    }
-    return derivativesSnapshot;
+
+    return Array.from(deduped.values());
   }, [cockpitDerivatives, confirmedFlatDerivatives, derivativesSnapshot]);
 
   const cockpitSleeves = useMemo(() => cockpit?.attribution?.sleeves ?? [], [cockpit?.attribution?.sleeves]);
@@ -708,10 +717,16 @@ export default function Dashboard({ isPublic = false }: { isPublic?: boolean }) 
   const brokerRuntime = useMemo(() => {
     const rows = cockpit?.status?.brokers ?? [];
     const byType = new Map(rows.map((row) => [row.broker, row]));
+    
+    const checkStatus = (b: any) => {
+      if (!b) return { status: 'offline', mode: 'idle', last_heartbeat: null };
+      return b;
+    };
+
     return {
-      alpaca: byType.get("alpaca"),
-      ibkr: byType.get("ibkr"),
-      active: cockpit?.status?.active_broker ?? "none",
+      alpaca: checkStatus(byType.get("alpaca")),
+      ibkr: checkStatus(byType.get("ibkr")),
+      active: cockpit?.status?.active_broker === "none" ? "MULTI" : (cockpit?.status?.active_broker ?? "MULTI"),
     };
   }, [cockpit?.status?.active_broker, cockpit?.status?.brokers]);
 
@@ -750,12 +765,11 @@ export default function Dashboard({ isPublic = false }: { isPublic?: boolean }) 
     return "not configured";
   }, []);
   const optionPositions = optionPositionsFromStatus;
-  const totalLines = Math.max(
-    sanitizeCount(cockpit?.status.open_positions_total, sanitizedMetrics.open_positions_total),
-    openPositions + optionPositions,
-  );
+  const totalLines = openPositions + optionPositions;
 
-  const startingCapital = Math.max(1, sanitizedMetrics.starting_capital || (capital - totalPnl));
+  const startingCapital = sanitizedMetrics.starting_capital > 100 
+    ? sanitizedMetrics.starting_capital 
+    : (cockpit?.status?.starting_capital > 100 ? cockpit?.status?.starting_capital : Math.max(1, capital - totalPnl));
   const returnPct = startingCapital > 0 ? totalPnl / startingCapital : 0;
   const pnlPerTrade = tradesCount > 0 ? totalPnl / tradesCount : 0;
   const avgPositionSize = openPositions > 0 ? capital / openPositions : 0;
@@ -1334,18 +1348,15 @@ export default function Dashboard({ isPublic = false }: { isPublic?: boolean }) 
         detail: authExpired ? "session expired" : "session active",
       },
       {
-        label: "USP Engine",
-        state: !usp?.engine ? "down" : uspScore < 55 ? "warn" : "ok",
+        label: "USP Engine", state: (cockpit?.status?.usp_score || 0) > 70 ? "ok" : "warn",
         detail: !usp?.engine ? "missing scorecard" : `score ${uspScore.toFixed(1)}/100`,
       },
       {
-        label: "Mandate Copilot",
-        state: mandateError || calibrationError ? "warn" : copilotSignals > 0 ? "ok" : "warn",
+        label: "Mandate Copilot", state: (cockpit?.status?.mandate_signals || 0) > 0 ? "ok" : "warn",
         detail: mandateError || calibrationError ? "degraded" : `${copilotSignals} signals`,
       },
       {
-        label: "Workflow Pack",
-        state: workflowError ? "warn" : workflowPack || workflowList.length > 0 ? "ok" : "warn",
+        label: "Workflow Pack", state: (cockpit?.status?.active_workflows || 0) > 0 ? "ok" : "warn",
         detail: workflowError ? "action required" : workflowPack ? workflowPack.status : `${workflowList.length} packs`,
       },
       {

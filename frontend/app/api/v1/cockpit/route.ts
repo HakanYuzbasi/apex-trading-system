@@ -229,10 +229,14 @@ function derivativeFromOptionPosition(row: PositionRow): DerivativeRow | null {
     return null;
   }
   const symbolToken = String(row.symbol ?? "").trim().toUpperCase();
-  const baseSymbol = symbolToken.split(/\s+/)[0] || symbolToken;
+  // Aggressive normalization: extract base symbol and remove common suffixes/prefixes
+  let baseSymbol = symbolToken.split(/\s+/)[0] || symbolToken;
+  baseSymbol = baseSymbol.replace(/^(STK|OPT):/, "").replace(/\.(US|STK|OPT)$/, "").replace(/\/USD$/, "");
+
   const expiry = normalizeExpiryToken(row.expiry ?? "");
   const right = normalizeRight(String(row.right ?? ""));
   const strike = asNumber(row.strike, 0);
+
   if (!baseSymbol || !expiry || !right || strike <= 0) {
     return null;
   }
@@ -243,7 +247,7 @@ function derivativeFromOptionPosition(row: PositionRow): DerivativeRow | null {
   return {
     symbol: baseSymbol,
     expiry,
-    strike,
+    strike: Number(strike.toFixed(4)), // Normalize precision for keys
     right,
     quantity,
     side: quantity > 0 ? "LONG" : "SHORT",
@@ -285,10 +289,13 @@ function parseDerivativeFromPositionLabel(symbol: string, payload: Record<string
     const qty = asNumber(payload.qty ?? payload.quantity, 0);
     const right = normalizeRight(human[4] || "");
     if (!right || qty === 0) return null;
+    let baseSymbol = human[1].toUpperCase();
+    baseSymbol = baseSymbol.replace(/^(STK|OPT):/, "").replace(/\.(US|STK|OPT)$/, "").replace(/\/USD$/, "");
+
     return {
-      symbol: human[1].toUpperCase(),
+      symbol: baseSymbol,
       expiry: parseHumanExpiry(human[2]),
-      strike: asNumber(human[3], 0),
+      strike: Number(asNumber(human[3], 0).toFixed(4)),
       right,
       quantity: qty,
       side: qty > 0 ? "LONG" : "SHORT",
@@ -300,10 +307,13 @@ function parseDerivativeFromPositionLabel(symbol: string, payload: Record<string
   if (occ) {
     const qty = asNumber(payload.qty ?? payload.quantity, 0);
     if (qty === 0) return null;
+    let baseSymbol = occ[1].toUpperCase();
+    baseSymbol = baseSymbol.replace(/^(STK|OPT):/, "").replace(/\.(US|STK|OPT)$/, "").replace(/\/USD$/, "");
+
     return {
-      symbol: occ[1],
+      symbol: baseSymbol,
       expiry: `20${occ[2]}-${occ[3]}-${occ[4]}`,
-      strike: asNumber(occ[6], 0) / 1000,
+      strike: Number((asNumber(occ[6], 0) / 1000).toFixed(4)),
       right: normalizeRight(occ[5]),
       quantity: qty,
       side: qty > 0 ? "LONG" : "SHORT",
@@ -426,12 +436,12 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
   const cachedSocialAuditSnapshot = SOCIAL_AUDIT_CACHE.get(cacheKey);
   const cachedSocialAuditSnapshotFresh = Boolean(
     cachedSocialAuditSnapshot
-      && (Date.now() - cachedSocialAuditSnapshot.updated_at_ms) <= SOCIAL_AUDIT_CACHE_TTL_MS,
+    && (Date.now() - cachedSocialAuditSnapshot.updated_at_ms) <= SOCIAL_AUDIT_CACHE_TTL_MS,
   );
   const cachedPositionSnapshot = POSITION_SNAPSHOT_CACHE.get(cacheKey);
   const cachedPositionSnapshotFresh = Boolean(
     cachedPositionSnapshot
-      && (Date.now() - cachedPositionSnapshot.updated_at_ms) <= POSITION_SNAPSHOT_CACHE_TTL_MS,
+    && (Date.now() - cachedPositionSnapshot.updated_at_ms) <= POSITION_SNAPSHOT_CACHE_TTL_MS,
   );
   for (const [key, row] of POSITION_PARITY_WATCHDOG.entries()) {
     if ((Date.now() - row.updated_at_ms) > POSITION_PARITY_WATCHDOG_TTL_MS) {
@@ -552,9 +562,9 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
   }
   const preferredActiveBroker = normalizeBrokerName(
     statusData.primary_execution_broker
-      || process.env.APEX_PRIMARY_EXECUTION_BROKER
-      || process.env.APEX_ACTIVE_TRADING_BROKER
-      || "alpaca",
+    || process.env.APEX_PRIMARY_EXECUTION_BROKER
+    || process.env.APEX_ACTIVE_TRADING_BROKER
+    || "alpaca",
   );
   const brokerModeHint = String(statusData.broker_mode ?? "").trim().toLowerCase();
   for (const broker of ["alpaca", "ibkr"] as const) {
@@ -581,8 +591,8 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
     liveBrokerCount > 1
       ? "multi"
       : brokers.find((row) => row.status === "live")?.broker
-        ?? brokers.find((row) => row.status === "stale")?.broker
-        ?? "none";
+      ?? brokers.find((row) => row.status === "stale")?.broker
+      ?? "none";
 
   if (preferredActiveBroker) {
     const preferredConfigured = brokers.some(
@@ -597,6 +607,10 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
     if (!row.configured) {
       return { ...row, mode: "disabled" as BrokerRuntimeMode };
     }
+    // In multi-broker mode, all configured live/stale brokers are actively trading
+    if (activeBroker === "multi" && (row.status === "live" || row.status === "stale" || row.status === "configured")) {
+      return { ...row, mode: "trading" as BrokerRuntimeMode, stale: row.status === "stale" };
+    }
     if (activeBroker !== "none" && activeBroker !== "multi" && row.broker === activeBroker) {
       return { ...row, mode: "trading" as BrokerRuntimeMode };
     }
@@ -604,11 +618,10 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
     return {
       ...row,
       mode: "idle" as BrokerRuntimeMode,
-      status: row.status === "not_configured" ? "configured" : "stale",
-      stale: true,
+      status: row.status === "not_configured" ? "configured" : row.status,
     };
   });
-  liveBrokerCount = brokers.filter((row) => row.status === "live").length;
+  liveBrokerCount = brokers.filter((row) => row.status === "live" || row.mode === "trading").length;
   configuredBrokerCount = brokers.filter((row) => row.configured).length;
   const statusMetrics = sanitizeExecutionMetrics({
     capital: statusData.capital,

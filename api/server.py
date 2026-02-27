@@ -513,7 +513,7 @@ async def stream_trading_state():
 
                     if is_admin:
                         update.update({
-                            "timestamp": current_state.get("timestamp", datetime.now().isoformat()),
+                            "timestamp": current_state.get("timestamp", datetime.utcnow().isoformat() + "Z"),
                             "capital": current_state.get("capital", 0),
                             "initial_capital": current_state.get("initial_capital", 0),
                             "starting_capital": current_state.get("starting_capital", 0),
@@ -532,7 +532,7 @@ async def stream_trading_state():
                         })
                     else:
                         update.update({
-                            "timestamp": datetime.now().isoformat(),
+                            "timestamp": datetime.utcnow().isoformat() + "Z",
                             "capital": 0,
                             "initial_capital": 0,
                             "starting_capital": 0,
@@ -680,7 +680,7 @@ async def get_status(user=Depends(require_user)):
         safe_metrics = sanitize_execution_metrics({})
         return {
             "status": "online",
-            "timestamp": datetime.now().isoformat(),
+            "timestamp": datetime.utcnow().isoformat() + "Z",
             "broker_mode": broker_mode,
             "primary_execution_broker": primary_execution_broker,
             **safe_metrics,
@@ -1077,7 +1077,7 @@ async def websocket_endpoint(websocket: WebSocket):
         await websocket.send_json({
             "type": "state_update",
             "tenant_id": tenant_id,
-            "timestamp": current_state.get("timestamp", datetime.now().isoformat()),
+            "timestamp": current_state.get("timestamp", datetime.utcnow().isoformat() + "Z"),
             "capital": aggregated_equity if aggregated_equity > 0 else current_state.get("capital", 0),
             "initial_capital": current_state.get("initial_capital", 0),
             "starting_capital": current_state.get("starting_capital", 0),

@@ -277,7 +277,7 @@ class TradingTracer:
             "trading_cycle",
             attributes={
                 "cycle_id": cycle_id,
-                "start_time": datetime.now().isoformat()
+                "start_time": datetime.utcnow().isoformat() + "Z"
             }
         )
 

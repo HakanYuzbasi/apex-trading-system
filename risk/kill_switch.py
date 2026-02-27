@@ -47,6 +47,7 @@ class RiskKillSwitch:
         self.last_sharpe = 0.0
 
     def update(self, *args, **kwargs):
+        # Permanently disabled as requested
         self.active = False
         return self.state()
 

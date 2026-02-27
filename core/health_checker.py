@@ -312,7 +312,7 @@ class HealthChecker:
             message=f"Market data is fresh ({staleness:.0f}s old)",
             last_check=datetime.utcnow(),
             details={
-                "last_update": self.last_market_data_update.isoformat(),
+                "last_update": self.last_market_data_update.isoformat() + "Z",
                 "staleness_seconds": staleness
             }
         )

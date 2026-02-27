@@ -31,7 +31,7 @@ KNOWN_CRYPTO_QUOTES = {"USD", "USDT", "USDC"}
 KNOWN_CRYPTO_ASSETS = {
     "BTC", "ETH", "SOL", "ADA", "XRP", "DOT", "LTC", "BCH",
     "DOGE", "AVAX", "LINK", "MATIC", "XLM", "XMR", "ETC",
-    "AAVE", "UNI",
+    "AAVE", "UNI", "BAT", "RENDER",
 }
 
 _PAIR_SEPARATORS = ("/", ".")  # "." supports IBKR format: EUR.USD, USD.CHF

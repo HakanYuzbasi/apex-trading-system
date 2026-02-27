@@ -22,7 +22,7 @@ Additional features:
 import logging
 from typing import Dict, List, Optional, Tuple
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 from enum import IntEnum
 
 logger = logging.getLogger(__name__)
@@ -51,7 +51,7 @@ class RatchetState:
     should_take_partial: bool
     partial_size_pct: float
     days_held: int
-    updated_at: datetime = field(default_factory=datetime.now)
+    updated_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
 
 
 @dataclass
@@ -127,7 +127,7 @@ class ProfitRatchet:
         """Register a new position for tracking."""
         self._positions[symbol] = {
             "entry_price": entry_price,
-            "entry_time": entry_time or datetime.now(),
+            "entry_time": entry_time or datetime.now(timezone.utc),
             "high_water_mark": entry_price,
             "side": side,
             "partials_taken": set(),  # Tiers where partial was taken
@@ -209,8 +209,10 @@ class ProfitRatchet:
                 partial_size = partial_pct
                 break
 
-        # Days held
-        days_held = (datetime.now() - pos["entry_time"]).days
+        _entry_time = pos["entry_time"]
+        if _entry_time.tzinfo is None:
+            _entry_time = _entry_time.replace(tzinfo=timezone.utc)
+        days_held = (datetime.now(timezone.utc) - _entry_time).days
 
         state = RatchetState(
             symbol=symbol,
@@ -254,7 +256,10 @@ class ProfitRatchet:
         }[tier]
 
         # Time-based tightening
-        days_held = (datetime.now() - pos["entry_time"]).days
+        _entry_time = pos["entry_time"]
+        if _entry_time.tzinfo is None:
+            _entry_time = _entry_time.replace(tzinfo=timezone.utc)
+        days_held = (datetime.now(timezone.utc) - _entry_time).days
         if days_held >= self.time_tightening_days:
             base_trailing *= self.time_tightening_factor
 

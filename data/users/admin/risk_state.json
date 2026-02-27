@@ -1,8 +1,8 @@
 {
-  "day_start_capital": 100000.0,
-  "peak_capital": 100000.0,
-  "starting_capital": 1281760.55,
-  "current_day": "2026-02-23",
+  "day_start_capital": 1285175.77,
+  "peak_capital": 1285175.77,
+  "starting_capital": 1284160.8800000001,
+  "current_day": "2026-02-27",
   "circuit_breaker": {
     "is_tripped": false,
     "reason": null,

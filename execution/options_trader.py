@@ -540,6 +540,7 @@ class OptionsTrader:
             side='BUY',
             quantity=contracts,
             order_type='MKT',
+            limit_price=put.mid_price,
             trading_class=put.trading_class,
             multiplier=put.multiplier
         )
@@ -623,6 +624,7 @@ class OptionsTrader:
             side='SELL',
             quantity=contracts,
             order_type='MKT',
+            limit_price=call.mid_price,
             trading_class=call.trading_class,
             multiplier=call.multiplier
         )
@@ -718,7 +720,8 @@ class OptionsTrader:
             right='C',
             side='BUY',
             quantity=contracts,
-            order_type='MKT'
+            order_type='MKT',
+            limit_price=atm_call.mid_price
         )
         
         # 2. Buy Put
@@ -729,7 +732,8 @@ class OptionsTrader:
             right='P',
             side='BUY',
             quantity=contracts,
-            order_type='MKT'
+            order_type='MKT',
+            limit_price=atm_put.mid_price
         )
         
         if not call_result or not put_result:

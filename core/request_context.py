@@ -94,7 +94,7 @@ class TradingContext:
             'order_id': self.order_id,
             'session_id': self.session_id,
             'user_id': self.user_id,
-            'timestamp': self.timestamp.isoformat(),
+            'timestamp': self.timestamp.isoformat() + "Z",
             **self.extra
         }
 

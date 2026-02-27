@@ -96,7 +96,7 @@ async def run_backtest(
         return {
             "report_id": report_id,
             "report_url": f"/backtest/reports/{report_id}",
-            "expires_at": expires_at.isoformat()
+            "expires_at": expires_at.isoformat() + "Z"
         }
 
     except Exception as e:

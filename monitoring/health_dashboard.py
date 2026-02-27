@@ -13,7 +13,7 @@ Provides alerts and status checks.
 
 import json
 from typing import Dict, List, Optional, Any
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from dataclasses import dataclass, field
 from pathlib import Path
 from enum import Enum
@@ -37,7 +37,7 @@ class HealthCheck:
     status: HealthStatus
     message: str
     value: Optional[Any] = None
-    timestamp: datetime = field(default_factory=datetime.now)
+    timestamp: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     
     def to_dict(self) -> Dict:
         return {
@@ -170,8 +170,13 @@ class HealthDashboard:
                 with open(heartbeat_file) as f:
                     data = json.load(f)
                 
-                last_beat = datetime.fromisoformat(data.get('timestamp', ''))
-                age_seconds = (datetime.now() - last_beat).total_seconds()
+                # Parse timestamp — handle both naive and Z-suffix UTC
+                raw_ts = data.get('timestamp', '')
+                raw_ts_clean = raw_ts.replace('Z', '+00:00') if raw_ts.endswith('Z') else raw_ts
+                last_beat = datetime.fromisoformat(raw_ts_clean)
+                if last_beat.tzinfo is None:
+                    last_beat = last_beat.replace(tzinfo=timezone.utc)
+                age_seconds = (datetime.now(timezone.utc) - last_beat).total_seconds()
                 
                 if age_seconds < 60:
                     return HealthCheck(
@@ -346,13 +351,13 @@ class HealthDashboard:
     
     def _process_alerts(self, checks: List[HealthCheck]):
         """Process health checks and generate alerts."""
-        now = datetime.now()
+        now = datetime.now(timezone.utc)
         repeat_cooldown = max(1, int(self.thresholds.get('alert_repeat_cooldown_seconds', 300)))
         for check in checks:
             if check.status in [HealthStatus.ERROR, HealthStatus.CRITICAL]:
                 signature = f"{check.name}:{check.status.value}:{check.message}"
                 last_logged = self._last_alert_logged_at.get(signature)
-                if last_logged and (now - last_logged).total_seconds() < repeat_cooldown:
+                if last_logged and (now - last_logged.replace(tzinfo=timezone.utc) if last_logged.tzinfo is None else now - last_logged).total_seconds() < repeat_cooldown:
                     continue
                 self._last_alert_logged_at[signature] = now
                 alert = {
@@ -383,8 +388,8 @@ class HealthDashboard:
             return HealthStatus.WARNING
         
         # Look at recent checks (last minute)
-        cutoff = datetime.now() - timedelta(minutes=1)
-        recent = [c for c in self.health_checks if c.timestamp >= cutoff]
+        cutoff = datetime.now(timezone.utc) - timedelta(minutes=1)
+        recent = [c for c in self.health_checks if (c.timestamp if c.timestamp.tzinfo else c.timestamp.replace(tzinfo=timezone.utc)) >= cutoff]
         
         if not recent:
             return HealthStatus.WARNING
@@ -404,8 +409,8 @@ class HealthDashboard:
         status = self.get_overall_status()
         
         # Recent alerts
-        cutoff = datetime.now() - timedelta(hours=1)
-        recent_alerts = [a for a in self.alerts if datetime.fromisoformat(a['timestamp']) >= cutoff]
+        cutoff = datetime.now(timezone.utc) - timedelta(hours=1)
+        recent_alerts = [a for a in self.alerts if datetime.fromisoformat(a['timestamp'].replace('Z', '+00:00')).replace(tzinfo=timezone.utc) >= cutoff]
         
         return {
             'status': status.value,

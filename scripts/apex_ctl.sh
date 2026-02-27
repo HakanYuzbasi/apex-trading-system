@@ -102,7 +102,7 @@ kill_orphan_matches() {
 enforce_single_instance_stack() {
   # Clean up orphaned processes not tracked by PID files.
   # This avoids split-brain when users run `npm run dev` or `uvicorn` manually.
-  kill_orphan_matches "$BASE_DIR/venv/bin/python main.py"
+  kill_orphan_matches "python.*main.py"
   kill_orphan_matches "uvicorn api.server:app --port 8000"
   kill_orphan_matches "$BASE_DIR/frontend/node_modules/.bin/next dev"
   kill_orphan_matches "npm run dev"

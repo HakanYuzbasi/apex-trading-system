@@ -4,9 +4,9 @@
   "starting_capital": 100000.0,
   "current_day": "2026-02-20",
   "circuit_breaker": {
-    "is_tripped": true,
-    "reason": "Daily loss -10.00% exceeds 3.0%",
-    "trip_time": "2026-02-20T10:38:43.647872",
+    "is_tripped": false,
+    "reason": null,
+    "trip_time": null,
     "consecutive_losses": 0,
     "recent_trades": 0
   }

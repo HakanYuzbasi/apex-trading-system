@@ -22,6 +22,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from enum import Enum
 import logging
+from core.symbols import AssetClass
 
 logger = logging.getLogger(__name__)
 
@@ -242,7 +243,8 @@ class InstitutionalRiskManager:
         current_positions: Dict[str, int],
         price_cache: Dict[str, float],
         sector: str = "Unknown",
-        historical_prices: Optional[pd.Series] = None
+        historical_prices: Optional[pd.Series] = None,
+        asset_class: AssetClass = AssetClass.EQUITY
     ) -> SizingResult:
         """
         Calculate optimal position size with institutional constraints.
@@ -325,11 +327,16 @@ class InstitutionalRiskManager:
         final_shares = int(final_value / price) if price > 0 else 0
 
         # Ensure minimum position size
-        min_value = self.current_capital * self.config.min_position_pct
+        # Relax constraints for crypto to allow $5k trades on $1M+ capital
+        effective_min_pct = self.config.min_position_pct
+        if asset_class == AssetClass.CRYPTO:
+            effective_min_pct = 0.001  # 0.1% floor ($1k for $1M portfolio)
+
+        min_value = self.current_capital * effective_min_pct
         if final_value > 0 and final_value < min_value:
             final_value = 0
             final_shares = 0
-            constraints_hit.append("below_minimum")
+            constraints_hit.append(f"below_minimum:{final_value:,.0f}<{min_value:,.0f}")
 
         # Calculate weight
         weight = final_value / self.current_capital if self.current_capital > 0 else 0
@@ -388,26 +395,29 @@ class InstitutionalRiskManager:
         price_cache: Dict[str, float],
         target_sector: str
     ) -> float:
-        """Calculate current sector exposure."""
-        if not positions:
+        """Calculate current sector exposure relative to total capital."""
+        if not positions or self.current_capital <= 0:
             return 0.0
 
         sector_value = 0.0
-        total_value = 0.0
+        from config import ApexConfig
 
         for symbol, qty in positions.items():
             if qty == 0:
                 continue
 
             price = price_cache.get(symbol, 0)
+            if price <= 0:
+                continue
+                
             value = abs(qty * price)
-            total_value += value
+            
+            # Use same sector mapping as execution loop
+            symbol_sector = ApexConfig.get_sector(symbol)
+            if symbol_sector == target_sector:
+                sector_value += value
 
-            # Simplified: would need sector mapping
-            # For now, assume 10% default
-            # In production, use proper sector classification
-
-        return sector_value / total_value if total_value > 0 else 0.0
+        return sector_value / self.current_capital
 
     def _get_drawdown_multiplier(self) -> float:
         """Get risk multiplier based on current drawdown."""

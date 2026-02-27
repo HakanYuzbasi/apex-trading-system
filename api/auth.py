@@ -155,7 +155,7 @@ class User:
             "roles": self.roles,
             "permissions": self.permissions,
             "api_key": self.api_key,
-            "created_at": self.created_at.isoformat() if self.created_at else None,
+            "created_at": self.created_at.isoformat() + "Z" if self.created_at else None,
             "tier": self.tier
         }
 

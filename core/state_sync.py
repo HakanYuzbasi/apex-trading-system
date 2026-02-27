@@ -28,7 +28,7 @@ class StateSync:
     def write(self, state: Dict[str, Any]) -> None:
         """Write full runtime state atomically with timestamp normalization."""
         state_with_timestamp = dict(state)
-        state_with_timestamp.setdefault("timestamp", datetime.now(timezone.utc).isoformat())
+        state_with_timestamp.setdefault("timestamp", datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"))
         self.state_file.parent.mkdir(parents=True, exist_ok=True)
         with open(self.state_file, "w", encoding="utf-8") as file_handle:
             json.dump(state_with_timestamp, file_handle, indent=2, sort_keys=True, default=str)

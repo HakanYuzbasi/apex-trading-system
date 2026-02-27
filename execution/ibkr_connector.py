@@ -164,6 +164,18 @@ class IBKRConnector:
 
         # Normalized broker pair mapping for paper trading
         self.ibkr_pair_map = self._build_ibkr_pair_map()
+        
+        # Track live ticks for pre-market staleness guard
+        self.live_ticks_received_today: Dict[str, Any] = {}
+
+    def has_live_tick_today(self, symbol: str) -> bool:
+        from datetime import datetime, timezone
+        try:
+            normalized = self._normalize_symbol(symbol)
+            today = datetime.now(timezone.utc).date()
+            return self.live_ticks_received_today.get(normalized) == today
+        except Exception:
+            return False
 
     def _normalize_symbol(self, symbol: str) -> str:
         return normalize_symbol(symbol)
@@ -265,7 +277,21 @@ class IBKRConnector:
             from data.market_data import MarketDataFetcher
             price = MarketDataFetcher().get_current_price(normalized)
             if price and price > 0:
-                logger.info("event=price_fallback symbol=%s price=%.4f reason=%s", normalized, price, reason)
+                is_pre_open = False
+                if getattr(ApexConfig, "PRE_MARKET_STALENESS_GUARD", True):
+                    try:
+                        from datetime import datetime
+                        import pytz
+                        now_et = datetime.now(pytz.timezone('US/Eastern'))
+                        if now_et.hour == 9 and 0 <= now_et.minute < 30:
+                            is_pre_open = True
+                    except Exception:
+                        pass
+                
+                if is_pre_open:
+                    logger.warning(f"⚠️ Stale price fallback: {normalized} @ {price:.4f} — {reason}. Live tick not yet received.")
+                else:
+                    logger.info("event=price_fallback symbol=%s price=%.4f reason=%s", normalized, price, reason)
                 return float(price)
         except Exception:
             pass
@@ -298,10 +324,15 @@ class IBKRConnector:
         
     def _on_data_update(self, tickers):
         """Internal handler for IBKR pendingTickers event."""
-        if self.data_callback:
-            for ticker in tickers:
-                if ticker.contract and ticker.contract.symbol:
-                    self.data_callback(self._symbol_from_contract(ticker.contract))
+        from datetime import datetime, timezone
+        today = datetime.now(timezone.utc).date()
+        
+        for ticker in tickers:
+            if ticker.contract and ticker.contract.symbol:
+                symbol = self._symbol_from_contract(ticker.contract)
+                self.live_ticks_received_today[symbol] = today
+                if self.data_callback:
+                    self.data_callback(symbol)
 
     def record_execution_metrics(
         self,
@@ -381,18 +412,27 @@ class IBKRConnector:
             from execution.ibkr_lease_manager import lease_manager
             
             # Allocate a guaranteed unique client ID across cluster
-            max_id_retries = 3
+            max_id_retries = 5
             current_client_id = self.client_id
             
             for id_attempt in range(max_id_retries):
                 try:
-                    current_client_id = await lease_manager.allocate(self.client_id if id_attempt == 0 else None)
+                    # Try a consistently incrementing ID to naturally avoid collisions on quick retries
+                    preferred = self.client_id + id_attempt
+                    current_client_id = await lease_manager.allocate(preferred)
                     self._active_client_id = current_client_id
                     
+                    logger.info(f"🔑 Lease manager returned client ID {current_client_id} (preferred={preferred})")
                     await asyncio.wait_for(
                         self.ib.connectAsync(self.host, self.port, clientId=current_client_id),
                         timeout=getattr(ApexConfig, "IBKR_CONNECT_TIMEOUT", 10)
                     )
+                    
+                    # Wait briefly to catch immediate Server Error 326 (clientId already in use)
+                    await asyncio.sleep(2.0)
+                    if not self.ib.isConnected():
+                        # Connection dropped immediately, likely a client ID collision
+                        raise ConnectionError(f"clientId {current_client_id} rejected by peer")
                     
                     # Start heartbeat task to keep lease alive
                     if getattr(self, "_heartbeat_task", None) is None:
@@ -1637,15 +1677,20 @@ class IBKRConnector:
             # Use LMT by default for paper trading safety with delayed data
             if order_type == 'MKT' and not ApexConfig.USE_LIVE_MARKET_DATA:
                 order_type = 'LMT'
-                if limit_price is None:
+                if limit_price is None or limit_price <= 0:
                     limit_price = expected_price
                 limit_price = self._finite_float(limit_price, 0.0)
                 if limit_price <= 0:
                     limit_price = 0.01
+                # Increase by a safety margin to ensure fill on paper (since we wanted MKT anyway)
+                if side.upper() == 'BUY':
+                    limit_price = limit_price * 1.05  # Pay 5% more
+                else:
+                    limit_price = limit_price * 0.95  # Accept 5% less
                 logger.info(f"   🔄 Switching to LMT order for paper trading safety (${limit_price:.2f})")
 
             if order_type == 'MKT':
-                order = MarketOrder(action, quantity)
+                order = MarketOrder(action, quantity, tif='GTC')
                 logger.info(f"📈 Option Market Order: {action} {quantity} {symbol} {expiry} {strike}{right}")
             else:
                 # Ensure we have a valid limit price
@@ -1656,7 +1701,7 @@ class IBKRConnector:
                 # Round to 2 decimals for USD options
                 limit_price = max(0.01, round(limit_price, 2))
                 
-                order = LimitOrder(action, quantity, limit_price)
+                order = LimitOrder(action, quantity, limit_price, tif='GTC')
                 logger.info(f"💰 Option Limit Order: {action} {quantity} {symbol} {expiry} {strike}{right} @ ${limit_price:.2f}")
 
             # Place order

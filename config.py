@@ -229,7 +229,10 @@ class ApexConfig:
         os.getenv("APEX_INITIAL_CAPITAL", os.getenv("INITIAL_CAPITAL", "1100000"))
     )
     POSITION_SIZE_USD = float(os.getenv("APEX_POSITION_SIZE_USD", "20000"))  # Default $20k
-    MAX_POSITIONS = 10  # Increased from 15 for better capital utilization
+    CRYPTO_POSITION_SIZE_USD: float = float(
+        os.getenv("APEX_CRYPTO_POSITION_SIZE_USD", "5000")
+    )  # Separate crypto size from equity — Alpaca $100k account at ~5% per trade
+    MAX_POSITIONS = 40  # Raised from 10 to allow broader portfolio diversification
     MAX_SHARES_PER_POSITION = 500  # Cap max shares per position
     MIN_HEDGE_NOTIONAL = 50_000  # Only hedge positions larger than $50k to save on costs
     
@@ -238,7 +241,7 @@ class ApexConfig:
     # ═══════════════════════════════════════════════════════════════
     MAX_DAILY_LOSS = 0.03  # 3% max daily loss (Moderate risk profile)
     MAX_DRAWDOWN = 0.10  # 10% max drawdown
-    MAX_SECTOR_EXPOSURE = 0.20  # 20% max per sector for proper diversification (was 0.50)
+    MAX_SECTOR_EXPOSURE = 0.20  # Reduced from 50% to 20% to prevent concentration risk (e.g. Energy)
     EQUITY_OUTLIER_GUARD_ENABLED: bool = os.getenv(
         "APEX_EQUITY_OUTLIER_GUARD_ENABLED", "true"
     ).lower() == "true"
@@ -428,6 +431,10 @@ class ApexConfig:
     # ═══════════════════════════════════════════════════════════════
     # SIGNAL THRESHOLDS (QUALITY FOCUS - Reduced noise)    # ML Configuration
     # ═══════════════════════════════════════════════════════════════
+    # FX Signal Calibration
+    FX_SIGNAL_THRESHOLD = 0.05       # Lower threshold for low-volatility FX macro patterns
+    FX_SIGNAL_GAIN_MULTIPLIER = 3.0  # Post-tanh gain amplification for FX signals
+
     MIN_SIGNAL_THRESHOLD = 0.18      # Lowered from 0.25 to let moderate signals through
     MIN_CONFIDENCE = 0.55            # Lowered from 0.35 (soft filters stack 0.85x*0.90x penalties)
     CRYPTO_SIGNAL_THRESHOLD_MULTIPLIER: float = float(
@@ -471,6 +478,10 @@ class ApexConfig:
     CRYPTO_MOMENTUM_CONFLICT_CONFIDENCE_PENALTY_MAX: float = float(
         os.getenv("APEX_CRYPTO_MOMENTUM_CONFLICT_CONFIDENCE_PENALTY_MAX", "0.08")
     )
+    
+    # Sentiment API configuration
+    SENTIMENT_API_ENABLED = True     # Toggle Yahoo Finance news sentiment parsing
+    
     FORCE_RETRAIN = False            # Set to True to force model retraining on startup
 
     # Regime-based entry thresholds (High filter)
@@ -550,6 +561,7 @@ class ApexConfig:
     USE_ADAPTIVE_REGIME = True         # Use probability-based regime detector
     REGIME_SMOOTHING_ALPHA = 0.15      # EMA alpha for smooth regime transitions
     MIN_REGIME_DURATION_DAYS = 3       # Min days before allowing regime switch
+    REGIME_MIN_MARGIN = 0.10           # Minimum probability margin required to switch regime
 
     # Signal Integrity Monitor
     SIGNAL_INTEGRITY_ENABLED = True    # Monitor signal stream for anomalies
@@ -580,6 +592,7 @@ class ApexConfig:
 
     # Signal Decay Shield - Time-decay & staleness guard
     SIGNAL_DECAY_ENABLED = True
+    PRE_MARKET_STALENESS_GUARD = True     # Guard against stale overnight pre-market gaps
     MAX_PRICE_AGE_SECONDS = 120           # 2 minutes max for price data
     MAX_SENTIMENT_AGE_SECONDS = 1800      # 30 minutes max for sentiment
     MAX_FEATURE_AGE_SECONDS = 14400       # 4 hours max for features
@@ -778,7 +791,7 @@ class ApexConfig:
     # ═══════════════════════════════════════════════════════════════
     # LOGGING
     # ═══════════════════════════════════════════════════════════════
-    LOG_LEVEL = "INFO"  # DEBUG, INFO, WARNING, ERROR, CRITICAL
+    LOG_LEVEL = "DEBUG"  # DEBUG, INFO, WARNING, ERROR, CRITICAL
     LOG_FILE = "logs/apex.log"
     # ✅ NEW: Log rotation controls (bytes)
     LOG_MAX_BYTES = int(os.getenv("APEX_LOG_MAX_BYTES", str(5 * 1024 * 1024)))  # 5MB
@@ -804,6 +817,7 @@ class ApexConfig:
     ]
 
     # 3. Crypto Pairs (Top Liquid, expanded for Alpaca crypto paper)
+    # Note: MATIC/USD and UNI/USD removed - delisted from yfinance as of Feb 2026
     CRYPTO_PAIRS = [
         "BTC/USD",
         "ETH/USD",
@@ -811,7 +825,7 @@ class ApexConfig:
         "DOGE/USD",
         "AVAX/USD",
         "LINK/USD",
-        "MATIC/USD",
+        # "MATIC/USD",  # ❌ Delisted from yfinance
         "ADA/USD",
         "XRP/USD",
         "DOT/USD",
@@ -820,7 +834,7 @@ class ApexConfig:
         "XLM/USD",
         "ETC/USD",
         "AAVE/USD",
-        "UNI/USD",
+        # "UNI/USD",  # ❌ Delisted from yfinance
     ]
     EXTRA_CRYPTO_PAIRS = [
         token.strip().upper()
@@ -932,6 +946,8 @@ class ApexConfig:
     @classmethod
     def get_sector(cls, symbol: str) -> str:
         """Get sector for a symbol."""
+        if symbol.startswith("CRYPTO:"):
+            return "Crypto"
         return cls.SECTOR_MAP.get(symbol, "Unknown")
 
     @classmethod

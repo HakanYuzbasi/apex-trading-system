@@ -426,7 +426,13 @@ class AlpacaConnector:
                     self.data_callback(normalized)
                 return price
 
-            logger.warning(f"No price for {symbol} from Alpaca")
+            logger.debug(f"No price for {symbol} from Alpaca (symbol may be delisted or market closed)")
+            # Track dead symbols to avoid repeated warning spam
+            if not hasattr(self, '_no_price_symbols'):
+                self._no_price_symbols = set()
+            if symbol not in self._no_price_symbols:
+                self._no_price_symbols.add(symbol)
+                logger.warning(f"No price for {symbol} from Alpaca (first miss — subsequent misses suppressed to debug)")
             return self._fallback_price(normalized)
 
         except Exception as e:

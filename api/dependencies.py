@@ -336,7 +336,11 @@ def _parse_timestamp(ts: Optional[str]) -> Optional[datetime]:
     if not ts:
         return None
     try:
-        return datetime.fromisoformat(ts.replace("Z", "+00:00"))
+        if ts.endswith("Z"):
+            return datetime.fromisoformat(ts.replace("Z", "+00:00"))
+        if "+" not in ts and "-" not in ts: # Naive assumed UTC
+            return datetime.fromisoformat(ts + "+00:00")
+        return datetime.fromisoformat(ts)
     except Exception:
         return None
 

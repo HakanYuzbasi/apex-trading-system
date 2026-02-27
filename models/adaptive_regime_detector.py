@@ -92,14 +92,47 @@ class AdaptiveRegimeDetector:
         self._regime_start: datetime = datetime.now()
         self._regime_age_days: int = 0
         self._step_counter: int = 0
-        self._last_transition_step: int = -10_000
+        self._last_transition_step: int = 0  # Replaced -10_000 initialization
         self._history: deque = deque(maxlen=500)
         self._previous_assessment: Optional[RegimeAssessment] = None
+
+        self._load_state()
 
         logger.info(
             f"AdaptiveRegimeDetector initialized: alpha={smoothing_alpha}, "
             f"min_duration={min_regime_duration}"
         )
+
+    def _load_state(self):
+        import json
+        from config import ApexConfig
+        try:
+            state_file = ApexConfig.DATA_DIR / "regime_state.json"
+            if state_file.exists():
+                with open(state_file, 'r') as f:
+                    data = json.load(f)
+                    self._current_regime = data.get("current_regime", "neutral")
+                    self._step_counter = data.get("step_counter", 0)
+                    self._last_transition_step = data.get("last_transition_step", 0)
+                    logger.info(f"Loaded regime state: {self._current_regime} at step {self._step_counter}")
+        except Exception as e:
+            logger.warning(f"Failed to load regime state: {e}")
+
+    def save_state(self):
+        import json
+        from config import ApexConfig
+        try:
+            state_file = ApexConfig.DATA_DIR / "regime_state.json"
+            ApexConfig.DATA_DIR.mkdir(parents=True, exist_ok=True)
+            data = {
+                "current_regime": self._current_regime,
+                "step_counter": self._step_counter,
+                "last_transition_step": self._last_transition_step,
+            }
+            with open(state_file, 'w') as f:
+                json.dump(data, f)
+        except Exception as e:
+            logger.debug(f"Failed to save regime state: {e}")
 
     def assess_regime(
         self,
@@ -146,11 +179,26 @@ class AdaptiveRegimeDetector:
                 if len(sorted_probs) > 1 else float(sorted_probs[0][1])
             )
             cooldown_ready = (self._step_counter - self._last_transition_step) >= self.transition_cooldown_steps
-            if (
+            cooldown_remaining = max(0, self.transition_cooldown_steps - (self._step_counter - self._last_transition_step))
+            
+            from config import ApexConfig
+            margin_req = float(getattr(ApexConfig, "REGIME_MIN_MARGIN", 0.10))
+            eff_gap_req = max(self.min_transition_gap, margin_req)
+
+            allowed = (
                 self._regime_age_days >= self.min_regime_duration
-                and prob_gap >= self.min_transition_gap
+                and prob_gap >= eff_gap_req
                 and cooldown_ready
-            ):
+            )
+            
+            if emit_transition_logs:
+                logger.debug(
+                    f"🕵️ Regime Transition Attempt {self._current_regime}->{primary} | step={self._step_counter} | "
+                    f"probs={{k: round(v, 2) for k, v in smoothed.items()}} | margin={prob_gap:.2f} (req={eff_gap_req:.2f}) | "
+                    f"cooldown_rem={cooldown_remaining} | {'ALLOWED' if allowed else 'BLOCKED'}"
+                )
+
+            if allowed:
                 self._current_regime = primary
                 self._regime_start = datetime.now()
                 self._regime_age_days = 0

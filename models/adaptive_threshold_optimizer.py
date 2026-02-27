@@ -22,9 +22,9 @@ import logging
 
 logger = logging.getLogger(__name__)
 
-# Grid search parameter space
-ENTRY_THRESHOLD_GRID = [0.15, 0.20, 0.25, 0.30, 0.35, 0.40, 0.45, 0.50]
-CONFIDENCE_THRESHOLD_GRID = [0.20, 0.30, 0.40, 0.50]
+# Grid search parameter space (expanded for crypto/FX aggressive thresholds)
+ENTRY_THRESHOLD_GRID = [0.05, 0.08, 0.10, 0.12, 0.15, 0.18, 0.20, 0.25, 0.30, 0.35, 0.40, 0.45, 0.50]
+CONFIDENCE_THRESHOLD_GRID = [0.10, 0.15, 0.20, 0.30, 0.40, 0.50]
 
 
 @dataclass
@@ -71,13 +71,13 @@ class AdaptiveThresholdOptimizer:
     ):
         self.outcome_tracker = outcome_tracker
         self.default_thresholds = default_thresholds or {
-            "bull": 0.23,
-            "bear": 0.25,
-            "neutral": 0.28,
-            "volatile": 0.32,
-            "strong_bull": 0.20,
-            "strong_bear": 0.23,
-            "high_volatility": 0.32,
+            "bull": 0.18,
+            "bear": 0.18,
+            "neutral": 0.15,
+            "volatile": 0.22,
+            "strong_bull": 0.15,
+            "strong_bear": 0.15,
+            "high_volatility": 0.22,
         }
         self.min_signals = min_signals
         self.optimization_interval_hours = optimization_interval_hours

@@ -134,9 +134,11 @@ class OvernightRiskGuard:
                 return MarketPhase.AFTER_HOURS
             return MarketPhase.CLOSED
 
-        # Regular hours - calculate minutes to close
+        # Regular hours - calculate minutes to close and since open
         close_dt = datetime.combine(now.date(), self.market_close)
+        open_dt = datetime.combine(now.date(), self.market_open)
         minutes_to_close = (close_dt - now).total_seconds() / 60
+        minutes_since_open = (now - open_dt).total_seconds() / 60
 
         if minutes_to_close <= self.final_reduction_minutes:
             return MarketPhase.FINAL_MINUTES
@@ -144,7 +146,7 @@ class OvernightRiskGuard:
             return MarketPhase.CLOSE_PREP
         elif minutes_to_close <= self.reduce_exposure_minutes:
             return MarketPhase.POWER_HOUR
-        elif minutes_to_close <= 60:  # First 30 min
+        elif 0 <= minutes_since_open <= 30:
             return MarketPhase.OPEN
         else:
             return MarketPhase.REGULAR

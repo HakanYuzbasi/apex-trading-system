@@ -93,8 +93,34 @@ class SentimentAnalyzer:
         self.cache_minutes = cache_minutes
         self._cache: Dict[str, Tuple[SentimentResult, datetime]] = {}
         
-        logger.info("SentimentAnalyzer initialized (keyword-based)")
+        from config import ApexConfig
+        self.enabled = getattr(ApexConfig, "SENTIMENT_API_ENABLED", True)
+        logger.info(f"SentimentAnalyzer initialized (keyword-based, API enabled: {self.enabled})")
     
+    def check_connectivity(self) -> bool:
+        """Test Yahoo Finance news API connectivity on startup."""
+        if not self.enabled:
+            logger.info("ℹ️ Sentiment API is DISABLED in config.")
+            return False
+            
+        if not YFINANCE_AVAILABLE:
+            logger.warning("⚠️ Sentiment API unavailable: yfinance not installed.")
+            return False
+            
+        try:
+            logger.info("Testing Yahoo Finance Sentiment API connectivity...")
+            ticker = yf.Ticker("AAPL")
+            news = ticker.news
+            if news and len(news) > 0:
+                logger.info("✅ Sentiment API connectivity: SUCCESS (Endpoint reachable, rate limit OK).")
+                return True
+            else:
+                logger.warning("⚠️ Sentiment API connectivity: REACHABLE but returned empty news for AAPL.")
+                return False
+        except Exception as e:
+            logger.warning(f"⚠️ Sentiment API connectivity: FAILED. Network error or rate limited. Error: {e}")
+            return False
+
     def analyze(
         self,
         symbol: str,
@@ -216,28 +242,47 @@ class SentimentAnalyzer:
             return pd.Series()
     
     def _fetch_news(self, symbol: str) -> List[str]:
-        """Fetch news headlines from Yahoo Finance."""
+        """Fetch news headlines from Yahoo Finance with retries."""
         if not YFINANCE_AVAILABLE:
             return []
-        
-        try:
-            ticker = yf.Ticker(symbol)
-            news = ticker.news
             
-            if not news:
-                return []
-            
-            headlines = []
-            for item in news[:20]:  # Limit to 20 most recent
-                title = item.get('title', '')
-                if title:
-                    headlines.append(title)
-            
-            return headlines
-            
-        except Exception as e:
-            logger.debug(f"Error fetching news for {symbol}: {e}")
+        from config import ApexConfig
+        if not getattr(ApexConfig, "SENTIMENT_API_ENABLED", True):
+            logger.debug(f"🌑 Sentiment check skipped for {symbol} (API disabled)")
             return []
+            
+        import time
+        max_retries = 3
+        delays = [2, 4, 8]
+        
+        for attempt in range(max_retries + 1):
+            try:
+                ticker = yf.Ticker(symbol)
+                news = ticker.news
+                
+                if not news:
+                    if attempt < max_retries:
+                        time.sleep(delays[attempt])
+                        continue
+                    return []
+                
+                headlines = []
+                for item in news[:20]:  # Limit to 20 most recent
+                    title = item.get('title', '')
+                    if title:
+                        headlines.append(title)
+                
+                return headlines
+                
+            except Exception as e:
+                if attempt < max_retries:
+                    logger.debug(f"News fetch failed for {symbol} (attempt {attempt+1}/{max_retries+1}): {e}")
+                    time.sleep(delays[attempt])
+                else:
+                    logger.warning(f"⚠️ Yahoo Finance news API failed for {symbol} after {max_retries+1} attempts: HTTP/Connection Error: {e}")
+                    return []
+        
+        return []
     
     def _score_headline(self, headline: str) -> float:
         """

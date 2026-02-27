@@ -42,9 +42,22 @@ class PerformanceTracker:
         logger.debug(f"Trade recorded: {side} {quantity} {symbol} @ ${price:.2f}")
     
     def record_equity(self, value: float):
-        """✅ FIXED: Record equity point with proper float conversion."""
+        """✅ FIXED: Record equity point with proper float conversion and sanity guard."""
         try:
             value = float(value)  # ✅ Force conversion
+            
+            # 🛡️ Sanity Guard: Prevent recording massive transient drops
+            if self.equity_curve:
+                last_value = self.equity_curve[-1][1]
+                if last_value > 0:
+                    drop_pct = (last_value - value) / last_value
+                    if drop_pct > 0.5:
+                        logger.warning(
+                            f"🛑 record_equity: Skipped outlier value ${value:,.2f} "
+                            f"(drop of {drop_pct:.1%} from ${last_value:,.2f})"
+                        )
+                        return
+
             timestamp = datetime.now().isoformat()
             self.equity_curve.append((timestamp, value))
             self._save_state()  # ✅ Persist immediately

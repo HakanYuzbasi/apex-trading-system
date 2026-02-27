@@ -264,7 +264,12 @@ class UltimateSignalGenerator:
         self.random_seed = random_seed
         self.enable_deep_learning = enable_deep_learning
         
-        self.adaptive_regime_detector = AdaptiveRegimeDetector()
+        self.adaptive_regime_detector = AdaptiveRegimeDetector(
+            smoothing_alpha=0.15,
+            min_regime_duration=5,
+            min_transition_gap=0.08,
+            transition_cooldown_steps=15,
+        )
         self._symbol_regime_detectors: Dict[str, AdaptiveRegimeDetector] = {}
         
         # Feature engineering
@@ -714,9 +719,7 @@ class UltimateSignalGenerator:
 
             # SVR: support vector regression with RBF kernel
             svr_C = 0.5 if regime in ('bull', 'volatile') else 1.0
-            models['svr'] = SVRRegressor(
-                C=svr_C, epsilon=0.01, random_state=self.random_seed
-            )
+            
 
             # Gaussian Process: regime-aware noise and subsample settings
             gp_config = {
@@ -725,10 +728,7 @@ class UltimateSignalGenerator:
                 'bull': {'alpha': 0.15, 'max_samples': 2000, 'noise_level': 0.2},
             }
             gp_params = gp_config.get(regime, {'alpha': 0.1, 'max_samples': 2000, 'noise_level': 0.1})
-            models['gp'] = GPRegressor(
-                max_samples=gp_params['max_samples'], alpha=gp_params['alpha'],
-                noise_level=gp_params['noise_level'], random_state=self.random_seed
-            )
+            
 
             # Anomaly-Aware: IsolationForest + GradientBoosting
             models['anomaly_gb'] = AnomalyAwareRegressor(
@@ -795,47 +795,58 @@ class UltimateSignalGenerator:
         overfit_threshold = median_val_mse * 3.0
 
         scores = {}
-        excluded = []
+        penalized = []
         for m in metrics:
-            # Gate 1: val_mse too large relative to peers
-            if m.val_mse > overfit_threshold:
-                excluded.append(m.model_name)
+            if m.val_mse <= 0:
+                scores[m.model_name] = 1.0
                 continue
-            # Gate 2: val/train ratio too high (severe overfitting)
-            if m.train_mse > 0 and m.val_mse / m.train_mse > overfit_ratio:
-                excluded.append(m.model_name)
-                continue
-            if m.val_mse > 0:
-                base = (1.0 / m.val_mse) ** temperature
-            else:
-                base = 1.0
+
+            # Compute base score using val_mse
+            base = (1.0 / m.val_mse) ** temperature
 
             # Accuracy bonus: models with better directional accuracy get a boost
             if use_accuracy and hasattr(m, "directional_accuracy"):
                 acc_bonus = max(0.0, (m.directional_accuracy - 0.50)) * 2.0
                 base *= (1.0 + acc_bonus)
 
+            # --- Overfit Penalty instead of hard exclusion ---
+            # Overfit models still contribute but at reduced weight.
+            # Penalty schedule:
+            #   ratio 1.0-2.0 → no penalty (clean model)
+            #   ratio 2.0-3.0 → weight × 0.40  (mild overfit: still useful direction signal)
+            #   ratio 3.0-4.0 → weight × 0.15  (moderate overfit: small diversification value)
+            #   ratio 4.0+    → weight × 0.05  (severe overfit: tiny contrarian signal)
+            # This prevents total signal blackout in any regime while keeping overfit models
+            # from dominating the ensemble.
+            ratio = m.val_mse / m.train_mse if m.train_mse > 0 else 1.0
+            peer_ratio = m.val_mse / (median_val_mse + 1e-10)
+
+            # Combined overfit severity (max of ratio-based and peer-based)
+            severity = max(
+                max(0.0, ratio - 1.0) / 3.0,       # 0 at ratio=1, 1.0 at ratio=4
+                max(0.0, peer_ratio - 1.0) / 2.0,  # 0 at peer median, 1.0 at 3x median
+            )
+            severity = min(severity, 1.0)
+
+            if severity > 0.01:
+                # Exponential penalty: score × e^(-3 × severity)
+                # severity=0.33 → ×0.37, severity=0.67 → ×0.13, severity=1.0 → ×0.05
+                import math
+                penalty = math.exp(-3.0 * severity)
+                base *= penalty
+                penalized.append(f"{m.model_name}(×{penalty:.2f})")
+
             scores[m.model_name] = base
 
-        if excluded:
-            logger.warning(f"  Excluded overfit models from {regime}: {excluded}")
-
-        if not scores:
-            # Fallback: use all models with uniform weights
-            scores = {m.model_name: (1.0 / max(m.val_mse, 1e-10)) ** temperature for m in metrics}
+        if penalized:
+            logger.info(f"  Overfit-penalized models in {regime}: {penalized}")
 
         total = sum(scores.values())
         self.regime_weights[regime] = {name: score / total for name, score in scores.items()}
-        # Set excluded models to zero weight
-        for name in excluded:
-            self.regime_weights[regime][name] = 0.0
 
         logger.info(f"  Model weights for {regime} (temp={temperature:.1f}, acc_bonus={use_accuracy}):")
         for name, weight in sorted(self.regime_weights[regime].items(), key=lambda x: -x[1]):
-            if weight > 0:
-                logger.info(f"    {name}: {weight:.2%}")
-            else:
-                logger.info(f"    {name}: EXCLUDED (overfit)")
+            logger.info(f"    {name}: {weight:.2%}")
     
     def generate_signal(
         self,
@@ -1182,7 +1193,7 @@ class UltimateSignalGenerator:
                 # Load models - standard pkl models
                 pkl_models = [
                     'rf', 'gb', 'lgb',
-                    'elastic_net', 'bayesian_ridge', 'svr', 'gp',
+                    'elastic_net', 'bayesian_ridge',  
                     'anomaly_gb', 'catboost', 'stacking',
                 ]
                 for name in pkl_models:

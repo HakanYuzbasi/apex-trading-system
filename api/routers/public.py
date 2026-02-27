@@ -89,6 +89,8 @@ async def public_websocket_endpoint(websocket: WebSocket):
                         "type": "state_update",
                         "timestamp": current_timestamp or datetime.utcnow().isoformat() + "Z",
                         "capital": current_state.get("capital", 0),
+                        "starting_capital": current_state.get("starting_capital", 0), # Added missing field
+                        "aggregated_equity": current_state.get("aggregated_equity", current_state.get("capital", 0)), # Added missing field
                         "positions": current_state.get("positions", {}),
                         "daily_pnl": current_state.get("daily_pnl", 0),
                         "total_pnl": current_state.get("total_pnl", 0),

@@ -25,7 +25,7 @@ Also tracks:
 import logging
 from typing import Dict, List, Optional, Tuple
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 from enum import IntEnum
 
 logger = logging.getLogger(__name__)
@@ -112,7 +112,7 @@ class PositionAgingManager:
         entry_time: Optional[datetime] = None,
     ):
         """Register a new position for aging tracking."""
-        now = entry_time or datetime.now()
+        now = entry_time or datetime.now(timezone.utc)
         self._positions[symbol] = {
             "entry_price": entry_price,
             "entry_time": now,
@@ -148,7 +148,7 @@ class PositionAgingManager:
                 return None
 
         pos = self._positions[symbol]
-        now = datetime.now()
+        now = datetime.now(timezone.utc)
 
         # Calculate P&L
         entry = pos["entry_price"]
@@ -166,10 +166,16 @@ class PositionAgingManager:
             pos["high_water_time"] = now
 
         # Calculate days held
-        days_held = (now - pos["entry_time"]).days
+        _entry = pos["entry_time"]
+        if _entry.tzinfo is None:
+            _entry = _entry.replace(tzinfo=timezone.utc)
+        days_held = (now - _entry).days
 
         # Calculate days since new high
-        days_since_high = (now - pos["high_water_time"]).days
+        _hwt = pos["high_water_time"]
+        if _hwt.tzinfo is None:
+            _hwt = _hwt.replace(tzinfo=timezone.utc)
+        days_since_high = (now - _hwt).days
 
         # Calculate velocity (P&L change rate)
         velocity = self._calculate_velocity(pos["pnl_history"])
@@ -356,7 +362,10 @@ class PositionAgingManager:
             return 1.0
 
         pos = self._positions[symbol]
-        days_held = (datetime.now() - pos["entry_time"]).days
+        _e = pos["entry_time"]
+        if _e.tzinfo is None:
+            _e = _e.replace(tzinfo=timezone.utc)
+        days_held = (datetime.now(timezone.utc) - _e).days
         tier = self._get_tier(days_held)
 
         multiplier = 1.0 - (tier.value * self.stop_tightening)
@@ -366,7 +375,10 @@ class PositionAgingManager:
         """Get days held for a position."""
         if symbol not in self._positions:
             return 0
-        return (datetime.now() - self._positions[symbol]["entry_time"]).days
+        _e2 = self._positions[symbol]["entry_time"]
+        if _e2.tzinfo is None:
+            _e2 = _e2.replace(tzinfo=timezone.utc)
+        return (datetime.now(timezone.utc) - _e2).days
 
     def remove_position(self, symbol: str):
         """Remove position from tracking."""
@@ -380,7 +392,10 @@ class PositionAgingManager:
         exit_candidates = 0
 
         for symbol, pos in self._positions.items():
-            days = (datetime.now() - pos["entry_time"]).days
+            _e3 = pos["entry_time"]
+            if _e3.tzinfo is None:
+                _e3 = _e3.replace(tzinfo=timezone.utc)
+            days = (datetime.now(timezone.utc) - _e3).days
             total_days += days
             tier = self._get_tier(days)
             tier_counts[tier.name] += 1

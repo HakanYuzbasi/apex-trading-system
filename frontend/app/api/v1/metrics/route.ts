@@ -68,7 +68,7 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
       ? sanitizeMoney(balanceData.total_equity, sanitized.capital)
       : sanitized.capital;
     let combinedOpenPositions = portfolioPositionsResp.ok
-      ? Math.max(sanitized.open_positions, sanitizeCount(portfolioPositions.length, 0))
+      ? sanitizeCount(portfolioPositions.length, sanitized.open_positions)
       : sanitized.open_positions;
 
     if ((!portfolioBalanceResp.ok || !portfolioPositionsResp.ok) && cachedFresh && LAST_GOOD_METRICS_SNAPSHOT) {

@@ -360,7 +360,7 @@ class BrokerService:
         connection: BrokerConnection,
         credentials: Dict[str, Any],
     ) -> List[Dict[str, Any]]:
-        as_of = datetime.utcnow().isoformat()
+        as_of = datetime.utcnow().isoformat() + "Z"
         if connection.broker_type == BrokerType.ALPACA:
             return await asyncio.wait_for(
                 asyncio.to_thread(
@@ -473,7 +473,8 @@ class BrokerService:
     ) -> List[Dict[str, Any]]:
         host = credentials.get("host", "127.0.0.1")
         port = int(credentials.get("port", 7497))
-        ib_client_id = int(credentials.get("client_id") or client_id or 1)
+        import random
+        ib_client_id = int(credentials.get("client_id") or client_id or random.randint(100, 199))
         owned_loop: Optional[asyncio.AbstractEventLoop] = None
         try:
             asyncio.get_event_loop()
@@ -580,7 +581,7 @@ class BrokerService:
                 "tenant_id": tenant_id,
                 "total_equity": 0.0,
                 "breakdown": [],
-                "as_of": datetime.utcnow().isoformat(),
+                "as_of": datetime.utcnow().isoformat() + "Z",
             }
 
         lock = self._equity_locks.setdefault(tenant_id, asyncio.Lock())
@@ -592,7 +593,7 @@ class BrokerService:
                     "tenant_id": tenant_id,
                     "total_equity": 0.0,
                     "breakdown": [],
-                    "as_of": datetime.utcnow().isoformat(),
+                    "as_of": datetime.utcnow().isoformat() + "Z",
                 }
 
             snapshots = await self._collect_equity_snapshots_for_user(tenant_id)
@@ -601,7 +602,7 @@ class BrokerService:
                 "tenant_id": tenant_id,
                 "total_equity": float(total_value),
                 "breakdown": [snapshot.__dict__ for snapshot in snapshots],
-                "as_of": datetime.utcnow().isoformat(),
+                "as_of": datetime.utcnow().isoformat() + "Z",
             }
             self._equity_snapshot_cache[tenant_id] = {
                 "snapshot": payload,
@@ -691,7 +692,7 @@ class BrokerService:
                 value=float(equity),
                 broker="alpaca",
                 stale=False,
-                as_of=datetime.utcnow().isoformat(),
+                as_of=datetime.utcnow().isoformat() + "Z",
                 source=connection.name,
                 source_id=connection.id,
             )
@@ -709,7 +710,7 @@ class BrokerService:
                 value=float(equity),
                 broker="ibkr",
                 stale=False,
-                as_of=datetime.utcnow().isoformat(),
+                as_of=datetime.utcnow().isoformat() + "Z",
                 source=connection.name,
                 source_id=connection.id,
             )
@@ -736,7 +737,8 @@ class BrokerService:
         """Blocking IBKR equity fetch using NetLiquidation summary tag."""
         host = credentials.get("host", "127.0.0.1")
         port = int(credentials.get("port", 7497))
-        ib_client_id = int(credentials.get("client_id") or client_id or 1)
+        import random
+        ib_client_id = int(credentials.get("client_id") or client_id or random.randint(100, 199))
         owned_loop: Optional[asyncio.AbstractEventLoop] = None
         try:
             asyncio.get_event_loop()
