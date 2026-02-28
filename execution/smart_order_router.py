@@ -4,6 +4,15 @@ from typing import Callable, Awaitable, Optional, Dict, Any
 
 logger = logging.getLogger(__name__)
 
+
+def _is_crypto_symbol(symbol: str) -> bool:
+    """Return True if symbol is a crypto asset (trades 24/7 on Alpaca)."""
+    try:
+        from core.symbols import parse_symbol, AssetClass
+        return parse_symbol(symbol).asset_class == AssetClass.CRYPTO
+    except Exception:
+        return False
+
 class SmartOrderRouter:
     """
     APEX Institutional Smart Order Router (SOR)
@@ -13,6 +22,56 @@ class SmartOrderRouter:
     def __init__(self, max_urgency_steps: int = 3, step_delay_seconds: int = 10):
         self.max_steps = max_urgency_steps
         self.step_delay = step_delay_seconds
+
+    def select_algorithm(self, symbol: str, side: str, quantity: float, urgency: str = "medium", **kwargs) -> Dict[str, Any]:
+        """
+        Recommends an execution algorithm based on order characteristics.
+        Used by simulators and high-level execution managers.
+        """
+        # Crypto: trades 24/7, no VWAP/TWAP (no defined session volume), much larger daily volume
+        if _is_crypto_symbol(symbol):
+            # BTC/ETH daily volume ~$10-30B — participation rate math is equity-irrelevant.
+            # Use ADAPTIVE (mid-peg) for low urgency; fall back to MARKET for high/critical.
+            if urgency in ("critical", "high"):
+                return {
+                    "algorithm": "MARKET",
+                    "estimated_duration_minutes": 0,
+                    "reason": "Crypto high-urgency: immediate market execution.",
+                }
+            return {
+                "algorithm": "ADAPTIVE",
+                "estimated_duration_minutes": 5,
+                "reason": "Crypto 24/7: adaptive mid-peg — no VWAP/TWAP on continuous market.",
+            }
+
+        # Equity / Forex: session-based volume, VWAP/TWAP apply
+        daily_volume = kwargs.get("daily_volume", 1_000_000)
+        participation_rate = quantity / max(1, daily_volume)
+
+        if urgency == "critical" or participation_rate > 0.1:
+            return {
+                "algorithm": "MARKET",
+                "estimated_duration_minutes": 0,
+                "reason": "High urgency or large size relative to volume - immediate execution."
+            }
+        elif urgency == "high" or participation_rate > 0.03:
+            return {
+                "algorithm": "VWAP",
+                "estimated_duration_minutes": 45,
+                "reason": "Moderate urgency - VWAP recommended to balance cost and speed."
+            }
+        elif participation_rate < 0.01 and urgency == "low":
+            return {
+                "algorithm": "ADAPTIVE",
+                "estimated_duration_minutes": 20,
+                "reason": "Small order with low urgency - capture spread with adaptive pegging."
+            }
+        else:
+            return {
+                "algorithm": "TWAP",
+                "estimated_duration_minutes": 30,
+                "reason": "Standard order - TWAP recommended for steady execution."
+            }
 
     async def execute_adaptive_order(
         self,

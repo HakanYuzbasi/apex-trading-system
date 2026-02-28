@@ -127,7 +127,10 @@ class ApexConfig:
     # Market hours overrides (set for stress tests)
     MARKET_ALWAYS_OPEN: bool = os.getenv("APEX_MARKET_ALWAYS_OPEN", "false").lower() == "true"
     FX_ALWAYS_OPEN: bool = os.getenv("APEX_FX_ALWAYS_OPEN", "false").lower() == "true"
-    CRYPTO_ALWAYS_OPEN: bool = os.getenv("APEX_CRYPTO_ALWAYS_OPEN", "false").lower() == "true"
+    CRYPTO_ALWAYS_OPEN: bool = os.getenv("APEX_CRYPTO_ALWAYS_OPEN", "true").lower() == "true"
+    # Separate daily-loss limits per asset class (crypto uses a rolling 24h window)
+    CRYPTO_MAX_DAILY_LOSS: float = float(os.getenv("APEX_CRYPTO_MAX_DAILY_LOSS", "0.05"))   # 5%
+    EQUITY_MAX_DAILY_LOSS: float = float(os.getenv("APEX_EQUITY_MAX_DAILY_LOSS", "0.03"))   # 3%
     CUSTOM_MARKET_SESSIONS = {
         # Example:
         # "FOREX": {"timezone": "America/New_York", "open": "17:00", "close": "17:00", "weekdays": [0,1,2,3,4,6]},

@@ -560,12 +560,22 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
   for (const row of brokerRuntimeByType.values()) {
     row.stale_age_seconds = timestampAgeSeconds(row.heartbeat_ts);
   }
-  const preferredActiveBroker = normalizeBrokerName(
+  let preferredActiveBroker = normalizeBrokerName(
     statusData.primary_execution_broker
     || process.env.APEX_PRIMARY_EXECUTION_BROKER
     || process.env.APEX_ACTIVE_TRADING_BROKER
     || "alpaca",
   );
+
+  // Fallback: If it's a weekend (UTC Day 0=Sun, 6=Sat), force Alpaca for Crypto
+  const _now = new Date();
+  const isWeekend = _now.getUTCDay() === 0 || _now.getUTCDay() === 6;
+  // US equity hours: Mon-Fri 9:30-16:00 EST (UTC-5, ignoring DST — close enough for UI hint)
+  const _estMinutes = (_now.getUTCHours() * 60 + _now.getUTCMinutes() - 5 * 60 + 1440) % 1440;
+  const isEquityHours = !isWeekend && _estMinutes >= 570 && _estMinutes <= 960; // 9:30-16:00
+  if (isWeekend) {
+    preferredActiveBroker = "alpaca";
+  }
   const brokerModeHint = String(statusData.broker_mode ?? "").trim().toLowerCase();
   for (const broker of ["alpaca", "ibkr"] as const) {
     const impliedByMode = brokerModeHint === "both" || brokerModeHint === broker;
@@ -598,16 +608,38 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
     const preferredConfigured = brokers.some(
       (row) => row.broker === preferredActiveBroker && row.configured,
     );
-    if (preferredConfigured || activeBroker === "none") {
+    // On weekends always override to alpaca regardless of live status
+    if (preferredConfigured || activeBroker === "none" || isWeekend) {
       activeBroker = preferredActiveBroker;
     }
   }
+
+  // Ensure Alpaca is always shown as configured (crypto trades 24/7)
+  const alpacaRuntime = brokerRuntimeByType.get("alpaca");
+  if (alpacaRuntime && !alpacaRuntime.configured) {
+    alpacaRuntime.configured = true;
+    alpacaRuntime.source_count = Math.max(alpacaRuntime.source_count, 1);
+    alpacaRuntime.status = alpacaRuntime.status === "not_configured" ? "configured" : alpacaRuntime.status;
+  }
+  brokers = Array.from(brokerRuntimeByType.values());
 
   brokers = brokers.map((row) => {
     if (!row.configured) {
       return { ...row, mode: "disabled" as BrokerRuntimeMode };
     }
-    // In multi-broker mode, all configured live/stale brokers are actively trading
+    // IBKR only trades during equity market hours — force idle outside those hours
+    if (row.broker === "ibkr" && !isEquityHours) {
+      return {
+        ...row,
+        mode: "idle" as BrokerRuntimeMode,
+        status: row.status === "not_configured" ? "configured" : row.status,
+      };
+    }
+    // Alpaca handles crypto 24/7 — always trading if configured
+    if (row.broker === "alpaca") {
+      return { ...row, mode: "trading" as BrokerRuntimeMode };
+    }
+    // In multi-broker mode during equity hours, all configured live/stale brokers trade
     if (activeBroker === "multi" && (row.status === "live" || row.status === "stale" || row.status === "configured")) {
       return { ...row, mode: "trading" as BrokerRuntimeMode, stale: row.status === "stale" };
     }

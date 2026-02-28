@@ -185,14 +185,14 @@ describe("Dashboard", () => {
       login: async () => ({ ok: true }),
       register: async () => ({ ok: true }),
       logout: logoutMock,
-      refreshUser: async () => {},
+      refreshUser: async () => { },
       getToken: () => "token",
     });
   });
 
   test("renders dashboard shell with live heading", () => {
     render(<Dashboard />);
-    expect(screen.getByRole("heading", { name: "Apex Dashboard" })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "Apex Terminal" })).toBeInTheDocument();
     expect(screen.getByText("Function Readiness")).toBeInTheDocument();
   });
 

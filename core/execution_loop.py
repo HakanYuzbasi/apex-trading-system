@@ -150,7 +150,7 @@ from reconciliation.equity_reconciler import EquityReconciler, EquityReconciliat
 setup_logging(
     level=ApexConfig.LOG_LEVEL,
     log_file=ApexConfig.LOG_FILE,
-    json_format=False,
+    json_format=True,
     console_output=True,
     max_bytes=ApexConfig.LOG_MAX_BYTES,
     backup_count=ApexConfig.LOG_BACKUP_COUNT,
@@ -185,6 +185,16 @@ logging.getLogger('httpx').setLevel(logging.WARNING)
 
 from execution.smart_order_router import SmartOrderRouter
 from config import ApexConfig
+
+
+def _symbol_is_crypto(symbol: str) -> bool:
+    """Return True if symbol belongs to the crypto asset class."""
+    try:
+        return parse_symbol(symbol).asset_class == AssetClass.CRYPTO
+    except Exception:
+        return False
+
+
 class ApexTradingSystem:
     """
     Main trading system with comprehensive risk controls.
@@ -3555,8 +3565,9 @@ class ApexTradingSystem:
                 logger.debug("🛑 %s: New entries blocked by kill-switch", symbol)
                 return
 
-        # Equity reconciliation hard block: fail-closed for new entries only.
-        if self._equity_reconciliation_block_entries:
+        # Equity reconciliation hard block: fail-closed for new equity entries only.
+        # Crypto trades on Alpaca and is unaffected by IBKR equity reconciliation.
+        if self._equity_reconciliation_block_entries and not _symbol_is_crypto(symbol):
             if current_qty == 0:
                 if self.prometheus_metrics:
                     self.prometheus_metrics.record_governor_blocked_entry(
@@ -6711,8 +6722,10 @@ class ApexTradingSystem:
             
             while self.is_running:
                 try:
+                    cycle_start_time = datetime.now()
                     cycle += 1
                     self._cycle_count = cycle
+                    logger.debug(f"Starting trading cycle {cycle}")
                     now = datetime.now()
                     self._roll_daily_realized_if_needed(now)
 
@@ -6815,17 +6828,34 @@ class ApexTradingSystem:
                     # ✅ SOTA: Ensure all selected symbols have historical data before processing
                     await self._prefill_historical_data(open_universe)
                     if not open_universe and not open_positions:
-                        logger.info("⏸️  No open markets right now; skipping cycle work")
-                        await asyncio.sleep(ApexConfig.CHECK_INTERVAL_SECONDS)
-                        continue
+                        # Crypto trades 24/7 — never skip when crypto symbols exist in universe
+                        if ApexConfig.CRYPTO_ALWAYS_OPEN:
+                            crypto_universe = [
+                                s for s in self._runtime_symbols()
+                                if _symbol_is_crypto(s)
+                            ]
+                            if crypto_universe:
+                                open_universe = crypto_universe
+                                logger.info(
+                                    "⏰ Equity markets closed; running crypto-only cycle (%d symbols)",
+                                    len(crypto_universe),
+                                )
+                            else:
+                                logger.info("⏸️  No open markets right now; skipping cycle work")
+                                await asyncio.sleep(ApexConfig.CHECK_INTERVAL_SECONDS)
+                                continue
+                        else:
+                            logger.info("⏸️  No open markets right now; skipping cycle work")
+                            await asyncio.sleep(ApexConfig.CHECK_INTERVAL_SECONDS)
+                            continue
 
                     in_equity_hours = ApexConfig.TRADING_HOURS_START <= est_hour <= ApexConfig.TRADING_HOURS_END
                     if not in_equity_hours:
                         logger.info("⏰ Outside equity hours; processing only open markets")
 
                     # Always process if any market is open
-                    logger.info(f"⏰ Cycle #{cycle}: {now.strftime('%Y-%m-%d %H:%M:%S')} (EST: {est_hour:.1f}h)")
-                    logger.info("─" * 80)
+                    logger.debug(f"⏰ Cycle #{cycle}: {now.strftime('%Y-%m-%d %H:%M:%S')} (EST: {est_hour:.1f}h)")
+                    logger.debug("─" * 80)
 
                     # ═══════════════════════════════════════════════════════
                     # SOTA: Update Market State & Health
@@ -6880,12 +6910,12 @@ class ApexTradingSystem:
                                 logger.info(f"🚀 Top Momentum: {', '.join([f'{s}({v:.2f})' for s,v in tops])}")
 
                         # Process symbols in parallel
-                        logger.info(f"👉 Step 3: Process symbols ({len(open_universe)} symbols in open_universe)")
+                        logger.debug(f"👉 Step 3: Process symbols ({len(open_universe)} symbols in open_universe)")
                         await self.process_symbols_parallel(open_universe)
 
                         # 4. Refresh data (market data, indicators)
                         if cycle % 10 == 0:
-                            logger.info("👉 Step 4: Refresh data")
+                            logger.debug("👉 Step 4: Refresh data")
                             await self.refresh_data()
 
                         # Check for rebalancing (near market close)
@@ -6896,18 +6926,18 @@ class ApexTradingSystem:
                         if ApexConfig.OPTIONS_ENABLED and any(
                             parse_symbol(s).asset_class == AssetClass.EQUITY for s in open_universe
                         ):
-                            logger.info("👉 Step 5: Manage options")
+                            logger.debug("👉 Step 5: Manage options")
                             await self.manage_options()
 
                             # Phase 3: Manage Active Positions (Ratchet, Aging)
-                            logger.info("👉 Step 6: Manage active positions")
+                            logger.debug("👉 Step 6: Manage active positions")
                             await self.manage_active_positions()
 
                         # Sync positions after processing (captures any trades)
                         if self.ibkr or self.alpaca:
                             await self._sync_positions()
 
-                        logger.info("👉 Step 7: Check risk")
+                        logger.debug("👉 Step 7: Check risk")
                         await self.check_risk()
                         if cycle % 200 == 0:
                             self._maybe_tune_governor_policies(now)
@@ -7123,6 +7153,9 @@ class ApexTradingSystem:
                         except Exception as metrics_exc:
                             logger.debug("Prometheus cycle metrics error: %s", metrics_exc)
 
+                    cycle_end_time = datetime.now()
+                    cycle_duration = (cycle_end_time - cycle_start_time).total_seconds()
+                    logger.debug(f"Trading cycle {cycle} finished in {cycle_duration:.2f} seconds.")
                     await asyncio.sleep(ApexConfig.CHECK_INTERVAL_SECONDS)
                 
                 except KeyboardInterrupt:

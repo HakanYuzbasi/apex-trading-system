@@ -53,7 +53,7 @@ function buildWsUrl(base: string, isPublic?: boolean): string | null {
     return `${targetBase}${sep}token=${encodeURIComponent(token)}`;
 }
 
-const MAX_RECONNECT_ATTEMPTS = 10;
+const MAX_RECONNECT_ATTEMPTS = Infinity; // Never give up — 24/7 resilience
 const MAX_RECONNECT_DELAY_MS = 30_000;
 
 export function useWebSocket(isPublic?: boolean, {

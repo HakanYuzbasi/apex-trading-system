@@ -525,6 +525,10 @@ async def stream_trading_state():
                             "max_drawdown": current_state.get("max_drawdown", 0),
                             "sharpe_ratio": current_state.get("sharpe_ratio", 0),
                             "win_rate": current_state.get("win_rate", 0),
+                            "sortino_ratio": current_state.get("sortino_ratio", 0),
+                            "calmar_ratio": current_state.get("calmar_ratio", 0),
+                            "profit_factor": current_state.get("profit_factor", 0),
+                            "alpha_retention": current_state.get("alpha_retention", 0),
                             "sector_exposure": current_state.get("sector_exposure", {}),
                             "open_positions": current_state.get("open_positions", 0),
                             "max_positions": current_state.get("max_positions", ApexConfig.MAX_POSITIONS),
@@ -676,6 +680,9 @@ async def get_status(user=Depends(require_user)):
             getattr(ApexConfig, "PRIMARY_EXECUTION_BROKER", "alpaca"),
         )
     ).lower()
+    
+    if datetime.utcnow().weekday() >= 5 and primary_execution_broker in ["ibkr", "both"]:
+        primary_execution_broker = "alpaca"
     if not user.has_role("admin"):
         safe_metrics = sanitize_execution_metrics({})
         return {
@@ -1089,6 +1096,10 @@ async def websocket_endpoint(websocket: WebSocket):
             "max_drawdown": current_state.get("max_drawdown", 0),
             "sharpe_ratio": current_state.get("sharpe_ratio", 0),
             "win_rate": current_state.get("win_rate", 0),
+            "sortino_ratio": current_state.get("sortino_ratio", 0),
+            "calmar_ratio": current_state.get("calmar_ratio", 0),
+            "profit_factor": current_state.get("profit_factor", 0),
+            "alpha_retention": current_state.get("alpha_retention", 0),
             "sector_exposure": current_state.get("sector_exposure", {}),
             "open_positions": current_state.get("open_positions", 0),
             "max_positions": current_state.get("max_positions", ApexConfig.MAX_POSITIONS),

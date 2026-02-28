@@ -60,7 +60,7 @@ async def main() -> None:
     try:
         # Keep the main process alive while orchestrator manages background tasks
         while True:
-            await asyncio.sleep(3600)
+            await asyncio.sleep(60)
     except asyncio.CancelledError:
         logger.info("Main execution loop cancelled, gracefully shutting down orchestrator...")
     finally:

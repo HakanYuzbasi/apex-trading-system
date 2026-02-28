@@ -122,7 +122,11 @@ class RiskSession:
         self.current_day: str = datetime.now().strftime('%Y-%m-%d')
 
         self.circuit_breaker = CircuitBreaker()
-        
+
+        # Crypto uses a rolling 24h loss window (not calendar-day) because crypto trades 24/7
+        self._crypto_24h_ref_capital: float = 0.0
+        self._crypto_24h_ref_time: datetime = datetime.utcnow()
+
         # Load state on init
         self.load_state()
 
@@ -244,6 +248,13 @@ class RiskSession:
         self.circuit_breaker.record_trade(pnl)
         self.save_state()
 
+    def manual_reset_circuit_breaker(self, requested_by: str = "admin", reason: str = "manual_reset") -> bool:
+        """Manually reset the circuit breaker."""
+        logger.info(f"🔄 Manual circuit breaker reset requested by {requested_by} for {self.user_id}. Reason: {reason}")
+        self.circuit_breaker.reset()
+        self.save_state()
+        return True
+
     def set_starting_capital(self, capital: float):
         """Set starting capital and initialize tracking."""
         try:
@@ -321,6 +332,54 @@ class RiskSession:
         except Exception as e:
             logger.error(f"Error checking daily loss for {self.user_id}: {e}")
             return {'daily_pnl': 0, 'daily_return': 0, 'breached': False, 'limit': self.max_daily_loss}
+
+    def check_crypto_rolling_loss(self, current_value: float) -> Dict:
+        """
+        Check crypto P&L against a rolling 24-hour window.
+        Unlike equities, crypto trades 24/7 so a calendar-day reset at midnight is meaningless.
+        The reference capital resets every 24h from the first time this is called.
+        """
+        try:
+            current_value = float(current_value)
+            now = datetime.utcnow()
+            limit = getattr(ApexConfig, "CRYPTO_MAX_DAILY_LOSS", 0.05)
+
+            # Initialise reference on first call or after 24h window expires
+            if self._crypto_24h_ref_capital <= 0:
+                self._crypto_24h_ref_capital = current_value
+                self._crypto_24h_ref_time = now
+
+            elapsed_hours = (now - self._crypto_24h_ref_time).total_seconds() / 3600
+            if elapsed_hours >= 24:
+                logger.info(
+                    "[RiskSession/%s] Crypto 24h window expired (%.1fh); resetting reference capital.",
+                    self.user_id, elapsed_hours,
+                )
+                self._crypto_24h_ref_capital = current_value
+                self._crypto_24h_ref_time = now
+
+            pnl_24h = current_value - self._crypto_24h_ref_capital
+            ret_24h = pnl_24h / self._crypto_24h_ref_capital if self._crypto_24h_ref_capital > 0 else 0.0
+            breached = ret_24h < -limit
+
+            if breached:
+                logger.error(
+                    "🚨 CRYPTO 24H LOSS LIMIT BREACHED for %s: %.2f%% (limit %.1f%%)",
+                    self.user_id, ret_24h * 100, limit * 100,
+                )
+
+            return {
+                "crypto_pnl_24h": pnl_24h,
+                "crypto_return_24h": ret_24h,
+                "breached": breached,
+                "limit": limit,
+                "window_start": self._crypto_24h_ref_time.isoformat(),
+                "hours_elapsed": round(elapsed_hours, 2),
+            }
+        except Exception as e:
+            logger.error(f"Error checking crypto rolling loss for {self.user_id}: {e}")
+            return {"crypto_pnl_24h": 0.0, "crypto_return_24h": 0.0, "breached": False,
+                    "limit": getattr(ApexConfig, "CRYPTO_MAX_DAILY_LOSS", 0.05)}
 
     def check_drawdown(self, current_value: float) -> Dict:
         """Check if drawdown limit breached."""

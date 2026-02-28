@@ -185,7 +185,10 @@ def is_market_open(raw_or_parsed, timestamp, assume_daily: bool = False) -> bool
 import pytz
 from datetime import datetime
 
-def custom_is_market_open(symbol: str, timestamp=None) -> bool:
+def custom_is_market_open(symbol: str, timestamp=None, **kwargs) -> bool:
+    # Handle assume_daily from kwargs
+    assume_daily = kwargs.get('assume_daily', False)
+    
     if timestamp is None:
         timestamp = datetime.utcnow()
     try:
@@ -203,9 +206,13 @@ def custom_is_market_open(symbol: str, timestamp=None) -> bool:
         if timestamp.weekday() >= 5: 
             return False
             
+        # If assume_daily is True, we only care about the day (Mon-Fri)
+        if assume_daily:
+            return True
+
         # Calculate precise New York time
         eastern = pytz.timezone('America/New_York')
-        now_est = datetime.now(pytz.UTC).astimezone(eastern)
+        now_est = timestamp.astimezone(eastern) if timestamp.tzinfo else pytz.utc.localize(timestamp).astimezone(eastern)
         est_hour = now_est.hour + now_est.minute / 60.0
         
         # 9.5 = 9:30 AM EST | 16.0 = 4:00 PM EST

@@ -318,6 +318,11 @@ class IBKRConnector:
         )
         return mapped_parsed
 
+    def _on_disconnected(self):
+        """Handle disconnection from IBKR."""
+        logger.warning("IBKR disconnected. Attempting to reconnect...")
+        asyncio.create_task(self.connect())
+
     def set_data_callback(self, callback: Callable[[str], None]):
         """Set callback to be called on every data update (for heartbeat monitoring)."""
         self.data_callback = callback
@@ -489,6 +494,7 @@ class IBKRConnector:
             
             # Hook up data event listener
             self.ib.pendingTickersEvent += self._on_data_update
+            self.ib.disconnectedEvent += self._on_disconnected
             
         except Exception as e:
             logger.error(f"❌ Failed to connect to IBKR: {e}")

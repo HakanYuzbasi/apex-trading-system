@@ -166,11 +166,15 @@ def sanitize_execution_metrics(raw: Dict[str, Any]) -> Dict[str, Any]:
             fallback=0.0,
         )
 
-    drawdown = _as_finite_float(raw.get("max_drawdown"))
-    if drawdown is None:
+    drawdown_raw = _as_finite_float(raw.get("max_drawdown"))
+    if drawdown_raw is None:
         drawdown = 0.0
-    elif abs(drawdown) > 1.0 and abs(drawdown) > DRAWDOWN_PERCENT_ABS_MAX:
+    elif 1.0 < abs(drawdown_raw) <= DRAWDOWN_PERCENT_ABS_MAX:
+        drawdown = drawdown_raw / 100.0
+    elif abs(drawdown_raw) > DRAWDOWN_PERCENT_ABS_MAX:
         drawdown = 0.0
+    else:
+        drawdown = drawdown_raw
 
     sharpe_ratio = _bounded_float(raw.get("sharpe_ratio"), -SHARPE_ABS_MAX, SHARPE_ABS_MAX, fallback=0.0)
 

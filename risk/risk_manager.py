@@ -123,11 +123,19 @@ class RiskManager:
     def check_daily_loss(self, current_value: float, user_id: str = None) -> Dict:
         return self._get_or_create_session(user_id or self.default_user_id).check_daily_loss(current_value)
 
+    def check_crypto_rolling_loss(self, current_value: float, user_id: str = None) -> Dict:
+        """Check crypto P&L over a rolling 24h window (not calendar-day reset)."""
+        return self._get_or_create_session(user_id or self.default_user_id).check_crypto_rolling_loss(current_value)
+
     def check_drawdown(self, current_value: float, user_id: str = None) -> Dict:
         return self._get_or_create_session(user_id or self.default_user_id).check_drawdown(current_value)
 
     def get_circuit_breaker_status(self, user_id: str = None) -> Dict:
         return self._get_or_create_session(user_id or self.default_user_id).circuit_breaker.get_status()
+
+    def manual_reset_circuit_breaker(self, requested_by: str = "admin", reason: str = "manual_reset", user_id: str = None) -> bool:
+        """Manually reset the circuit breaker for a user."""
+        return self._get_or_create_session(user_id or self.default_user_id).manual_reset_circuit_breaker(requested_by, reason)
 
     # ----------------------------------------------------------------
     # Shared Logic (Stateless)

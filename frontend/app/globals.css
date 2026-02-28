@@ -1,3 +1,4 @@
+@import url('https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700&display=swap');
 @import "tailwindcss";
 @import "tw-animate-css";
 @import "shadcn/tailwind.css";
@@ -96,46 +97,46 @@
 }
 
 .dark {
-  --background: oklch(0.19 0.02 252);
-  --foreground: oklch(0.97 0.01 220);
+  --background: oklch(0.14 0.01 260);
+  --foreground: oklch(0.98 0 0);
 
-  --card: oklch(0.24 0.02 250);
-  --card-foreground: oklch(0.97 0.01 220);
+  --card: oklch(0.18 0.01 260);
+  --card-foreground: oklch(0.98 0 0);
 
-  --popover: oklch(0.24 0.02 250);
-  --popover-foreground: oklch(0.97 0.01 220);
+  --popover: oklch(0.18 0.01 260);
+  --popover-foreground: oklch(0.98 0 0);
 
-  --primary: oklch(0.71 0.1 221);
-  --primary-foreground: oklch(0.2 0.03 252);
+  --primary: oklch(0.65 0.15 250);
+  --primary-foreground: oklch(0.98 0 0);
 
-  --secondary: oklch(0.29 0.03 250);
-  --secondary-foreground: oklch(0.97 0.01 220);
+  --secondary: oklch(0.24 0.02 260);
+  --secondary-foreground: oklch(0.98 0 0);
 
-  --muted: oklch(0.29 0.03 250);
-  --muted-foreground: oklch(0.76 0.02 230);
+  --muted: oklch(0.24 0.02 260);
+  --muted-foreground: oklch(0.7 0.02 260);
 
-  --accent: oklch(0.33 0.03 210);
-  --accent-foreground: oklch(0.97 0.01 220);
+  --accent: oklch(0.24 0.02 260);
+  --accent-foreground: oklch(0.98 0 0);
 
-  --destructive: oklch(0.65 0.18 24);
-  --destructive-foreground: oklch(0.99 0 0);
+  --destructive: oklch(0.65 0.2 24);
+  --destructive-foreground: oklch(0.98 0 0);
 
-  --border: oklch(0.38 0.02 245);
-  --input: oklch(0.38 0.02 245);
-  --ring: oklch(0.72 0.08 220);
+  --border: oklch(0.28 0.01 260);
+  --input: oklch(0.28 0.01 260);
+  --ring: oklch(0.65 0.15 250);
 
-  --positive: oklch(0.75 0.14 155);
-  --negative: oklch(0.72 0.17 20);
-  --warning: oklch(0.78 0.12 75);
+  --positive: oklch(0.7 0.18 150);
+  --negative: oklch(0.65 0.2 24);
+  --warning: oklch(0.75 0.18 70);
 
-  --sidebar: oklch(0.24 0.02 250);
-  --sidebar-foreground: oklch(0.97 0.01 220);
-  --sidebar-primary: oklch(0.71 0.1 221);
-  --sidebar-primary-foreground: oklch(0.2 0.03 252);
-  --sidebar-accent: oklch(0.33 0.03 210);
-  --sidebar-accent-foreground: oklch(0.97 0.01 220);
-  --sidebar-border: oklch(0.38 0.02 245);
-  --sidebar-ring: oklch(0.72 0.08 220);
+  --sidebar: oklch(0.18 0.01 260);
+  --sidebar-foreground: oklch(0.98 0 0);
+  --sidebar-primary: oklch(0.65 0.15 250);
+  --sidebar-primary-foreground: oklch(0.98 0 0);
+  --sidebar-accent: oklch(0.24 0.02 260);
+  --sidebar-accent-foreground: oklch(0.98 0 0);
+  --sidebar-border: oklch(0.28 0.01 260);
+  --sidebar-ring: oklch(0.65 0.15 250);
 }
 
 @layer base {
@@ -145,7 +146,7 @@
 
   body {
     @apply bg-background text-foreground;
-    font-family: var(--font-sans), "Geist", "Segoe UI", sans-serif;
+    font-family: 'Outfit', var(--font-sans), "Geist", "Segoe UI", sans-serif;
     background-image:
       radial-gradient(circle at 10% 15%, rgba(53, 99, 233, 0.2), transparent 34%),
       radial-gradient(circle at 92% 82%, rgba(26, 181, 158, 0.2), transparent 30%),
@@ -247,18 +248,38 @@
   animation: apex-fade-up 520ms ease-out both;
 }
 
-.apex-stagger > * {
+.apex-stagger>* {
   opacity: 0;
   animation: apex-fade-up 520ms ease-out forwards;
 }
 
-.apex-stagger > *:nth-child(1) { animation-delay: 40ms; }
-.apex-stagger > *:nth-child(2) { animation-delay: 80ms; }
-.apex-stagger > *:nth-child(3) { animation-delay: 120ms; }
-.apex-stagger > *:nth-child(4) { animation-delay: 160ms; }
-.apex-stagger > *:nth-child(5) { animation-delay: 200ms; }
-.apex-stagger > *:nth-child(6) { animation-delay: 240ms; }
-.apex-stagger > *:nth-child(7) { animation-delay: 280ms; }
+.apex-stagger>*:nth-child(1) {
+  animation-delay: 40ms;
+}
+
+.apex-stagger>*:nth-child(2) {
+  animation-delay: 80ms;
+}
+
+.apex-stagger>*:nth-child(3) {
+  animation-delay: 120ms;
+}
+
+.apex-stagger>*:nth-child(4) {
+  animation-delay: 160ms;
+}
+
+.apex-stagger>*:nth-child(5) {
+  animation-delay: 200ms;
+}
+
+.apex-stagger>*:nth-child(6) {
+  animation-delay: 240ms;
+}
+
+.apex-stagger>*:nth-child(7) {
+  animation-delay: 280ms;
+}
 
 .apex-density-grid {
   align-items: stretch;
@@ -321,6 +342,7 @@
     opacity: 0;
     transform: translateY(10px);
   }
+
   to {
     opacity: 1;
     transform: translateY(0);
@@ -347,9 +369,9 @@
 
 .apex-skeleton {
   background: linear-gradient(90deg,
-    oklch(0.92 0.01 220) 25%,
-    oklch(0.96 0.005 220) 50%,
-    oklch(0.92 0.01 220) 75%);
+      oklch(0.92 0.01 220) 25%,
+      oklch(0.96 0.005 220) 50%,
+      oklch(0.92 0.01 220) 75%);
   background-size: 200% 100%;
   animation: apex-skeleton-shimmer 1.5s ease-in-out infinite;
   border-radius: 6px;
@@ -357,20 +379,26 @@
 
 .dark .apex-skeleton {
   background: linear-gradient(90deg,
-    oklch(0.28 0.02 250) 25%,
-    oklch(0.33 0.015 250) 50%,
-    oklch(0.28 0.02 250) 75%);
+      oklch(0.28 0.02 250) 25%,
+      oklch(0.33 0.015 250) 50%,
+      oklch(0.28 0.02 250) 75%);
   background-size: 200% 100%;
 }
 
 @keyframes apex-skeleton-shimmer {
-  0% { background-position: 200% 0; }
-  100% { background-position: -200% 0; }
+  0% {
+    background-position: 200% 0;
+  }
+
+  100% {
+    background-position: -200% 0;
+  }
 }
 
 @media (prefers-reduced-motion: reduce) {
+
   .apex-fade-up,
-  .apex-stagger > *,
+  .apex-stagger>*,
   .apex-progress-fill,
   .apex-interactive,
   .apex-interactive::before,
@@ -385,13 +413,16 @@
 body::before {
   content: "";
   position: fixed;
-  top: 0; left: 0; right: 0; bottom: 0;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
   background-image:
     linear-gradient(to right, rgba(255, 255, 255, 0.03) 1px, transparent 1px),
     linear-gradient(to bottom, rgba(255, 255, 255, 0.03) 1px, transparent 1px);
   background-size: 40px 40px;
-  mask-image: radial-gradient(circle at 50% 0%, rgba(0,0,0,1) 0%, transparent 80%);
-  -webkit-mask-image: radial-gradient(circle at 50% 0%, rgba(0,0,0,1) 0%, transparent 80%);
+  mask-image: radial-gradient(circle at 50% 0%, rgba(0, 0, 0, 1) 0%, transparent 80%);
+  -webkit-mask-image: radial-gradient(circle at 50% 0%, rgba(0, 0, 0, 1) 0%, transparent 80%);
   z-index: -1;
   pointer-events: none;
 }
@@ -399,23 +430,24 @@ body::before {
 .glass-card {
   z-index: 1 !important;
   position: relative;
-  background-color: hsl(var(--card) / 0.4) !important;
-  backdrop-filter: blur(12px) !important;
-  -webkit-backdrop-filter: blur(12px) !important;
-  border: 1px solid hsl(var(--border) / 0.5) !important;
+  background: linear-gradient(145deg, color-mix(in srgb, var(--card) 40%, transparent), color-mix(in srgb, var(--card) 20%, transparent)) !important;
+  backdrop-filter: blur(16px) !important;
+  -webkit-backdrop-filter: blur(16px) !important;
+  border: 1px solid color-mix(in srgb, var(--border) 60%, transparent) !important;
   box-shadow: 0 8px 32px -4px rgba(0, 0, 0, 0.3) !important;
-  transition: transform 0.2s ease, border-color 0.2s ease;
+  transition: all 0.2s ease !important;
 }
 
 .glass-card:hover {
-  border-color: hsl(var(--border) / 0.9) !important;
+  border-color: color-mix(in srgb, var(--primary) 50%, transparent) !important;
   transform: translateY(-2px);
+  box-shadow: 0 12px 40px -4px rgba(0, 0, 0, 0.4) !important;
 }
 
 /* Force Command Palette and Modals to the Absolute Top */
-[data-radix-portal], 
-[role="dialog"], 
-[data-state="open"] > .fixed,
+[data-radix-portal],
+[role="dialog"],
+[data-state="open"]>.fixed,
 .fixed.inset-0 {
   z-index: 99999 !important;
 }
@@ -435,15 +467,15 @@ div[cmdk-dialog],
 /* ========================================= */
 
 /* 1. Force Shadcn's default modal layer to the absolute maximum */
-.z-50, 
-[data-radix-portal], 
-div[role="dialog"] { 
-  z-index: 2147483647 !important; 
+.z-50,
+[data-radix-portal],
+div[role="dialog"] {
+  z-index: 2147483647 !important;
 }
 
 /* 2. Force the glass cards to stay flat on the bottom layer */
-.glass-card { 
-  z-index: 0 !important; 
-  isolation: isolate; 
-  transform: translateZ(0); 
+.glass-card {
+  z-index: 0 !important;
+  isolation: isolate;
+  transform: translateZ(0);
 }

@@ -1,7 +1,7 @@
 from types import SimpleNamespace
 
 from config import ApexConfig
-from main import ApexTradingSystem
+from core.execution_loop import ApexTradingSystem
 
 
 class _DummyCircuitBreaker:
@@ -25,6 +25,11 @@ class _DummyRiskManager:
 
     def save_state(self):
         self.save_called = True
+
+    def set_starting_capital(self, value):
+        self.starting_capital = value
+        self.peak_capital = value
+        self.day_start_capital = value
 
 
 class _DummyPerformanceTracker:

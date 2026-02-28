@@ -518,11 +518,19 @@ class AlpacaConnector:
     async def _poll_quotes_loop(self, symbols: list) -> None:
         """Background polling loop for crypto quotes."""
         chunk_size = 25
+        cycle_count = 0
         while True:
             try:
+                cycle_count += 1
                 if self.offline_mode or not self._connected or self._client is None:
                     await asyncio.sleep(15)
                     continue
+
+                # Periodically check account status
+                if cycle_count % 30 == 0:  # Every 30 * 10s = 5 minutes
+                    account = await self._request("GET", "/v2/account")
+                    if not account or "id" not in account:
+                        logger.warning("Alpaca connection health check failed. May be disconnected.")
 
                 for i in range(0, len(symbols), chunk_size):
                     batch = symbols[i:i + chunk_size]
@@ -573,6 +581,15 @@ class AlpacaConnector:
         try:
             parsed = parse_symbol(symbol)
             symbol = parsed.normalized
+
+            # Guard: Alpaca connector only handles crypto; reject anything else at the gate.
+            if parsed.asset_class != AssetClass.CRYPTO:
+                logger.error(
+                    "AlpacaConnector: non-crypto symbol %s (asset_class=%s) rejected — "
+                    "route equities/forex to IBKR.",
+                    symbol, parsed.asset_class.value,
+                )
+                return None
 
             if side not in ("BUY", "SELL"):
                 logger.error(f"Invalid order side: {side}")

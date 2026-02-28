@@ -155,7 +155,7 @@ class User:
             "roles": self.roles,
             "permissions": self.permissions,
             "api_key": self.api_key,
-            "created_at": self.created_at.isoformat() + "Z" if self.created_at else None,
+            "created_at": self.created_at.isoformat() if self.created_at else None,
             "tier": self.tier
         }
 
@@ -164,7 +164,9 @@ class User:
         """Create user from dictionary."""
         created_at = data.get("created_at")
         if created_at:
-            created_at = datetime.fromisoformat(created_at)
+            # Robust parsing: strip erroneous trailing Z when timezone offset already present
+            created_at_str = str(created_at).replace("+00:00Z", "+00:00").rstrip("Z")
+            created_at = datetime.fromisoformat(created_at_str)
         
         return cls(
             user_id=data["user_id"],

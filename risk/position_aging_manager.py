@@ -169,13 +169,13 @@ class PositionAgingManager:
         _entry = pos["entry_time"]
         if _entry.tzinfo is None:
             _entry = _entry.replace(tzinfo=timezone.utc)
-        days_held = (now - _entry).days
+        days_held = round((now - _entry).total_seconds() / 86400)
 
         # Calculate days since new high
         _hwt = pos["high_water_time"]
         if _hwt.tzinfo is None:
             _hwt = _hwt.replace(tzinfo=timezone.utc)
-        days_since_high = (now - _hwt).days
+        days_since_high = round((now - _hwt).total_seconds() / 86400)
 
         # Calculate velocity (P&L change rate)
         velocity = self._calculate_velocity(pos["pnl_history"])
@@ -365,7 +365,7 @@ class PositionAgingManager:
         _e = pos["entry_time"]
         if _e.tzinfo is None:
             _e = _e.replace(tzinfo=timezone.utc)
-        days_held = (datetime.now(timezone.utc) - _e).days
+        days_held = round((datetime.now(timezone.utc) - _e).total_seconds() / 86400)
         tier = self._get_tier(days_held)
 
         multiplier = 1.0 - (tier.value * self.stop_tightening)
@@ -378,7 +378,7 @@ class PositionAgingManager:
         _e2 = self._positions[symbol]["entry_time"]
         if _e2.tzinfo is None:
             _e2 = _e2.replace(tzinfo=timezone.utc)
-        return (datetime.now(timezone.utc) - _e2).days
+        return round((datetime.now(timezone.utc) - _e2).total_seconds() / 86400)
 
     def remove_position(self, symbol: str):
         """Remove position from tracking."""
@@ -395,7 +395,7 @@ class PositionAgingManager:
             _e3 = pos["entry_time"]
             if _e3.tzinfo is None:
                 _e3 = _e3.replace(tzinfo=timezone.utc)
-            days = (datetime.now(timezone.utc) - _e3).days
+            days = round((datetime.now(timezone.utc) - _e3).total_seconds() / 86400)
             total_days += days
             tier = self._get_tier(days)
             tier_counts[tier.name] += 1

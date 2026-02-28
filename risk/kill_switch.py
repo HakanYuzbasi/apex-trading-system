@@ -46,10 +46,8 @@ class RiskKillSwitch:
         self.last_drawdown = 0.0
         self.last_sharpe = 0.0
 
-    def update(self, *args, **kwargs):
-        # Permanently disabled as requested
-        self.active = False
-        return self.state()
+    def update(self, equity_curve: Iterable[Tuple[object, float]]) -> KillSwitchState:
+        return self._original_update(equity_curve)
 
     def _original_update(self, equity_curve: Iterable[Tuple[object, float]]) -> KillSwitchState:
         entries = self._normalize_equity_curve(equity_curve)
