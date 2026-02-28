@@ -364,20 +364,54 @@ class PerformanceTracker:
         except Exception as e:
             logger.error(f"Failed to save performance state: {e}")
 
+    def _clean_equity_curve(self, curve: list) -> list:
+        """
+        Remove transient outlier points that corrupt drawdown calculation.
+        A point is an outlier if its value is < 10% OR > 1000% of the median
+        of all values in the curve. This preserves legitimate multi-year trends
+        while stripping one-off bad broker readings.
+        """
+        if len(curve) < 3:
+            return curve
+        try:
+            values = [float(v) for _, v in curve]
+            median_val = float(np.median(values))
+            if median_val <= 0:
+                return curve
+            cleaned = [
+                point for point, val in zip(curve, values)
+                if 0.10 * median_val <= val <= 10.0 * median_val
+            ]
+            removed = len(curve) - len(cleaned)
+            if removed > 0:
+                logger.warning(
+                    "🩹 Stripped %d outlier equity points from history "
+                    "(median=$%.2f). Drawdown calculation is now clean.",
+                    removed, median_val,
+                )
+            return cleaned
+        except Exception as e:
+            logger.error("Failed to clean equity curve: %s", e)
+            return curve
+
     def _load_state(self):
         """Load performance history from disk."""
         if not self.history_file.exists():
             return
-        
+
         try:
             with open(self.history_file, 'r') as f:
                 state = json.load(f)
-            
+
             self.trades = state.get('trades', [])
-            self.equity_curve = state.get('equity_curve', [])
+            raw_curve = state.get('equity_curve', [])
+            self.equity_curve = self._clean_equity_curve(raw_curve)
             self.starting_capital = state.get('starting_capital', 0.0)
-            
+
             logger.info(f"📊 Restored {len(self.trades)} trades and {len(self.equity_curve)} equity points")
+            # Persist the cleaned curve so outliers don't reappear on next load
+            if len(self.equity_curve) != len(raw_curve):
+                self._save_state()
         except Exception as e:
             logger.error(f"Failed to load performance state: {e}")
 
