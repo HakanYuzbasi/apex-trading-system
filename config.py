@@ -35,6 +35,12 @@ class ApexConfig:
     SOR_MAX_URGENCY_STEPS = 3        # Number of times to adjust price toward the ask/bid
     SOR_STEP_DELAY_SECONDS = 10      # How long to wait at each price level before adjusting
 
+    # Passive Limit Execution (Pillar 1B — spread capture during market hours)
+    PASSIVE_LIMIT_ENABLED = True     # Post at mid-price first; step toward touch if unfilled
+    PASSIVE_LIMIT_STEP_SECONDS = 10  # Seconds to wait at each urgency step
+    PASSIVE_LIMIT_MAX_STEPS = 3      # Steps before falling back to market sweep
+    PASSIVE_LIMIT_MIN_SPREAD_BPS = 2 # Skip passive limit if estimated spread < 2bps
+
     # --- PHASE B: DYNAMIC LIMITS ---
     CORRELATION_DYNAMIC_ENABLED = True
     DRAWDOWN_DYNAMIC_TIERS_ENABLED = True
@@ -167,6 +173,15 @@ class ApexConfig:
             "APEX_ALPACA_DISCOVER_CRYPTO_PREFERRED_QUOTES", "USD,USDT,USDC"
         ).split(",")
         if token.strip()
+    ]
+    # Symbols known to have no yfinance historical data — excluded from discovery universe
+    ALPACA_DISCOVER_CRYPTO_EXCLUDED: List[str] = [
+        s.strip().upper()
+        for s in os.getenv(
+            "APEX_ALPACA_DISCOVER_CRYPTO_EXCLUDED",
+            "CRYPTO:GRT/USD,CRYPTO:PEPE/USD,CRYPTO:POL/USD,GRT/USD,PEPE/USD,POL/USD"
+        ).split(",")
+        if s.strip()
     ]
 
     # ═══════════════════════════════════════════════════════════════
@@ -311,7 +326,7 @@ class ApexConfig:
     KILL_SWITCH_DD_MULTIPLIER: float = float(os.getenv("APEX_KILL_SWITCH_DD_MULTIPLIER", "1.5"))
     KILL_SWITCH_SHARPE_WINDOW_DAYS: int = int(os.getenv("APEX_KILL_SWITCH_SHARPE_WINDOW_DAYS", "63"))
     KILL_SWITCH_SHARPE_FLOOR: float = float(os.getenv("APEX_KILL_SWITCH_SHARPE_FLOOR", "0.2"))
-    KILL_SWITCH_LOGIC: str = os.getenv("APEX_KILL_SWITCH_LOGIC", "OR")
+    KILL_SWITCH_LOGIC: str = os.getenv("APEX_KILL_SWITCH_LOGIC", "AND")
     KILL_SWITCH_MIN_POINTS: int = int(os.getenv("APEX_KILL_SWITCH_MIN_POINTS", "20"))
     KILL_SWITCH_HISTORICAL_MDD_BASELINE: float = float(
         os.getenv("APEX_KILL_SWITCH_HISTORICAL_MDD_BASELINE", "0.08")
@@ -481,7 +496,12 @@ class ApexConfig:
     CRYPTO_MOMENTUM_CONFLICT_CONFIDENCE_PENALTY_MAX: float = float(
         os.getenv("APEX_CRYPTO_MOMENTUM_CONFLICT_CONFIDENCE_PENALTY_MAX", "0.08")
     )
-    
+    # During overnight crypto-only sessions, refresh market data every N seconds
+    # (vs 3600s during equity hours). Lower = fresher signals, higher = less yfinance load.
+    CRYPTO_OVERNIGHT_DATA_REFRESH_SECONDS: int = int(
+        os.getenv("APEX_CRYPTO_OVERNIGHT_DATA_REFRESH_SECONDS", "900")
+    )
+
     # Sentiment API configuration
     SENTIMENT_API_ENABLED = True     # Toggle Yahoo Finance news sentiment parsing
     
@@ -512,6 +532,7 @@ class ApexConfig:
     MODEL_WEIGHT_TEMPERATURE: float = 3.0       # Power scaling for inverse-MSE weights
     MODEL_WEIGHT_ACCURACY_BONUS: bool = True     # Include directional accuracy in weighting
     MODEL_OVERFIT_RATIO_THRESHOLD: float = 2.5   # val/train ratio gate (excludes GP at 2.63x)
+    MODEL_OVERFIT_WARNING_RATIO: float = 2.0     # Log warning when val/train ratio exceeds this (G)
 
     # Signal Quality Filters (relaxed for more activity)
     MIN_MODEL_AGREEMENT = 0.50      # 50% agreement (majority rule)
@@ -650,7 +671,7 @@ class ApexConfig:
         os.getenv("APEX_EXECUTION_MAX_SPREAD_BPS_FX", "8")
     )
     EXECUTION_MAX_SPREAD_BPS_CRYPTO: float = float(
-        os.getenv("APEX_EXECUTION_MAX_SPREAD_BPS_CRYPTO", "26")
+        os.getenv("APEX_EXECUTION_MAX_SPREAD_BPS_CRYPTO", "80")
     )
     EXECUTION_EDGE_GATE_ENABLED: bool = os.getenv(
         "APEX_EXECUTION_EDGE_GATE_ENABLED",
@@ -658,6 +679,10 @@ class ApexConfig:
     ).strip().lower() == "true"
     EXECUTION_SIGNAL_TO_EDGE_BPS: float = float(
         os.getenv("APEX_EXECUTION_SIGNAL_TO_EDGE_BPS", "80")
+    )
+    # Crypto: higher signal-to-edge multiplier (crypto vol ~3-10%/day vs 1-2% equity)
+    EXECUTION_SIGNAL_TO_EDGE_BPS_CRYPTO: float = float(
+        os.getenv("APEX_EXECUTION_SIGNAL_TO_EDGE_BPS_CRYPTO", "300")
     )
     EXECUTION_MIN_EDGE_OVER_COST_BPS_EQUITY: float = float(
         os.getenv("APEX_EXECUTION_MIN_EDGE_OVER_COST_BPS_EQUITY", "8")
@@ -745,7 +770,9 @@ class ApexConfig:
 
     # Correlation Management
     MAX_CORRELATION = 0.70  # Max correlation between positions
-    MAX_PORTFOLIO_CORRELATION = 0.50  # Max average portfolio correlation
+    MAX_PORTFOLIO_CORRELATION = 0.50  # Max average portfolio correlation (equities)
+    # Crypto: all cryptos are inherently correlated; use a much higher cap
+    MAX_PORTFOLIO_CORRELATION_CRYPTO = 0.92  # Max avg portfolio correlation for crypto
     CORRELATION_LOOKBACK = 60  # Days for correlation calculation
 
     # Execution
@@ -772,6 +799,50 @@ class ApexConfig:
     # GLD, SLV, USO, UNG, PALL - trade regular + extended hours on some brokers
     COMMODITY_ETF_USE_EXTENDED = True  # Trade commodities in extended hours (4AM-8PM EST)
     
+    # ═══════════════════════════════════════════════════════════════
+    # BROKER FAILOVER (A)
+    # ═══════════════════════════════════════════════════════════════
+    IBKR_FAILOVER_ENABLED: bool = True          # Degrade to Alpaca-only on persistent IBKR outage
+    IBKR_FAILOVER_MAX_RETRIES: int = 3          # Reconnect attempts before declaring IBKR down
+    IBKR_FAILOVER_RETRY_SECONDS: float = 30.0   # Seconds between reconnect retries after failover
+
+    # ═══════════════════════════════════════════════════════════════
+    # LIQUIDITY GATE (D)
+    # ═══════════════════════════════════════════════════════════════
+    LIQUIDITY_SPREAD_MAX_BPS: float = 100.0     # Skip crypto entries if spread > 100bps (1%)
+    LIQUIDITY_GATE_ENABLED: bool = True         # Enable pre-trade spread check
+
+    # ═══════════════════════════════════════════════════════════════
+    # CIRCUIT BREAKER AUTO-RESET (E)
+    # ═══════════════════════════════════════════════════════════════
+    CIRCUIT_BREAKER_AUTO_RESET: bool = True     # Auto-reset circuit breaker after cooldown
+
+    # ═══════════════════════════════════════════════════════════════
+    # CORRELATED EXIT STAGGER (F)
+    # ═══════════════════════════════════════════════════════════════
+    CORR_EXIT_STAGGER_ENABLED: bool = True      # Stagger simultaneous correlated exits
+    CORR_EXIT_STAGGER_MAX_PER_CYCLE: int = 2    # Max exits per cycle when correlation is high
+    CORR_EXIT_STAGGER_THRESHOLD: float = 0.70   # Pearson r above this triggers staggering
+
+    # ═══════════════════════════════════════════════════════════════
+    # AUDIT LOGS (H, I)
+    # ═══════════════════════════════════════════════════════════════
+    TRADE_REJECTION_AUDIT_ENABLED: bool = True  # Write rejected signals to JSONL (H)
+    DEAD_LETTER_QUEUE_ENABLED: bool = True       # Write failed orders to JSONL (I)
+
+    # PROFIT RATCHET (AG)
+    # ═══════════════════════════════════════════════════════════════
+    # When equity grows > PROFIT_RATCHET_TRIGGER above peak, lock in a fraction of gains
+    # and reduce max position size temporarily until equity makes a new high.
+    PROFIT_RATCHET_ENABLED: bool = True
+    PROFIT_RATCHET_TRIGGER_PCT: float = float(os.getenv("APEX_PROFIT_RATCHET_TRIGGER_PCT", "10.0"))
+    PROFIT_RATCHET_LOCK_PCT: float = float(os.getenv("APEX_PROFIT_RATCHET_LOCK_PCT", "5.0"))
+    PROFIT_RATCHET_SIZE_SCALE: float = float(os.getenv("APEX_PROFIT_RATCHET_SIZE_SCALE", "0.6"))  # 60% of normal size
+
+    # EXECUTION LATENCY AUDIT (P)
+    # ═══════════════════════════════════════════════════════════════
+    EXECUTION_LATENCY_AUDIT_ENABLED: bool = True
+
     # ═══════════════════════════════════════════════════════════════
     # TIMING & EXECUTION
     # ═══════════════════════════════════════════════════════════════

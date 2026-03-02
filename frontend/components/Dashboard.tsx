@@ -1130,6 +1130,33 @@ export default function Dashboard({ isPublic = false }: { isPublic?: boolean }) 
               {showLoading ? <Skeleton className="h-3 w-20" /> : (usp?.band ?? "stabilize").replaceAll("_", " ")}
             </p>
           </button>
+
+          <button type="button" className="apex-panel apex-interactive rounded-2xl p-4 text-left" onClick={() => setActiveLens("risk")}>
+            <div className="flex items-center justify-between">
+              <p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">Sortino</p>
+              <Gauge className="h-4 w-4 text-primary" />
+            </div>
+            <p className="apex-kpi-value mt-2 text-lg font-semibold text-foreground">{showLoading ? <Skeleton className="h-5 w-14" /> : sortino.toFixed(2)}</p>
+            <p className="mt-1 text-xs text-muted-foreground">Downside adjusted</p>
+          </button>
+
+          <button type="button" className="apex-panel apex-interactive rounded-2xl p-4 text-left" onClick={() => setActiveLens("performance")}>
+            <div className="flex items-center justify-between">
+              <p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">Profit Factor</p>
+              <TrendingUp className="h-4 w-4 text-primary" />
+            </div>
+            <p className="apex-kpi-value mt-2 text-lg font-semibold text-foreground">{showLoading ? <Skeleton className="h-5 w-14" /> : profitFactor.toFixed(2)}</p>
+            <p className="mt-1 text-xs text-muted-foreground">Gross PnL Ratio</p>
+          </button>
+
+          <button type="button" className="apex-panel apex-interactive rounded-2xl p-4 text-left" onClick={() => setActiveLens("performance")}>
+            <div className="flex items-center justify-between">
+              <p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">Alpha Retention</p>
+              <BarChart3 className="h-4 w-4 text-primary" />
+            </div>
+            <p className="apex-kpi-value mt-2 text-lg font-semibold text-foreground">{showLoading ? <Skeleton className="h-5 w-14" /> : `${(alphaRetention * 100).toFixed(2)}%`}</p>
+            <p className="mt-1 text-xs text-muted-foreground">vs SPY Benchmark</p>
+          </button>
         </EquityPanel>
 
         <section className="grid grid-cols-1 gap-4 xl:grid-cols-[1.25fr_0.75fr]">
@@ -1244,11 +1271,10 @@ export default function Dashboard({ isPublic = false }: { isPublic?: boolean }) 
               key={tab}
               type="button"
               onClick={() => setActiveTab(tab)}
-              className={`rounded-xl px-4 py-2 text-sm font-semibold transition ${
-                activeTab === tab
+              className={`rounded-xl px-4 py-2 text-sm font-semibold transition ${activeTab === tab
                   ? "bg-primary text-primary-foreground shadow-sm"
                   : "text-muted-foreground hover:bg-secondary/60 hover:text-foreground"
-              }`}
+                }`}
             >
               {label}
             </button>
@@ -1263,197 +1289,197 @@ export default function Dashboard({ isPublic = false }: { isPublic?: boolean }) 
 
 
         {activeTab === "trading" ? (
-        <>
+          <>
 
-        <section className="grid grid-cols-1 gap-4 xl:grid-cols-[0.95fr_1.05fr]">
-          <article className="apex-panel apex-fade-up rounded-2xl p-5">
-            <div className="mb-4 flex items-center justify-between">
-              <h2 className="text-lg font-semibold text-foreground">Sleeve Attribution</h2>
-              <span className="text-xs text-muted-foreground">30d lookback</span>
-            </div>
+            <section className="grid grid-cols-1 gap-4 xl:grid-cols-[0.95fr_1.05fr]">
+              <article className="apex-panel apex-fade-up rounded-2xl p-5">
+                <div className="mb-4 flex items-center justify-between">
+                  <h2 className="text-lg font-semibold text-foreground">Sleeve Attribution</h2>
+                  <span className="text-xs text-muted-foreground">30d lookback</span>
+                </div>
 
-            <div className="space-y-3">
-              {sleeves.length === 0 ? (
-                <p className="rounded-lg border border-border/70 bg-background/60 px-3 py-2 text-xs text-muted-foreground">No sleeve attribution yet.</p>
-              ) : (
-                sleeves.map((sleeve: SleeveAttribution) => (
-                  <div key={sleeve.sleeve} className="rounded-xl border border-border/80 bg-background/70 p-3">
-                    <div className="flex items-center justify-between gap-3">
-                      <p className="text-sm font-semibold capitalize text-foreground">{formatSleeveLabel(sleeve.sleeve)}</p>
-                      <span className="text-xs text-muted-foreground">{sleeve.trades} trades</span>
-                    </div>
-                    <div className="mt-3 grid grid-cols-2 gap-2 text-xs">
-                      <div className="rounded-lg border border-border/70 bg-background/60 px-2 py-1.5">
-                        <p className="text-muted-foreground">Net alpha</p>
-                        <p className={`apex-kpi-value mt-0.5 text-sm font-semibold ${sleeve.net_pnl >= 0 ? "text-positive" : "text-negative"}`}>
-                          {formatCurrencyWithCents(sleeve.net_pnl)}
-                        </p>
-                      </div>
-                      <div className="rounded-lg border border-border/70 bg-background/60 px-2 py-1.5">
-                        <p className="text-muted-foreground">Execution drag</p>
-                        <p className="apex-kpi-value mt-0.5 text-sm font-semibold text-foreground">{formatCurrencyWithCents(sleeve.modeled_execution_drag)}</p>
-                      </div>
-                      <div className="rounded-lg border border-border/70 bg-background/60 px-2 py-1.5">
-                        <p className="text-muted-foreground">Slippage drag</p>
-                        <p className="apex-kpi-value mt-0.5 text-sm font-semibold text-foreground">{formatCurrencyWithCents(sleeve.modeled_slippage_drag)}</p>
-                      </div>
-                      <div className="rounded-lg border border-border/70 bg-background/60 px-2 py-1.5">
-                        <p className="text-muted-foreground">Drag / gross</p>
-                        <p className="apex-kpi-value mt-0.5 text-sm font-semibold text-foreground">{formatPct(sleeve.execution_drag_pct_of_gross || 0)}</p>
-                      </div>
-                    </div>
-                  </div>
-                ))
-              )}
-            </div>
-          </article>
-
-          <PositionsTable>
-            <div className="mb-4 flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
-              <h2 className="text-lg font-semibold text-foreground">Position Book (Sortable)</h2>
-              <div className="flex flex-wrap items-center gap-2">
-                {!isPublic && brokerSources.length > 0 && (
-                  <select
-                    id="account-selector"
-                    value={selectedSourceId ?? ""}
-                    onChange={(e) => setSelectedSourceId(e.target.value || null)}
-                    className="h-8 rounded-lg border border-border bg-background px-2 text-xs font-medium text-foreground focus:outline-none focus:ring-1 focus:ring-primary"
-                    aria-label="Filter by account"
-                  >
-                    <option value="">All Accounts</option>
-                    {brokerSources.map((src) => (
-                      <option key={src.id} value={src.id}>
-                        {src.name} ({src.environment})
-                      </option>
-                    ))}
-                  </select>
-                )}
-                <span className="text-xs text-muted-foreground">
-                  {openPositions} equity + {optionPositions} options = {totalLines} lines
-                </span>
-              </div>
-            </div>
-
-            {notes.map((note) => (
-              <p key={note} className="mb-2 rounded-lg border border-border/70 bg-background/60 px-3 py-2 text-xs text-muted-foreground">
-                {note}
-              </p>
-            ))}
-
-            {selectedSourceId && brokerSources.length > 0 && (() => {
-              const src = brokerSources.find(s => s.id === selectedSourceId);
-              return src ? (
-                <p className="mb-2 rounded-lg border border-positive/30 bg-positive/10 px-3 py-2 text-xs font-medium text-positive">
-                  Viewing: <strong>{src.name}</strong> ({src.broker_type.toUpperCase()} · {src.environment}) - positions scope active
-                </p>
-              ) : null;
-            })()}
-
-            <div className="max-h-[50vh] overflow-auto rounded-xl border border-border/80">
-              <table className="min-w-full text-xs">
-                <thead className="sticky top-0 z-10 bg-background/95 backdrop-blur">
-                  <tr className="text-left text-muted-foreground">
-                    <th className="px-3 py-2 font-semibold">Source</th>
-                    {([
-                      ["symbol", "Symbol"],
-                      ["qty", "Qty"],
-                      ["entry", "Entry"],
-                      ["current", "Current"],
-                      ["pnl", "PnL"],
-                      ["pnl_pct", "PnL %"],
-                      ["signal_direction", "Signal"],
-                    ] as [PositionSortKey, string][]).map(([key, label]) => (
-                      <th key={key} className="px-3 py-2 font-semibold" aria-sort={sortKey === key ? (sortDirection === "asc" ? "ascending" : "descending") : "none"}>
-                        <button
-                          type="button"
-                          onClick={() => setSort(key)}
-                          className="inline-flex items-center gap-1 hover:text-foreground"
-                        >
-                          {label}
-                          <span className="text-[10px]">{sortIndicator(sortKey === key, sortDirection)}</span>
-                        </button>
-                      </th>
-                    ))}
-                  </tr>
-                </thead>
-                <tbody>
-                  {sortedPositions.length === 0 ? (
-                    <tr>
-                      <td colSpan={8} className="px-3 py-6 text-center text-muted-foreground">
-                        {showLoading ? "Loading positions..." : "No positions in API state."}
-                      </td>
-                    </tr>
+                <div className="space-y-3">
+                  {sleeves.length === 0 ? (
+                    <p className="rounded-lg border border-border/70 bg-background/60 px-3 py-2 text-xs text-muted-foreground">No sleeve attribution yet.</p>
                   ) : (
-                    sortedPositions.map((position) => (
-                      <tr key={positionRowKey(position)} className="border-t border-border/60 hover:bg-secondary/30">
-                        <td className="px-3 py-2 text-[11px] uppercase text-muted-foreground">
-                          {position.broker_type
-                            ? `${String(position.broker_type).toUpperCase()}${position.stale ? " (stale)" : ""}`
-                            : (position.source_id ? position.source_id.slice(0, 8) : "state")}
-                        </td>
-                        <td className="px-3 py-2 font-semibold text-foreground">{position.symbol}</td>
-                        <td className="apex-kpi-value px-3 py-2 text-foreground">{position.qty}</td>
-                        <td className="apex-kpi-value px-3 py-2 text-foreground">{formatCurrencyWithCents(position.entry)}</td>
-                        <td className="apex-kpi-value px-3 py-2 text-foreground">{formatCurrencyWithCents(position.current)}</td>
-                        <td className={`apex-kpi-value px-3 py-2 font-semibold ${position.pnl >= 0 ? "text-positive" : "text-negative"}`}>
-                          {formatCurrencyWithCents(position.pnl)}
-                        </td>
-                        <td className={`apex-kpi-value px-3 py-2 font-semibold ${position.pnl_pct >= 0 ? "text-positive" : "text-negative"}`}>
-                          {position.pnl_pct.toFixed(2)}%
-                        </td>
-                        <td className="px-3 py-2 uppercase text-muted-foreground">{position.signal_direction || "unknown"}</td>
-                      </tr>
+                    sleeves.map((sleeve: SleeveAttribution) => (
+                      <div key={sleeve.sleeve} className="rounded-xl border border-border/80 bg-background/70 p-3">
+                        <div className="flex items-center justify-between gap-3">
+                          <p className="text-sm font-semibold capitalize text-foreground">{formatSleeveLabel(sleeve.sleeve)}</p>
+                          <span className="text-xs text-muted-foreground">{sleeve.trades} trades</span>
+                        </div>
+                        <div className="mt-3 grid grid-cols-2 gap-2 text-xs">
+                          <div className="rounded-lg border border-border/70 bg-background/60 px-2 py-1.5">
+                            <p className="text-muted-foreground">Net alpha</p>
+                            <p className={`apex-kpi-value mt-0.5 text-sm font-semibold ${sleeve.net_pnl >= 0 ? "text-positive" : "text-negative"}`}>
+                              {formatCurrencyWithCents(sleeve.net_pnl)}
+                            </p>
+                          </div>
+                          <div className="rounded-lg border border-border/70 bg-background/60 px-2 py-1.5">
+                            <p className="text-muted-foreground">Execution drag</p>
+                            <p className="apex-kpi-value mt-0.5 text-sm font-semibold text-foreground">{formatCurrencyWithCents(sleeve.modeled_execution_drag)}</p>
+                          </div>
+                          <div className="rounded-lg border border-border/70 bg-background/60 px-2 py-1.5">
+                            <p className="text-muted-foreground">Slippage drag</p>
+                            <p className="apex-kpi-value mt-0.5 text-sm font-semibold text-foreground">{formatCurrencyWithCents(sleeve.modeled_slippage_drag)}</p>
+                          </div>
+                          <div className="rounded-lg border border-border/70 bg-background/60 px-2 py-1.5">
+                            <p className="text-muted-foreground">Drag / gross</p>
+                            <p className="apex-kpi-value mt-0.5 text-sm font-semibold text-foreground">{formatPct(sleeve.execution_drag_pct_of_gross || 0)}</p>
+                          </div>
+                        </div>
+                      </div>
                     ))
                   )}
-                </tbody>
-              </table>
-            </div>
+                </div>
+              </article>
 
-            <div className="mt-4">
-              <div className="mb-2 flex items-center justify-between">
-                <h3 className="text-sm font-semibold text-foreground">Derivatives (Options)</h3>
-                <span className="text-xs text-muted-foreground">{derivatives.length} option legs</span>
-              </div>
-              <div className="max-h-[30vh] overflow-auto rounded-xl border border-border/80">
-                <table className="min-w-full text-xs">
-                  <thead className="sticky top-0 z-10 bg-background/95 backdrop-blur">
-                    <tr className="text-left text-muted-foreground">
-                      <th className="px-3 py-2 font-semibold">Symbol</th>
-                      <th className="px-3 py-2 font-semibold">Expiry</th>
-                      <th className="px-3 py-2 font-semibold">Type</th>
-                      <th className="px-3 py-2 font-semibold">Strike</th>
-                      <th className="px-3 py-2 font-semibold">Qty</th>
-                      <th className="px-3 py-2 font-semibold">Avg Cost</th>
-                      <th className="px-3 py-2 font-semibold">Side</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {derivatives.length === 0 ? (
-                      <tr>
-                        <td colSpan={7} className="px-3 py-6 text-center text-muted-foreground">
-                          {showLoading ? "Loading option legs..." : "No option legs in exported state."}
-                        </td>
-                      </tr>
-                    ) : (
-                      derivatives.map((leg: CockpitDerivative) => (
-                        <tr key={`${leg.symbol}-${leg.expiry}-${leg.strike}-${leg.right}`} className="border-t border-border/60 hover:bg-secondary/30">
-                          <td className="px-3 py-2 font-semibold text-foreground">{leg.symbol}</td>
-                          <td className="px-3 py-2 text-foreground">{leg.expiry}</td>
-                          <td className="px-3 py-2 text-foreground">{leg.right === "C" ? "CALL" : leg.right === "P" ? "PUT" : leg.right}</td>
-                          <td className="apex-kpi-value px-3 py-2 text-foreground">{leg.strike.toFixed(2)}</td>
-                          <td className="apex-kpi-value px-3 py-2 text-foreground">{leg.quantity}</td>
-                          <td className="apex-kpi-value px-3 py-2 text-foreground">{formatCurrencyWithCents(leg.avg_cost)}</td>
-                          <td className="px-3 py-2 text-muted-foreground">{leg.side}</td>
-                        </tr>
-                      ))
+              <PositionsTable>
+                <div className="mb-4 flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+                  <h2 className="text-lg font-semibold text-foreground">Position Book (Sortable)</h2>
+                  <div className="flex flex-wrap items-center gap-2">
+                    {!isPublic && brokerSources.length > 0 && (
+                      <select
+                        id="account-selector"
+                        value={selectedSourceId ?? ""}
+                        onChange={(e) => setSelectedSourceId(e.target.value || null)}
+                        className="h-8 rounded-lg border border-border bg-background px-2 text-xs font-medium text-foreground focus:outline-none focus:ring-1 focus:ring-primary"
+                        aria-label="Filter by account"
+                      >
+                        <option value="">All Accounts</option>
+                        {brokerSources.map((src) => (
+                          <option key={src.id} value={src.id}>
+                            {src.name} ({src.environment})
+                          </option>
+                        ))}
+                      </select>
                     )}
-                  </tbody>
-                </table>
-              </div>
-            </div>
-          </PositionsTable>
-        </section>
-        </>
+                    <span className="text-xs text-muted-foreground">
+                      {openPositions} equity + {optionPositions} options = {totalLines} lines
+                    </span>
+                  </div>
+                </div>
+
+                {notes.map((note) => (
+                  <p key={note} className="mb-2 rounded-lg border border-border/70 bg-background/60 px-3 py-2 text-xs text-muted-foreground">
+                    {note}
+                  </p>
+                ))}
+
+                {selectedSourceId && brokerSources.length > 0 && (() => {
+                  const src = brokerSources.find(s => s.id === selectedSourceId);
+                  return src ? (
+                    <p className="mb-2 rounded-lg border border-positive/30 bg-positive/10 px-3 py-2 text-xs font-medium text-positive">
+                      Viewing: <strong>{src.name}</strong> ({src.broker_type.toUpperCase()} · {src.environment}) - positions scope active
+                    </p>
+                  ) : null;
+                })()}
+
+                <div className="max-h-[50vh] overflow-auto rounded-xl border border-border/80">
+                  <table className="min-w-full text-xs">
+                    <thead className="sticky top-0 z-10 bg-background/95 backdrop-blur">
+                      <tr className="text-left text-muted-foreground">
+                        <th className="px-3 py-2 font-semibold">Source</th>
+                        {([
+                          ["symbol", "Symbol"],
+                          ["qty", "Qty"],
+                          ["entry", "Entry"],
+                          ["current", "Current"],
+                          ["pnl", "PnL"],
+                          ["pnl_pct", "PnL %"],
+                          ["signal_direction", "Signal"],
+                        ] as [PositionSortKey, string][]).map(([key, label]) => (
+                          <th key={key} className="px-3 py-2 font-semibold" aria-sort={sortKey === key ? (sortDirection === "asc" ? "ascending" : "descending") : "none"}>
+                            <button
+                              type="button"
+                              onClick={() => setSort(key)}
+                              className="inline-flex items-center gap-1 hover:text-foreground"
+                            >
+                              {label}
+                              <span className="text-[10px]">{sortIndicator(sortKey === key, sortDirection)}</span>
+                            </button>
+                          </th>
+                        ))}
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {sortedPositions.length === 0 ? (
+                        <tr>
+                          <td colSpan={8} className="px-3 py-6 text-center text-muted-foreground">
+                            {showLoading ? "Loading positions..." : "No positions in API state."}
+                          </td>
+                        </tr>
+                      ) : (
+                        sortedPositions.map((position) => (
+                          <tr key={positionRowKey(position)} className="border-t border-border/60 hover:bg-secondary/30">
+                            <td className="px-3 py-2 text-[11px] uppercase text-muted-foreground">
+                              {position.broker_type
+                                ? `${String(position.broker_type).toUpperCase()}${position.stale ? " (stale)" : ""}`
+                                : (position.source_id ? position.source_id.slice(0, 8) : "state")}
+                            </td>
+                            <td className="px-3 py-2 font-semibold text-foreground">{position.symbol}</td>
+                            <td className="apex-kpi-value px-3 py-2 text-foreground">{position.qty}</td>
+                            <td className="apex-kpi-value px-3 py-2 text-foreground">{formatCurrencyWithCents(position.entry)}</td>
+                            <td className="apex-kpi-value px-3 py-2 text-foreground">{formatCurrencyWithCents(position.current)}</td>
+                            <td className={`apex-kpi-value px-3 py-2 font-semibold ${position.pnl >= 0 ? "text-positive" : "text-negative"}`}>
+                              {formatCurrencyWithCents(position.pnl)}
+                            </td>
+                            <td className={`apex-kpi-value px-3 py-2 font-semibold ${position.pnl_pct >= 0 ? "text-positive" : "text-negative"}`}>
+                              {position.pnl_pct.toFixed(2)}%
+                            </td>
+                            <td className="px-3 py-2 uppercase text-muted-foreground">{position.signal_direction || "unknown"}</td>
+                          </tr>
+                        ))
+                      )}
+                    </tbody>
+                  </table>
+                </div>
+
+                <div className="mt-4">
+                  <div className="mb-2 flex items-center justify-between">
+                    <h3 className="text-sm font-semibold text-foreground">Derivatives (Options)</h3>
+                    <span className="text-xs text-muted-foreground">{derivatives.length} option legs</span>
+                  </div>
+                  <div className="max-h-[30vh] overflow-auto rounded-xl border border-border/80">
+                    <table className="min-w-full text-xs">
+                      <thead className="sticky top-0 z-10 bg-background/95 backdrop-blur">
+                        <tr className="text-left text-muted-foreground">
+                          <th className="px-3 py-2 font-semibold">Symbol</th>
+                          <th className="px-3 py-2 font-semibold">Expiry</th>
+                          <th className="px-3 py-2 font-semibold">Type</th>
+                          <th className="px-3 py-2 font-semibold">Strike</th>
+                          <th className="px-3 py-2 font-semibold">Qty</th>
+                          <th className="px-3 py-2 font-semibold">Avg Cost</th>
+                          <th className="px-3 py-2 font-semibold">Side</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {derivatives.length === 0 ? (
+                          <tr>
+                            <td colSpan={7} className="px-3 py-6 text-center text-muted-foreground">
+                              {showLoading ? "Loading option legs..." : "No option legs in exported state."}
+                            </td>
+                          </tr>
+                        ) : (
+                          derivatives.map((leg: CockpitDerivative) => (
+                            <tr key={`${leg.symbol}-${leg.expiry}-${leg.strike}-${leg.right}`} className="border-t border-border/60 hover:bg-secondary/30">
+                              <td className="px-3 py-2 font-semibold text-foreground">{leg.symbol}</td>
+                              <td className="px-3 py-2 text-foreground">{leg.expiry}</td>
+                              <td className="px-3 py-2 text-foreground">{leg.right === "C" ? "CALL" : leg.right === "P" ? "PUT" : leg.right}</td>
+                              <td className="apex-kpi-value px-3 py-2 text-foreground">{leg.strike.toFixed(2)}</td>
+                              <td className="apex-kpi-value px-3 py-2 text-foreground">{leg.quantity}</td>
+                              <td className="apex-kpi-value px-3 py-2 text-foreground">{formatCurrencyWithCents(leg.avg_cost)}</td>
+                              <td className="px-3 py-2 text-muted-foreground">{leg.side}</td>
+                            </tr>
+                          ))
+                        )}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              </PositionsTable>
+            </section>
+          </>
         ) : null}
       </div>
     </main>

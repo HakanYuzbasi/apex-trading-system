@@ -11,6 +11,7 @@ Refactored to support Multi-User/Multi-Broker sessions while maintaining
 backward compatibility for the singleton "system" account.
 """
 
+import asyncio
 import logging
 from typing import Dict, Tuple
 import pandas as pd
@@ -107,6 +108,9 @@ class RiskManager:
 
     def save_state(self):
         self.sessions[self.default_user_id].save_state()
+
+    async def save_state_async(self, user_id: str = None):
+        await self._get_or_create_session(user_id or self.default_user_id).save_state_async()
 
     def load_state(self):
         self.sessions[self.default_user_id].load_state()

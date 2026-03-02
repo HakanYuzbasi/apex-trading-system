@@ -1,7 +1,6 @@
-"""End-to-end auth and websocket flow tests."""
-
 import uuid
-
+import asyncio
+import os
 import pytest
 from fastapi.testclient import TestClient
 from starlette.websockets import WebSocketDisconnect
@@ -80,7 +79,8 @@ def test_e2e_websocket_accepts_access_token_and_rejects_refresh_token(client: Te
             ws.receive_json()
 
 
-def test_metrics_endpoint_available_when_prometheus_client_installed(client: TestClient):
+def test_metrics_endpoint_available_when_prometheus_client_installed(client: TestClient, monkeypatch):
+    monkeypatch.setenv("APEX_METRICS_TOKEN", "")
     resp = client.get("/metrics")
     if PROMETHEUS_AVAILABLE:
         assert resp.status_code == 200
@@ -107,7 +107,7 @@ def test_kill_switch_reset_endpoint_requires_admin_and_queues_command(
     )
     assert user_resp.status_code == 403
 
-    admin = USER_STORE.get_user("admin")
+    admin = asyncio.run(USER_STORE.get_user("admin"))
     assert admin is not None
     assert admin.api_key
 
@@ -188,7 +188,7 @@ def test_governor_policy_approve_and_rollback_endpoints_require_admin_and_audit(
     )
     assert non_admin.status_code == 403
 
-    admin = USER_STORE.get_user("admin")
+    admin = asyncio.run(USER_STORE.get_user("admin"))
     assert admin is not None
     assert admin.api_key
 
@@ -254,9 +254,12 @@ def test_social_governor_decision_audit_endpoint_requires_admin(
     from risk.social_decision_audit import SocialDecisionAuditRepository
 
     audit_file = tmp_path / "audit" / "social_governor_decisions.jsonl"
-    monkeypatch.setattr(server, "SOCIAL_DECISION_AUDIT_FILE", audit_file)
-
+    audit_file.parent.mkdir(parents=True, exist_ok=True)
     repo = SocialDecisionAuditRepository(audit_file)
+    
+    monkeypatch.setattr(server, "_social_audit_repo_for_user", lambda uid: repo)
+    monkeypatch.setattr(server, "SOCIAL_DECISION_AUDIT_FILE", audit_file)
+    monkeypatch.setattr(server, "SOCIAL_DECISION_AUDIT_LEGACY_FILE", audit_file)
     repo.append_event(
         {
             "asset_class": "EQUITY",
@@ -271,7 +274,7 @@ def test_social_governor_decision_audit_endpoint_requires_admin(
     )
     assert unauth.status_code in {401, 403}
 
-    admin = USER_STORE.get_user("admin")
+    admin = asyncio.run(USER_STORE.get_user("admin"))
     assert admin is not None
     assert admin.api_key
     admin_resp = client.get(

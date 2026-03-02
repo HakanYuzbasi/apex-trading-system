@@ -297,12 +297,12 @@ class AlpacaConnector:
                     return {}
                 if attempt < max_retries:
                     logger.warning(
-                        f"Alpaca request failed (attempt {attempt + 1}): {e}"
+                        f"Alpaca request failed (attempt {attempt + 1}): {type(e).__name__}: {e}"
                     )
                     await asyncio.sleep(2 ** attempt)
                 else:
                     logger.error(
-                        f"Alpaca request failed after {max_retries + 1} attempts: {e}"
+                        f"Alpaca request failed after {max_retries + 1} attempts: {type(e).__name__}: {e}"
                     )
                     return {}
         return {}
@@ -601,7 +601,17 @@ class AlpacaConnector:
             expected_price = await self.get_market_price(symbol)
             if expected_price <= 0:
                 logger.error(f"Cannot execute: no price for {symbol}")
+                self.write_dead_letter(symbol, side, quantity, "no_price")
                 return None
+
+            # UPGRADE D: Pre-trade spread gate (entries only)
+            if side == "BUY":
+                allowed, spread_bps, spread_reason = await self.check_spread_gate(symbol)
+                if not allowed:
+                    logger.warning("🚫 %s: BUY blocked by spread gate (%s)", symbol, spread_reason)
+                    self.write_dead_letter(symbol, side, quantity, f"spread_gate:{spread_reason}",
+                                          {"spread_bps": spread_bps})
+                    return None
 
             alpaca_sym = self._to_alpaca_symbol(symbol)
 
@@ -621,6 +631,8 @@ class AlpacaConnector:
 
             if not data or "id" not in data:
                 logger.error(f"Order rejected by Alpaca: {data}")
+                self.write_dead_letter(symbol, side, quantity, "alpaca_rejected",
+                                      {"response": str(data)[:200]})
                 return None
 
             order_id = data["id"]
@@ -686,6 +698,7 @@ class AlpacaConnector:
 
         except Exception as e:
             logger.error(f"Error executing {side} {quantity} {symbol}: {e}")
+            self.write_dead_letter(symbol, side, quantity, f"exception:{type(e).__name__}:{e}")
             return None
 
     async def _wait_for_fill(
@@ -770,14 +783,20 @@ class AlpacaConnector:
     # ------------------------------------------------------------------
 
     async def get_portfolio_value(self) -> float:
-        """Get total portfolio value."""
+        """Get total portfolio value (Upgrade J: proper logging + fallback)."""
         try:
             account = await self._request("GET", "/v2/account")
-            equity = float(account.get("equity", 0))
-            self._last_equity = equity  # Cache for sync dashboard export
+            equity = float(account.get("equity", 0) or 0)
+            if equity > 0:
+                self._last_equity = equity  # Cache for dashboard
             return equity
-        except Exception:
-            return getattr(self, '_last_equity', 0.0)
+        except Exception as e:
+            cached = getattr(self, "_last_equity", 0.0)
+            logger.warning(
+                "Alpaca get_portfolio_value failed (%s: %s); returning cached $%.2f",
+                type(e).__name__, e, cached,
+            )
+            return cached
 
     async def get_account_cash(self) -> float:
         """Get available cash."""
@@ -816,6 +835,93 @@ class AlpacaConnector:
             logger.info("Cancelled all open Alpaca orders")
         except Exception as e:
             logger.error(f"Error cancelling orders: {e}")
+
+    # ------------------------------------------------------------------
+    # UPGRADE B: Order persistence — save/load pending orders across restarts
+    # ------------------------------------------------------------------
+
+    def save_pending_orders(self, path) -> None:
+        """Persist pending orders to disk so they survive engine restarts (Upgrade B)."""
+        import json
+        from pathlib import Path
+        try:
+            p = Path(path)
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_text(json.dumps(self._pending_orders, indent=2))
+            logger.debug("Saved %d pending Alpaca orders to %s", len(self._pending_orders), p)
+        except Exception as e:
+            logger.warning("Failed to save pending orders: %s", e)
+
+    def load_pending_orders(self, path) -> None:
+        """Reload pending orders from disk on startup to avoid ghost orders (Upgrade B)."""
+        import json
+        from pathlib import Path
+        try:
+            p = Path(path)
+            if not p.exists():
+                return
+            data = json.loads(p.read_text())
+            if isinstance(data, dict):
+                self._pending_orders.update(data)
+                logger.info("Loaded %d pending Alpaca orders from %s", len(data), p)
+        except Exception as e:
+            logger.warning("Failed to load pending orders: %s", e)
+
+    # ------------------------------------------------------------------
+    # UPGRADE D: Pre-trade spread gate — reject entry if spread too wide
+    # ------------------------------------------------------------------
+
+    async def check_spread_gate(self, symbol: str) -> tuple:
+        """
+        Check if bid-ask spread is within acceptable range before entry (Upgrade D).
+        Returns (allowed: bool, spread_bps: float, reason: str).
+        """
+        if not getattr(ApexConfig, "LIQUIDITY_GATE_ENABLED", True):
+            return True, 0.0, ""
+        max_spread_bps = float(getattr(ApexConfig, "LIQUIDITY_SPREAD_MAX_BPS", 100.0))
+        try:
+            quote = await self.get_quote(symbol)
+            if not quote:
+                return True, 0.0, "no_quote"  # pass-through when quote unavailable
+            bid, ask = quote.get("bid", 0.0), quote.get("ask", 0.0)
+            if bid <= 0 or ask <= 0:
+                return True, 0.0, "no_quote"
+            mid = (bid + ask) / 2.0
+            spread_bps = ((ask - bid) / mid) * 10_000 if mid > 0 else 0.0
+            if spread_bps > max_spread_bps:
+                return False, spread_bps, f"spread {spread_bps:.0f}bps > {max_spread_bps:.0f}bps limit"
+            return True, spread_bps, ""
+        except Exception as e:
+            logger.debug("Spread gate check failed for %s: %s", symbol, e)
+            return True, 0.0, "gate_error"
+
+    # ------------------------------------------------------------------
+    # UPGRADE I: Dead-letter queue — persist failed orders to JSONL
+    # ------------------------------------------------------------------
+
+    def write_dead_letter(self, symbol: str, side: str, quantity: float,
+                          reason: str, context: dict = None) -> None:
+        """Write a failed order to the dead-letter queue JSONL file (Upgrade I)."""
+        if not getattr(ApexConfig, "DEAD_LETTER_QUEUE_ENABLED", True):
+            return
+        import json
+        from pathlib import Path
+        try:
+            log_dir = Path(getattr(ApexConfig, "LOGS_DIR", "logs"))
+            log_dir.mkdir(parents=True, exist_ok=True)
+            entry = {
+                "ts": datetime.utcnow().isoformat() + "Z",
+                "broker": "alpaca",
+                "symbol": symbol,
+                "side": side,
+                "quantity": quantity,
+                "reason": reason,
+                **(context or {}),
+            }
+            with open(log_dir / "dead_letter_orders.jsonl", "a") as f:
+                f.write(json.dumps(entry) + "\n")
+        except Exception as e:
+            logger.debug("Dead-letter write failed: %s", e)
 
     # ------------------------------------------------------------------
     # Execution metrics (same interface as IBKRConnector)

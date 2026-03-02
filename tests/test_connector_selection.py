@@ -1,5 +1,5 @@
 from config import ApexConfig
-from main import ApexTradingSystem
+from core.execution_loop import ApexTradingSystem
 
 
 def test_connector_selection_both_mode_requires_ibkr_for_non_crypto(monkeypatch):

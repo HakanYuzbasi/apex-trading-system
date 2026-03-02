@@ -24,7 +24,7 @@ class IBKRLeaseManager:
         self._lock = asyncio.Lock()
         self._local_leases: Dict[int, float] = {}
         self.default_ttl = 300.0  # 5 minutes
-        self.min_id = 100
+        self.min_id = 103  # TWS occupies clientId 100 (gateway), 101 & 102 (zombie sessions); start at 103
         self.max_id = 999
         self.redis_prefix = "ibkr:lease:"
         
@@ -37,14 +37,20 @@ class IBKRLeaseManager:
             now = time.time()
             self._prune_local(now)
             
-            # Check preferred
+            # 1. Check preferred
             if preferred_id is not None and preferred_id >= self.min_id and preferred_id <= self.max_id:
                 acquired = await self._try_acquire(redis, preferred_id, lease_ttl, now)
                 if acquired:
                     return preferred_id
-                    
-            # Find any available
-            for client_id in range(self.min_id, self.max_id + 1):
+            
+            # 2. Find any available (Randomized search order to prevent clumping at 100)
+            import random
+            full_range = list(range(self.min_id, self.max_id + 1))
+            random.shuffle(full_range)
+            
+            for client_id in full_range:
+                if client_id == preferred_id:
+                    continue
                 acquired = await self._try_acquire(redis, client_id, lease_ttl, now)
                 if acquired:
                     return client_id

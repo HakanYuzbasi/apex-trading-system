@@ -12,6 +12,7 @@ Validates:
 """
 
 import pytest
+import secrets
 import time
 from datetime import datetime, timedelta
 
@@ -55,6 +56,50 @@ def admin_user():
         permissions=["read", "write", "trade", "admin"],
         api_key="test-admin-api-key",
     )
+
+
+class MockUserStore:
+    """In-memory user store for testing."""
+    def __init__(self, admin_user=None, sample_user=None):
+        self.users = {}
+        if admin_user:
+            self.users[admin_user.user_id] = admin_user
+        if sample_user:
+            self.users[sample_user.user_id] = sample_user
+
+    def get_user(self, user_id):
+        return self.users.get(user_id)
+
+    def get_user_by_api_key(self, api_key):
+        for user in self.users.values():
+            if user.api_key == api_key:
+                return user
+        return None
+
+    def create_user(self, username, email):
+        user_id = f"user-{len(self.users)+1}"
+        user = User(
+            user_id=user_id,
+            username=username,
+            email=email,
+            api_key=f"apex-{secrets.token_hex(16)}"
+        )
+        self.users[user_id] = user
+        return user
+
+    def validate_credentials(self, username, password):
+        # In mock mode, we assume "password-123" is correct for everyone
+        for user in self.users.values():
+            if (user.username == username or user.email == username) and password == "password-123":
+                return user
+        return None
+
+
+@pytest.fixture
+def user_store(admin_user, sample_user):
+    """Provides a MockUserStore with default users."""
+    import secrets # Required for create_user in MockUserStore if not already imported
+    return MockUserStore(admin_user=admin_user, sample_user=sample_user)
 
 
 # ---------------------------------------------------------------------------

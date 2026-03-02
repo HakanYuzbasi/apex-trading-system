@@ -16,6 +16,7 @@ import logging
 import math
 import os
 import random
+import time
 from datetime import datetime, timedelta
 from typing import Any, Dict, Optional, List, Tuple
 try:
@@ -154,6 +155,8 @@ setup_logging(
     console_output=True,
     max_bytes=ApexConfig.LOG_MAX_BYTES,
     backup_count=ApexConfig.LOG_BACKUP_COUNT,
+    main_log_file="/private/tmp/apex_main.log",
+    debug_log_file="/private/tmp/apex_debug.log",
 )
 logger = logging.getLogger(__name__)
 options_logger = logging.getLogger("options_audit")
@@ -193,6 +196,102 @@ def _symbol_is_crypto(symbol: str) -> bool:
         return parse_symbol(symbol).asset_class == AssetClass.CRYPTO
     except Exception:
         return False
+
+
+def _crypto_technical_signal(data: "pd.DataFrame") -> tuple:
+    """
+    Fast crypto-native technical signal using RSI, MACD, and Bollinger Bands.
+
+    Returns (signal: float, confidence: float) both in [-1, +1] / [0, 1].
+    Works with as few as 30 bars; returns (0, 0) if insufficient data.
+    """
+    try:
+        import numpy as np
+        close = data["Close"].dropna()
+        if len(close) < 30:
+            return 0.0, 0.0
+        c = close.values.astype(float)
+
+        # --- RSI(14) ---
+        delta = np.diff(c)
+        gain = np.where(delta > 0, delta, 0.0)
+        loss = np.where(delta < 0, -delta, 0.0)
+        period = 14
+        avg_gain = np.mean(gain[:period])
+        avg_loss = np.mean(loss[:period])
+        for i in range(period, len(delta)):
+            avg_gain = (avg_gain * (period - 1) + gain[i]) / period
+            avg_loss = (avg_loss * (period - 1) + loss[i]) / period
+        rs = avg_gain / (avg_loss + 1e-12)
+        rsi = 100 - 100 / (1 + rs)
+        # Map RSI to signal: <30 → strong buy, >70 → strong sell
+        if rsi < 30:
+            rsi_sig = (30 - rsi) / 30      # 0 to 1
+        elif rsi > 70:
+            rsi_sig = -(rsi - 70) / 30    # 0 to -1
+        else:
+            rsi_sig = (50 - rsi) / 50 * 0.3  # mild mean-reversion
+
+        # --- MACD(12,26,9) crossover ---
+        def ema(arr, n):
+            k = 2.0 / (n + 1)
+            e = arr[0]
+            for v in arr[1:]:
+                e = v * k + e * (1 - k)
+            return e
+
+        ema12 = ema(c[-50:], 12)
+        ema26 = ema(c[-50:], 26)
+        macd_line = ema12 - ema26
+        # Recent 9-bar signal EMA approximation
+        if len(c) >= 60:
+            prev_ema12 = ema(c[-60:-10], 12)
+            prev_ema26 = ema(c[-60:-10], 26)
+            prev_macd = prev_ema12 - prev_ema26
+        else:
+            prev_macd = 0.0
+        macd_sig_val = (macd_line - prev_macd) / (abs(c[-1]) * 0.01 + 1e-9)
+        macd_sig = max(-1.0, min(1.0, macd_sig_val * 5))
+
+        # --- Bollinger Band position (20, 2σ) ---
+        window = 20
+        roll = c[-window:]
+        mid = np.mean(roll)
+        std = np.std(roll) + 1e-9
+        bb_pos = (c[-1] - mid) / (2 * std)  # -1 = at lower band, +1 = at upper band
+        # Momentum: if above upper band → trend continuation (NOT mean reversion for crypto)
+        bb_sig = max(-1.0, min(1.0, bb_pos * 0.5))
+
+        # --- Volume surge (if available) ---
+        vol_mult = 1.0
+        if "Volume" in data.columns:
+            vol = data["Volume"].dropna().values.astype(float)
+            if len(vol) >= 20:
+                avg_vol = np.mean(vol[-20:])
+                cur_vol = vol[-1]
+                if avg_vol > 0:
+                    surge = cur_vol / avg_vol
+                    if surge > 2.0:
+                        vol_mult = 1.3  # C: volume surge amplifier
+                    elif surge > 1.5:
+                        vol_mult = 1.15
+
+        # Blend: RSI carries most weight (mean-reversion), MACD confirms trend, BB gives position
+        raw_signal = 0.50 * rsi_sig + 0.30 * macd_sig + 0.20 * bb_sig
+        raw_signal = max(-1.0, min(1.0, raw_signal * vol_mult))
+
+        # Confidence: proportional to signal strength and internal agreement
+        agreement = (
+            (1 if rsi_sig > 0 else -1 if rsi_sig < 0 else 0)
+            + (1 if macd_sig > 0 else -1 if macd_sig < 0 else 0)
+            + (1 if bb_sig > 0 else -1 if bb_sig < 0 else 0)
+        )
+        conf = 0.30 + 0.20 * abs(raw_signal) + 0.15 * (abs(agreement) / 3.0)
+        conf = max(0.15, min(0.85, conf))
+
+        return float(raw_signal), float(conf)
+    except Exception:
+        return 0.0, 0.0
 
 
 class ApexTradingSystem:
@@ -840,6 +939,7 @@ class ApexTradingSystem:
             self.capital = ApexConfig.INITIAL_CAPITAL
             
         self._last_good_total_equity: float = float(self.capital)
+        self._per_broker_last_equity: Dict[str, float] = {}  # last-known equity per broker (survives cache expiry)
         self.positions: Dict[str, int] = {}  # symbol -> quantity (positive=long, negative=short)
         self.is_running = False
         self._cached_ibkr_positions: Optional[Dict[str, int]] = None  # Cycle-level cache
@@ -874,6 +974,16 @@ class ApexTradingSystem:
             "top_scores": [],
         }
         self._dynamic_crypto_symbols: List[str] = []
+        # UPGRADE F: Correlated exit stagger — track exits already queued this cycle
+        self._cycle_exit_count: int = 0     # resets each cycle in _run_cycle
+        self._cycle_id: int = 0             # monotonic cycle counter for stagger reset
+        # Overnight crypto session tracking (reset at equity open)
+        self._overnight_cycles: int = 0
+        self._overnight_signals_evaluated: int = 0
+        self._overnight_entries: int = 0
+        self._overnight_exits: int = 0
+        self._overnight_session_start: Optional[datetime] = None
+        self._last_in_equity_hours: Optional[bool] = None
         self._failed_symbols: set = set()
         self.equity_outlier_guard = EquityOutlierGuard(
             enabled=ApexConfig.EQUITY_OUTLIER_GUARD_ENABLED,
@@ -895,6 +1005,7 @@ class ApexTradingSystem:
         
         # Cache
         self.price_cache: Dict[str, float] = {}
+        self._price_cache_ts: Dict[str, float] = {}  # AD: Unix timestamp of last price update
         self.historical_data: Dict[str, pd.DataFrame] = {}
         self.position_entry_prices: Dict[str, float] = {}
         self.position_entry_times: Dict[str, datetime] = {}
@@ -918,7 +1029,12 @@ class ApexTradingSystem:
         self._entry_semaphore = asyncio.Semaphore(3)  # Max 3 concurrent entries
         self._position_lock = asyncio.Lock()  # Lock for position count checks
         self._regime_eval_lock = asyncio.Lock()
+        self._meta_file_lock = asyncio.Lock()  # AF: Serialize position metadata file writes
         self._cycle_regime_eval_cycle: int = -1
+
+        # A/D: Crypto signal enhancers
+        self._fear_greed_value: float = 50.0   # neutral default
+        self._fear_greed_ts: float = 0.0       # last fetch time
         self._cycle_regime_value: str = "neutral"
         self._cycle_regime_transition_prob: float = 0.0
         self._cycle_regime_log_cycle: int = -1
@@ -990,7 +1106,7 @@ class ApexTradingSystem:
                     drift_ratio * 100.0,
                 )
 
-    def _sanitize_startup_state_for_paper(self):
+    async def _sanitize_startup_state_for_paper(self):
         """Auto-heal stale persisted risk/performance state for paper sessions."""
         if not ApexConfig.PAPER_STARTUP_RISK_SELF_HEAL_ENABLED:
             return
@@ -1039,7 +1155,7 @@ class ApexTradingSystem:
             ):
                 self.risk_manager.circuit_breaker.reset()
                 logger.warning("🩹 Paper startup risk self-heal: cleared persisted circuit breaker latch")
-            self.risk_manager.save_state()
+            await self.risk_manager.save_state_async()
 
         if ApexConfig.PAPER_STARTUP_PERFORMANCE_REBASE_ENABLED:
             try:
@@ -1052,12 +1168,12 @@ class ApexTradingSystem:
                 perf_mismatch = 1.0
 
             if perf_mismatch >= ApexConfig.PAPER_STARTUP_PERFORMANCE_REBASE_RATIO:
-                self.performance_tracker.reset_history(
+                await self.performance_tracker.reset_history(
                     starting_capital=capital,
                     reason="paper_startup_rebase",
                 )
 
-    def _rebase_latches_after_reset_for_paper(self, requested_by: str, reason: str, reset_notes: List[str]) -> None:
+    async def _rebase_latches_after_reset_for_paper(self, requested_by: str, reason: str, reset_notes: List[str]) -> None:
         """In paper sessions, align risk/performance baselines after manual latch reset."""
         if not self._is_paper_session():
             reset_notes.append("paper_rebase=skipped_non_paper")
@@ -1092,7 +1208,7 @@ class ApexTradingSystem:
             reset_notes.append("paper_risk_rebase=disabled")
 
         if ApexConfig.UNIFIED_LATCH_RESET_REBASE_PERFORMANCE:
-            self.performance_tracker.reset_history(
+            await self.performance_tracker.reset_history(
                 starting_capital=baseline,
                 reason="unified_latch_reset",
             )
@@ -1108,6 +1224,67 @@ class ApexTradingSystem:
     @staticmethod
     def _now_iso_utc() -> str:
         return datetime.utcnow().isoformat() + "Z"
+
+    def _write_trade_rejection(self, symbol: str, reason: str, signal: float = 0.0,
+                               confidence: float = 0.0, price: float = 0.0,
+                               extra: dict = None) -> None:
+        """Append rejected signal to audit JSONL (Upgrade H)."""
+        if not getattr(ApexConfig, "TRADE_REJECTION_AUDIT_ENABLED", True):
+            return
+        import json
+        try:
+            audit_path = self.user_data_dir / "audit" / "trade_rejections.jsonl"
+            audit_path.parent.mkdir(parents=True, exist_ok=True)
+            entry = {
+                "ts": self._now_iso_utc(),
+                "symbol": symbol,
+                "reason": reason,
+                "signal": round(signal, 4),
+                "confidence": round(confidence, 4),
+                "price": round(price, 4),
+                **(extra or {}),
+            }
+            with open(audit_path, "a") as f:
+                f.write(json.dumps(entry) + "\n")
+        except Exception as _audit_err:
+            logger.debug("Trade rejection audit write failed: %s", _audit_err)
+
+    def _write_execution_latency(
+        self,
+        symbol: str,
+        side: str,
+        broker: str,
+        signal_ts: float,      # time.time() when signal was generated
+        order_sent_ts: float,  # time.time() when order was submitted to broker
+        fill_ts: float,        # time.time() when fill/confirmation received (0 = unfilled)
+        quantity: float = 0.0,
+        fill_price: float = 0.0,
+        signal_strength: float = 0.0,
+    ) -> None:
+        """P: Append trade execution latency record to audit JSONL for TCA analysis."""
+        try:
+            signal_to_order_ms = round((order_sent_ts - signal_ts) * 1000, 1)
+            order_to_fill_ms = round((fill_ts - order_sent_ts) * 1000, 1) if fill_ts else None
+            total_ms = round((fill_ts - signal_ts) * 1000, 1) if fill_ts else None
+
+            audit_path = self.user_data_dir / "audit" / "execution_latency.jsonl"
+            audit_path.parent.mkdir(parents=True, exist_ok=True)
+            entry = {
+                "ts": self._now_iso_utc(),
+                "symbol": symbol,
+                "side": side,
+                "broker": broker,
+                "signal_strength": round(signal_strength, 4),
+                "qty": round(quantity, 6),
+                "fill_price": round(fill_price, 4),
+                "signal_to_order_ms": signal_to_order_ms,
+                "order_to_fill_ms": order_to_fill_ms,
+                "total_ms": total_ms,
+            }
+            with open(audit_path, "a") as f:
+                f.write(json.dumps(entry) + "\n")
+        except Exception as _lat_err:
+            logger.debug("Execution latency audit write failed: %s", _lat_err)
 
     @staticmethod
     def _normalize_broker_name(broker_name: str) -> str:
@@ -1401,6 +1578,19 @@ class ApexTradingSystem:
                 for row in ranked[: min(12, len(ranked))]
             ],
         }
+
+        # Log top-5 ranked crypto with scores
+        top5 = ranked[:5]
+        top5_str = " | ".join(
+            f"{r['symbol']}={r['score']:.3f}(mom={r['momentum']:.3f})"
+            for r in top5
+        )
+        logger.info(
+            "🔄 Crypto rotation updated: selected=%d/%d — top5: %s",
+            len(selected_crypto),
+            len(ranked),
+            top5_str or "n/a",
+        )
         return rotated
 
     async def _prefill_historical_data(self, symbols: List[str]):
@@ -1437,6 +1627,46 @@ class ApexTradingSystem:
                     
             except Exception as e:
                 logger.error(f"❌ Prefill failed for batch: {e}")
+
+    async def _fetch_fear_greed(self) -> float:
+        """
+        D: Fetch Crypto Fear & Greed index (alternative.me free API).
+        Returns value 0-100.  Caches for 1 hour.  Falls back to 50 on any error.
+        """
+        if time.time() - self._fear_greed_ts < 3600:
+            return self._fear_greed_value
+        try:
+            import httpx
+            async with httpx.AsyncClient(timeout=5.0) as c:
+                r = await c.get("https://api.alternative.me/fng/?limit=1")
+                val = int(r.json()["data"][0]["value"])
+            self._fear_greed_value = float(val)
+            self._fear_greed_ts = time.time()
+            logger.info("D: Crypto Fear & Greed = %d (%s)", val,
+                        r.json()["data"][0].get("value_classification", "?"))
+        except Exception as e:
+            logger.debug("D: Fear & Greed fetch failed (%s), using cached %.0f", e, self._fear_greed_value)
+        return self._fear_greed_value
+
+    def _btc_momentum(self) -> float:
+        """
+        B: Return BTC 24h momentum signal in [-1, +1].
+        Used to boost/dampen all altcoin signals (BTC leads the market).
+        """
+        try:
+            btc_data = self.historical_data.get("BTC/USD") or self.historical_data.get("BTCUSD")
+            if btc_data is None or len(btc_data) < 5:
+                return 0.0
+            c = btc_data["Close"].dropna().values.astype(float)
+            if len(c) < 5:
+                return 0.0
+            ret_1d = c[-1] / c[-2] - 1   # 1-bar return (15-min bars → last bar)
+            ret_3d = c[-1] / c[max(0, len(c) - 4)] - 1
+            # Normalize: 2% move = ±1.0 leader signal
+            momentum = (ret_1d * 0.6 + ret_3d * 0.4) / 0.02
+            return float(max(-1.0, min(1.0, momentum)))
+        except Exception:
+            return 0.0
 
     def _crypto_rotation_score(self, symbol: str) -> float:
         """Return latest rotation score [0, 1] for a crypto symbol."""
@@ -1612,10 +1842,10 @@ class ApexTradingSystem:
         # Load risk state (day_start_capital, etc)
         self.risk_manager.load_state()
         self.load_price_cache()
-        # Connect to IBKR
+        # Connect to IBKR (cap startup wait to 90 s so a zombie session can't block crypto)
         if self.ibkr:
             try:
-                await self.ibkr.connect()
+                await asyncio.wait_for(self.ibkr.connect(), timeout=90)
                 self._mark_broker_heartbeat("ibkr", success=True)
                 if self.prometheus_metrics:
                     self.prometheus_metrics.update_ibkr_status(True)
@@ -1623,7 +1853,7 @@ class ApexTradingSystem:
                 self._mark_broker_heartbeat("ibkr", success=False, error=str(ibkr_exc))
                 if self.prometheus_metrics:
                     self.prometheus_metrics.update_ibkr_status(False)
-                
+
                 if self.alpaca:
                     logger.error(f"❌ IBKR unavailable: {ibkr_exc}")
                     logger.warning(
@@ -1792,6 +2022,13 @@ class ApexTradingSystem:
                         self.positions[sym] = int(qty) if qty == int(qty) else qty
                         logger.info(f"  Alpaca position: {sym} = {qty}")
 
+                # UPGRADE B: Reload pending orders from previous session
+                _orders_path = self.user_data_dir / "runtime" / "alpaca_pending_orders.json"
+                try:
+                    self.alpaca.load_pending_orders(_orders_path)
+                except Exception as _load_err:
+                    logger.debug("Could not load pending orders: %s", _load_err)
+
                 # Start crypto quote polling
                 if getattr(ApexConfig, "ALPACA_DISCOVER_CRYPTO_SYMBOLS", True):
                     try:
@@ -1800,13 +2037,15 @@ class ApexTradingSystem:
                             preferred_quotes=list(getattr(ApexConfig, "ALPACA_DISCOVER_CRYPTO_PREFERRED_QUOTES", [])),
                         )
                     except Exception as discover_exc:
-                        logger.debug("Alpaca crypto discovery failed: %s", discover_exc)
+                        logger.warning("Alpaca crypto discovery failed: %s", discover_exc)
                         discovered = []
                     if discovered:
-                        self._dynamic_crypto_symbols = discovered
+                        excluded = set(getattr(ApexConfig, "ALPACA_DISCOVER_CRYPTO_EXCLUDED", []))
+                        filtered = [s for s in discovered if s.upper() not in excluded]
+                        self._dynamic_crypto_symbols = filtered
                         logger.info(
-                            "🪙 Alpaca discovery added %d crypto pairs to runtime universe",
-                            len(discovered),
+                            "🪙 Alpaca discovery added %d crypto pairs to runtime universe (%d excluded)",
+                            len(filtered), len(discovered) - len(filtered),
                         )
 
                 crypto_symbols = []
@@ -1831,7 +2070,7 @@ class ApexTradingSystem:
         await self._refresh_capital_from_brokers_for_startup()
 
         # Prevent stale persisted paper state from tripping risk/kill controls at startup.
-        self._sanitize_startup_state_for_paper()
+        await self._sanitize_startup_state_for_paper()
 
         # Pre-load historical data
         logger.info("📥 Loading historical data for ML training...")
@@ -1906,8 +2145,13 @@ class ApexTradingSystem:
         # Train institutional signal generator
         if self.use_institutional:
             logger.info("")
+            # Try loading saved models from disk first (fast path, avoids ~18min training)
+            if not self.inst_signal_generator.is_trained and not ApexConfig.FORCE_RETRAIN:
+                logger.info("🔍 Checking for saved institutional ML models...")
+                loaded = self.inst_signal_generator.loadModels()
+                if loaded:
+                    logger.info("✅ Institutional ML models loaded from disk — skipping startup training.")
             if self.inst_signal_generator.is_trained and not ApexConfig.FORCE_RETRAIN:
-                logger.info("✅ Institutional ML models loaded from disk. Skipping training.")
                 # Ensure risk manager is initialized even if we skip training
                 self.inst_risk_manager.update_capital(self.capital)
             else:
@@ -2125,6 +2369,7 @@ class ApexTradingSystem:
             return None
         if value > 0:
             self._broker_equity_cache[broker_name] = (value, datetime.utcnow())
+            self._per_broker_last_equity[broker_name] = value  # persist across cache expiry
             self._mark_broker_heartbeat(broker_name, success=True)
             return value
         self._mark_broker_heartbeat(
@@ -2193,6 +2438,13 @@ class ApexTradingSystem:
         if normalized == "CRYPTO":
             return float(ApexConfig.EXECUTION_MIN_EDGE_OVER_COST_BPS_CRYPTO)
         return float(ApexConfig.EXECUTION_MIN_EDGE_OVER_COST_BPS_EQUITY)
+
+    def _signal_to_edge_bps_for_asset(self, asset_class: str) -> float:
+        """Return signal-to-edge multiplier by asset class.
+        Crypto has higher daily vol (~3-10%) so same signal strength yields larger bps returns."""
+        if str(asset_class or "EQUITY").upper() == "CRYPTO":
+            return float(getattr(ApexConfig, "EXECUTION_SIGNAL_TO_EDGE_BPS_CRYPTO", 300))
+        return float(ApexConfig.EXECUTION_SIGNAL_TO_EDGE_BPS)
 
     @staticmethod
     def _compute_slippage_bps(expected_price: float, fill_price: float) -> float:
@@ -2381,8 +2633,13 @@ class ApexTradingSystem:
             )
 
     async def _get_total_portfolio_value(self) -> float:
-        """Get combined portfolio value across brokers with quorum + cache fallback."""
-        brokers = {}
+        """Get combined portfolio value across brokers with per-broker awareness.
+
+        Priority per broker: live read → short-term cache → long-term last-known → omit.
+        Returns sum of whichever brokers have data so that an offline IBKR ($1.18M) does
+        NOT inflate the equity seen by an online Alpaca-only ($100k) session.
+        """
+        brokers: Dict[str, object] = {}
         if self.ibkr:
             brokers["ibkr"] = self.ibkr
         if self.alpaca:
@@ -2400,46 +2657,71 @@ class ApexTradingSystem:
             int(getattr(ApexConfig, "BROKER_EQUITY_QUORUM_MIN_BROKERS", 1)),
         )
         required_quorum = min(len(brokers), configured_quorum)
-        included_values: Dict[str, float] = {}
+
+        live_values: Dict[str, float] = {}    # brokers that returned fresh or cached equity
+        offline_brokers: list = []            # brokers with zero data (never seen or truly dead)
 
         for broker_name, connector in brokers.items():
+            # 1. Try live read (updates cache + _per_broker_last_equity on success)
             fresh = await self._read_broker_equity(broker_name, connector)
             if fresh is not None and fresh > 0:
-                included_values[broker_name] = fresh
+                live_values[broker_name] = fresh
                 continue
 
+            # 2. Short-term cache (broker recently went offline)
             cached = self._broker_equity_cache.get(broker_name)
-            if not cached:
-                continue
-            cached_value, cached_at = cached
-            age_seconds = (now - cached_at).total_seconds()
-            if cached_value > 0:
-                included_values[broker_name] = cached_value
-                if age_seconds <= stale_seconds:
-                    logger.warning(
-                        "⚠️ %s equity unavailable, reusing cached value $%.2f (age=%.0fs)",
-                        broker_name,
-                        cached_value,
-                        age_seconds,
-                    )
-                else:
-                    logger.warning(
-                        "⚠️ %s equity STALE, reusing last known value $%.2f (age=%.0fs) to prevent drawdown cliff",
-                        broker_name,
-                        cached_value,
-                        age_seconds,
-                    )
+            if cached:
+                cached_value, cached_at = cached
+                age_seconds = (now - cached_at).total_seconds()
+                if cached_value > 0:
+                    live_values[broker_name] = cached_value
+                    if age_seconds <= stale_seconds:
+                        logger.warning(
+                            "⚠️ %s equity unavailable, reusing cached value $%.2f (age=%.0fs)",
+                            broker_name, cached_value, age_seconds,
+                        )
+                    else:
+                        logger.warning(
+                            "⚠️ %s equity STALE (age=%.0fs), reusing last known $%.2f",
+                            broker_name, age_seconds, cached_value,
+                        )
+                    continue
 
-        if len(included_values) == len(brokers):
-            total = float(sum(included_values.values()))
+            # 3. Long-term last-known (survives cache expiry, e.g. after restart)
+            last_known = self._per_broker_last_equity.get(broker_name)
+            if last_known and last_known > 0:
+                live_values[broker_name] = last_known
+                logger.warning(
+                    "⚠️ %s offline – using last-known equity $%.2f for continuity",
+                    broker_name, last_known,
+                )
+                continue
+
+            # 4. Truly no data for this broker
+            offline_brokers.append(broker_name)
+
+        # Return sum of all brokers that have ANY equity data (live or remembered)
+        if len(live_values) >= required_quorum:
+            total = float(sum(live_values.values()))
             if total > 0:
                 self._last_good_total_equity = total
+                if offline_brokers:
+                    logger.warning(
+                        "⚠️ %s: no equity data at all – excluded from total. "
+                        "Active brokers %s sum: $%.2f",
+                        offline_brokers, list(live_values.keys()), total,
+                    )
                 return total
 
-        fallback_value = float(self._last_good_total_equity) if self._last_good_total_equity > 0 else float(self.capital)
+        # All brokers failed and we have no history anywhere
+        fallback_value = (
+            float(self._last_good_total_equity)
+            if self._last_good_total_equity > 0
+            else float(self.capital)
+        )
         logger.warning(
-            "⚠️ Missing equity for %d/%d brokers. Returning last good total $%.2f to prevent drawdown.",
-            len(brokers) - len(included_values),
+            "⚠️ No equity data from any broker (%d configured). "
+            "Returning last good total $%.2f.",
             len(brokers),
             fallback_value,
         )
@@ -2495,7 +2777,7 @@ class ApexTradingSystem:
                         age_seconds,
                     )
 
-        if len(included_values) == len(brokers):
+        if len(included_values) >= required_quorum:
             total_cash = float(sum(included_values.values()))
             if math.isfinite(total_cash):
                 self._last_good_total_cash = total_cash
@@ -2618,14 +2900,26 @@ class ApexTradingSystem:
     async def check_sector_limit(self, symbol: str) -> bool:
         """
         Check if adding this symbol would exceed sector limits.
-        
+
         Dynamic logic:
         - If < 5 positions, allow up to 80% in a sector.
         - Otherwise, use ApexConfig.MAX_SECTOR_EXPOSURE (0.50).
+        - Crypto symbols routed to Alpaca (dedicated crypto account) are exempt —
+          the Alpaca account is 100% crypto by design; sector caps apply to IBKR.
         """
+        # Crypto symbols routed to Alpaca are exempt: Alpaca is a dedicated crypto
+        # account so sector concentration vs the IBKR portfolio is meaningless.
+        try:
+            if _symbol_is_crypto(symbol) and self.alpaca is not None:
+                connector = self._get_connector_for(symbol)
+                if connector is self.alpaca:
+                    return True  # Alpaca crypto — no IBKR-style sector cap
+        except Exception:
+            pass
+
         sector = ApexConfig.get_sector(symbol)
         current_exposure = self.calculate_sector_exposure()
-        
+
         # Determine dynamic limit
         limit = ApexConfig.MAX_SECTOR_EXPOSURE
         if self.position_count < 5:
@@ -3396,7 +3690,7 @@ class ApexTradingSystem:
                     "circuit_breaker_reset=applied" if cb_reset else "circuit_breaker_reset=already_clear"
                 )
 
-            self._rebase_latches_after_reset_for_paper(
+            await self._rebase_latches_after_reset_for_paper(
                 requested_by=requested_by,
                 reason=reason,
                 reset_notes=reset_notes,
@@ -3412,7 +3706,7 @@ class ApexTradingSystem:
                 processed_by="apex-trader",
                 note=note,
             )
-            self.risk_manager.save_state()
+            await self.risk_manager.save_state_async()
             logger.warning("Control command %s: %s", request_id, note)
 
             # Keep exported state/metrics consistent immediately.
@@ -3591,6 +3885,7 @@ class ApexTradingSystem:
             if not can_trade:
                 if current_qty == 0:
                     logger.info(f"🛑 {symbol}: Trading halted - {reason}")
+                    self._write_trade_rejection(symbol, f"circuit_breaker:{reason}")
                     return
                 else:
                     logger.debug(f"🛑 {symbol}: Trading halted - Entries blocked, Exits allowed ({reason})")
@@ -3602,6 +3897,7 @@ class ApexTradingSystem:
             if not can_trade:
                 if current_qty == 0:
                     logger.info(f"🛑 {symbol}: Trading halted - {reason}")
+                    self._write_trade_rejection(symbol, f"circuit_breaker:{reason}")
                     return
                 else:
                     logger.debug(f"🛑 {symbol}: Trading halted - Entries blocked, Exits allowed ({reason})")
@@ -3688,7 +3984,7 @@ class ApexTradingSystem:
 
         # Get data
         if symbol not in self.historical_data:
-            logger.debug(f"⚠️ {symbol}: No historical data found in self.historical_data")
+            logger.info(f"⚠️ {symbol}: No historical data – skipping (data not yet loaded)")
             return
         
         try:
@@ -3704,10 +4000,11 @@ class ApexTradingSystem:
                 # Get current price
                 price = await connector.get_market_price(symbol)
                 if not price or price == 0:
-                    logger.debug(f"⚠️ {symbol}: No price available")
+                    logger.info(f"⚠️ {symbol}: No price from broker – skipping")
                     return
 
                 self.price_cache[symbol] = price
+                self._price_cache_ts[symbol] = time.time()  # AD: timestamp for TTL
                 if self.data_watchdog:
                     self.data_watchdog.feed_heartbeat(symbol)
                 # Record price freshness for decay shield
@@ -3717,6 +4014,7 @@ class ApexTradingSystem:
                 current_pos = self.positions.get(symbol, 0)
                 price = float(self.historical_data[symbol]['Close'].iloc[-1])
                 self.price_cache[symbol] = price
+                self._price_cache_ts[symbol] = time.time()  # AD: timestamp for TTL
                 if self.data_watchdog:
                     self.data_watchdog.feed_heartbeat(symbol)
                 if self.signal_decay_shield:
@@ -3735,8 +4033,8 @@ class ApexTradingSystem:
             cs_data = self.cs_momentum.get_signal(symbol, self.historical_data)
             cs_signal = cs_data.get('signal', 0)
             
-            # SOTA: Get News Sentiment
-            sent_result = self.sentiment_analyzer.analyze(symbol)
+            # SOTA: Get News Sentiment (offloaded — analyze() does blocking time.sleep on retries)
+            sent_result = await asyncio.to_thread(self.sentiment_analyzer.analyze, symbol)
             sent_signal = sent_result.sentiment_score
 
             if self.use_institutional:
@@ -3749,7 +4047,19 @@ class ApexTradingSystem:
                 )
                 signal = inst_signal.signal
                 confidence = inst_signal.confidence
-                
+
+                # I: Tiered signal confidence decay based on price data age.
+                # Stale data → reduced confidence → smaller position, higher bar to trade.
+                _price_age_s = time.time() - self._price_cache_ts.get(symbol, time.time())
+                if _price_age_s > 600:      # >10 min: block signal entirely
+                    logger.debug("I: %s signal rejected — price data %.0fs stale (>10min)", symbol, _price_age_s)
+                    return
+                elif _price_age_s > 300:    # 5-10 min: 40% confidence
+                    confidence = min(confidence, 0.40)
+                    logger.debug("I: %s confidence capped at 40%% — price %.0fs stale", symbol, _price_age_s)
+                elif _price_age_s > 120:    # 2-5 min: 80% confidence
+                    confidence = min(confidence, 0.80)
+
                 # Note: Blending is now handled within the ML feature matrix once models retrain.
                 # For now, we keep the signature-passing logic and let the generator decide.
 
@@ -3813,6 +4123,72 @@ class ApexTradingSystem:
             if not math.isfinite(confidence):
                 confidence = 0.0
 
+            # ═══════════════════════════════════════════════════════════════
+            # A/B/C/D: CRYPTO SIGNAL ENHANCEMENT LAYER
+            # ═══════════════════════════════════════════════════════════════
+            if str(asset_class).upper() == "CRYPTO":
+                # A: Compute technical signal (RSI + MACD + BB + volume)
+                tech_sig, tech_conf = _crypto_technical_signal(data)
+
+                ml_trained = (
+                    (self.use_institutional and hasattr(self.inst_signal_generator, "is_trained")
+                     and self.inst_signal_generator.is_trained)
+                    or (not self.use_institutional and hasattr(self.signal_generator, "is_trained")
+                        and self.signal_generator.is_trained)
+                )
+                if not ml_trained or (signal == 0.0 and confidence == 0.0):
+                    # Warmup: use pure technical signal until ML is ready
+                    signal = tech_sig
+                    confidence = tech_conf
+                    logger.debug(
+                        "A: %s warmup — using pure technical signal=%.3f conf=%.2f",
+                        symbol, signal, confidence,
+                    )
+                else:
+                    # ML trained: blend technical (60%) + ML (40%)
+                    # Technical analysis is more reliable for 24/7 crypto markets than
+                    # equity-trained ML models — favor RSI/MACD/BB for crypto entries.
+                    blended_signal = 0.40 * signal + 0.60 * tech_sig
+                    blended_conf = 0.40 * confidence + 0.60 * tech_conf
+                    logger.debug(
+                        "A: %s blend ML=%.3f tech=%.3f → %.3f (conf ML=%.2f tech=%.2f → %.2f)",
+                        symbol, signal, tech_sig, blended_signal, confidence, tech_conf, blended_conf,
+                    )
+                    signal = blended_signal
+                    confidence = blended_conf
+
+                signal = max(-1.0, min(1.0, signal))
+                confidence = max(0.0, min(1.0, confidence))
+
+                # B: BTC leader effect — altcoins follow BTC momentum
+                is_btc = symbol.upper() in ("BTC/USD", "BTCUSD", "BTC-USD")
+                if not is_btc:
+                    btc_mom = self._btc_momentum()
+                    if abs(btc_mom) > 0.20:
+                        # Only amplify if BTC and altcoin signal are in the same direction
+                        if btc_mom * signal > 0:
+                            boost = min(0.12, abs(btc_mom) * 0.12)
+                            signal = max(-1.0, min(1.0, signal + math.copysign(boost, signal)))
+                            logger.debug("B: %s BTC leader boost %.3f → signal=%.3f", symbol, boost, signal)
+
+                # D: Fear & Greed modulation (cached hourly)
+                try:
+                    fg = self._fear_greed_value  # use cached value; refresh happens async elsewhere
+                    if fg < 25:          # Extreme Fear → amplify BUY, dampen SELL
+                        if signal > 0:
+                            signal = min(1.0, signal * 1.25)
+                        else:
+                            signal = signal * 0.70
+                        logger.debug("D: %s Extreme Fear (F&G=%.0f) → amplify buy signal=%.3f", symbol, fg, signal)
+                    elif fg > 75:        # Extreme Greed → amplify SELL, dampen BUY
+                        if signal < 0:
+                            signal = max(-1.0, signal * 1.25)
+                        else:
+                            signal = signal * 0.70
+                        logger.debug("D: %s Extreme Greed (F&G=%.0f) → amplify sell signal=%.3f", symbol, fg, signal)
+                except Exception:
+                    pass
+
             crypto_rotation_score = 0.0
             if str(asset_class).upper() == "CRYPTO":
                 # Blend cross-sectional momentum with model signal for higher-quality
@@ -3844,6 +4220,14 @@ class ApexTradingSystem:
 
                 signal = max(-1.0, min(1.0, signal))
                 confidence = max(0.0, min(1.0, confidence))
+
+                # Log rotation blending details for crypto entries
+                _align_label = "aligned" if alignment > 0 else ("conflicting" if alignment < 0 else "neutral")
+                logger.debug(
+                    "🔄 Crypto blend [%s] rot_score=%.2f cs_strength=%.2f alignment=%s "
+                    "→ signal=%+.3f conf=%.3f",
+                    symbol, crypto_rotation_score, cs_strength, _align_label, signal, confidence,
+                )
 
             # ═══════════════════════════════════════════════════════════════
             # ENHANCED SIGNAL FILTERING - Quality gate before entry
@@ -3887,7 +4271,12 @@ class ApexTradingSystem:
 
                 # Update signal and confidence based on filter
                 if not filter_result['passed']:
-                    logger.info(f"🚫 {symbol}: Signal filtered out - {', '.join(filter_result['rejection_reasons'][:2])}")
+                    reasons = filter_result['rejection_reasons']
+                    logger.info(f"🚫 {symbol}: Signal filtered out - {', '.join(reasons[:2])}")
+                    self._write_trade_rejection(
+                        symbol, f"signal_filter:{';'.join(reasons[:3])}",
+                        signal=signal, confidence=confidence,
+                    )
                     return
 
                 # Use filtered values
@@ -4072,6 +4461,19 @@ class ApexTradingSystem:
                                     f"max_hold={status['max_hold_days']}d, signal_exit={status['signal_exit_threshold']:.2f}")
                 
                 if should_exit:
+                    # ══════════════════════════════════════════════════════════
+                    # UPGRADE F: Correlated exit stagger — cap simultaneous exits
+                    # ══════════════════════════════════════════════════════════
+                    if getattr(ApexConfig, "CORR_EXIT_STAGGER_ENABLED", True):
+                        _max_exits = int(getattr(ApexConfig, "CORR_EXIT_STAGGER_MAX_PER_CYCLE", 2))
+                        if self._cycle_exit_count >= _max_exits:
+                            logger.info(
+                                "⏳ %s: EXIT deferred to next cycle (stagger limit %d/cycle reached)",
+                                symbol, _max_exits,
+                            )
+                            return
+                    self._cycle_exit_count += 1
+
                     pos_type = "LONG" if current_pos > 0 else "SHORT"
                     logger.info(f"🚪 EXIT {symbol} ({pos_type}): {exit_reason}")
                     logger.info(f"   Quantity: {abs(current_pos)}")
@@ -4173,6 +4575,8 @@ class ApexTradingSystem:
                             self._save_position_metadata()
 
                             logger.info(f"   ✅ Position closed (commission: ${commission:.2f})")
+                            if str(asset_class).upper() == "CRYPTO" and not self._last_in_equity_hours:
+                                self._overnight_exits += 1
 
                             self.live_monitor.log_trade(
                                 symbol,
@@ -4181,7 +4585,7 @@ class ApexTradingSystem:
                                 float(exit_fill_price),
                                 float(realized_net) if not math.isclose(realized_net, 0.0, abs_tol=1e-9) else float(pnl - commission),
                             )
-                            self.performance_tracker.record_trade(
+                            await self.performance_tracker.record_trade(
                                 symbol,
                                 order_side,
                                 abs(current_pos),
@@ -4268,7 +4672,7 @@ class ApexTradingSystem:
                         self._save_position_metadata()
 
                         self.live_monitor.log_trade(symbol, order_side, abs(current_pos), price, pnl)
-                        self.performance_tracker.record_trade(symbol, order_side, abs(current_pos), price, 0)
+                        await self.performance_tracker.record_trade(symbol, order_side, abs(current_pos), price, 0)
 
                         # Record trade result for circuit breaker
                         self.risk_manager.record_trade_result(pnl)
@@ -4292,12 +4696,13 @@ class ApexTradingSystem:
             # ═══════════════════════════════════════════════════════════════
             # ENTRY LOGIC - Only if no position
             # ═══════════════════════════════════════════════════════════════
-            logger.info(f"🔍 {symbol}: Entry evaluation - signal={signal:+.3f} conf={confidence:.3f}")
+            logger.debug(f"🔍 {symbol}: Entry evaluation - signal={signal:+.3f} conf={confidence:.3f}")
+            if str(asset_class).upper() == "CRYPTO" and not self._last_in_equity_hours:
+                self._overnight_signals_evaluated += 1
 
             # Pre-market Staleness Guard check
             if getattr(ApexConfig, "PRE_MARKET_STALENESS_GUARD", True):
                 try:
-                    from datetime import datetime
                     import pytz
                     now_et = datetime.now(pytz.timezone('US/Eastern'))
                     if now_et.hour == 9 and 0 <= now_et.minute < 30:
@@ -4462,10 +4867,19 @@ class ApexTradingSystem:
                         regime=governor_regime_key,
                         reason="threshold",
                     )
-                logger.info(
-                    f"⏭️ {symbol}: Signal {signal:.3f} below effective threshold "
-                    f"{effective_signal_threshold:.3f} ({self._current_regime}, perf={perf_snapshot.tier.value})"
-                )
+                if str(asset_class).upper() == "CRYPTO":
+                    logger.info(
+                        "⏭️ %s [CRYPTO]: Signal %.3f below threshold %.3f "
+                        "(rot_score=%.2f, regime=%s, perf=%s)",
+                        symbol, signal, effective_signal_threshold,
+                        crypto_rotation_score, self._current_regime, perf_snapshot.tier.value,
+                    )
+                else:
+                    logger.info(
+                        "⏭️ %s: Signal %.3f below effective threshold %.3f (%s, perf=%s)",
+                        symbol, signal, effective_signal_threshold,
+                        self._current_regime, perf_snapshot.tier.value,
+                    )
                 return
 
             if confidence < effective_confidence_threshold:
@@ -4475,10 +4889,18 @@ class ApexTradingSystem:
                         regime=governor_regime_key,
                         reason="confidence",
                     )
-                logger.info(
-                    f"⏭️ {symbol}: Confidence {confidence:.3f} below effective minimum "
-                    f"{effective_confidence_threshold:.3f} (perf={perf_snapshot.tier.value})"
-                )
+                if str(asset_class).upper() == "CRYPTO":
+                    logger.info(
+                        "⏭️ %s [CRYPTO]: Confidence %.3f below threshold %.3f "
+                        "(rot_score=%.2f, perf=%s) — needs stronger signal alignment",
+                        symbol, confidence, effective_confidence_threshold,
+                        crypto_rotation_score, perf_snapshot.tier.value,
+                    )
+                else:
+                    logger.info(
+                        "⏭️ %s: Confidence %.3f below effective minimum %.3f (perf=%s)",
+                        symbol, confidence, effective_confidence_threshold, perf_snapshot.tier.value,
+                    )
                 return
 
             # ✅ Phase 1.2: Check VaR limit before new entries
@@ -4497,8 +4919,14 @@ class ApexTradingSystem:
             if ApexConfig.USE_CORRELATION_MANAGER and len(self.positions) > 1:
                 existing_symbols = [s for s, qty in self.positions.items() if qty != 0]
                 avg_corr = self.correlation_manager.get_average_correlation(symbol, existing_symbols)
-                if avg_corr > ApexConfig.MAX_PORTFOLIO_CORRELATION:
-                    logger.warning(f"⚠️ {symbol}: Correlation too high ({avg_corr:.2f} > {ApexConfig.MAX_PORTFOLIO_CORRELATION}) - blocking entry")
+                # Crypto assets are inherently correlated; use a higher cap to allow diversification within crypto
+                corr_limit = (
+                    float(getattr(ApexConfig, "MAX_PORTFOLIO_CORRELATION_CRYPTO", 0.92))
+                    if str(asset_class).upper() == "CRYPTO"
+                    else float(ApexConfig.MAX_PORTFOLIO_CORRELATION)
+                )
+                if avg_corr > corr_limit:
+                    logger.warning(f"⚠️ {symbol}: Correlation too high ({avg_corr:.2f} > {corr_limit:.2f}) - blocking entry")
                     return
 
             # ✅ Phase 3: Aggregate Risk Check (Pre-Trade)
@@ -4564,8 +4992,13 @@ class ApexTradingSystem:
 
                         shares = sizing.target_shares
 
-                        # ✅ Apply POSITION_SIZE_USD as additional cap
-                        max_shares_by_value = int(ApexConfig.POSITION_SIZE_USD / price)
+                        # ✅ Apply asset-class-specific notional cap
+                        _notional_cap = (
+                            getattr(ApexConfig, "CRYPTO_POSITION_SIZE_USD", 5000)
+                            if parsed_symbol.asset_class == AssetClass.CRYPTO
+                            else ApexConfig.POSITION_SIZE_USD
+                        )
+                        max_shares_by_value = int(_notional_cap / price) if price > 0 else 0
                         shares = min(shares, max_shares_by_value)
                         shares = min(shares, ApexConfig.MAX_SHARES_PER_POSITION)  # Cap max shares
                         
@@ -4632,6 +5065,28 @@ class ApexTradingSystem:
                             price=price,
                         )
 
+                        # AG: Portfolio Profit Ratchet — when overall equity has run up
+                        # significantly above peak, scale back new entries to protect gains.
+                        if getattr(ApexConfig, "PROFIT_RATCHET_ENABLED", True):
+                            _eq_peak = float(self.risk_manager.peak_capital or self.capital or 0.0)
+                            _eq_now = float(self.capital or 0.0)
+                            _ratchet_trigger = float(getattr(ApexConfig, "PROFIT_RATCHET_TRIGGER_PCT", 10.0)) / 100.0
+                            if _eq_peak > 0 and _eq_now >= _eq_peak * (1.0 + _ratchet_trigger):
+                                _ratchet_scale = float(getattr(ApexConfig, "PROFIT_RATCHET_SIZE_SCALE", 0.6))
+                                _pre_ratchet = shares
+                                if str(asset_class).upper() == "CRYPTO":
+                                    shares = round(shares * _ratchet_scale, 6)
+                                else:
+                                    shares = max(1, int(shares * _ratchet_scale))
+                                if shares != _pre_ratchet:
+                                    logger.info(
+                                        "   🔒 AG Profit Ratchet: equity +%.1f%% above peak → "
+                                        "size scaled to %.0f%% (%d→%d shares)",
+                                        (_eq_now / _eq_peak - 1.0) * 100,
+                                        _ratchet_scale * 100,
+                                        _pre_ratchet, shares,
+                                    )
+
                         if sizing.constraints:
                             logger.debug(f"   Size constraints: {', '.join(sizing.constraints)}")
 
@@ -4640,14 +5095,28 @@ class ApexTradingSystem:
                             logger.info(f"   📋 Constraints: {', '.join(sizing.constraints)}")
 
                         if shares < 1:
-                            if sizing.constraints:
-                                logger.info(f"⚠️ {symbol}: Position blocked by {sizing.constraints}")
+                            # Crypto: Alpaca supports fractional quantities — compute from target notional
+                            if str(asset_class).upper() == "CRYPTO" and price > 0:
+                                _notional = float(getattr(ApexConfig, "CRYPTO_POSITION_SIZE_USD", 5000))
+                                frac = round(_notional / price * self._vix_risk_multiplier * self._risk_multiplier, 6)
+                                if frac >= 0.001:
+                                    shares = frac
+                                    logger.info(f"   💎 {symbol}: Fractional crypto: {frac:.6f} × ${price:.2f} = ${frac*price:.0f}")
+                                else:
+                                    logger.info(f"⚠️ {symbol}: Crypto position too small ({frac:.6f} units @ ${price:.2f})")
+                                    async with self._position_lock:
+                                        if symbol in self.positions:
+                                            del self.positions[symbol]
+                                    return
                             else:
-                                logger.info(f"⚠️ {symbol}: Price too high or risk too high (${price:.2f})")
-                            async with self._position_lock:
-                                if symbol in self.positions:
-                                    del self.positions[symbol]
-                            return
+                                if sizing.constraints:
+                                    logger.info(f"⚠️ {symbol}: Position blocked by {sizing.constraints}")
+                                else:
+                                    logger.info(f"⚠️ {symbol}: Price too high or risk too high (${price:.2f})")
+                                async with self._position_lock:
+                                    if symbol in self.positions:
+                                        del self.positions[symbol]
+                                return
                     else:
                         # Fallback: standard position sizing — use dedicated crypto budget if applicable
                         _pos_size_usd = (
@@ -4655,13 +5124,20 @@ class ApexTradingSystem:
                             if asset_class == "CRYPTO"
                             else ApexConfig.POSITION_SIZE_USD
                         )
-                        shares = int(_pos_size_usd / price)
-                        shares = min(shares, ApexConfig.MAX_SHARES_PER_POSITION)
-                        # SOTA: Apply VIX multiplier
-                        shares = int(shares * self._vix_risk_multiplier)
+                        if str(asset_class).upper() == "CRYPTO" and price > 0:
+                            # Crypto: use fractional quantity instead of truncating to 0
+                            shares = round(_pos_size_usd / price * self._vix_risk_multiplier, 6)
+                        else:
+                            shares = int(_pos_size_usd / price)
+                            shares = min(shares, ApexConfig.MAX_SHARES_PER_POSITION)
+                            # SOTA: Apply VIX multiplier
+                            shares = int(shares * self._vix_risk_multiplier)
 
                         if governor_controls.size_multiplier < 1.0:
-                            shares = max(1, int(shares * governor_controls.size_multiplier))
+                            if str(asset_class).upper() == "CRYPTO":
+                                shares = round(shares * governor_controls.size_multiplier, 6)
+                            else:
+                                shares = max(1, int(shares * governor_controls.size_multiplier))
                             logger.info(
                                 f"   🧭 PerformanceGovernor: {governor_controls.size_multiplier:.0%} "
                                 f"size ({perf_snapshot.tier.value}, {governor_regime_key}) → {shares} shares"
@@ -4673,7 +5149,7 @@ class ApexTradingSystem:
                             price=price,
                         )
 
-                        if shares < 1:
+                        if shares < 0.001:
                             logger.debug(f"⚠️ {symbol}: Price too high (${price:.2f})")
                             async with self._position_lock:
                                 if symbol in self.positions:
@@ -4688,7 +5164,9 @@ class ApexTradingSystem:
                     reference_price = None
                     adv_shares = None
                     try:
-                        if len(prices) > 1:
+                        # Crypto: skip price_band — daily historical close vs live price
+                        # differs by 3-10% normally (not an anomaly). Pass None to disable.
+                        if len(prices) > 1 and str(asset_class).upper() != "CRYPTO":
                             reference_price = float(prices.iloc[-2])
                     except Exception:
                         reference_price = None
@@ -4778,7 +5256,7 @@ class ApexTradingSystem:
                             signal_strength=float(signal),
                             confidence=float(confidence),
                             min_edge_over_cost_bps=edge_buffer_bps,
-                            signal_to_edge_bps=float(ApexConfig.EXECUTION_SIGNAL_TO_EDGE_BPS),
+                            signal_to_edge_bps=self._signal_to_edge_bps_for_asset(asset_class),
                         )
                         if not gate_ok:
                             if gate_reason.startswith("spread_gate_blocked"):
@@ -4816,6 +5294,15 @@ class ApexTradingSystem:
 
                     logger.info(f"📈 {side} {shares} {symbol} @ ${price:.2f} (${shares*price:,.0f})")
                     logger.info(f"   Signal: {signal:+.3f} | Confidence: {confidence:.3f}")
+                    if str(asset_class).upper() == "CRYPTO":
+                        _sor_rec = SmartOrderRouter().select_algorithm(symbol, side, shares)
+                        logger.info(
+                            "   [CRYPTO] rot_score=%.2f | sig_thr=%.3f | conf_thr=%.3f | algo=%s",
+                            crypto_rotation_score,
+                            effective_signal_threshold,
+                            effective_confidence_threshold,
+                            _sor_rec["algorithm"],
+                        )
                     if self.use_institutional:
                         logger.debug(f"   Vol-adjusted: ${sizing.vol_adjusted_size:,.0f} | Corr penalty: {sizing.correlation_penalty:.2f}")
 
@@ -4825,6 +5312,9 @@ class ApexTradingSystem:
                         # SOTA: Record arrival price
                         arrival_price = price
                         start_time = datetime.now()
+                        _signal_ts = time.time()          # P: latency tracking — signal ready
+                        _order_sent_ts = _signal_ts       # P: default (overridden in else branch)
+                        _fill_ts = 0.0                    # P: set after fill received
 
                         # ✅ Phase 2.1: Use TWAP/VWAP for large orders (IBKR only)
                         order_value = shares * price
@@ -4846,6 +5336,7 @@ class ApexTradingSystem:
                                 slice_interval_seconds=60  # Execute every minute
                             )
                         else:
+                            _order_sent_ts = time.time()   # P: latency — order submitted
                             trade = await entry_connector.execute_order(
                                 symbol=symbol,
                                 side=side,
@@ -4858,6 +5349,7 @@ class ApexTradingSystem:
                         expected_price_for_shield = float(arrival_price)
                         # SOTA: Record execution benchmark if we have a trade
                         if trade:
+                            _fill_ts = time.time()         # P: latency — fill received
                             fill_price = trade.get('price', 0) if isinstance(trade, dict) else trade.orderStatus.avgFillPrice
                             if isinstance(trade, dict):
                                 trade_status = str(trade.get("status", "UNKNOWN")).upper()
@@ -4877,6 +5369,16 @@ class ApexTradingSystem:
                                 )
                                 shortfall = self.arrival_benchmark.executions[-1].implementation_shortfall_bps
                                 logger.info(f"   📊 Execution Shortfall: {shortfall:.1f} bps")
+                                # P: Write execution latency audit record
+                                _broker_name = "ibkr" if use_advanced or entry_connector is self.ibkr else "alpaca"
+                                self._write_execution_latency(
+                                    symbol=symbol, side=side, broker=_broker_name,
+                                    signal_ts=_signal_ts,
+                                    order_sent_ts=_order_sent_ts if not use_advanced else _signal_ts,
+                                    fill_ts=_fill_ts,
+                                    quantity=float(shares), fill_price=float(fill_price),
+                                    signal_strength=float(signal),
+                                )
 
                         if trade:
                             trade_success = True
@@ -4973,9 +5475,11 @@ class ApexTradingSystem:
                                 }
 
                             logger.info(f"   ✅ Order placed (commission: ${commission:.2f})")
+                            if str(asset_class).upper() == "CRYPTO" and not self._last_in_equity_hours:
+                                self._overnight_entries += 1
 
                             self.live_monitor.log_trade(symbol, side, shares, attribution_entry_price, -commission)
-                            self.performance_tracker.record_trade(
+                            await self.performance_tracker.record_trade(
                                 symbol,
                                 side,
                                 shares,
@@ -5055,7 +5559,7 @@ class ApexTradingSystem:
                             }
 
                         self.live_monitor.log_trade(symbol, side, shares, price, 0)
-                        self.performance_tracker.record_trade(symbol, side, shares, price, 0)
+                        await self.performance_tracker.record_trade(symbol, side, shares, price, 0)
                         self.last_trade_time[symbol] = datetime.now()
 
                 finally:
@@ -5260,7 +5764,10 @@ class ApexTradingSystem:
 
                 # Process batch in parallel
                 tasks = [self.process_symbol(symbol) for symbol in batch_symbols]
-                await asyncio.gather(*tasks, return_exceptions=True)
+                results = await asyncio.gather(*tasks, return_exceptions=True)
+                for sym, res in zip(batch_symbols, results):
+                    if isinstance(res, Exception):
+                        logger.warning("⚠️ process_symbol exception for %s: %r", sym, res)
 
                 # Small delay between batches to allow cleanup of market data subscriptions
                 if batch_num < num_batches - 1:
@@ -5270,7 +5777,10 @@ class ApexTradingSystem:
         if alpaca_symbols:
             logger.info(f"📊 Processing {len(alpaca_symbols)} Alpaca crypto symbols (no batch limit)")
             tasks = [self.process_symbol(symbol) for symbol in alpaca_symbols]
-            await asyncio.gather(*tasks, return_exceptions=True)
+            results = await asyncio.gather(*tasks, return_exceptions=True)
+            for sym, res in zip(alpaca_symbols, results):
+                if isinstance(res, Exception):
+                    logger.warning("⚠️ process_symbol exception for %s: %r", sym, res)
 
     async def check_and_execute_rebalance(self, est_hour: float):
         """
@@ -5837,7 +6347,16 @@ class ApexTradingSystem:
 
             loss_check = self.risk_manager.check_daily_loss(current_value)
             dd_check = self.risk_manager.check_drawdown(current_value)
-            self.performance_tracker.record_equity(current_value)
+            await self.risk_manager.save_state_async()
+            await self.performance_tracker.record_equity(current_value)
+            
+            # 🎯 Phase 2: Capture SPY for Alpha Retention
+            current_time = datetime.now().isoformat()
+            spy_data = self.price_cache.get("SPY") or self.historical_data.get("SPY", {})
+            # Handle both dictionary formats
+            spy_price = spy_data.get("close") or spy_data.get("price")
+            if spy_price:
+                await self.performance_tracker.record_benchmark(float(spy_price), current_time)
             perf_snapshot = self._performance_snapshot
             if self.performance_governor:
                 self.performance_governor.set_regime_targets(
@@ -6217,7 +6736,11 @@ class ApexTradingSystem:
         return self.current_signals
     
     def _save_position_metadata(self):
-        """Persist position metadata for restart recovery."""
+        """Persist position metadata for restart recovery.
+
+        Called from async context — uses _meta_file_lock via a sync wrapper.
+        The lock prevents concurrent writes corrupting the JSON.
+        """
         try:
             metadata = {}
             for symbol in self.position_entry_prices:
@@ -6230,8 +6753,11 @@ class ApexTradingSystem:
                 }
             metadata_file = Path("data") / "position_metadata.json"
             metadata_file.parent.mkdir(exist_ok=True)
-            with open(metadata_file, 'w') as f:
+            # Write to temp file then atomically rename to prevent partial-write corruption
+            tmp_file = metadata_file.with_suffix(".json.tmp")
+            with open(tmp_file, 'w') as f:
                 json.dump(metadata, f, indent=2)
+            tmp_file.replace(metadata_file)
         except Exception as e:
             logger.error(f"Error saving position metadata: {e}")
 
@@ -6402,10 +6928,10 @@ class ApexTradingSystem:
                 'total_commissions': float(self.total_commissions),
                 'max_drawdown': float(self.performance_tracker.get_max_drawdown()) if math.isfinite(self.performance_tracker.get_max_drawdown()) else 0.0,
                 'sharpe_ratio': float(self.performance_tracker.get_sharpe_ratio()) if math.isfinite(self.performance_tracker.get_sharpe_ratio()) else 0.0,
-                'sortino_ratio': float(self.performance_tracker.get_sortino_ratio()) if math.isfinite(self.performance_tracker.get_sortino_ratio()) else 0.0,
+                'sortino_ratio': round(self.performance_tracker.get_sortino_ratio(), 2),
                 'calmar_ratio': float(self.performance_tracker.get_calmar_ratio()) if math.isfinite(self.performance_tracker.get_calmar_ratio()) else 0.0,
-                'profit_factor': (lambda pf: min(float(pf), 10.0) if math.isfinite(pf) else 10.0)(self.performance_tracker.get_profit_factor()),
-                'alpha_retention': (lambda s: float(s['net_pnl'] / s['gross_pnl']) if s.get('gross_pnl', 0) > 0 else 0.0)(self.performance_attribution.get_summary(lookback_days=30)),
+                'profit_factor': round(self.performance_tracker.get_profit_factor(), 2),
+                'alpha_retention': round(self.performance_tracker.get_alpha_retention(), 4),
                 'win_rate': float(self.performance_tracker.get_win_rate()) if math.isfinite(self.performance_tracker.get_win_rate()) else 0.0,
                 'total_trades': len(self.performance_tracker.trades),
                 'open_positions': self.position_count,
@@ -6512,15 +7038,15 @@ class ApexTradingSystem:
                 quality_metrics = self.signal_outcome_tracker.get_quality_metrics()
                 state['signal_quality'] = {
                     'total_signals_tracked': quality_metrics.total_signals,
-                    'completed_signals': quality_metrics.completed_signals,
-                    'avg_forward_return_5d': quality_metrics.avg_forward_returns.get(5, 0.0),
-                    'avg_forward_return_10d': quality_metrics.avg_forward_returns.get(10, 0.0),
-                    'hit_5pct_5d': quality_metrics.target_accuracy.get('hit_5pct_5d', 0.0),
-                    'hit_10pct_10d': quality_metrics.target_accuracy.get('hit_10pct_10d', 0.0),
-                    'avg_mfe_5d': quality_metrics.avg_mfe.get(5, 0.0),
-                    'avg_mae_5d': quality_metrics.avg_mae.get(5, 0.0),
-                    'by_regime': quality_metrics.by_regime,
-                    'by_confidence': quality_metrics.by_confidence,
+                    'completed_signals': quality_metrics.total_signals,
+                    'avg_forward_return_5d': quality_metrics.avg_return_5d_buy,
+                    'avg_forward_return_10d': quality_metrics.avg_return_10d_buy,
+                    'hit_5pct_5d': quality_metrics.hit_rate_5pct_5d,
+                    'hit_10pct_10d': quality_metrics.hit_rate_10pct_10d,
+                    'avg_mfe_5d': quality_metrics.avg_mfe_10d,
+                    'avg_mae_5d': quality_metrics.avg_mae_10d,
+                    'by_regime': quality_metrics.accuracy_by_regime,
+                    'by_confidence': quality_metrics.accuracy_by_confidence,
                 }
             except Exception as e:
                 logger.debug(f"Signal quality metrics error: {e}")
@@ -6534,11 +7060,20 @@ class ApexTradingSystem:
                 os.fsync(f.fileno())
             os.replace(tmp_file, state_file)
 
+            # Redis hot-path write — lets api/server.py read state in sub-ms.
+            # Fire-and-forget: Redis failure never blocks the trading loop.
+            try:
+                from services.common.redis_client import cache_set as _redis_set
+                await _redis_set("apex:state:trading", state, ttl_seconds=60)
+                await _redis_set("apex:state:prices", self.price_cache, ttl_seconds=30)
+            except Exception:
+                pass
+
             # Persist position metadata for restart recovery
             self._save_position_metadata()
-            
+
             # Save risk state and price cache
-            self.risk_manager.save_state()
+            await self.risk_manager.save_state_async()
             self.save_price_cache()
 
             logger.debug("📊 Dashboard state exported")
@@ -6733,12 +7268,51 @@ class ApexTradingSystem:
                     cycle_start_time = datetime.now()
                     cycle += 1
                     self._cycle_count = cycle
+                    self._cycle_id = cycle          # UPGRADE F: stagger reset
+                    self._cycle_exit_count = 0      # UPGRADE F: reset per-cycle exit counter
                     logger.debug(f"Starting trading cycle {cycle}")
                     now = datetime.now()
+
+                    # AD: Purge price cache entries older than 90 seconds to prevent
+                    # stale prices from being used for order sizing after reconnects.
+                    _price_ttl = 90.0
+                    _now_ts = now.timestamp()
+                    _stale_syms = [
+                        s for s, ts in list(self._price_cache_ts.items())
+                        if _now_ts - ts > _price_ttl
+                    ]
+                    for _s in _stale_syms:
+                        self.price_cache.pop(_s, None)
+                        self._price_cache_ts.pop(_s, None)
+                    if _stale_syms:
+                        logger.debug("AD: Purged %d stale price cache entries (>%.0fs old)", len(_stale_syms), _price_ttl)
                     self._roll_daily_realized_if_needed(now)
 
                     # Process operator commands (e.g., kill-switch reset) each cycle.
                     await self._process_external_control_commands()
+
+                    # ══════════════════════════════════════════════════════════════
+                    # UPGRADE A: IBKR Broker Failover — degrade to Alpaca-only if
+                    # the connector has exhausted all reconnect retries.
+                    # ══════════════════════════════════════════════════════════════
+                    if (
+                        self.ibkr
+                        and getattr(ApexConfig, "IBKR_FAILOVER_ENABLED", True)
+                        and getattr(self.ibkr, "_persistently_down", False)
+                    ):
+                        logger.error(
+                            "❌ IBKR persistently down — degrading to Alpaca-only (Upgrade A)"
+                        )
+                        self.ibkr = None
+
+                    # ══════════════════════════════════════════════════════════════
+                    # UPGRADE E: Circuit Breaker Auto-Reset — check at cycle start
+                    # so the cooldown clock is honoured even when no trades happen.
+                    # ══════════════════════════════════════════════════════════════
+                    if getattr(ApexConfig, "CIRCUIT_BREAKER_AUTO_RESET", True):
+                        cb = getattr(self.risk_manager, "circuit_breaker", None)
+                        if cb and getattr(cb, "is_tripped", False):
+                            cb.check_and_reset()
 
                     # ═══════════════════════════════════════════════════════════════
                     # 1. DATA HEALTH CHECK (Dead Man's Switch)
@@ -6823,8 +7397,26 @@ class ApexTradingSystem:
                     if self.ibkr or self.alpaca:
                         await self.refresh_pending_orders()
 
-                    # Refresh data hourly
-                    if (now - last_data_refresh).total_seconds() > 3600:
+                    # D: Refresh Crypto Fear & Greed index hourly (non-blocking)
+                    if self._dynamic_crypto_symbols or any(
+                        _symbol_is_crypto(s) for s in self._runtime_symbols()
+                    ):
+                        asyncio.ensure_future(self._fetch_fear_greed())
+
+                    # Refresh data: shorter interval during overnight crypto window, hourly otherwise
+                    _outside_equity_est = not (
+                        ApexConfig.TRADING_HOURS_START <= est_hour <= ApexConfig.TRADING_HOURS_END
+                    )
+                    _data_refresh_secs = (
+                        int(getattr(ApexConfig, "CRYPTO_OVERNIGHT_DATA_REFRESH_SECONDS", 900))
+                        if (ApexConfig.CRYPTO_ALWAYS_OPEN and _outside_equity_est)
+                        else 3600
+                    )
+                    if (now - last_data_refresh).total_seconds() > _data_refresh_secs:
+                        logger.info(
+                            "🔄 Refreshing market data (interval=%ds, overnight=%s)",
+                            _data_refresh_secs, _outside_equity_est,
+                        )
                         await self.refresh_data()
                         last_data_refresh = now
 
@@ -6845,8 +7437,9 @@ class ApexTradingSystem:
                             if crypto_universe:
                                 open_universe = crypto_universe
                                 logger.info(
-                                    "⏰ Equity markets closed; running crypto-only cycle (%d symbols)",
+                                    "⏰ Equity markets closed; running crypto-only cycle (%d symbols): %s",
                                     len(crypto_universe),
+                                    ", ".join(crypto_universe[:15]) + (" ..." if len(crypto_universe) > 15 else ""),
                                 )
                             else:
                                 logger.info("⏸️  No open markets right now; skipping cycle work")
@@ -6858,6 +7451,34 @@ class ApexTradingSystem:
                             continue
 
                     in_equity_hours = ApexConfig.TRADING_HOURS_START <= est_hour <= ApexConfig.TRADING_HOURS_END
+
+                    # Detect overnight → equity hours transition and emit overnight summary
+                    if in_equity_hours and self._last_in_equity_hours is False:
+                        if self._overnight_cycles > 0 and self._overnight_session_start is not None:
+                            elapsed_min = (now - self._overnight_session_start).total_seconds() / 60
+                            logger.info(
+                                "🌅 Overnight Crypto Session Summary — %.0f min | "
+                                "cycles=%d | signals_evaluated=%d | entries=%d | exits=%d",
+                                elapsed_min,
+                                self._overnight_cycles,
+                                self._overnight_signals_evaluated,
+                                self._overnight_entries,
+                                self._overnight_exits,
+                            )
+                        # Reset for next overnight session
+                        self._overnight_cycles = 0
+                        self._overnight_signals_evaluated = 0
+                        self._overnight_entries = 0
+                        self._overnight_exits = 0
+                        self._overnight_session_start = None
+                    elif not in_equity_hours:
+                        # Track start of overnight session
+                        if self._last_in_equity_hours is True or self._last_in_equity_hours is None:
+                            self._overnight_session_start = now
+                        self._overnight_cycles += 1
+
+                    self._last_in_equity_hours = in_equity_hours
+
                     if not in_equity_hours:
                         logger.info("⏰ Outside equity hours; processing only open markets")
 
@@ -7181,6 +7802,14 @@ class ApexTradingSystem:
             # Re-raise to ensure proper exit code
             raise
         finally:
+            # UPGRADE B: Save pending orders before disconnect so they survive restart
+            if self.alpaca:
+                _orders_path = self.user_data_dir / "runtime" / "alpaca_pending_orders.json"
+                try:
+                    self.alpaca.save_pending_orders(_orders_path)
+                except Exception as _save_err:
+                    logger.debug("Could not save pending orders: %s", _save_err)
+
             if self.ibkr:
                 self.ibkr.disconnect()
             if self.alpaca:

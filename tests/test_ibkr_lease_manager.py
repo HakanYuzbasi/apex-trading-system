@@ -5,14 +5,21 @@ from execution.ibkr_lease_manager import IBKRLeaseManager
 @pytest.fixture
 async def lease_manager(monkeypatch):
     """Provides a fresh lease manager forcing local non-redis mode for deterministic tests."""
-    from services.common import redis_client
-    # Mock get_redis to return None so we test the local dict fallback logic predictably
-    monkeypatch.setattr(redis_client, "get_redis", _mock_get_redis)
+    import execution.ibkr_lease_manager
+    from execution.ibkr_lease_manager import IBKRLeaseManager
     
+    # Mock get_redis where it's used
+    monkeypatch.setattr("execution.ibkr_lease_manager.get_redis", _mock_get_redis)
+    
+    # Reset singleton
     IBKRLeaseManager._instance = None
     manager = IBKRLeaseManager()
     
+    # Ensure module-level instance is also replaced for the test
+    monkeypatch.setattr(execution.ibkr_lease_manager, "lease_manager", manager)
+    
     yield manager
+    # Cleanup
     manager._local_leases.clear()
 
 async def _mock_get_redis():

@@ -603,11 +603,12 @@ class UltimateSignalGenerator:
             logger.info(f"    Val MSE:   {avg_val_mse:.6f}")
             logger.info(f"    Dir Acc:   {avg_dir_acc:.1%}")
             
-            # Overfitting check
+            # Overfitting check (threshold configurable via MODEL_OVERFIT_WARNING_RATIO)
             if avg_val_mse > 0:
                 ratio = avg_val_mse / avg_train_mse
-                if ratio > 2.0:
-                    logger.warning(f"    ⚠️  Possible overfitting (ratio: {ratio:.2f})")
+                _warn_threshold = getattr(__import__("config", fromlist=["ApexConfig"]).ApexConfig, "MODEL_OVERFIT_WARNING_RATIO", 2.0)
+                if ratio > _warn_threshold:
+                    logger.warning(f"    ⚠️  Possible overfitting (ratio: {ratio:.2f} > {_warn_threshold:.1f}x threshold)")
         
         # Update model weights
         self.updateRegimeWeights(regime, metrics_list)

@@ -205,7 +205,7 @@ class TestBacktestEngineMetrics:
         )
         np.random.seed(42)
         n = 300
-        prices = list(100 * np.exp(np.cumsum(np.random.normal(0.0005, 0.015, n))))
+        prices = list(100 * np.exp(np.cumsum(np.random.normal(0.005, 0.015, n))))
         data = _make_price_data("AAPL", prices)
         engine.load_data(data)
         ts = list(data["AAPL"].index)
@@ -213,7 +213,7 @@ class TestBacktestEngineMetrics:
         def strategy(eng, timestamp):
             idx = ts.index(timestamp) if timestamp in ts else -1
             if idx == 5:
-                eng.execute_order("AAPL", "BUY", 100)
+                eng.execute_order("AAPL", "BUY", 900)
 
         engine.run(strategy, ts[0], ts[-1])
         metrics = engine.get_results()

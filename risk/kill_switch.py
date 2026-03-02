@@ -59,19 +59,21 @@ class RiskKillSwitch:
 
         dd_limit = self.config.dd_multiplier * self.historical_mdd_baseline
         dd_breach = self.last_drawdown > dd_limit
-        sharpe_breach = self.last_sharpe < self.config.sharpe_floor
+        sharpe_breach = False
+        if self.last_sharpe is not None:
+             sharpe_breach = self.last_sharpe < self.config.sharpe_floor
 
         if self.config.logic.upper() == "AND":
             breach = dd_breach and sharpe_breach
             reason = (
                 f"DD+Sharpe breach: dd={self.last_drawdown:.2%}>{dd_limit:.2%} and "
-                f"sharpe={self.last_sharpe:.2f}<{self.config.sharpe_floor:.2f}"
+                f"sharpe={self.last_sharpe if self.last_sharpe is not None else 'N/A'}<{self.config.sharpe_floor:.2f}"
             )
         else:
             breach = dd_breach or sharpe_breach
             reason = (
                 f"DD/Sharpe breach: dd={self.last_drawdown:.2%}>{dd_limit:.2%} or "
-                f"sharpe={self.last_sharpe:.2f}<{self.config.sharpe_floor:.2f}"
+                f"sharpe={self.last_sharpe if self.last_sharpe is not None else 'N/A'}<{self.config.sharpe_floor:.2f}"
             )
 
         if breach and not self.active:
@@ -160,16 +162,32 @@ class RiskKillSwitch:
         cutoff = entries[-1][0] - timedelta(days=window_days)
         window = [(ts, v) for ts, v in entries if ts >= cutoff]
         if len(window) < self.config.min_points:
+            return None
+
+        # Resample to daily close prices to avoid inflating the annualization factor.
+        # Equity is stored at sub-minute frequency, so raw returns would produce
+        # points_per_year >> 252, turning tiny mean/vol ratios into extreme Sharpes.
+        daily = self._daily_closes(window)
+        if len(daily) < 2:
             return 0.0
 
-        values = np.array([v for _, v in window], dtype=float)
+        values = np.array(daily, dtype=float)
         returns = np.diff(values) / np.maximum(values[:-1], 1e-9)
         returns = returns[np.isfinite(returns)]
-        if returns.size < max(5, self.config.min_points // 3):
+        if returns.size < max(2, self.config.min_points // 10):
             return 0.0
 
-        points_per_year = self._infer_points_per_year(window)
         vol = float(np.std(returns))
         if vol <= 1e-12:
             return 0.0
-        return float(np.mean(returns) / vol * np.sqrt(points_per_year))
+        # Always annualize assuming 252 trading days regardless of observation frequency
+        return float(np.mean(returns) / vol * np.sqrt(252.0))
+
+    @staticmethod
+    def _daily_closes(entries: List[Tuple[datetime, float]]) -> List[float]:
+        """Return one equity value per calendar day (last observation of each day)."""
+        day_map: dict = {}
+        for ts, v in entries:
+            day = ts.date()
+            day_map[day] = v  # last write wins → daily close
+        return [day_map[d] for d in sorted(day_map)]

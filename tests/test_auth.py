@@ -1,5 +1,5 @@
 import pytest
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from api.auth import (
     User, create_access_token, verify_token,
     RateLimiter
@@ -17,7 +17,7 @@ def test_user_serialization():
         roles=["user", "admin"],
         permissions=["read", "write"],
         api_key="test_key",
-        created_at=datetime.utcnow(),
+        created_at=datetime.now(timezone.utc),
         tier="pro"
     )
     

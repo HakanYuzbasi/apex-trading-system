@@ -9,6 +9,7 @@ Reads state from trading_state.json written by the ApexTrader.
 import asyncio
 import logging
 import os
+import random
 import threading
 import time
 from pathlib import Path
@@ -55,6 +56,7 @@ from api.dependencies import (
     STATE_FILE,
     _mtime_ns,
     _state_is_fresh,
+    async_read_trading_state,
     read_trading_state,
     sanitize_execution_metrics,
 )
@@ -73,13 +75,10 @@ setup_logging(
     console_output=True,
     max_bytes=ApexConfig.LOG_MAX_BYTES,
     backup_count=ApexConfig.LOG_BACKUP_COUNT,
+    main_log_file="/private/tmp/apex_main.log",
+    debug_log_file="/private/tmp/apex_debug.log",
 )
 
-try:
-    from core.cache import get_cache_stats, clear_all_caches
-    CACHE_AVAILABLE = True
-except ImportError:
-    CACHE_AVAILABLE = False
 
 # Alert aggregator for reducing log noise
 from core.alert_aggregator import get_alert_aggregator
@@ -93,12 +92,12 @@ _preflight_metrics_mtime_ns: Optional[int] = None
 
 def _update_preflight_metrics_from_file() -> None:
     """Refresh preflight Prometheus gauges from latest persisted preflight status."""
+    global _preflight_metrics_mtime_ns
     if not PROMETHEUS_AVAILABLE:
         return
 
     mtime_ns = _mtime_ns(PREFLIGHT_STATUS_FILE)
     with _preflight_metrics_lock:
-        global _preflight_metrics_mtime_ns
         if _preflight_metrics_mtime_ns == mtime_ns:
             return
 
@@ -144,7 +143,7 @@ def _update_preflight_metrics_from_file() -> None:
             PREFLIGHT_CHECK_STATUS.labels(check=check_name).set(check_ok)
 
     with _preflight_metrics_lock:
-        _preflight_metrics_mtime_ns = mtime_ns
+        _preflight_metrics_mtime_ns = mtime_ns  # noqa: F841 — global cache, read in next call
 
 app = FastAPI(title="APEX Trading API", version="2.0.0")
 
@@ -271,26 +270,35 @@ async def request_context_and_metrics_middleware(request: Request, call_next):
             # Improved logging: only log errors, slow requests, or sample successful requests
             should_log = False
             log_level = logging.INFO
-            
+
+            # Paths that are expected to be slow (long-poll, SSE, polling endpoints)
+            _slow_exempt = ("/state", "/metrics", "/health", "/ws",
+                            "/portfolio", "/status", "/cockpit", "/positions")
+            is_slow_exempt = any(path.startswith(p) for p in _slow_exempt)
+
             if status_code >= 500:
                 should_log = True
                 log_level = logging.ERROR
             elif status_code >= 400:
                 should_log = True
                 log_level = logging.WARNING
-            elif elapsed > 1.0:  # Slow request
+            elif elapsed > 1.0 and not is_slow_exempt:  # Slow request (non-exempt)
                 should_log = True
                 log_level = logging.WARNING
             elif status_code < 400:
                 # Sample 1% of successful requests to reduce noise
-                import random
                 should_log = random.random() < 0.01
                 log_level = logging.DEBUG
             
             if should_log:
+                msg = (
+                    f"HTTP {method} {path} → {status_code} ({elapsed * 1000:.0f}ms)"
+                    if log_level >= logging.WARNING
+                    else "HTTP request completed"
+                )
                 logger.log(
                     log_level,
-                    "HTTP request completed" if status_code < 400 else "HTTP request slow/failed",
+                    msg,
                     extra={
                         "method": method,
                         "path": path,
@@ -479,8 +487,9 @@ async def stream_trading_state():
 
     while True:
         try:
-            current_state = read_trading_state()
-            
+            # Redis-first read: sub-ms when Redis is warm, falls back to mtime cache
+            current_state = await async_read_trading_state()
+
             # Periodically fetch aggregated equity (every ~15 seconds to avoid API limits)
             now_ts = time.time()
             if now_ts - last_equity_update_time > 15:
@@ -507,7 +516,6 @@ async def stream_trading_state():
 
                     is_admin = manager.is_tenant_admin(tenant_id)
                     update = {
-                        "type": "state_update",
                         "tenant_id": tenant_id
                     }
 
@@ -564,16 +572,23 @@ async def stream_trading_state():
                             update["capital"] = aggregated_equity
                         update["equity_breakdown"] = tenant_equity.get("breakdown", [])
 
+                    # Delta-encode: sends full state_update every 30 ticks, tiny
+                    # state_delta otherwise — drops wire payload by ~90%.
+                    payload = manager.compute_delta_payload(tenant_id, update)
+                    if not payload:
+                        # Nothing changed this tick — skip broadcast entirely
+                        continue
+
                     def increment_metrics():
                         if PROMETHEUS_AVAILABLE and WEBSOCKET_MESSAGES_TOTAL is not None:
                             WEBSOCKET_MESSAGES_TOTAL.labels(direction="outbound").inc()
 
-                    await manager.broadcast_to_tenant(tenant_id, update, increment_metrics)
+                    await manager.broadcast_to_tenant(tenant_id, payload, increment_metrics)
                 last_state = current_state
 
         except Exception as e:
             logger.error(f"Error in broadcast loop: {e}")
-            
+
         await asyncio.sleep(getattr(ApexConfig, "POLL_INTERVAL_SECONDS", 1.0))
 
 
@@ -750,7 +765,7 @@ async def get_full_state(user=Depends(require_user)):
     return read_trading_state()
 
 @app.get("/health")
-async def get_health(user=Depends(require_user)):
+async def get_health(_user=Depends(require_user)):
     """Lightweight health check (auth required)."""
     state = read_trading_state()
     return {
@@ -770,7 +785,7 @@ async def get_sector_exposure(user=Depends(require_user)):
 
 
 @app.get("/ops/kill-switch")
-async def get_kill_switch_control(user=Depends(require_user)):
+async def get_kill_switch_control(_user=Depends(require_user)):
     """Read operational kill-switch control command state."""
     control_state = read_control_state(CONTROL_COMMAND_FILE)
     state = read_trading_state()
@@ -815,7 +830,7 @@ async def post_kill_switch_reset(
 
 
 @app.get("/ops/equity-reconciliation")
-async def get_equity_reconciliation_control(user=Depends(require_user)):
+async def get_equity_reconciliation_control(_user=Depends(require_user)):
     """Read operational equity reconciliation latch command + runtime state."""
     control_state = read_control_state(CONTROL_COMMAND_FILE)
     state = read_trading_state()
@@ -896,7 +911,7 @@ async def post_equity_reconciliation_latch(
 
 
 @app.get("/ops/governor/policies/active")
-async def get_governor_active_policies(user=Depends(require_role("admin"))):
+async def get_governor_active_policies(_user=Depends(require_role("admin"))):
     repo = _governor_repo()
     policies = sorted(repo.load_active(), key=lambda p: p.key().as_id())
     return {
@@ -915,7 +930,7 @@ async def get_governor_active_policies(user=Depends(require_role("admin"))):
 @app.get("/ops/governor/policies/candidates")
 async def get_governor_candidate_policies(
     status: Optional[str] = None,
-    user=Depends(require_role("admin")),
+    _user=Depends(require_role("admin")),
 ):
     repo = _governor_repo()
     policies = repo.load_candidates()
@@ -1017,7 +1032,7 @@ async def get_governor_policy_audit(
     limit: int = 100,
     asset_class: Optional[str] = None,
     regime: Optional[str] = None,
-    user=Depends(require_role("admin")),
+    _user=Depends(require_role("admin")),
 ):
     if regime and not asset_class:
         raise HTTPException(status_code=400, detail="asset_class is required when regime is provided")
@@ -1072,7 +1087,9 @@ async def websocket_endpoint(websocket: WebSocket):
         await websocket.close(code=1008)
         return
     tenant_id = str(getattr(user, "user_id", getattr(user, "id", "default")))
-    await manager.connect(websocket, tenant_id=tenant_id, is_admin=user.has_role("admin"))
+    accepted = await manager.connect(websocket, tenant_id=tenant_id, is_admin=user.has_role("admin"))
+    if not accepted:
+        return  # Connection rejected (per-user cap hit); manager already closed socket
     if PROMETHEUS_AVAILABLE and WEBSOCKET_CONNECTIONS is not None:
         WEBSOCKET_CONNECTIONS.inc()
     try:

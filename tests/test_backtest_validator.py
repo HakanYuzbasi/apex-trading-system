@@ -66,26 +66,26 @@ class TestRobustnessScore:
             "mc_99_pct_equity": 0.85,
             "mc_max_equity": 1.8,
         }
-        score = compute_robustness_score(mc, {}, max_drawdown_pct=15.0)
+        score = compute_robustness_score(mc, {}, max_drawdown=0.15)
         assert 0 <= score <= 100
 
     def test_empty_inputs(self):
         """Empty MC and stress should return base score."""
-        score = compute_robustness_score({}, {}, max_drawdown_pct=0.0)
+        score = compute_robustness_score({}, {}, max_drawdown=0.0)
         assert score == 50.0
 
     def test_high_drawdown_penalty(self):
         """Large drawdown should reduce score."""
-        score_low = compute_robustness_score({}, {}, max_drawdown_pct=5.0)
-        score_high = compute_robustness_score({}, {}, max_drawdown_pct=50.0)
+        score_low = compute_robustness_score({}, {}, max_drawdown=0.05)
+        score_high = compute_robustness_score({}, {}, max_drawdown=0.50)
         assert score_high < score_low
 
     def test_score_bounds(self):
         """Score should always be in [0, 100]."""
         mc = {"mc_95_pct_equity": 0.01, "mc_median_equity": 2.0}
-        score = compute_robustness_score(mc, {}, max_drawdown_pct=200.0)
+        score = compute_robustness_score(mc, {}, max_drawdown=2.0) # 200% DD
         assert 0 <= score <= 100
 
         mc_good = {"mc_95_pct_equity": 2.0, "mc_median_equity": 1.0}
-        score = compute_robustness_score(mc_good, {}, max_drawdown_pct=0.0)
+        score = compute_robustness_score(mc_good, {}, max_drawdown=0.0)
         assert 0 <= score <= 100

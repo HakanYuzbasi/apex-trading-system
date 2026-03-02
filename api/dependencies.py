@@ -336,6 +336,18 @@ def read_trading_state() -> Dict:
         _state_cache_price_mtime_ns = price_mtime_ns
         return _state_cache_data
 
+async def async_read_trading_state() -> Dict:
+    """Redis-first read of trading state; falls back to file-based mtime cache."""
+    try:
+        from services.common.redis_client import cache_get
+        cached = await cache_get("apex:state:trading")
+        if cached is not None and isinstance(cached, dict):
+            return cached
+    except Exception:
+        pass
+    return read_trading_state()
+
+
 def _parse_timestamp(ts: Optional[str]) -> Optional[datetime]:
     if not ts:
         return None

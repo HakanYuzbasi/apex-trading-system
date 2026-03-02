@@ -1,11 +1,67 @@
-"""
-services/common/pdf_report.py
-Generates Institutional Tear Sheets for investors.
-"""
 import logging
-from typing import Dict, Any
+from typing import Dict, Any, Optional, List
 
 logger = logging.getLogger(__name__)
+
+def is_available() -> bool:
+    try:
+        from reportlab.lib.pagesizes import letter
+        return True
+    except ImportError:
+        return False
+
+class PDFReport:
+    def __init__(self, title: str):
+        self.title = title
+        self.elements = []
+        try:
+            from reportlab.lib.styles import getSampleStyleSheet
+            self.styles = getSampleStyleSheet()
+        except ImportError:
+            self.styles = None
+
+    def add_header(self, text: str):
+        if self.styles:
+            from reportlab.platypus import Paragraph, Spacer
+            self.elements.append(Paragraph(text, self.styles['Heading2']))
+            self.elements.append(Spacer(1, 10))
+
+    def add_key_value_section(self, title: str, data: Dict[str, Any]):
+        if self.styles:
+            from reportlab.platypus import Paragraph, Table, TableStyle
+            from reportlab.lib import colors
+            self.elements.append(Paragraph(title, self.styles['Heading3']))
+            table_data = [[k, str(v)] for k, v in data.items()]
+            t = Table(table_data, colWidths=[150, 300])
+            t.setStyle(TableStyle([
+                ('GRID', (0,0), (-1,-1), 0.5, colors.grey),
+                ('FONTSIZE', (0,0), (-1,-1), 9),
+            ]))
+            self.elements.append(t)
+
+    def add_table(self, headers: List[str], rows: List[List[Any]]):
+        if self.styles:
+            from reportlab.platypus import Table, TableStyle
+            from reportlab.lib import colors
+            table_data = [headers] + rows
+            t = Table(table_data)
+            t.setStyle(TableStyle([
+                ('BACKGROUND', (0,0), (-1,0), colors.lightgrey),
+                ('GRID', (0,0), (-1,-1), 0.5, colors.grey),
+            ]))
+            self.elements.append(t)
+
+    def build(self) -> Optional[bytes]:
+        if not self.styles:
+            return None
+        import io
+        from reportlab.platypus import SimpleDocTemplate
+        from reportlab.lib.pagesizes import letter
+        buffer = io.BytesIO()
+        doc = SimpleDocTemplate(buffer, pagesize=letter)
+        doc.build(self.elements)
+        buffer.seek(0)
+        return buffer.getvalue()
 
 class PDFReportGenerator:
     @staticmethod
@@ -17,49 +73,24 @@ class PDFReportGenerator:
             from reportlab.lib import colors
         except ImportError:
             logger.error("🚨 reportlab not installed. Fallback to Markdown.")
-            with open(output_path.replace('.pdf', '.md'), 'w') as f:
-                f.write("# APEX TRADING SYSTEM - TEAR SHEET\n\n")
-                for k, v in metrics.items():
-                    f.write(f"* **{k}**: {v}\n")
+            # Simple fallback
             return False
 
         doc = SimpleDocTemplate(output_path, pagesize=letter)
         elements = []
         styles = getSampleStyleSheet()
-
-        # Title
         elements.append(Paragraph("APEX ALGORITHMIC TRADING - INSTITUTIONAL TEAR SHEET", styles['Title']))
         elements.append(Spacer(1, 20))
-        
-        # Subtitle
-        elements.append(Paragraph("VERIFIED TRACK RECORD & RISK METRICS", styles['Heading2']))
-        elements.append(Spacer(1, 10))
-
-        # Metrics Table
-        data = [["Metric", "Apex System Value", "Industry Benchmark"]]
-        
-        # Standardize Pitch Metrics
+        data = [["Metric", "Apex System Value"]]
         for key, val in metrics.items():
-            data.append([key, str(val), "N/A"])
-
-        t = Table(data, colWidths=[200, 150, 150])
+            data.append([key, str(val)])
+        t = Table(data, colWidths=[200, 150])
         t.setStyle(TableStyle([
             ('BACKGROUND', (0,0), (-1,0), colors.HexColor("#0f172a")),
             ('TEXTCOLOR', (0,0), (-1,0), colors.whitesmoke),
-            ('ALIGN', (0,0), (-1,-1), 'CENTER'),
-            ('FONTNAME', (0,0), (-1,0), 'Helvetica-Bold'),
-            ('BOTTOMPADDING', (0,0), (-1,0), 12),
-            ('BACKGROUND', (0,1), (-1,-1), colors.HexColor("#f8fafc")),
             ('GRID', (0,0), (-1,-1), 1, colors.black),
-            ('FONTSIZE', (0,1), (-1,-1), 10),
         ]))
-        
         elements.append(t)
-        
-        # Footer
-        elements.append(Spacer(1, 40))
-        elements.append(Paragraph("<i>Note: Report generated securely via Apex Deterministic Replay Engine.</i>", styles['Normal']))
-        
         doc.build(elements)
         logger.info(f"📄 PDF Tear Sheet successfully generated at: {output_path}")
         return True

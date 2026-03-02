@@ -7,10 +7,12 @@ Encapsulates the risk state for a single user/session, including:
 - Daily loss and drawdown logic
 """
 
+import asyncio
 import logging
 import json
 from datetime import datetime, timedelta
-from typing import Dict, Tuple, List
+from typing import Dict, Tuple
+import collections
 from pathlib import Path
 
 from config import ApexConfig
@@ -27,7 +29,7 @@ class CircuitBreaker:
         self.trip_reason = None
         self.trip_time = None
         self.consecutive_losses = 0
-        self.recent_trades: List[Dict] = []  # Track recent trade P&L
+        self.recent_trades: collections.deque = collections.deque(maxlen=20)
 
     def record_trade(self, pnl: float):
         """Record a trade for consecutive loss tracking."""
@@ -35,10 +37,6 @@ class CircuitBreaker:
             'timestamp': datetime.now(),
             'pnl': pnl
         })
-
-        # Keep only last 20 trades
-        if len(self.recent_trades) > 20:
-            self.recent_trades = self.recent_trades[-20:]
 
         # Update consecutive losses
         if pnl < 0:
@@ -184,7 +182,7 @@ class RiskSession:
         return user_dir / "risk_state.json"
 
     def save_state(self):
-        """Save risk state to disk."""
+        """Save risk state to disk and mirror to Redis (fire-and-forget)."""
         try:
             state = {
                 'day_start_capital': self.day_start_capital,
@@ -193,16 +191,33 @@ class RiskSession:
                 'current_day': self.current_day,
                 'circuit_breaker': self.circuit_breaker.get_status()
             }
-            
+
             state_file = self._get_state_file()
             # Ensure parent dir exists (redundant for default but good for users)
             state_file.parent.mkdir(parents=True, exist_ok=True)
 
             with open(state_file, "w") as f:
                 json.dump(state, f, indent=2)
-                
+
+            # Mirror to Redis so async readers get sub-ms access.
+            # Uses ensure_future — safe to call from both sync and async contexts.
+            try:
+                import asyncio
+                from services.common.redis_client import cache_set as _redis_set
+                loop = asyncio.get_event_loop()
+                if loop.is_running():
+                    asyncio.ensure_future(
+                        _redis_set(f"apex:risk:{self.user_id}", state, ttl_seconds=3600)
+                    )
+            except Exception:
+                pass  # Redis unavailable — JSON file is the durable source of truth
+
         except Exception as e:
             logger.error(f"Error saving risk state for {self.user_id}: {e}")
+
+    async def save_state_async(self):
+        """Non-blocking version of save_state for use inside the async event loop."""
+        await asyncio.to_thread(self.save_state)
 
     def load_state(self):
         """Load risk state from disk."""
@@ -244,9 +259,10 @@ class RiskSession:
             return False, f"Circuit breaker tripped: {self.circuit_breaker.trip_reason}"
 
     def record_trade_result(self, pnl: float):
-        """Record trade result."""
+        """Record trade result. Persistence is deferred to the async save cycle."""
         self.circuit_breaker.record_trade(pnl)
-        self.save_state()
+        # Do NOT call save_state() here — it blocks the event loop.
+        # The execution loop calls save_state_async() on every risk-check tick.
 
     def manual_reset_circuit_breaker(self, requested_by: str = "admin", reason: str = "manual_reset") -> bool:
         """Manually reset the circuit breaker."""
@@ -265,16 +281,15 @@ class RiskSession:
             return
 
         self.starting_capital = capital
-        
+
         if self.peak_capital == 0:
             self.peak_capital = capital
-            
+
         today = datetime.now().strftime('%Y-%m-%d')
         if self.day_start_capital == 0 or self.current_day != today:
             self.day_start_capital = capital
             self.current_day = today
-        
-        self.save_state()
+        # Defer persistence — caller is in async context; periodic save_state_async handles it.
 
     def check_daily_loss(self, current_value: float) -> Dict:
         """Check if daily loss limit breached."""
@@ -299,7 +314,6 @@ class RiskSession:
                     f"Treating as stale baseline — resetting day_start_capital."
                 )
                 self.day_start_capital = current_value
-                self.save_state()
                 return {
                     'daily_pnl': 0.0,
                     'daily_return': 0.0,
@@ -318,8 +332,6 @@ class RiskSession:
 
             if breached:
                 logger.error(f"🚨 DAILY LOSS LIMIT BREACHED for {self.user_id}!")
-
-            self.save_state()
 
             return {
                 'daily_pnl': daily_pnl,
@@ -401,8 +413,6 @@ class RiskSession:
 
             if breached:
                 logger.error(f"🚨 MAX DRAWDOWN BREACHED for {self.user_id}!")
-
-            self.save_state()
 
             return {
                 'drawdown': abs(drawdown),

@@ -79,7 +79,7 @@ def run_stress_tests(last_equity: float) -> Dict[str, Any]:
 def compute_robustness_score(
     monte_carlo: Dict[str, float],
     stress_summary: Dict[str, Any],
-    max_drawdown_pct: float,
+    max_drawdown: float,
 ) -> float:
     """Compute a 0-100 robustness score from MC and stress results."""
     score = 50.0
@@ -90,9 +90,9 @@ def compute_robustness_score(
         if mc_median > 0:
             ratio = mc_95 / mc_median
             score += min(25, max(-25, (ratio - 0.8) * 100))
-    if max_drawdown_pct > 0:
-        # Penalize large drawdowns
-        score -= min(30, max_drawdown_pct / 2)
+    if max_drawdown > 0:
+        # Penalize large drawdowns (max_drawdown is a fraction, so multiply by 100 for penalty logic)
+        score -= min(30, (max_drawdown * 100) / 2)
     if stress_summary:
         worst_return = 0
         for v in stress_summary.values():
@@ -110,7 +110,7 @@ def build_validation_pdf(
     monte_carlo: Dict[str, float],
     stress_summary: Dict[str, Any],
     equity_rows: int,
-    max_dd_pct: float,
+    max_drawdown: float,
 ) -> Optional[bytes]:
     """Generate PDF report bytes."""
     if not pdf_available():
@@ -121,7 +121,7 @@ def build_validation_pdf(
         "Job ID": job_id,
         "Robustness Score": f"{robustness_score:.1f} / 100",
         "Equity data points": equity_rows,
-        "Max drawdown (approx %)": f"{max_dd_pct:.2f}%",
+        "Max drawdown (approx %)": f"{max_drawdown * 100:.2f}%",
     })
     if monte_carlo:
         report.add_header("Monte Carlo (bootstrap)")
@@ -196,10 +196,10 @@ class BacktestValidatorService:
                     max_dd = dd
             max_dd_pct = max_dd * 100
 
-            robustness = compute_robustness_score(monte_carlo, stress_summary, max_dd_pct)
+            robustness = compute_robustness_score(monte_carlo, stress_summary, max_dd)
 
             pdf_bytes = build_validation_pdf(
-                job_id, robustness, monte_carlo, stress_summary, len(values), max_dd_pct
+                job_id, robustness, monte_carlo, stress_summary, len(values), max_dd
             )
             pdf_path = None
             if pdf_bytes:
@@ -211,7 +211,7 @@ class BacktestValidatorService:
                 "robustness_score": robustness,
                 "monte_carlo": monte_carlo,
                 "stress_test_summary": stress_summary,
-                "max_drawdown_pct": max_dd_pct,
+                "max_drawdown": max_dd,
                 "equity_points": len(values),
             }
             job.status = JobStatus.COMPLETED

@@ -4,10 +4,13 @@ FIXED: Proper equity curve tracking with float conversion
 """
 
 import logging
+import math
 from datetime import datetime
 from typing import List, Dict, Tuple
 import numpy as np
 import json
+import collections
+import asyncio
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
@@ -17,15 +20,16 @@ class PerformanceTracker:
     """Track trading performance metrics."""
     
     def __init__(self):
-        self.trades: List[Dict] = []
-        self.equity_curve: List[Tuple[str, float]] = []  # ✅ Always store as float
+        self.trades: collections.deque = collections.deque(maxlen=5000)
+        self.equity_curve: collections.deque = collections.deque(maxlen=100000)  # ✅ Memory capped
+        self.benchmark_curve: collections.deque = collections.deque(maxlen=100000) # 🎯 Phase 2
         self.starting_capital: float = 0.0
         self.data_dir = Path("data")
         self.history_file = self.data_dir / "performance_history.json"
         self._load_state()
 
     
-    def record_trade(self, symbol: str, side: str, quantity: int, price: float, commission: float = 0.0):
+    async def record_trade(self, symbol: str, side: str, quantity: int, price: float, commission: float = 0.0):
         """Record a trade with commission."""
         trade = {
             'timestamp': datetime.now().isoformat(),
@@ -38,10 +42,18 @@ class PerformanceTracker:
         }
         
         self.trades.append(trade)
-        self._save_state()  # ✅ Persist immediately
+        await self._save_state_async()  # ✅ Non-blocking save
         logger.debug(f"Trade recorded: {side} {quantity} {symbol} @ ${price:.2f}")
     
-    def record_equity(self, value: float):
+    async def record_benchmark(self, price: float, timestamp: str):
+        """🎯 Phase 2: Stores the SPY benchmark price safely."""
+        try:
+            self.benchmark_curve.append((timestamp, float(price)))
+            # No disk write here to save I/O; record_equity handles persistence.
+        except Exception as e:
+            logger.error(f"Error recording benchmark: {e}")
+    
+    async def record_equity(self, value: float):
         """✅ FIXED: Record equity point with proper float conversion and sanity guard."""
         try:
             value = float(value)  # ✅ Force conversion
@@ -60,7 +72,7 @@ class PerformanceTracker:
 
             timestamp = datetime.now().isoformat()
             self.equity_curve.append((timestamp, value))
-            self._save_state()  # ✅ Persist immediately
+            await self._save_state_async()  # ✅ Non-blocking save
             logger.debug(f"Equity recorded: ${value:,.2f}")
         except (ValueError, TypeError) as e:
             logger.error(f"Invalid equity value: {value} ({type(value)}): {e}")
@@ -162,35 +174,6 @@ class PerformanceTracker:
             logger.error(f"Error calculating max drawdown: {e}")
             return 0.0
 
-    def get_sortino_ratio(self, risk_free_rate: float = 0.02) -> float:
-        """Calculate Sortino ratio (focuses on downside volatility only)."""
-        if len(self.equity_curve) < 2:
-            return 0.0
-
-        try:
-            values = [float(v) for _, v in self.equity_curve]
-            returns = np.diff(values) / values[:-1]
-
-            if len(returns) == 0:
-                return 0.0
-            if np.max(np.abs(returns)) < 1e-9:
-                return 0.0
-
-            # Calculate downside returns only
-            excess_returns = returns - (risk_free_rate / 252)
-            downside_returns = excess_returns[excess_returns < 0]
-
-            if len(downside_returns) == 0 or np.std(downside_returns) == 0:
-                return 0.0
-
-            downside_std = np.std(downside_returns)
-            sortino = np.mean(excess_returns) / downside_std * np.sqrt(252)
-            return float(sortino)
-
-        except Exception as e:
-            logger.error(f"Error calculating Sortino ratio: {e}")
-            return 0.0
-
     def get_completed_trade_count(self) -> int:
         """Count completed BUY->SELL round-trips."""
         if len(self.trades) < 2:
@@ -234,47 +217,137 @@ class PerformanceTracker:
             logger.error(f"Error calculating Calmar ratio: {e}")
             return 0.0
 
-    def get_profit_factor(self) -> float:
-        """Calculate profit factor (gross profit / gross loss)."""
-        if len(self.trades) < 2:
-            return 0.0
+    def _get_daily_returns(self, lookback: int = 252) -> np.ndarray:
+        """
+        Derive a series of daily returns from the equity curve.
 
+        Takes the last `lookback + 1` equity observations so that we can produce
+        up to `lookback` return observations.  Returns an empty array when there
+        is insufficient history.
+        """
         try:
-            gross_profit = 0.0
-            gross_loss = 0.0
-
-            positions = {}
-
-            for trade in self.trades:
-                symbol = trade['symbol']
-                side = trade['side']
-                qty = trade['quantity']
-                price = trade['price']
-                commission = trade.get('commission', 0)
-
-                if side == 'BUY':
-                    if symbol not in positions:
-                        positions[symbol] = []
-                    positions[symbol].append({'qty': qty, 'price': price, 'commission': commission})
-
-                elif side == 'SELL':
-                    if symbol in positions and len(positions[symbol]) > 0:
-                        entry = positions[symbol].pop(0)
-                        pnl = (price - entry['price']) * qty - entry['commission'] - commission
-
-                        if pnl > 0:
-                            gross_profit += pnl
-                        else:
-                            gross_loss += abs(pnl)
-
-            if gross_loss == 0:
-                return float('inf') if gross_profit > 0 else 0.0
-
-            return float(gross_profit / gross_loss)
-
+            # Slice conservatively: one extra point so diff produces `lookback` returns
+            curve = self.equity_curve[-(lookback + 1):]
+            if len(curve) < 2:
+                return np.array([])
+            values = np.array([float(v) for _, v in curve])
+            # Guard against zero denominator
+            nonzero = values[:-1] != 0
+            returns = np.where(
+                nonzero,
+                np.diff(values) / np.where(nonzero, values[:-1], 1.0),
+                0.0,
+            )
+            return returns
         except Exception as e:
-            logger.error(f"Error calculating profit factor: {e}")
+            logger.error("Error computing daily returns for VaR: %s", e)
+            return np.array([])
+
+    def get_var(self, confidence: float = 0.95, lookback: int = 252) -> float:
+        """
+        Historical Simulation Value-at-Risk (1-day, percentage of equity).
+
+        Returns the loss (as a negative fraction of equity, e.g. -0.023 = -2.3%)
+        that is NOT exceeded with probability `confidence`.  Requires at least 20
+        return observations; returns 0.0 when insufficient history exists.
+
+        Example: get_var(0.95) → -0.018 means there is a 95% chance that the
+        single-day loss will not exceed 1.8% of equity.
+        """
+        try:
+            returns = self._get_daily_returns(lookback)
+            if len(returns) < 20:
+                return 0.0
+            # (1 - confidence) percentile of the return distribution
+            var = float(np.percentile(returns, (1.0 - confidence) * 100.0))
+            return var if math.isfinite(var) else 0.0
+        except Exception as e:
+            logger.error("Error calculating VaR: %s", e)
             return 0.0
+
+    def get_cvar(self, confidence: float = 0.95, lookback: int = 252) -> float:
+        """
+        Conditional VaR — Expected Shortfall (1-day, percentage of equity).
+
+        Returns the *mean* return in the tail beyond VaR: the average of the worst
+        (1 - confidence) fraction of daily returns.  Always ≤ VaR.  Requires at
+        least 20 return observations; returns 0.0 when insufficient history exists.
+
+        Example: get_cvar(0.95) → -0.031 means that on the 5% worst days, the
+        average loss is 3.1% of equity.
+        """
+        try:
+            returns = self._get_daily_returns(lookback)
+            if len(returns) < 20:
+                return 0.0
+            var = self.get_var(confidence, lookback)
+            tail = returns[returns <= var]
+            if len(tail) == 0:
+                return var
+            cvar = float(np.mean(tail))
+            return cvar if math.isfinite(cvar) else 0.0
+        except Exception as e:
+            logger.error("Error calculating CVaR: %s", e)
+            return 0.0
+
+    def get_alpha_retention(self) -> float:
+        """🎯 Phase 2: Calculates (Strategy Return - Benchmark Return) / Abs(Benchmark Return)"""
+        if len(self.equity_curve) < 2 or len(self.benchmark_curve) < 2:
+            return 0.0
+            
+        strat_start, strat_end = self.equity_curve[0][1], self.equity_curve[-1][1]
+        bench_start, bench_end = self.benchmark_curve[0][1], self.benchmark_curve[-1][1]
+        
+        if strat_start <= 0 or bench_start <= 0:
+            return 0.0
+            
+        strat_ret = (strat_end - strat_start) / strat_start
+        bench_ret = (bench_end - bench_start) / bench_start
+        
+        # Avoid division by zero if benchmark is perfectly flat
+        if abs(bench_ret) < 1e-6:
+            return 0.0
+            
+        return float((strat_ret - bench_ret) / abs(bench_ret))
+
+    def get_sortino_ratio(self, risk_free_rate: float = 0.0) -> float:
+        """🎯 Phase 2: Sortino ratio measuring downside risk-adjusted return."""
+        if len(self.equity_curve) < 20:
+            return 0.0
+            
+        values = [float(v) for _, v in self.equity_curve]
+        returns = np.diff(values) / np.array(values[:-1])
+        
+        if len(returns) == 0:
+            return 0.0
+            
+        mean_return = np.mean(returns)
+        # Filter only negative returns for downside deviation
+        downside_returns = returns[returns < 0]
+        
+        if len(downside_returns) == 0:
+            return 0.0 # No downside volatility
+            
+        downside_dev = np.std(downside_returns)
+        
+        if downside_dev <= 1e-8:
+            return 0.0
+            
+        # Annualized Sortino (assuming daily bars/updates, adjust 252 if using higher freq)
+        return float((mean_return - risk_free_rate) / downside_dev * np.sqrt(252))
+
+    def get_profit_factor(self) -> float:
+        """🎯 Phase 2: Gross Profit / Gross Loss"""
+        if not self.trades:
+            return 0.0
+            
+        gross_profit = sum(t.get('pnl', 0) for t in self.trades if t.get('pnl', 0) > 0)
+        gross_loss = abs(sum(t.get('pnl', 0) for t in self.trades if t.get('pnl', 0) < 0))
+        
+        if gross_loss <= 1e-8:
+            return float(gross_profit) if gross_profit > 0 else 0.0
+            
+        return float(gross_profit / gross_loss)
 
     def get_avg_trade_pnl(self) -> Tuple[float, float]:
         """Calculate average winning and losing trade P&L."""
@@ -349,13 +422,18 @@ class PerformanceTracker:
 
         logger.info("=" * 80)
 
+    async def _save_state_async(self):
+        """Asynchronously save state to disk using a thread to avoid blocking."""
+        await asyncio.to_thread(self._save_state)
+
     def _save_state(self):
         """Save performance history to disk."""
         try:
             self.data_dir.mkdir(exist_ok=True)
             state = {
-                'trades': self.trades,
-                'equity_curve': self.equity_curve,
+                'trades': list(self.trades),
+                'equity_curve': list(self.equity_curve),
+                'benchmark_curve': list(self.benchmark_curve),
                 'starting_capital': self.starting_capital,
                 'last_updated': datetime.now().isoformat()
             }
@@ -403,9 +481,10 @@ class PerformanceTracker:
             with open(self.history_file, 'r') as f:
                 state = json.load(f)
 
-            self.trades = state.get('trades', [])
+            self.trades = collections.deque(state.get('trades', []), maxlen=5000)
             raw_curve = state.get('equity_curve', [])
-            self.equity_curve = self._clean_equity_curve(raw_curve)
+            self.equity_curve = collections.deque(self._clean_equity_curve(raw_curve), maxlen=100000)
+            self.benchmark_curve = collections.deque(state.get('benchmark_curve', []), maxlen=100000)
             self.starting_capital = state.get('starting_capital', 0.0)
 
             logger.info(f"📊 Restored {len(self.trades)} trades and {len(self.equity_curve)} equity points")
@@ -415,7 +494,7 @@ class PerformanceTracker:
         except Exception as e:
             logger.error(f"Failed to load performance state: {e}")
 
-    def reset_history(self, *, starting_capital: float, reason: str = "manual_reset"):
+    async def reset_history(self, *, starting_capital: float, reason: str = "manual_reset"):
         """Reset persisted performance history and seed with a single baseline equity point."""
         try:
             capital = float(starting_capital)
@@ -427,10 +506,12 @@ class PerformanceTracker:
             logger.warning("Cannot reset performance history with non-positive capital: %s", capital)
             return
 
-        self.trades = []
-        self.equity_curve = [(datetime.now().isoformat(), capital)]
+        self.trades.clear()
+        self.equity_curve.clear()
+        self.equity_curve.append((datetime.now().isoformat(), capital))
+        self.benchmark_curve.clear()
         self.starting_capital = capital
-        self._save_state()
+        await self._save_state_async()
         logger.warning(
             "🩹 Performance history reset (%s). Seeded baseline equity: $%.2f",
             reason,

@@ -392,6 +392,12 @@ doctor_endpoint_parity() {
     echo "WARNING: cockpit open_positions differs from cockpit positions length."
   fi
 
+  local open_pos_parity_ok=1
+  if [[ "$status_open" != "$metrics_open" ]] || [[ "$status_open" != "$cockpit_open" ]]; then
+    open_pos_parity_ok=0
+    echo "WARNING: open_positions mismatch between /status, /api/v1/metrics, and /api/v1/cockpit."
+  fi
+
   local broker_parity_ok=1
   if [[ "$status_primary_broker" != "unknown" && "$cockpit_active_broker" != "unknown" && "$cockpit_active_broker" != "multi" ]]; then
     if [[ "$status_primary_broker" != "$cockpit_active_broker" ]]; then
@@ -400,7 +406,7 @@ doctor_endpoint_parity() {
     fi
   fi
 
-  if [[ "$cap_parity_ok" -eq 1 && "$pos_parity_ok" -eq 1 && "$broker_parity_ok" -eq 1 ]]; then
+  if [[ "$cap_parity_ok" -eq 1 && "$pos_parity_ok" -eq 1 && "$broker_parity_ok" -eq 1 && "$open_pos_parity_ok" -eq 1 ]]; then
     echo "OK: endpoint parity checks passed."
     return 0
   fi

@@ -60,27 +60,10 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
       : [];
     const sanitized = sanitizeExecutionMetrics(data);
     const nowMs = Date.now();
-    const cachedFresh = Boolean(
-      LAST_GOOD_METRICS_SNAPSHOT
-      && (nowMs - LAST_GOOD_METRICS_SNAPSHOT.updated_at_ms) <= METRICS_SNAPSHOT_CACHE_TTL_MS,
-    );
-    let combinedCapital = portfolioBalanceResp.ok
-      ? sanitizeMoney(balanceData.total_equity, sanitized.capital)
-      : sanitized.capital;
-    let combinedOpenPositions = portfolioPositionsResp.ok
-      ? sanitizeCount(portfolioPositions.length, sanitized.open_positions)
-      : sanitized.open_positions;
+    
+    const combinedCapital = portfolioBalanceResp.ok ? sanitizeMoney(balanceData.total_equity) : sanitized.capital;
+    const combinedOpenPositions = sanitized.open_positions;
 
-    if ((!portfolioBalanceResp.ok || !portfolioPositionsResp.ok) && cachedFresh && LAST_GOOD_METRICS_SNAPSHOT) {
-      combinedCapital = LAST_GOOD_METRICS_SNAPSHOT.capital;
-      combinedOpenPositions = LAST_GOOD_METRICS_SNAPSHOT.open_positions;
-    } else if (portfolioBalanceResp.ok || portfolioPositionsResp.ok) {
-      LAST_GOOD_METRICS_SNAPSHOT = {
-        updated_at_ms: nowMs,
-        capital: combinedCapital,
-        open_positions: combinedOpenPositions,
-      };
-    }
     return NextResponse.json({
       status: String(data.status || "").toLowerCase() === "online",
       timestamp: (data.timestamp as string | null) ?? null,

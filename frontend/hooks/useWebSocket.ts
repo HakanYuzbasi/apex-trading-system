@@ -74,6 +74,13 @@ export function useWebSocket(isPublic?: boolean, {
     const reconnectTimeoutRef = useRef<NodeJS.Timeout | undefined>(undefined);
     const attemptRef = useRef(0);
     const stoppedRef = useRef(false); // true when we should NOT reconnect (e.g. 403)
+    // Shadow of the last full state — used to reconstruct a complete message from deltas
+    const stateShadowRef = useRef<WebSocketMessage | null>(null);
+    // Stable ref for onMessage — prevents connect from being recreated when the caller
+    // passes an inline arrow function, which would cause the useEffect to re-fire and
+    // disconnect/reconnect the socket on every parent render.
+    const onMessageRef = useRef(onMessage);
+    onMessageRef.current = onMessage;
 
     const connect = useCallback(function connectSocket() {
         if (!shouldConnect || stoppedRef.current) return;
@@ -150,9 +157,27 @@ export function useWebSocket(isPublic?: boolean, {
 
             socket.onmessage = (event) => {
                 try {
-                    const data = JSON.parse(event.data as string) as WebSocketMessage;
+                    const raw = JSON.parse(event.data as string) as WebSocketMessage;
+
+                    let data: WebSocketMessage;
+                    if (raw.type === "state_delta") {
+                        // Merge the delta fields into the shadow state and emit as
+                        // a full state_update so all consumers remain unchanged.
+                        const merged: WebSocketMessage = {
+                            ...(stateShadowRef.current ?? {}),
+                            ...raw,
+                            type: "state_update",
+                        };
+                        stateShadowRef.current = merged;
+                        data = merged;
+                    } else {
+                        // Full state_update — replace shadow entirely.
+                        stateShadowRef.current = raw;
+                        data = raw;
+                    }
+
                     setState((s) => ({ ...s, lastMessage: data }));
-                    onMessage?.(data);
+                    onMessageRef.current?.(data);
                 } catch {
                     // Ignore malformed messages
                 }
@@ -168,7 +193,7 @@ export function useWebSocket(isPublic?: boolean, {
             attemptRef.current += 1;
             reconnectTimeoutRef.current = setTimeout(connectSocket, delay);
         }
-    }, [url, reconnectInterval, shouldConnect, onMessage, isPublic]);
+    }, [url, reconnectInterval, shouldConnect, isPublic]);
 
     useEffect(() => {
         stoppedRef.current = false;

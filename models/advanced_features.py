@@ -41,7 +41,16 @@ class FeatureEngine:
         'microstructure': ['illiquidity', 'illiquidity_surge'],
         'regime': ['drawdown', 'runup', 'asymmetry', 'regime_bull', 'regime_duration'],
         'dynamics': ['hurst_20d', 'hurst_60d', 'hurst_regime', 'vov_20d', 'tail_risk_ratio'],
-        'context': ['sentiment_score', 'momentum_rank']
+        'context': ['sentiment_score', 'momentum_rank'],
+        'vwap_microstructure': [
+            'vwap_dev',              # (close - typical_price) / typical_price
+            'vwap_zscore_5d',        # 5-day rolling z-score of vwap_dev
+            'obi_proxy',             # (close - low) / (high - low) — buy/sell pressure
+            'obi_momentum_5d',       # EMA-smoothed OBI proxy
+            'vwap_reversion_signal', # -vwap_zscore_5d * (1 - obi_proxy) → mean-rev long signal
+            'cross_asset_corr_spy',  # 20d rolling corr with SPY (injectable; 0 default)
+            'cross_asset_corr_btc',  # 20d rolling corr with BTC (injectable; 0 default)
+        ]
     }
     
     def __init__(self, lookback: int = 60):
@@ -347,14 +356,41 @@ class FeatureEngine:
         df['relative_strength'] = p.pct_change(20) / (p.pct_change(20).rolling(20).mean() + 1e-8)
 
         
-        # cross_asset_injected
-        try:
-            df['spy_relative_strength'] = df['Close'].pct_change(5) - 0.01
-            df['vix_regime_zscore'] = (df['Close'].rolling(60).std() - df['Close'].rolling(252).std()) / (df['Close'].rolling(252).std() + 1e-8)
-            df['sector_momentum_rank'] = df['Close'].pct_change(20).rank(pct=True)
-            df['crypto_equity_corr'] = df['Close'].pct_change(20).rolling(20).corr(df['Close'].pct_change(20).shift(1))
-        except:
-            pass
+        # ═══════════════════════════════════════════════════════════════════════
+        # PILLAR 1A: VWAP MICROSTRUCTURE FEATURES (Alpha: mean-reversion + OBI)
+        # ═══════════════════════════════════════════════════════════════════════
+
+        if h is not None and low_px is not None:
+            # VWAP as typical price proxy: (H + L + C) / 3
+            typical_price = (h + low_px + p) / 3.0
+            vwap_dev = (p - typical_price) / typical_price.replace(0, np.nan)
+            df['vwap_dev'] = vwap_dev
+            # 5-day rolling z-score of vwap_dev — normalised mean-reversion signal
+            vwap_roll_mean = vwap_dev.rolling(5).mean()
+            vwap_roll_std = vwap_dev.rolling(5).std().replace(0, np.nan)
+            df['vwap_zscore_5d'] = (vwap_dev - vwap_roll_mean) / vwap_roll_std
+
+            # Order Book Imbalance proxy: where did price close in the H-L range?
+            hl_range = (h - low_px).replace(0, np.nan)
+            obi = (p - low_px) / hl_range          # 1.0 = closed at high, 0.0 = at low
+            df['obi_proxy'] = obi
+            df['obi_momentum_5d'] = obi.ewm(span=5, adjust=False).mean()
+
+            # Composite: negative vwap_zscore_5d (price below VWAP) × sell pressure
+            # → positive value = mean-reversion long signal
+            df['vwap_reversion_signal'] = -df['vwap_zscore_5d'] * (1.0 - obi)
+        else:
+            df['vwap_dev'] = 0.0
+            df['vwap_zscore_5d'] = 0.0
+            df['obi_proxy'] = 0.5
+            df['obi_momentum_5d'] = 0.5
+            df['vwap_reversion_signal'] = 0.0
+
+        # Cross-asset correlation stubs — injectable by the signal generator when
+        # SPY/BTC reference series are available; default 0 for single-symbol mode.
+        df['cross_asset_corr_spy'] = 0.0
+        df['cross_asset_corr_btc'] = 0.0
+
         return df.fillna(0).replace([np.inf, -np.inf], 0)
     
     def extract_single_sample(

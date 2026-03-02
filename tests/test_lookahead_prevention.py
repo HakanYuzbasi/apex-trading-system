@@ -141,6 +141,8 @@ class TestOrderTiming:
             initial_capital=100_000,
             slippage_bps=0.0,
             use_dynamic_slippage=False,
+            enable_stop_management=False,
+            max_participation_rate=0,
         )
         data = _make_price_data("AAPL", [100.0, 105.0, 110.0])
         engine.load_data(data)
@@ -159,6 +161,8 @@ class TestOrderTiming:
             initial_capital=100_000,
             slippage_bps=0.0,
             use_dynamic_slippage=False,
+            enable_stop_management=False,
+            max_participation_rate=0,
         )
         # Price goes 100 -> 110
         data = _make_price_data("AAPL", [100.0, 110.0, 120.0])
@@ -183,6 +187,8 @@ class TestOrderTiming:
             initial_capital=100_000,
             slippage_bps=0.0,
             use_dynamic_slippage=False,
+            enable_stop_management=False,
+            max_participation_rate=0,
         )
         prices = [100.0, 101.0, 102.0, 103.0, 104.0]
         data = _make_price_data("AAPL", prices)
@@ -207,6 +213,8 @@ class TestOrderTiming:
             initial_capital=100_000,
             slippage_bps=0.0,
             use_dynamic_slippage=False,
+            enable_stop_management=False,
+            max_participation_rate=0,
         )
         prices = [100.0, 105.0, 110.0, 115.0, 120.0]
         data = _make_price_data("AAPL", prices)
@@ -219,8 +227,6 @@ class TestOrderTiming:
                 eng.execute_order("AAPL", "BUY", 10)
 
         engine.run(strategy, ts[0], ts[-1])
-
-        # Order placed at t=1 (price=105) should fill at t=2 (price=110)
         assert len(engine.trades) == 1
         assert engine.trades[0].price == pytest.approx(110.0, abs=0.01)
         assert engine.trades[0].timestamp == ts[2]

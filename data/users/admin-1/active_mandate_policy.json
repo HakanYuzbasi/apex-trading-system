@@ -1,0 +1,28 @@
+{
+  "activated_at": "2026-02-28T21:50:14.823555+00:00",
+  "activated_by": "admin-1",
+  "expected_max_drawdown_pct": 12.0,
+  "feasibility_band": "green",
+  "notes": [
+    "init"
+  ],
+  "policy_snapshot": {
+    "asset_classes": [
+      "equity"
+    ],
+    "horizon_days": null,
+    "include_options": false,
+    "intent": "10% in two months energy and tech",
+    "max_drawdown_pct": null,
+    "recommendation_mode": "POLICY_ONLY",
+    "sectors": [],
+    "suitability_profile": "balanced",
+    "target_return_pct": null
+  },
+  "probability_target_hit": 0.726,
+  "recommendation_mode": "POLICY_ONLY",
+  "request_id": "mdt-3d0c7a76088d",
+  "status": "paper_live",
+  "tenant_id": "admin-1",
+  "workflow_id": "mwf-62f0b3860cfc"
+}

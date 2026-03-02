@@ -16,6 +16,7 @@ from models.broker import BrokerConnection, BrokerType
 from core.exceptions import ApexBrokerError
 from services.common.db import db_session
 from services.trading.models import BrokerConnectionModel
+from execution.ibkr_lease_manager import lease_manager
 
 logger = logging.getLogger(__name__)
 
@@ -375,17 +376,25 @@ class BrokerService:
             )
 
         if connection.broker_type == BrokerType.IBKR:
-            return await asyncio.wait_for(
-                asyncio.to_thread(
-                    self._fetch_ibkr_positions_blocking,
-                    source_name=connection.name,
-                    source_id=connection.id,
-                    client_id=connection.client_id,
-                    credentials=credentials,
-                    as_of=as_of,
-                ),
-                timeout=self._POSITIONS_FETCH_TIMEOUT_SECONDS,
+            # 🎯 Allocate unique clientId from lease manager
+            allocated_id = await lease_manager.allocate(
+                preferred_id=connection.client_id,
+                ttl=30  # Short TTL for single fetch
             )
+            try:
+                return await asyncio.wait_for(
+                    asyncio.to_thread(
+                        self._fetch_ibkr_positions_blocking,
+                        source_name=connection.name,
+                        source_id=connection.id,
+                        client_id=allocated_id,
+                        credentials=credentials,
+                        as_of=as_of,
+                    ),
+                    timeout=self._POSITIONS_FETCH_TIMEOUT_SECONDS,
+                )
+            finally:
+                await lease_manager.release(allocated_id)
 
         raise ApexBrokerError(
             code="BROKER_UNSUPPORTED",
@@ -474,7 +483,7 @@ class BrokerService:
         host = credentials.get("host", "127.0.0.1")
         port = int(credentials.get("port", 7497))
         import random
-        ib_client_id = int(credentials.get("client_id") or client_id or random.randint(100, 199))
+        ib_client_id = int(client_id or credentials.get("client_id") or random.randint(100, 199))
         owned_loop: Optional[asyncio.AbstractEventLoop] = None
         try:
             asyncio.get_event_loop()
@@ -698,22 +707,30 @@ class BrokerService:
             )
 
         if connection.broker_type == BrokerType.IBKR:
-            equity = await asyncio.wait_for(
-                asyncio.to_thread(
-                    self._fetch_ibkr_equity_blocking,
-                    credentials,
-                    connection.client_id,
-                ),
-                timeout=self._EQUITY_FETCH_TIMEOUT_SECONDS,
+            # 🎯 Allocate unique clientId from lease manager
+            allocated_id = await lease_manager.allocate(
+                preferred_id=connection.client_id,
+                ttl=30  # Short TTL for single fetch
             )
-            return BrokerEquitySnapshot(
-                value=float(equity),
-                broker="ibkr",
-                stale=False,
-                as_of=datetime.utcnow().isoformat() + "Z",
-                source=connection.name,
-                source_id=connection.id,
-            )
+            try:
+                equity = await asyncio.wait_for(
+                    asyncio.to_thread(
+                        self._fetch_ibkr_equity_blocking,
+                        credentials,
+                        allocated_id,
+                    ),
+                    timeout=self._EQUITY_FETCH_TIMEOUT_SECONDS,
+                )
+                return BrokerEquitySnapshot(
+                    value=float(equity),
+                    broker="ibkr",
+                    stale=False,
+                    as_of=datetime.utcnow().isoformat() + "Z",
+                    source=connection.name,
+                    source_id=connection.id,
+                )
+            finally:
+                await lease_manager.release(allocated_id)
 
         raise ApexBrokerError(
             code="BROKER_UNSUPPORTED",
@@ -738,7 +755,7 @@ class BrokerService:
         host = credentials.get("host", "127.0.0.1")
         port = int(credentials.get("port", 7497))
         import random
-        ib_client_id = int(credentials.get("client_id") or client_id or random.randint(100, 199))
+        ib_client_id = int(client_id or credentials.get("client_id") or random.randint(100, 199))
         owned_loop: Optional[asyncio.AbstractEventLoop] = None
         try:
             asyncio.get_event_loop()
