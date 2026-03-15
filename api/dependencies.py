@@ -18,6 +18,16 @@ DRAWDOWN_PERCENT_ABS_MAX = 100.0
 
 # Path to trading state file
 STATE_FILE = ApexConfig.DATA_DIR / "trading_state.json"
+CORE_STATE_FILE = ApexConfig.DATA_DIR / "core_trading_state.json"
+CRYPTO_STATE_FILE = ApexConfig.DATA_DIR / "crypto_trading_state.json"
+
+def _session_state_file(session_type: str) -> Path:
+    """Return the state file path for a given session type."""
+    if session_type == "core":
+        return CORE_STATE_FILE
+    elif session_type == "crypto":
+        return CRYPTO_STATE_FILE
+    return STATE_FILE
 PRICE_CACHE_FILE = ApexConfig.DATA_DIR / "price_cache.json"
 CONTROL_COMMAND_FILE = ApexConfig.DATA_DIR / "trading_control_commands.json"
 GOVERNOR_POLICY_DIR = ApexConfig.DATA_DIR / "governor_policies"
@@ -346,6 +356,70 @@ async def async_read_trading_state() -> Dict:
     except Exception:
         pass
     return read_trading_state()
+
+
+def read_session_state(session_type: str) -> Dict:
+    """Read trading state for a specific session (core or crypto).
+
+    Falls back to the unified state file if session-specific file doesn't exist.
+    """
+    state_file = _session_state_file(session_type)
+    mtime = _mtime_ns(state_file)
+    if mtime is None:
+        # Fallback: filter unified state by session
+        unified = read_trading_state()
+        if session_type == "unified":
+            return unified
+        return _filter_state_by_session(unified, session_type)
+
+    try:
+        with open(state_file, "r") as f:
+            data = json.load(f)
+    except Exception as e:
+        logger.error(f"Error reading {session_type} state file: {e}")
+        return dict(DEFAULT_STATE)
+
+    # Enrich with live prices
+    price_cache, _ = read_price_cache()
+    positions = data.get("positions", {})
+    for symbol, pos in positions.items():
+        live_price = price_cache.get(symbol, 0)
+        avg_price = pos.get("avg_price", 0)
+        qty = pos.get("qty", 0)
+        if live_price > 0 and avg_price > 0:
+            pos["current_price"] = live_price
+            if qty > 0:
+                pos["pnl"] = round((live_price - avg_price) * qty, 2)
+                pos["pnl_pct"] = round((live_price / avg_price - 1) * 100, 2)
+            else:
+                pos["pnl"] = round((avg_price - live_price) * abs(qty), 2)
+                pos["pnl_pct"] = round((avg_price / live_price - 1) * 100, 2) if live_price > 0 else 0.0
+
+    return _sanitize_floats(data)
+
+
+def _filter_state_by_session(state: Dict, session_type: str) -> Dict:
+    """Filter a unified trading state to only include positions/signals for a session."""
+    from core.symbols import parse_symbol, AssetClass
+
+    filtered = dict(state)
+    positions = state.get("positions", {})
+    filtered_positions = {}
+    for symbol, data in positions.items():
+        try:
+            parsed = parse_symbol(symbol)
+            is_crypto = parsed.asset_class == AssetClass.CRYPTO
+        except Exception:
+            is_crypto = "/" in symbol and "USD" in symbol
+
+        if session_type == "core" and not is_crypto:
+            filtered_positions[symbol] = data
+        elif session_type == "crypto" and is_crypto:
+            filtered_positions[symbol] = data
+
+    filtered["positions"] = filtered_positions
+    filtered["session_type"] = session_type
+    return filtered
 
 
 def _parse_timestamp(ts: Optional[str]) -> Optional[datetime]:

@@ -875,6 +875,120 @@ class ApexConfig:
     HEALTH_STALENESS_SECONDS = int(os.getenv("APEX_HEALTH_STALENESS_SECONDS", "30"))
     
     # ═══════════════════════════════════════════════════════════════
+    # DUAL-SESSION MODE (Core Strategy + Crypto Sleeve)
+    # ═══════════════════════════════════════════════════════════════
+    SESSION_MODE: str = os.getenv("APEX_SESSION_MODE", "dual")  # "unified", "dual", "core_only", "crypto_only"
+    CRYPTO_SLEEVE_ENABLED: bool = os.getenv("APEX_CRYPTO_SLEEVE_ENABLED", "true").lower() == "true"
+
+    # Per-session capital allocation (must sum to INITIAL_CAPITAL)
+    CORE_INITIAL_CAPITAL: int = int(os.getenv("APEX_CORE_INITIAL_CAPITAL", "1000000"))
+    CRYPTO_INITIAL_CAPITAL: int = int(os.getenv("APEX_CRYPTO_INITIAL_CAPITAL", "100000"))
+
+    # Per-session signal thresholds (tuned independently for higher Sharpe)
+    CORE_MIN_SIGNAL_THRESHOLD: float = float(os.getenv("APEX_CORE_MIN_SIGNAL_THRESHOLD", "0.10"))
+    CORE_MIN_CONFIDENCE: float = float(os.getenv("APEX_CORE_MIN_CONFIDENCE", "0.45"))
+    CRYPTO_MIN_SIGNAL_THRESHOLD: float = float(os.getenv("APEX_CRYPTO_MIN_SIGNAL_THRESHOLD", "0.08"))
+    CRYPTO_MIN_CONFIDENCE: float = float(os.getenv("APEX_CRYPTO_MIN_CONFIDENCE", "0.40"))
+
+    # Per-session risk parameters
+    CORE_MAX_POSITIONS: int = int(os.getenv("APEX_CORE_MAX_POSITIONS", "25"))
+    CRYPTO_MAX_POSITIONS: int = int(os.getenv("APEX_CRYPTO_MAX_POSITIONS", "10"))
+    CORE_MAX_DAILY_LOSS: float = float(os.getenv("APEX_CORE_MAX_DAILY_LOSS", "0.025"))
+    CRYPTO_MAX_DAILY_LOSS_SESSION: float = float(os.getenv("APEX_CRYPTO_MAX_DAILY_LOSS_SESSION", "0.06"))
+    CORE_KELLY_FRACTION: float = float(os.getenv("APEX_CORE_KELLY_FRACTION", "0.60"))
+    CRYPTO_KELLY_FRACTION: float = float(os.getenv("APEX_CRYPTO_KELLY_FRACTION", "0.40"))
+
+    # Per-session position sizing (more aggressive for concentrated signals)
+    CORE_POSITION_SIZE_USD: float = float(os.getenv("APEX_CORE_POSITION_SIZE_USD", "25000"))
+    CORE_KELLY_MAX_POSITION_PCT: float = float(os.getenv("APEX_CORE_KELLY_MAX_POSITION_PCT", "0.08"))
+
+    # Per-session ATR stops (tighter for better Sharpe)
+    CORE_ATR_MULTIPLIER_STOP: float = float(os.getenv("APEX_CORE_ATR_MULTIPLIER_STOP", "2.0"))
+    CORE_TRAILING_STOP_ATR: float = float(os.getenv("APEX_CORE_TRAILING_STOP_ATR", "1.8"))
+
+    # Per-session regime thresholds (relaxed to capture more trades)
+    CORE_SIGNAL_THRESHOLDS_BY_REGIME: Dict = {
+        'strong_bull': 0.08, 'bull': 0.10, 'neutral': 0.10,
+        'bear': 0.12, 'strong_bear': 0.10, 'volatile': 0.15
+    }
+    CRYPTO_SIGNAL_THRESHOLDS_BY_REGIME: Dict = {
+        'strong_bull': 0.06, 'bull': 0.08, 'neutral': 0.08,
+        'bear': 0.10, 'strong_bear': 0.08, 'volatile': 0.12
+    }
+
+    # Per-session state files
+    DATA_DIR: Path = Path(os.getenv("APEX_DATA_DIR", str(Path(__file__).parent / "data")))
+    CORE_STATE_FILE: str = str(DATA_DIR / "core_trading_state.json")
+    CRYPTO_STATE_FILE: str = str(DATA_DIR / "crypto_trading_state.json")
+
+    # High-conviction assets (get 2x position sizing in Core session)
+    # Top performers by risk-adjusted returns from backtest analysis
+    CORE_HIGH_CONVICTION: List[str] = [
+        "NVDA", "META", "AAPL", "MSFT", "GOOGL", "AMZN", "AVGO", "LLY",
+        "JPM", "GS", "XOM", "CVX", "CAT", "GE", "NFLX",
+        "SPY", "QQQ", "HD", "WMT", "UNH",
+        "CRM", "ORCL", "AMD", "NEM", "MPC",
+        "LIN", "HON", "ABBV", "MRK", "BA"
+    ]
+
+    # Crypto high-conviction (momentum leaders)
+    CRYPTO_HIGH_CONVICTION: List[str] = [
+        "BTC/USD", "ETH/USD", "SOL/USD", "AVAX/USD", "LINK/USD"
+    ]
+
+    @classmethod
+    def get_session_config(cls, session_type: str) -> Dict:
+        """Return config overrides for a specific session type."""
+        if session_type == "core":
+            return {
+                "initial_capital": cls.CORE_INITIAL_CAPITAL,
+                "min_signal_threshold": cls.CORE_MIN_SIGNAL_THRESHOLD,
+                "min_confidence": cls.CORE_MIN_CONFIDENCE,
+                "max_positions": cls.CORE_MAX_POSITIONS,
+                "max_daily_loss": cls.CORE_MAX_DAILY_LOSS,
+                "kelly_fraction": cls.CORE_KELLY_FRACTION,
+                "position_size_usd": cls.CORE_POSITION_SIZE_USD,
+                "kelly_max_position_pct": cls.CORE_KELLY_MAX_POSITION_PCT,
+                "atr_multiplier_stop": cls.CORE_ATR_MULTIPLIER_STOP,
+                "trailing_stop_atr": cls.CORE_TRAILING_STOP_ATR,
+                "signal_thresholds_by_regime": cls.CORE_SIGNAL_THRESHOLDS_BY_REGIME,
+                "state_file": cls.CORE_STATE_FILE,
+                "high_conviction": cls.CORE_HIGH_CONVICTION,
+            }
+        elif session_type == "crypto":
+            return {
+                "initial_capital": cls.CRYPTO_INITIAL_CAPITAL,
+                "min_signal_threshold": cls.CRYPTO_MIN_SIGNAL_THRESHOLD,
+                "min_confidence": cls.CRYPTO_MIN_CONFIDENCE,
+                "max_positions": cls.CRYPTO_MAX_POSITIONS,
+                "max_daily_loss": cls.CRYPTO_MAX_DAILY_LOSS_SESSION,
+                "kelly_fraction": cls.CRYPTO_KELLY_FRACTION,
+                "position_size_usd": cls.CRYPTO_POSITION_SIZE_USD,
+                "kelly_max_position_pct": cls.KELLY_MAX_POSITION_PCT,
+                "atr_multiplier_stop": cls.ATR_MULTIPLIER_STOP,
+                "trailing_stop_atr": cls.TRAILING_STOP_ATR,
+                "signal_thresholds_by_regime": cls.CRYPTO_SIGNAL_THRESHOLDS_BY_REGIME,
+                "state_file": cls.CRYPTO_STATE_FILE,
+                "high_conviction": cls.CRYPTO_HIGH_CONVICTION,
+            }
+        else:
+            return {
+                "initial_capital": cls.INITIAL_CAPITAL,
+                "min_signal_threshold": cls.MIN_SIGNAL_THRESHOLD,
+                "min_confidence": cls.MIN_CONFIDENCE,
+                "max_positions": cls.MAX_POSITIONS,
+                "max_daily_loss": cls.MAX_DAILY_LOSS,
+                "kelly_fraction": cls.KELLY_FRACTION,
+                "position_size_usd": cls.POSITION_SIZE_USD,
+                "kelly_max_position_pct": cls.KELLY_MAX_POSITION_PCT,
+                "atr_multiplier_stop": cls.ATR_MULTIPLIER_STOP,
+                "trailing_stop_atr": cls.TRAILING_STOP_ATR,
+                "signal_thresholds_by_regime": cls.SIGNAL_THRESHOLDS_BY_REGIME,
+                "state_file": str(cls.DATA_DIR / "trading_state.json"),
+                "high_conviction": [],
+            }
+
+    # ═══════════════════════════════════════════════════════════════
     # UNIVERSE SELECTION
     # ═══════════════════════════════════════════════════════════════
     UNIVERSE_MODE = "SP500"  # Options: "SP500", "NASDAQ100", "CUSTOM"
@@ -946,6 +1060,19 @@ class ApexConfig:
 
     # Combine all into master universe
     SYMBOLS = list(set(INDICES + FOREX_PAIRS + CRYPTO_PAIRS + SP500_TOP_100))
+
+    # Session-scoped universes (for dual-session mode)
+    CORE_SYMBOLS = list(set(INDICES + FOREX_PAIRS + SP500_TOP_100))  # No crypto
+    CRYPTO_SYMBOLS = list(set(CRYPTO_PAIRS))  # Crypto only
+
+    @classmethod
+    def get_session_symbols(cls, session_type: str) -> list:
+        """Return the symbol universe for a specific session."""
+        if session_type == "core":
+            return cls.CORE_SYMBOLS
+        elif session_type == "crypto":
+            return cls.CRYPTO_SYMBOLS
+        return cls.SYMBOLS
 
     # Backtesting-only symbols (kept in universe, excluded from IBKR paper execution)
     BACKTEST_ONLY_SYMBOLS = {"SOL/USDT", "DOGE/USDT"}

@@ -283,12 +283,26 @@ class GodLevelBacktester:
         symbols: List[str] = None,
         start_date: str = None,
         end_date: str = None,
-        walk_forward: bool = True
+        walk_forward: bool = True,
+        session_type: str = "unified",
     ) -> BacktestResult:
         """
         Run comprehensive backtest with optional walk-forward optimization.
+        session_type: "unified", "core", or "crypto" — scopes universe and thresholds.
         """
-        symbols = symbols or ApexConfig.SYMBOLS[:50]  # Limit for speed
+        self._session_type = session_type
+        self._session_config = ApexConfig.get_session_config(session_type)
+
+        if symbols is None:
+            session_symbols = ApexConfig.get_session_symbols(session_type)
+            symbols = session_symbols[:50]  # Limit for speed
+
+        # Apply session-specific parameters
+        if session_type in ("core", "crypto"):
+            self.MAX_POSITIONS = self._session_config.get("max_positions", self.MAX_POSITIONS)
+            self.initial_capital = self._session_config.get("initial_capital", self.initial_capital)
+            self.capital = self.initial_capital
+            self.peak_capital = self.initial_capital
 
         logger.info("=" * 70)
         logger.info("GOD LEVEL BACKTEST")
@@ -566,40 +580,84 @@ class GodLevelBacktester:
         regime: str,
         current_drawdown: float
     ) -> bool:
-        """Apply adaptive entry thresholds by regime and drawdown state."""
-        thresholds = {
-            'strong_bull': (0.34, 0.42),
-            'bull': (0.37, 0.46),
-            'neutral': (0.43, 0.53),
-            'bear': (0.45, 0.58),
-            'strong_bear': (0.50, 0.60),
-            'high_volatility': (0.55, 0.62),
-        }
+        """Apply adaptive entry thresholds by regime and drawdown state.
+
+        Session-specific thresholds are significantly relaxed to increase trade
+        count (key driver of Sharpe stabilization) while maintaining signal quality
+        via the edge-over-cost gate and position sizing.
+        """
+        session = getattr(self, "_session_type", "unified")
+        if session == "core":
+            # Core: relaxed thresholds, more trades in equities/indices/fx
+            thresholds = {
+                'strong_bull': (0.18, 0.30),
+                'bull': (0.22, 0.34),
+                'neutral': (0.25, 0.38),
+                'bear': (0.22, 0.34),      # Encourage short entries
+                'strong_bear': (0.20, 0.32),  # Shorts on bearish conviction
+                'high_volatility': (0.30, 0.42),
+            }
+        elif session == "crypto":
+            # Crypto: even more relaxed — crypto signals are noisier but moves are larger
+            thresholds = {
+                'strong_bull': (0.15, 0.25),
+                'bull': (0.18, 0.28),
+                'neutral': (0.20, 0.32),
+                'bear': (0.18, 0.28),
+                'strong_bear': (0.16, 0.26),
+                'high_volatility': (0.25, 0.35),
+            }
+        else:
+            # Legacy unified thresholds
+            thresholds = {
+                'strong_bull': (0.34, 0.42),
+                'bull': (0.37, 0.46),
+                'neutral': (0.43, 0.53),
+                'bear': (0.45, 0.58),
+                'strong_bear': (0.50, 0.60),
+                'high_volatility': (0.55, 0.62),
+            }
         signal_threshold, confidence_threshold = thresholds.get(regime, (0.50, 0.65))
         if current_drawdown >= 0.08:
-            signal_threshold += 0.05
-            confidence_threshold += 0.04
+            signal_threshold += 0.03
+            confidence_threshold += 0.02
         return abs(signal) >= signal_threshold and confidence >= confidence_threshold
 
     def _passes_directional_filter(self, prices: pd.Series, signal: float, regime: str) -> bool:
-        """Avoid trading against persistent trend/regime unless the setup is strong."""
+        """Avoid trading against persistent trend/regime unless the setup is strong.
+
+        In session modes, allow more directional flexibility:
+        - Core: allow shorts in bear regimes (key missed alpha source)
+        - Crypto: allow both directions in trending regimes
+        """
         if len(prices) < 50 or signal == 0:
             return True
 
+        session = getattr(self, "_session_type", "unified")
         ma20 = prices.iloc[-20:].mean()
         ma50 = prices.iloc[-50:].mean()
         trend_bias = (ma20 / ma50 - 1) if ma50 > 0 else 0.0
 
-        long_allowed = trend_bias >= -0.005
-        short_allowed = trend_bias <= 0.005
+        long_allowed = trend_bias >= -0.01
+        short_allowed = trend_bias <= 0.01
 
-        if regime == 'strong_bull':
-            short_allowed = False
-        elif regime == 'bull':
-            # In bull regime allow only very strong reversal shorts.
-            short_allowed = abs(signal) >= 0.85 and trend_bias < -0.015
-        elif regime in {'strong_bear', 'bear'}:
-            long_allowed = False
+        if session in ("core", "crypto"):
+            # Relaxed: allow shorts in bull if strong signal, allow longs in bear if strong signal
+            if regime == 'strong_bull':
+                short_allowed = abs(signal) >= 0.50 and trend_bias < -0.005
+            elif regime == 'bull':
+                short_allowed = abs(signal) >= 0.40 and trend_bias < -0.005
+            elif regime in {'strong_bear', 'bear'}:
+                # Key change: allow short entries in bear regimes (was blocking all longs)
+                long_allowed = abs(signal) >= 0.50 and trend_bias > 0.005
+                short_allowed = True  # Shorts are natural in bear
+        else:
+            if regime == 'strong_bull':
+                short_allowed = False
+            elif regime == 'bull':
+                short_allowed = abs(signal) >= 0.85 and trend_bias < -0.015
+            elif regime in {'strong_bear', 'bear'}:
+                long_allowed = False
 
         return long_allowed if signal > 0 else short_allowed
 
@@ -626,14 +684,31 @@ class GodLevelBacktester:
         confidence: float,
         regime: str
     ) -> float:
-        """Boost best setups while shrinking crowded/high-correlation entries."""
+        """Boost best setups while shrinking crowded/high-correlation entries.
+
+        In session modes, high-conviction assets get an extra sizing boost
+        to concentrate capital where the edge is strongest.
+        """
+        session = getattr(self, "_session_type", "unified")
+        session_cfg = getattr(self, "_session_config", {})
+        high_conviction = session_cfg.get("high_conviction", [])
+
         mult = 1.0
-        if confidence >= 0.72 and abs(signal) >= 0.62:
+
+        # High-conviction asset boost (session-specific)
+        if symbol in high_conviction:
+            mult += 0.25
+
+        if confidence >= 0.55 and abs(signal) >= 0.40:
+            mult += 0.20
+        elif confidence >= 0.72 and abs(signal) >= 0.62:
             mult += 0.15
-        if regime == 'strong_bull' and signal > 0:
+
+        # Regime-aligned direction boost
+        if regime in ('strong_bull', 'bull') and signal > 0:
             mult += 0.15
-        elif regime == 'bull' and signal > 0:
-            mult += 0.10
+        elif regime in ('strong_bear', 'bear') and signal < 0:
+            mult += 0.15  # Reward shorts in bearish regimes
 
         max_corr = self._max_open_correlation(symbol)
         if max_corr is not None:
@@ -641,7 +716,9 @@ class GodLevelBacktester:
                 mult += 0.15
             elif max_corr >= 0.75:
                 mult -= 0.20
-        return float(np.clip(mult, 0.75, 1.60))
+
+        max_mult = 2.0 if session in ("core", "crypto") else 1.60
+        return float(np.clip(mult, 0.75, max_mult))
 
     def _dynamic_gross_exposure_cap(self, current_drawdown: float) -> float:
         """Scale gross exposure down as drawdown deepens."""
@@ -735,11 +812,27 @@ class GodLevelBacktester:
                         exit_signal = True
                         exit_reason = "Trailing stop"
 
-            # 3. Time-based exit
+            # 3. Time-based exit (session-aware: tighter for better capital efficiency)
             hold_days = max((pd.Timestamp(date) - pd.Timestamp(position.entry_date)).days, 0)
-            if hold_days >= 90:  # Max 90 days
-                exit_signal = True
-                exit_reason = "Max hold period"
+            session = getattr(self, "_session_type", "unified")
+            if session in ("core", "crypto"):
+                # Tighter time exits for session mode — eliminate dead capital
+                max_hold = 30 if session == "core" else 14  # crypto moves fast
+                if hold_days >= max_hold:
+                    exit_signal = True
+                    exit_reason = "Max hold period"
+                # Stale position exit: close if held >15 days with <1% unrealized gain (core)
+                elif session == "core" and hold_days >= 15 and abs(pnl_pct) < 0.01:
+                    exit_signal = True
+                    exit_reason = "Stale position (time-decay)"
+                # Crypto: close if held >7 days with <2% unrealized gain
+                elif session == "crypto" and hold_days >= 7 and abs(pnl_pct) < 0.02:
+                    exit_signal = True
+                    exit_reason = "Stale position (time-decay)"
+            else:
+                if hold_days >= 90:  # Legacy: Max 90 days
+                    exit_signal = True
+                    exit_reason = "Max hold period"
 
             if exit_signal:
                 positions_to_close.append((symbol, current_price, exit_reason, date))

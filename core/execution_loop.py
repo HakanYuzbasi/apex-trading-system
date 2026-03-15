@@ -308,17 +308,23 @@ class ApexTradingSystem:
     """
     _banner_printed = False
     
-    def __init__(self, tenant_id: str = "default", broker_service=None):
+    def __init__(self, tenant_id: str = "default", broker_service=None, session_type: str = "unified"):
         self.tenant_id = tenant_id
+        self.session_type = session_type
         if self.tenant_id == "default":
             self.user_data_dir = ApexConfig.DATA_DIR
         else:
             self.user_data_dir = ApexConfig.DATA_DIR / "users" / self.tenant_id
             self.user_data_dir.mkdir(parents=True, exist_ok=True)
 
+        # Load session-specific configuration overrides
+        self._session_config = ApexConfig.get_session_config(session_type)
+        self._session_symbols = ApexConfig.get_session_symbols(session_type)
+
         self.print_banner()
         logger.info("=" * 80)
-        logger.info(f"🚀 {ApexConfig.SYSTEM_NAME} V{ApexConfig.VERSION} [Tenant: {self.tenant_id}]")
+        logger.info(f"🚀 {ApexConfig.SYSTEM_NAME} V{ApexConfig.VERSION} [Tenant: {self.tenant_id}] [Session: {self.session_type}]")
+        logger.info(f"   Universe: {len(self._session_symbols)} symbols | Capital: ${self._session_config['initial_capital']:,}")
         logger.info("=" * 80)
         
         self.ibkr: Optional[IBKRConnector] = None
@@ -385,13 +391,15 @@ class ApexTradingSystem:
             logger.info("Mode: SIMULATION")
             
         self.broker_dispatch = BrokerDispatch(self.ibkr, self.alpaca)
-        self.state_sync = StateSync(self.user_data_dir / "trading_state.json")
+        # Session-scoped state file: core_trading_state.json / crypto_trading_state.json / trading_state.json
+        _state_prefix = f"{self.session_type}_" if self.session_type != "unified" else ""
+        self.state_sync = StateSync(self.user_data_dir / f"{_state_prefix}trading_state.json")
         self.event_store = EventStore(self.user_data_dir)
         
-        # Initialize modules
+        # Initialize modules (session-scoped parameters)
         self.signal_generator = AdvancedSignalGenerator()
         self.risk_manager = RiskManager(
-            max_daily_loss=ApexConfig.MAX_DAILY_LOSS,
+            max_daily_loss=self._session_config.get("max_daily_loss", ApexConfig.MAX_DAILY_LOSS),
             max_drawdown=ApexConfig.MAX_DRAWDOWN,
             user_id=self.tenant_id
         )
@@ -931,12 +939,13 @@ class ApexTradingSystem:
         
         # State
         # Load last known capital from risk state to prevent drawdown cliffs on startup
+        _session_capital = self._session_config.get("initial_capital", ApexConfig.INITIAL_CAPITAL)
         if self.risk_manager.day_start_capital > 0:
             self.capital = self.risk_manager.day_start_capital
         elif self.risk_manager.starting_capital > 0:
             self.capital = self.risk_manager.starting_capital
         else:
-            self.capital = ApexConfig.INITIAL_CAPITAL
+            self.capital = _session_capital
             
         self._last_good_total_equity: float = float(self.capital)
         self._per_broker_last_equity: Dict[str, float] = {}  # last-known equity per broker (survives cache expiry)
@@ -1043,9 +1052,9 @@ class ApexTradingSystem:
         self._risk_multiplier: float = 1.0  # 1.0 = full size, 0.5 = half size during WARNING
         
         logger.info(f"💰 Capital: ${self.capital:,.2f}")
-        logger.info(f"📈 Universe: {ApexConfig.UNIVERSE_MODE} ({len(ApexConfig.SYMBOLS)} symbols)")
-        logger.info(f"📊 Max Positions: {ApexConfig.MAX_POSITIONS}")
-        logger.info(f"💵 Position Size: ${ApexConfig.POSITION_SIZE_USD:,}")
+        logger.info(f"📈 Universe: {ApexConfig.UNIVERSE_MODE} ({len(self._session_symbols)} symbols) [session={self.session_type}]")
+        logger.info(f"📊 Max Positions: {self._session_config.get('max_positions', ApexConfig.MAX_POSITIONS)}")
+        logger.info(f"💵 Position Size: ${self._session_config.get('position_size_usd', ApexConfig.POSITION_SIZE_USD):,}")
         logger.info(f"🛡️  Max Shares/Position: {ApexConfig.MAX_SHARES_PER_POSITION}")
         logger.info(f"⏱️  Trade Cooldown: {ApexConfig.TRADE_COOLDOWN_SECONDS}s")
         logger.info("📱 Dashboard: Enabled")
@@ -1462,6 +1471,8 @@ class ApexTradingSystem:
         open_positions: List[str],
     ) -> List[str]:
         """Trade only top-N crypto pairs by momentum/liquidity while always keeping open positions."""
+        if self.session_type == "core":
+            return open_universe  # Core session has no crypto to rotate
         if not ApexConfig.CRYPTO_ROTATION_ENABLED:
             return open_universe
 
@@ -1690,10 +1701,13 @@ class ApexTradingSystem:
         return 0.0
 
     def _runtime_symbols(self) -> List[str]:
-        """Static universe + runtime-discovered symbols (e.g., Alpaca crypto)."""
-        base = [s for s in ApexConfig.SYMBOLS if s not in self._failed_symbols]
-        extras = [s for s in self._dynamic_crypto_symbols if s not in base and s not in self._failed_symbols]
-        return base + extras
+        """Session-scoped universe + runtime-discovered symbols (e.g., Alpaca crypto)."""
+        base = [s for s in self._session_symbols if s not in self._failed_symbols]
+        # Only add dynamic crypto for unified/crypto sessions
+        if self.session_type in ("unified", "crypto"):
+            extras = [s for s in self._dynamic_crypto_symbols if s not in base and s not in self._failed_symbols]
+            return base + extras
+        return base
 
     def _get_est_hour(self) -> float:
         """Get current hour in Eastern Time (handles DST properly)."""

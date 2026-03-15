@@ -1077,6 +1077,110 @@ async def get_social_governor_decisions(
     }
 
 # --------------------------------------------------------------------------------
+# Session-Scoped Endpoints (Core Strategy + Crypto Sleeve)
+# --------------------------------------------------------------------------------
+
+@app.get("/api/v1/sessions")
+async def list_sessions(user=Depends(require_user)):
+    """List available trading sessions and their status."""
+    session_mode = getattr(ApexConfig, "SESSION_MODE", "unified")
+    crypto_enabled = getattr(ApexConfig, "CRYPTO_SLEEVE_ENABLED", True)
+    sessions = []
+    if session_mode == "dual":
+        sessions.append({"id": "core", "label": "Core Strategy", "enabled": True,
+                         "description": "Equities, indices, and forex"})
+        sessions.append({"id": "crypto", "label": "Crypto Sleeve", "enabled": crypto_enabled,
+                         "description": "Cryptocurrency trading"})
+    elif session_mode == "core_only":
+        sessions.append({"id": "core", "label": "Core Strategy", "enabled": True,
+                         "description": "Equities, indices, and forex"})
+    elif session_mode == "crypto_only":
+        sessions.append({"id": "crypto", "label": "Crypto Sleeve", "enabled": True,
+                         "description": "Cryptocurrency trading"})
+    else:
+        sessions.append({"id": "unified", "label": "Unified Strategy", "enabled": True,
+                         "description": "All asset classes"})
+    return {"session_mode": session_mode, "sessions": sessions}
+
+
+@app.get("/api/v1/session/{session_type}/status")
+async def get_session_status(session_type: str, user=Depends(require_user)):
+    """Get status for a specific trading session (core or crypto)."""
+    if session_type not in ("core", "crypto", "unified"):
+        raise HTTPException(status_code=400, detail="session_type must be 'core', 'crypto', or 'unified'")
+
+    from api.dependencies import read_session_state
+    state = read_session_state(session_type)
+    safe_metrics = sanitize_execution_metrics(state)
+    session_cfg = ApexConfig.get_session_config(session_type)
+    return {
+        "session_type": session_type,
+        "status": "online" if _state_is_fresh(state, ApexConfig.HEALTH_STALENESS_SECONDS) else "offline",
+        "timestamp": state.get("timestamp"),
+        "initial_capital": session_cfg.get("initial_capital", 0),
+        "symbols_count": len(ApexConfig.get_session_symbols(session_type)),
+        **safe_metrics,
+    }
+
+
+@app.get("/api/v1/session/{session_type}/positions")
+async def get_session_positions(session_type: str, user=Depends(require_user)):
+    """Get positions for a specific trading session."""
+    if session_type not in ("core", "crypto", "unified"):
+        raise HTTPException(status_code=400, detail="Invalid session_type")
+
+    from api.dependencies import read_session_state
+    state = read_session_state(session_type)
+    positions = state.get("positions", {})
+    result = []
+    for symbol, data in positions.items():
+        result.append({
+            "symbol": symbol,
+            "qty": data.get("qty", 0),
+            "side": data.get("side", "LONG"),
+            "entry": data.get("avg_price", 0),
+            "current": data.get("current_price", 0),
+            "pnl": data.get("pnl", 0),
+            "pnl_pct": data.get("pnl_pct", 0),
+            "signal": data.get("current_signal", 0),
+            "signal_direction": data.get("signal_direction", "UNKNOWN"),
+        })
+    return {"session_type": session_type, "positions": result}
+
+
+@app.get("/api/v1/session/{session_type}/metrics")
+async def get_session_metrics(session_type: str, user=Depends(require_user)):
+    """Get performance metrics for a specific trading session."""
+    if session_type not in ("core", "crypto", "unified"):
+        raise HTTPException(status_code=400, detail="Invalid session_type")
+
+    from api.dependencies import read_session_state
+    state = read_session_state(session_type)
+    safe_metrics = sanitize_execution_metrics(state)
+    session_cfg = ApexConfig.get_session_config(session_type)
+
+    return {
+        "session_type": session_type,
+        "sharpe_target": 1.5,
+        "initial_capital": session_cfg.get("initial_capital", 0),
+        "max_positions": session_cfg.get("max_positions", 0),
+        "signal_threshold": session_cfg.get("min_signal_threshold", 0),
+        "confidence_threshold": session_cfg.get("min_confidence", 0),
+        **safe_metrics,
+    }
+
+
+@app.post("/api/v1/session/crypto/toggle")
+async def toggle_crypto_sleeve(user=Depends(require_role("admin"))):
+    """Toggle the crypto sleeve on/off."""
+    current = getattr(ApexConfig, "CRYPTO_SLEEVE_ENABLED", True)
+    ApexConfig.CRYPTO_SLEEVE_ENABLED = not current
+    new_state = ApexConfig.CRYPTO_SLEEVE_ENABLED
+    logger.info(f"Crypto sleeve toggled: {current} -> {new_state} by user {getattr(user, 'user_id', 'unknown')}")
+    return {"crypto_sleeve_enabled": new_state, "previous": current}
+
+
+# --------------------------------------------------------------------------------
 # WebSocket Endpoint
 # --------------------------------------------------------------------------------
 
