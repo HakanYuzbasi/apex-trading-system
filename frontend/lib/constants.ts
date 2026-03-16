@@ -27,7 +27,7 @@ export const SESSION_CONFIG = {
     label: "Crypto Sleeve",
     description: "Cryptocurrency trading",
     sharpeTarget: 1.5,
-    maxPositions: 10,
+    maxPositions: 15,
     initialCapital: 100_000,
   },
 } as const;

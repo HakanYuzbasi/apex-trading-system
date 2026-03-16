@@ -892,7 +892,7 @@ class ApexConfig:
 
     # Per-session risk parameters
     CORE_MAX_POSITIONS: int = int(os.getenv("APEX_CORE_MAX_POSITIONS", "25"))
-    CRYPTO_MAX_POSITIONS: int = int(os.getenv("APEX_CRYPTO_MAX_POSITIONS", "10"))
+    CRYPTO_MAX_POSITIONS: int = int(os.getenv("APEX_CRYPTO_MAX_POSITIONS", "15"))
     CORE_MAX_DAILY_LOSS: float = float(os.getenv("APEX_CORE_MAX_DAILY_LOSS", "0.025"))
     CRYPTO_MAX_DAILY_LOSS_SESSION: float = float(os.getenv("APEX_CRYPTO_MAX_DAILY_LOSS_SESSION", "0.06"))
     CORE_KELLY_FRACTION: float = float(os.getenv("APEX_CORE_KELLY_FRACTION", "0.60"))
@@ -1004,25 +1004,39 @@ class ApexConfig:
         "USD/CAD", "NZD/USD"
     ]
 
-    # 3. Crypto Pairs (Top Liquid, expanded for Alpaca crypto paper)
+    # 3. Crypto Pairs (Expanded universe for Alpaca crypto paper)
     # Note: MATIC/USD and UNI/USD removed - delisted from yfinance as of Feb 2026
     CRYPTO_PAIRS = [
+        # Tier 1: Blue-chip (highest liquidity)
         "BTC/USD",
         "ETH/USD",
         "SOL/USD",
+        "XRP/USD",
         "DOGE/USD",
+        "ADA/USD",
+        # Tier 2: Large-cap DeFi & L1s
         "AVAX/USD",
         "LINK/USD",
-        # "MATIC/USD",  # ❌ Delisted from yfinance
-        "ADA/USD",
-        "XRP/USD",
         "DOT/USD",
         "LTC/USD",
         "BCH/USD",
+        "AAVE/USD",
+        "ATOM/USD",
+        "NEAR/USD",
+        "FIL/USD",
+        "APT/USD",
+        # Tier 3: Mid-cap momentum
         "XLM/USD",
         "ETC/USD",
-        "AAVE/USD",
-        # "UNI/USD",  # ❌ Delisted from yfinance
+        "ALGO/USD",
+        "ICP/USD",
+        "GRT/USD",
+        "SHIB/USD",
+        "MKR/USD",
+        "CRV/USD",
+        "SUSHI/USD",
+        # "MATIC/USD",  # ❌ Delisted from yfinance
+        # "UNI/USD",    # ❌ Delisted from yfinance
     ]
     EXTRA_CRYPTO_PAIRS = [
         token.strip().upper()
@@ -1032,30 +1046,32 @@ class ApexConfig:
     if EXTRA_CRYPTO_PAIRS:
         CRYPTO_PAIRS = list(dict.fromkeys(CRYPTO_PAIRS + EXTRA_CRYPTO_PAIRS))
 
-    # 4. Top 100 S&P 500 Components (aligned with SECTOR_MAP)
-    # Trimmed to exactly 85 to keep total universe at 100 (4 Indices + 7 Forex + 4 Crypto + 85 Stocks)
+    # 4. Top S&P 500 Components (aligned with SECTOR_MAP)
+    # Exactly 89 equities so IBKR universe = 4 indices + 7 forex + 89 equities = 100
     SP500_TOP_100 = [
-        # Technology (Top 15)
+        # Technology (18)
         "AAPL", "MSFT", "NVDA", "GOOGL", "META", "TSLA", "AVGO", "ORCL", "CSCO", "ADBE",
-        "CRM", "ACN", "AMD", "INTC", "IBM", "QCOM", "TXN",
-        # Financials (Top 6)
-        "JPM", "BAC", "WFC", "GS", "MS", "C", "BLK", "AXP",
-        # Healthcare (Top 6)
-        "UNH", "JNJ", "LLY", "ABBV", "MRK", "TMO", "ABT", "DHR",
-        # Consumer (Top 6)
-        "AMZN", "WMT", "HD", "MCD", "NKE", "SBUX", "LOW", "TGT", "DLTR",
-        # Industrials (Top 7)
-        "BA", "CAT", "GE", "HON", "UPS", "RTX", "LMT", "DE",
-        # Energy (Top 5)
-        "XOM", "CVX", "COP", "SLB", "EOG", "MPC",
-        # Materials (Top 5)
-        "LIN", "APD", "ECL", "SHW", "FCX", "NEM", "ALB",
-        # Communication (Top 6)
+        "CRM", "ACN", "AMD", "INTC", "IBM", "QCOM", "TXN", "AMAT",
+        # Financials (10)
+        "JPM", "BAC", "WFC", "GS", "MS", "C", "BLK", "AXP", "SCHW", "USB",
+        # Healthcare (10)
+        "UNH", "JNJ", "LLY", "ABBV", "MRK", "TMO", "ABT", "DHR", "PFE", "BMY",
+        # Consumer (10)
+        "AMZN", "WMT", "HD", "MCD", "NKE", "SBUX", "LOW", "TGT", "DG", "DLTR",
+        # Industrials (10)
+        "BA", "CAT", "GE", "HON", "UPS", "RTX", "LMT", "DE", "MMM", "UNP",
+        # Energy (8)
+        "XOM", "CVX", "COP", "SLB", "EOG", "MPC", "PSX", "VLO",
+        # Materials (5)
+        "LIN", "APD", "SHW", "FCX", "NEM",
+        # Communication (6)
         "NFLX", "DIS", "CMCSA", "T", "TMUS", "VZ",
-        # Real Estate & Utilities (Top 5)
+        # Real Estate & Utilities (5)
         "AMT", "PLD", "CCI", "EQIX", "NEE",
-        # Commodities (Top 4)
-        "GLD", "SLV", "USO", "UNG"
+        # Commodities (4) — ETFs with equity-like trading
+        "GLD", "SLV", "USO", "UNG",
+        # Additional high-momentum names (3)
+        "MU", "LRCX", "OXY",
     ]
 
     # Combine all into master universe
@@ -1075,7 +1091,10 @@ class ApexConfig:
         return cls.SYMBOLS
 
     # Backtesting-only symbols (kept in universe, excluded from IBKR paper execution)
-    BACKTEST_ONLY_SYMBOLS = {"SOL/USDT", "DOGE/USDT"}
+    BACKTEST_ONLY_SYMBOLS = {
+        "SOL/USDT", "DOGE/USDT",
+        "SUSHI/USD", "CRV/USD", "GRT/USD", "ICP/USD",  # Lower liquidity crypto
+    }
 
     # Commodity symbols for special handling
     COMMODITY_SYMBOLS = {'GLD', 'SLV', 'USO', 'UNG', 'PALL'}
