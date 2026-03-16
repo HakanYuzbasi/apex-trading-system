@@ -20,10 +20,16 @@ import numpy as np
 import pandas as pd
 from typing import Dict, List, Tuple, Optional
 from datetime import datetime
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from collections import defaultdict
 import logging
 import warnings
+
+try:
+    from scipy import stats as scipy_stats
+    SCIPY_AVAILABLE = True
+except ImportError:
+    SCIPY_AVAILABLE = False
 
 warnings.filterwarnings('ignore')
 
@@ -133,6 +139,12 @@ class BacktestResult:
     # Monte Carlo results
     monte_carlo: Optional[Dict] = None
 
+    # Deflated Sharpe Ratio (multiple testing adjustment)
+    deflated_sharpe: Optional[Dict] = None
+
+    # Session type
+    session_type: str = "unified"
+
 
 class GodLevelBacktester:
     """
@@ -144,6 +156,12 @@ class GodLevelBacktester:
     WARMUP_DAYS = 60
     WALK_FORWARD_TRAIN_DAYS = 252  # 1 year training
     WALK_FORWARD_TEST_DAYS = 126   # 6 months testing
+    # Purge/embargo gap: prevent feature contamination between train and test.
+    # Per Lopez de Prado (2018, "Advances in Financial ML", Ch. 7):
+    # purge_days >= max feature lookback (60 bars) + label forward window
+    # embargo_days >= autocorrelation decay (typically 2-5 days for daily returns)
+    WALK_FORWARD_PURGE_DAYS = 10   # Gap between train end and test start
+    WALK_FORWARD_EMBARGO_DAYS = 5  # Additional embargo after purge
 
     # Transaction costs
     COMMISSION_PER_SHARE = 0.005  # $0.005 per share
@@ -197,8 +215,18 @@ class GodLevelBacktester:
     def _slippage_bps_for_asset(
         self,
         asset_class: AssetClass,
-        prices: Optional[pd.Series] = None
+        prices: Optional[pd.Series] = None,
+        order_notional: float = 0.0,
     ) -> float:
+        """Empirical slippage + square-root market impact model.
+
+        Market impact per Almgren & Chriss (2001):
+            impact = sigma_daily * sqrt(Q / ADV)
+        where Q = order size in $, ADV = average daily volume in $.
+
+        This prevents the backtest from being over-optimistic on large orders
+        where market impact dominates spread-based slippage.
+        """
         if asset_class == AssetClass.FOREX:
             base_bps = float(ApexConfig.FX_SPREAD_BPS)
             max_bps = 40.0
@@ -217,7 +245,28 @@ class GodLevelBacktester:
             return base_bps
         vol = float(returns.std())
         vol_multiplier = min(2.0, max(0.0, vol * 40.0))
-        return float(min(max_bps, base_bps * (1.0 + vol_multiplier)))
+        spread_slippage = float(min(max_bps, base_bps * (1.0 + vol_multiplier)))
+
+        # Square-root market impact model
+        # Estimate ADV from price series (proxy: avg price * assumed daily volume)
+        if order_notional > 0 and len(prices) >= 20:
+            avg_price = float(prices.tail(20).mean())
+            # Conservative ADV estimates per asset class
+            if asset_class == AssetClass.CRYPTO:
+                est_adv = avg_price * 5_000_000  # ~$5M daily for major crypto
+            elif asset_class == AssetClass.FOREX:
+                est_adv = avg_price * 50_000_000  # FX is ultra-liquid
+            else:
+                est_adv = avg_price * 2_000_000  # ~$2M daily for mid-cap equities
+
+            if est_adv > 0:
+                participation_rate = order_notional / est_adv
+                # impact_bps = sigma_daily_bps * sqrt(participation_rate)
+                sigma_daily_bps = vol * 10000.0
+                impact_bps = sigma_daily_bps * float(np.sqrt(min(participation_rate, 0.10)))
+                spread_slippage += min(impact_bps, max_bps)  # Cap total impact
+
+        return spread_slippage
 
     def _commission_for_order(
         self,
@@ -408,8 +457,13 @@ class GodLevelBacktester:
             train_start_idx = max(0, train_end_idx - self.WALK_FORWARD_TRAIN_DAYS)
             train_dates = all_dates[train_start_idx:train_end_idx]
 
-            # Test period
-            test_start_idx = train_end_idx
+            # Purge + embargo gap: skip days between train end and test start
+            # to prevent feature contamination (lookback windows that span
+            # the train/test boundary). Per Lopez de Prado (2018), Ch. 7.
+            purge_embargo = self.WALK_FORWARD_PURGE_DAYS + self.WALK_FORWARD_EMBARGO_DAYS
+            test_start_idx = train_end_idx + purge_embargo
+            if test_start_idx >= total_days:
+                break
             test_end_idx = min(test_start_idx + self.WALK_FORWARD_TEST_DAYS, total_days)
             test_dates = all_dates[test_start_idx:test_end_idx]
 
@@ -856,8 +910,9 @@ class GodLevelBacktester:
         entry_price = row['Close']
         asset_class = self._asset_class_for_symbol(symbol)
 
-        # Apply slippage
-        entry_slippage_bps = self._slippage_bps_for_asset(asset_class, prices)
+        # Apply slippage (with square-root market impact for large orders)
+        est_notional = min(self.capital * self.MAX_POSITION_PCT, self.capital / max(1, self.MAX_POSITIONS))
+        entry_slippage_bps = self._slippage_bps_for_asset(asset_class, prices, order_notional=est_notional)
         slippage = entry_price * (entry_slippage_bps / 10000.0)
         if signal > 0:
             entry_price += slippage  # Buy higher
@@ -1224,13 +1279,16 @@ class GodLevelBacktester:
         max_drawdown_duration = max(drawdown_periods) if drawdown_periods else 0
 
         # Risk metrics
+        # Use risk-free rate of 5% (consistent with performance_tracker.py)
+        risk_free_daily = 0.05 / 252
         if len(daily_returns) > 0 and daily_returns.std() > 0:
-            sharpe_ratio = (daily_returns.mean() * 252) / (daily_returns.std() * np.sqrt(252))
+            excess_returns = daily_returns - risk_free_daily
+            sharpe_ratio = (excess_returns.mean() * 252) / (excess_returns.std() * np.sqrt(252))
 
-            # Sortino (downside deviation)
-            downside_returns = daily_returns[daily_returns < 0]
-            downside_std = downside_returns.std() * np.sqrt(252) if len(downside_returns) > 0 else daily_returns.std() * np.sqrt(252)
-            sortino_ratio = (daily_returns.mean() * 252) / downside_std if downside_std > 0 else 0
+            # Sortino (downside deviation using excess returns)
+            downside_excess = excess_returns[excess_returns < 0]
+            downside_std = downside_excess.std() * np.sqrt(252) if len(downside_excess) > 0 else excess_returns.std() * np.sqrt(252)
+            sortino_ratio = (excess_returns.mean() * 252) / downside_std if downside_std > 0 else 0
 
             # Calmar ratio
             calmar_ratio = annualized_return / max_drawdown if max_drawdown > 0 else 0
@@ -1277,11 +1335,23 @@ class GodLevelBacktester:
         squared_drawdowns = drawdown ** 2
         ulcer_index = np.sqrt(squared_drawdowns.mean()) * 100
 
-        # Regime performance
+        # Regime performance (with per-regime Sharpe)
+        logger.info("\n--- PER-REGIME PERFORMANCE ---")
         regime_performance = self._calculate_regime_performance()
 
+        # Deflated Sharpe Ratio (multiple testing adjustment)
+        logger.info("\n--- DEFLATED SHARPE RATIO ---")
+        dsr_result = self.calculate_deflated_sharpe(sharpe_ratio, total_trades)
+
+        # Flag any bleeding regimes
+        bleeding_regimes = [r for r, p in regime_performance.items() if p.get('negative_sharpe')]
+        if bleeding_regimes:
+            logger.warning(f"\n  *** WARNING: Strategy bleeds in regimes: {bleeding_regimes}")
+            logger.warning(f"  *** Consider adding regime filter or disabling trading in these regimes")
+
         logger.info(f"\nTotal Return: {total_return:.2f}%")
-        logger.info(f"Sharpe Ratio: {sharpe_ratio:.2f}")
+        logger.info(f"Sharpe Ratio: {sharpe_ratio:.2f} (risk-free adjusted)")
+        logger.info(f"DSR: {dsr_result['dsr']:.3f} ({'PASS' if dsr_result['pass'] else 'FAIL'})")
         logger.info(f"Win Rate: {win_rate:.1f}%")
         logger.info(f"Max Drawdown: {max_drawdown:.2f}%")
         logger.info(f"Total Trades: {total_trades}")
@@ -1314,7 +1384,9 @@ class GodLevelBacktester:
             regime_performance=regime_performance,
             equity_curve=equity_series,
             drawdown_curve=drawdown,
-            trades=self.trades
+            trades=self.trades,
+            deflated_sharpe=dsr_result,
+            session_type=getattr(self, "_session_type", "unified"),
         )
 
     def _calculate_benchmark_return(self, historical_data: Dict, dates) -> float:
@@ -1333,7 +1405,13 @@ class GodLevelBacktester:
         return 0.0
 
     def _calculate_regime_performance(self) -> Dict[str, Dict]:
-        """Calculate performance by market regime."""
+        """Calculate performance by market regime INCLUDING per-regime Sharpe.
+
+        Critical for GO/NO-GO: if any regime has negative Sharpe, the strategy
+        must either add a regime filter for that regime or accept the bleed.
+        A strategy profitable in 4/6 regimes but bleeding in 2 will surprise
+        with drawdowns that the aggregate Sharpe masks.
+        """
         regime_trades = defaultdict(list)
 
         for trade in self.trades:
@@ -1342,14 +1420,90 @@ class GodLevelBacktester:
         regime_perf = {}
         for regime, trades in regime_trades.items():
             wins = [t for t in trades if t.pnl > 0]
+            trade_returns = [t.pnl / max(abs(t.entry_price * t.shares), 1) for t in trades]
+
+            # Per-regime Sharpe (annualized from trade returns)
+            if len(trade_returns) >= 5 and np.std(trade_returns) > 0:
+                avg_hold = np.mean([max(t.hold_days, 1) for t in trades])
+                annualization = np.sqrt(252.0 / max(avg_hold, 1.0))
+                regime_sharpe = float(np.mean(trade_returns) / np.std(trade_returns) * annualization)
+            else:
+                regime_sharpe = 0.0
+
             regime_perf[regime] = {
                 'trades': len(trades),
                 'win_rate': len(wins) / len(trades) * 100 if trades else 0,
                 'avg_pnl': np.mean([t.pnl for t in trades]) if trades else 0,
-                'total_pnl': sum(t.pnl for t in trades)
+                'total_pnl': sum(t.pnl for t in trades),
+                'sharpe': round(regime_sharpe, 3),
+                'negative_sharpe': regime_sharpe < 0,
             }
 
+        # Log regime breakdown
+        for regime, perf in sorted(regime_perf.items()):
+            flag = " *** BLEEDING ***" if perf['negative_sharpe'] else ""
+            logger.info(
+                f"  Regime '{regime}': {perf['trades']} trades, "
+                f"Sharpe={perf['sharpe']:.2f}, "
+                f"WR={perf['win_rate']:.0f}%, "
+                f"PnL=${perf['total_pnl']:,.0f}{flag}"
+            )
+
         return regime_perf
+
+    def calculate_deflated_sharpe(self, sharpe_ratio: float, n_trades: int, n_trials: int = 20) -> Dict:
+        """Compute Deflated Sharpe Ratio (DSR) per Bailey & Lopez de Prado (2014).
+
+        DSR adjusts observed Sharpe for multiple testing (selection bias).
+        Formula: DSR = P(SR* > 0 | SR_hat, N, T, skew, kurtosis)
+
+        n_trials: number of strategy variants tried (configs, thresholds, etc.)
+            Default 20 is conservative — most quant shops try 50-200 variants.
+
+        GO gate: DSR > 1.35 (roughly p < 0.05 after multiple testing adjustment)
+
+        Failure mode: if n_trials is underestimated, DSR is overoptimistic.
+        """
+        if not SCIPY_AVAILABLE:
+            logger.warning("scipy not available — cannot compute Deflated Sharpe Ratio")
+            return {'dsr': 0.0, 'pass': False, 'reason': 'scipy not installed'}
+
+        if n_trades < 30:
+            return {'dsr': 0.0, 'pass': False, 'reason': 'Insufficient trades'}
+
+        trade_returns = [t.pnl / max(abs(t.entry_price * t.shares), 1) for t in self.trades]
+        if not trade_returns or np.std(trade_returns) == 0:
+            return {'dsr': 0.0, 'pass': False, 'reason': 'Zero variance'}
+
+        T = len(trade_returns)
+        skew = float(scipy_stats.skew(trade_returns))
+        kurtosis = float(scipy_stats.kurtosis(trade_returns))
+
+        # Expected maximum Sharpe under null (Euler-Mascheroni approximation)
+        euler_mascheroni = 0.5772156649
+        e_max_sr = np.sqrt(2 * np.log(n_trials)) - (np.log(np.pi) + euler_mascheroni) / (2 * np.sqrt(2 * np.log(n_trials)))
+
+        # Standard error of the Sharpe ratio
+        sr_se = np.sqrt((1 + 0.5 * sharpe_ratio**2 - skew * sharpe_ratio + (kurtosis / 4) * sharpe_ratio**2) / T)
+
+        # DSR = (SR_hat - E[max(SR)]) / SE(SR)
+        if sr_se > 0:
+            dsr = float((sharpe_ratio - e_max_sr) / sr_se)
+        else:
+            dsr = 0.0
+
+        passed = dsr > 1.35
+        logger.info(f"\n  Deflated Sharpe Ratio: {dsr:.3f} (threshold: 1.35) -> {'PASS' if passed else 'FAIL'}")
+        logger.info(f"    Observed Sharpe: {sharpe_ratio:.3f}, E[max SR under null]: {e_max_sr:.3f}")
+        logger.info(f"    n_trials={n_trials}, T={T}, skew={skew:.2f}, kurtosis={kurtosis:.2f}")
+
+        return {
+            'dsr': round(dsr, 4),
+            'pass': passed,
+            'e_max_sr': round(e_max_sr, 4),
+            'sr_se': round(sr_se, 4),
+            'n_trials': n_trials,
+        }
 
     def run_monte_carlo(self, n_simulations: int = 1000) -> Dict:
         """

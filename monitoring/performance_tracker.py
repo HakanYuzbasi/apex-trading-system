@@ -77,7 +77,7 @@ class PerformanceTracker:
         except (ValueError, TypeError) as e:
             logger.error(f"Invalid equity value: {value} ({type(value)}): {e}")
     
-    def get_sharpe_ratio(self, risk_free_rate: float = 0.02) -> float:
+    def get_sharpe_ratio(self, risk_free_rate: float = 0.05) -> float:
         """Calculate Sharpe ratio from equity curve."""
         if len(self.equity_curve) < 2:
             return 0.0
