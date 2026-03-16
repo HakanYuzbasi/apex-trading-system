@@ -74,7 +74,7 @@ class ApexConfig:
     # ═══════════════════════════════════════════════════════════════
     IBKR_HOST: str = os.getenv("APEX_IBKR_HOST", os.getenv("IBKR_HOST", "127.0.0.1"))
     IBKR_PORT: int = int(
-        os.getenv("APEX_IBKR_PORT", os.getenv("IBKR_PORT", "7497"))
+        os.getenv("APEX_IBKR_PORT", os.getenv("IBKR_PORT", "7497")).split("#")[0].strip()
     )  # 7497 = Paper, 7496 = Live
     import random
     IBKR_CLIENT_ID: int = int(
