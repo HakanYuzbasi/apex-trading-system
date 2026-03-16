@@ -1,5 +1,16 @@
 # tests/conftest.py - Pytest configuration and fixtures
 
+import os
+import tempfile
+from pathlib import Path
+
+# Force Matplotlib to use a writable temp cache during pytest collection/imports.
+_mplconfigdir = Path(tempfile.gettempdir()) / "apex_pytest_mplconfig"
+_mplconfigdir.mkdir(parents=True, exist_ok=True)
+os.environ.setdefault("MPLCONFIGDIR", str(_mplconfigdir))
+if not os.environ.get("LOKY_MAX_CPU_COUNT"):
+    os.environ["LOKY_MAX_CPU_COUNT"] = str(os.cpu_count() or 1)
+
 import pytest
 import asyncio
 import numpy as np

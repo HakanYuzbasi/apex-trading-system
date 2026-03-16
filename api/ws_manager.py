@@ -1,9 +1,10 @@
 import json
 import logging
 import math
+from typing import Dict, List, Optional, Any, Set, Tuple, DefaultDict
 from collections import defaultdict
-from typing import DefaultDict, Dict, List
 from fastapi import WebSocket
+from monitoring.prometheus_metrics import PrometheusMetrics
 
 logger = logging.getLogger("api")
 
@@ -19,7 +20,7 @@ _DELTA_ALWAYS_INCLUDE = frozenset({
 })
 
 # Maximum simultaneous WebSocket connections per user (DoS guard).
-_MAX_WS_PER_USER = 5
+_MAX_WS_PER_USER = 10
 
 def _sanitize_floats(obj):
     """Replace NaN/Inf float values with JSON-safe defaults."""
@@ -35,11 +36,23 @@ def _sanitize_floats(obj):
 
 
 def _values_equal(a, b) -> bool:
-    """Deep equality check that handles dicts/lists via JSON comparison."""
-    if type(a) != type(b):
+    """Deep equality check for WS delta encoding.
+
+    Fast path for scalars (covers ~95% of fields like capital, pnl, equity).
+    Falls back to structural equality for dicts/lists; avoids json.dumps overhead.
+    """
+    if a is b:
+        return True
+    if type(a) is not type(b):
         return False
-    if isinstance(a, (dict, list)):
-        return json.dumps(a, default=str, sort_keys=True) == json.dumps(b, default=str, sort_keys=True)
+    if isinstance(a, dict):
+        if len(a) != len(b):
+            return False
+        return all(k in b and _values_equal(v, b[k]) for k, v in a.items())
+    if isinstance(a, list):
+        if len(a) != len(b):
+            return False
+        return all(_values_equal(x, y) for x, y in zip(a, b))
     return a == b
 
 
@@ -158,5 +171,13 @@ class ConnectionManager:
             if getattr(ws.state, "is_admin", False):
                 return True
         return False
+
+    def record_latency(self, latency_ms: float):
+        """Record frontend WebSocket latency to Prometheus."""
+        try:
+            metrics = PrometheusMetrics()
+            metrics.record_frontend_latency(latency_ms)
+        except Exception:
+            pass
 
 manager = ConnectionManager()

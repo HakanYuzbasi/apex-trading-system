@@ -1,3 +1,4 @@
+import pytest
 from types import SimpleNamespace
 
 from config import ApexConfig
@@ -26,6 +27,9 @@ class _DummyRiskManager:
     def save_state(self):
         self.save_called = True
 
+    async def save_state_async(self):
+        self.save_called = True
+
     def set_starting_capital(self, value):
         self.starting_capital = value
         self.peak_capital = value
@@ -37,7 +41,7 @@ class _DummyPerformanceTracker:
         self.equity_curve = [("2026-01-01T00:00:00", 1_300_000.0)]
         self.reset_calls = []
 
-    def reset_history(self, *, starting_capital: float, reason: str):
+    async def reset_history(self, *, starting_capital: float, reason: str):
         self.reset_calls.append((float(starting_capital), str(reason)))
 
 
@@ -49,7 +53,16 @@ class _DummyDrawdownBreaker:
         self.reset_calls.append(float(value))
 
 
-def test_unified_latch_rebase_for_paper(monkeypatch):
+class _DummyEquityOutlierGuard:
+    def __init__(self):
+        self.seed_calls = []
+
+    def seed(self, value: float):
+        self.seed_calls.append(float(value))
+
+
+@pytest.mark.asyncio
+async def test_unified_latch_rebase_for_paper(monkeypatch):
     monkeypatch.setattr(ApexConfig, "UNIFIED_LATCH_RESET_REBASE_RISK_BASELINES", True, raising=False)
     monkeypatch.setattr(ApexConfig, "UNIFIED_LATCH_RESET_REBASE_PERFORMANCE", True, raising=False)
     monkeypatch.setattr(ApexConfig, "LIVE_TRADING", True, raising=False)
@@ -65,7 +78,7 @@ def test_unified_latch_rebase_for_paper(monkeypatch):
     system._last_good_total_equity = 0.0
 
     notes = []
-    system._rebase_latches_after_reset_for_paper(
+    await system._rebase_latches_after_reset_for_paper(
         requested_by="ops-test",
         reason="manual_reset",
         reset_notes=notes,
@@ -81,7 +94,8 @@ def test_unified_latch_rebase_for_paper(monkeypatch):
     assert "paper_performance_rebase=applied" in notes
 
 
-def test_startup_state_sanitize_rebases_paper_state(monkeypatch):
+@pytest.mark.asyncio
+async def test_startup_state_sanitize_rebases_paper_state(monkeypatch):
     monkeypatch.setattr(ApexConfig, "PAPER_STARTUP_RISK_SELF_HEAL_ENABLED", True, raising=False)
     monkeypatch.setattr(ApexConfig, "PAPER_STARTUP_RISK_MISMATCH_RATIO", 0.30, raising=False)
     monkeypatch.setattr(ApexConfig, "PAPER_STARTUP_RESET_CIRCUIT_BREAKER", True, raising=False)
@@ -98,7 +112,7 @@ def test_startup_state_sanitize_rebases_paper_state(monkeypatch):
     system.performance_tracker = _DummyPerformanceTracker()
     system.drawdown_breaker = _DummyDrawdownBreaker()
 
-    system._sanitize_startup_state_for_paper()
+    await system._sanitize_startup_state_for_paper()
 
     assert system.risk_manager.starting_capital == 100_000.0
     assert system.risk_manager.peak_capital == 100_000.0
@@ -108,3 +122,72 @@ def test_startup_state_sanitize_rebases_paper_state(monkeypatch):
     assert system.performance_tracker.reset_calls == [(100_000.0, "paper_startup_rebase")]
     assert system.drawdown_breaker.reset_calls == [100_000.0]
     assert system._last_good_total_equity == 100_000.0
+
+
+@pytest.mark.asyncio
+async def test_paper_broker_mix_rebase_when_new_broker_joins(monkeypatch):
+    monkeypatch.setattr(ApexConfig, "PAPER_STARTUP_RISK_MISMATCH_RATIO", 0.05, raising=False)
+    monkeypatch.setattr(ApexConfig, "PAPER_STARTUP_RESET_CIRCUIT_BREAKER", True, raising=False)
+    monkeypatch.setattr(ApexConfig, "PAPER_STARTUP_PERFORMANCE_REBASE_ENABLED", True, raising=False)
+    monkeypatch.setattr(ApexConfig, "LIVE_TRADING", True, raising=False)
+    monkeypatch.setattr(ApexConfig, "ALPACA_BASE_URL", "https://paper-api.alpaca.markets", raising=False)
+
+    system = ApexTradingSystem.__new__(ApexTradingSystem)
+    system.ibkr = SimpleNamespace(port=7497)
+    system.alpaca = SimpleNamespace()
+    system.capital = 1_180_000.0
+    system.risk_manager = _DummyRiskManager()
+    system.risk_manager.starting_capital = 1_180_000.0
+    system.risk_manager.peak_capital = 1_180_000.0
+    system.risk_manager.day_start_capital = 1_180_000.0
+    system.performance_tracker = _DummyPerformanceTracker()
+    system.drawdown_breaker = _DummyDrawdownBreaker()
+    system.equity_outlier_guard = _DummyEquityOutlierGuard()
+    system._last_good_total_equity = 1_180_000.0
+    system._equity_baseline_brokers = {"ibkr"}
+    system._current_equity_contributors = {"ibkr", "alpaca"}
+
+    await system._maybe_rebase_paper_baselines_for_broker_mix(current_value=1_260_000.0)
+
+    assert system.risk_manager.starting_capital == 1_260_000.0
+    assert system.risk_manager.peak_capital == 1_260_000.0
+    assert system.risk_manager.day_start_capital == 1_260_000.0
+    assert system.performance_tracker.reset_calls == [(1_260_000.0, "paper_broker_mix_rebase")]
+    assert system.drawdown_breaker.reset_calls == [1_260_000.0]
+    assert system.equity_outlier_guard.seed_calls == [1_260_000.0]
+    assert system.risk_manager.circuit_breaker.reset_called is True
+    assert system.risk_manager.save_called is True
+    assert system._last_good_total_equity == 1_260_000.0
+    assert system._equity_baseline_brokers == {"ibkr", "alpaca"}
+
+
+@pytest.mark.asyncio
+async def test_paper_broker_mix_small_delta_updates_baseline_without_rebase(monkeypatch):
+    monkeypatch.setattr(ApexConfig, "PAPER_STARTUP_RISK_MISMATCH_RATIO", 0.10, raising=False)
+    monkeypatch.setattr(ApexConfig, "PAPER_STARTUP_PERFORMANCE_REBASE_ENABLED", True, raising=False)
+    monkeypatch.setattr(ApexConfig, "LIVE_TRADING", True, raising=False)
+    monkeypatch.setattr(ApexConfig, "ALPACA_BASE_URL", "https://paper-api.alpaca.markets", raising=False)
+
+    system = ApexTradingSystem.__new__(ApexTradingSystem)
+    system.ibkr = SimpleNamespace(port=7497)
+    system.alpaca = SimpleNamespace()
+    system.capital = 1_180_000.0
+    system.risk_manager = _DummyRiskManager()
+    system.risk_manager.starting_capital = 1_180_000.0
+    system.risk_manager.peak_capital = 1_180_000.0
+    system.risk_manager.day_start_capital = 1_180_000.0
+    system.performance_tracker = _DummyPerformanceTracker()
+    system.drawdown_breaker = _DummyDrawdownBreaker()
+    system.equity_outlier_guard = _DummyEquityOutlierGuard()
+    system._equity_baseline_brokers = {"ibkr"}
+    system._current_equity_contributors = {"ibkr", "alpaca"}
+
+    await system._maybe_rebase_paper_baselines_for_broker_mix(current_value=1_200_000.0)
+
+    assert system.risk_manager.starting_capital == 1_180_000.0
+    assert system.risk_manager.peak_capital == 1_180_000.0
+    assert system.risk_manager.day_start_capital == 1_180_000.0
+    assert system.performance_tracker.reset_calls == []
+    assert system.drawdown_breaker.reset_calls == []
+    assert system.equity_outlier_guard.seed_calls == []
+    assert system._equity_baseline_brokers == {"ibkr", "alpaca"}

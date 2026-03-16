@@ -321,8 +321,7 @@ class RiskGuard:
         circuit_breaker_consecutive_losses: int = 5,
         circuit_breaker_cooldown_bars: int = 1,
         trade_cooldown_bars: int = 1,
-        max_order_notional: float = 250_000.0,
-        max_order_shares: int = 10_000,
+        max_order_notional: float = 50_000.0,
         max_price_deviation_bps: float = 250.0,
     ):
         self.max_positions = max_positions
@@ -333,7 +332,6 @@ class RiskGuard:
         self.cb_cooldown_bars = circuit_breaker_cooldown_bars
         self.trade_cooldown_bars = trade_cooldown_bars
         self.max_order_notional = max_order_notional
-        self.max_order_shares = max_order_shares
         self.max_price_deviation_bps = max_price_deviation_bps
 
         # State
@@ -439,9 +437,6 @@ class RiskGuard:
         if notional > self.max_order_notional:
             return False, "max_order_notional"
 
-        # Pre-trade share limit
-        if abs(quantity) > self.max_order_shares:
-            return False, "max_order_shares"
 
         # Price deviation check
         if recent_close is not None and recent_close > 0:
@@ -490,8 +485,7 @@ class BacktestEngine:
         # Execution realism
         use_open_price_fill: bool = True,
         max_participation_rate: float = 0.10,
-        max_order_notional: float = 250_000.0,
-        max_order_shares: int = 10_000,
+        max_order_notional: float = 50_000.0,
         # Stop management
         enable_stop_management: bool = True,
         default_stop_loss_pct: float = 0.03,
@@ -548,7 +542,6 @@ class BacktestEngine:
             circuit_breaker_cooldown_bars=circuit_breaker_cooldown_bars,
             trade_cooldown_bars=trade_cooldown_bars,
             max_order_notional=max_order_notional,
-            max_order_shares=max_order_shares,
         )
 
         # Initialize market impact model for dynamic slippage

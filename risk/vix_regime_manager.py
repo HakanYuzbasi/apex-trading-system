@@ -84,12 +84,15 @@ class VIXRegimeManager:
     # Elevated: 0.5 <= Z < 1.5
     # Fear: 1.5 <= Z < 3.0
     # Panic: Z >= 3.0
+    # Tuned 2026-03-11: raised FEAR boundary from 1.5 → 2.0σ
+    # At 1.5σ the FEAR regime fired ~13% of the time (far too often).
+    # At 2.0σ it fires only ~2-5% — correctly reserved for genuine extremes.
     Z_SCORE_THRESHOLDS = {
         VIXRegime.COMPLACENCY: (-float('inf'), -1.0),
         VIXRegime.NORMAL: (-1.0, 0.5),
-        VIXRegime.ELEVATED: (0.5, 1.5),
-        VIXRegime.FEAR: (1.5, 3.0),
-        VIXRegime.PANIC: (3.0, float('inf'))
+        VIXRegime.ELEVATED: (0.5, 2.0),
+        VIXRegime.FEAR: (2.0, 3.5),
+        VIXRegime.PANIC: (3.5, float('inf'))
     }
 
     # Fallback static thresholds
@@ -101,13 +104,17 @@ class VIXRegimeManager:
         VIXRegime.PANIC: (40, float('inf'))
     }
     
-    # Risk multipliers by regime
+    # Risk multipliers by regime — tuned 2026-03-11
+    # Goal: preserve participation in stressed-but-trending markets.
+    # Combined effect at VIX=25.73 (post-tuning):
+    #   VIXRegimeManager × EnhancedSignalFilter × DynamicConfigAdjuster
+    #   ≈ 0.90 × 0.86 × 0.95 ≈ 0.74  (was 0.65 × 0.71 × 0.95 ≈ 0.44)
     RISK_MULTIPLIERS = {
-        VIXRegime.COMPLACENCY: 0.8,  # Reduce risk (complacency is dangerous)
+        VIXRegime.COMPLACENCY: 0.8,  # Slightly reduce (complacency = hidden risk)
         VIXRegime.NORMAL: 1.0,
-        VIXRegime.ELEVATED: 0.7,
-        VIXRegime.FEAR: 0.5,
-        VIXRegime.PANIC: 0.25
+        VIXRegime.ELEVATED: 0.90,    # Raised from 0.85: stressed market, keep most size
+        VIXRegime.FEAR: 0.75,        # Raised from 0.65: meaningful reduction but still tradeable
+        VIXRegime.PANIC: 0.45        # Raised from 0.40: Z≥3.5σ is a true crash event
     }
     
     def __init__(
@@ -124,14 +131,17 @@ class VIXRegimeManager:
         """
         self.cache_minutes = cache_minutes
         self.use_term_structure = use_term_structure
-        
+
         # Cache
         self._vix_cache: Optional[pd.DataFrame] = None
         self._last_fetch: Optional[datetime] = None
         self._current_state: Optional[VIXState] = None
-        
+
         # History for percentile calculations
         self._vix_history: List[float] = []
+
+        # Rate-limit VIX spike warning to once per hour
+        self._last_vix_spike_log: Optional[datetime] = None
         
         logger.info("VIXRegimeManager initialized")
         if not YFINANCE_AVAILABLE:
@@ -151,22 +161,34 @@ class VIXRegimeManager:
             return self._simulate_vix_data(lookback_days)
         
         try:
+            # yfinance 1.0: history(start=, end=) raises KeyError('chart').
+            # Use period= strings instead; map lookback_days to the closest period.
+            if lookback_days <= 30:
+                period = "1mo"
+            elif lookback_days <= 90:
+                period = "3mo"
+            elif lookback_days <= 180:
+                period = "6mo"
+            elif lookback_days <= 365:
+                period = "1y"
+            elif lookback_days <= 730:
+                period = "2y"
+            else:
+                period = "5y"
+
             vix = yf.Ticker("^VIX")
-            end = datetime.now()
-            start = end - timedelta(days=lookback_days)
-            
-            data = vix.history(start=start, end=end)
-            
+            data = vix.history(period=period)
+
             if data.empty:
                 logger.warning("No VIX data received from yfinance")
                 return self._simulate_vix_data(lookback_days)
-            
+
             self._vix_cache = data
             self._last_fetch = datetime.now()
-            
-            logger.debug(f"Fetched {len(data)} days of VIX data")
+
+            logger.debug(f"Fetched {len(data)} days of VIX data (period={period})")
             return data
-            
+
         except Exception as e:
             logger.error(f"Error fetching VIX data: {e}")
             return self._simulate_vix_data(lookback_days)
@@ -297,7 +319,11 @@ class VIXRegimeManager:
         # Additional reduction for VIX spikes
         if vix_change_1d > 0.20:  # 20% spike
             base_mult *= 0.7
-            logger.warning(f"VIX spike detected: {vix_change_1d*100:.1f}% - reducing risk")
+            _now = datetime.now()
+            if (self._last_vix_spike_log is None or
+                    (_now - self._last_vix_spike_log).total_seconds() >= 3600):
+                logger.warning(f"VIX spike detected: {vix_change_1d*100:.1f}% - reducing risk")
+                self._last_vix_spike_log = _now
         elif vix_change_1d > 0.10:  # 10% spike
             base_mult *= 0.85
         

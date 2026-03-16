@@ -9,7 +9,7 @@ import json
 import logging
 import asyncio
 from datetime import date
-from typing import Any, Optional
+from typing import Any, Optional, Dict
 
 logger = logging.getLogger(__name__)
 
@@ -153,3 +153,53 @@ async def rate_get_remaining(user_id: str, feature_key: str, daily_limit: int) -
         return max(0, daily_limit - used)
     except Exception:
         return daily_limit
+
+# ---------------------------------------------------------------------------
+# State Management (Epic 3: Zero-Downtime Core)
+# ---------------------------------------------------------------------------
+
+async def state_get(namespace: str, key: str) -> Optional[Any]:
+    """Get a JSON value from Redis state mapped by namespace/key."""
+    r = await get_redis()
+    if r is None:
+        return None
+    try:
+        raw = await r.hget(f"state:{namespace}", key)
+        return json.loads(raw) if raw else None
+    except Exception:
+        return None
+
+
+async def state_set(namespace: str, key: str, value: Any) -> None:
+    """Set a JSON value in Redis state mapped by namespace/key."""
+    r = await get_redis()
+    if r is None:
+        return
+    try:
+        await r.hset(f"state:{namespace}", key, json.dumps(value, default=str))
+    except Exception as e:
+        logger.debug("Redis state_set error: %s", e)
+
+
+async def state_get_all(namespace: str) -> Dict[str, Any]:
+    """Get all keys and JSON values for a namespace from Redis."""
+    r = await get_redis()
+    if r is None:
+        return {}
+    try:
+        raw_dict = await r.hgetall(f"state:{namespace}")
+        return {k: json.loads(v) for k, v in raw_dict.items() if v} if raw_dict else {}
+    except Exception:
+        return {}
+
+
+async def state_delete(namespace: str, key: str) -> None:
+    """Delete a key from a Redis namespace."""
+    r = await get_redis()
+    if r is None:
+        return
+    try:
+        await r.hdel(f"state:{namespace}", key)
+    except Exception:
+        pass
+

@@ -77,34 +77,42 @@ class PerformanceTracker:
         except (ValueError, TypeError) as e:
             logger.error(f"Invalid equity value: {value} ({type(value)}): {e}")
     
+    def _daily_close_values(self) -> List[float]:
+        """Resample the sub-minute equity curve to one value per calendar day (last observation).
+
+        Equity is recorded at ~1-second frequency.  Using raw observations inflates the
+        number of periods-per-year far above 252, making √252 annualization produce
+        numerically meaningless results.  Reducing to daily closes ensures every
+        Sharpe/Sortino/Calmar calculation uses the same frequency assumption as the
+        kill-switch (which has the same fix applied independently).
+        """
+        day_map: dict = {}
+        for ts_str, val in self.equity_curve:
+            try:
+                day = str(ts_str)[:10]   # "YYYY-MM-DD" prefix of ISO timestamp
+                day_map[day] = float(val)  # last write per day = daily close
+            except Exception:
+                continue
+        return [day_map[d] for d in sorted(day_map)]
+
     def get_sharpe_ratio(self, risk_free_rate: float = 0.02) -> float:
-        """Calculate Sharpe ratio from equity curve."""
-        if len(self.equity_curve) < 2:
+        """Calculate annualised Sharpe ratio from daily-close equity samples."""
+        daily = self._daily_close_values()
+        if len(daily) < 2:
             return 0.0
-        
         try:
-            # Extract values and ensure float
-            values = [float(v) for _, v in self.equity_curve]
-            
-            # Calculate returns
-            returns = np.diff(values) / values[:-1]
-            
-            if len(returns) == 0:
+            values = np.array(daily, dtype=float)
+            returns = np.diff(values) / np.maximum(values[:-1], 1e-9)
+            returns = returns[np.isfinite(returns)]
+            if len(returns) == 0 or np.max(np.abs(returns)) < 1e-9:
                 return 0.0
-            if np.max(np.abs(returns)) < 1e-9:
+            excess = returns - (risk_free_rate / 252)
+            vol = float(np.std(excess))
+            if vol < 1e-9:
                 return 0.0
-            
-            # Annualize (assuming daily data)
-            excess_returns = returns - (risk_free_rate / 252)
-            
-            if np.std(excess_returns) < 1e-9:
-                return 0.0
-            
-            sharpe = np.mean(excess_returns) / np.std(excess_returns) * np.sqrt(252)
-            return float(sharpe)
-        
+            return float(np.mean(excess) / vol * np.sqrt(252))
         except Exception as e:
-            logger.error(f"Error calculating Sharpe ratio: {e}")
+            logger.error("Error calculating Sharpe ratio: %s", e)
             return 0.0
     
     def get_win_rate(self) -> float:
@@ -195,50 +203,39 @@ class PerformanceTracker:
             return 0
 
     def get_calmar_ratio(self) -> float:
-        """Calculate Calmar ratio (annual return / max drawdown)."""
-        if len(self.equity_curve) < 20:
+        """Calmar ratio: annualised return / max drawdown, using actual calendar days."""
+        daily = self._daily_close_values()
+        if len(daily) < 5:
             return 0.0
-
         try:
-            values = [float(v) for _, v in self.equity_curve]
-            total_return = (values[-1] / values[0]) - 1
-
-            # Annualize (assuming ~252 trading days)
-            days = len(values)
-            annual_return = total_return * (252 / max(days, 1))
-
+            total_return = (daily[-1] / max(daily[0], 1e-9)) - 1
+            # n_days is the actual number of calendar days in the sample — not observation count
+            n_days = max(len(daily), 1)
+            annual_return = total_return * (252 / n_days)
             max_dd = self.get_max_drawdown()
             if max_dd == 0:
                 return 0.0
-
             return float(annual_return / max_dd)
-
         except Exception as e:
-            logger.error(f"Error calculating Calmar ratio: {e}")
+            logger.error("Error calculating Calmar ratio: %s", e)
             return 0.0
 
     def _get_daily_returns(self, lookback: int = 252) -> np.ndarray:
         """
-        Derive a series of daily returns from the equity curve.
+        Daily returns derived from the daily-close resampled equity curve.
 
-        Takes the last `lookback + 1` equity observations so that we can produce
-        up to `lookback` return observations.  Returns an empty array when there
-        is insufficient history.
+        Using raw sub-minute equity observations here would produce ~86400× too many
+        data points per day, making VaR/CVaR percentile cuts meaningless.
         """
         try:
-            # Slice conservatively: one extra point so diff produces `lookback` returns
-            curve = self.equity_curve[-(lookback + 1):]
-            if len(curve) < 2:
+            daily = self._daily_close_values()
+            daily = daily[-(lookback + 1):]  # apply lookback window
+            if len(daily) < 2:
                 return np.array([])
-            values = np.array([float(v) for _, v in curve])
-            # Guard against zero denominator
-            nonzero = values[:-1] != 0
-            returns = np.where(
-                nonzero,
-                np.diff(values) / np.where(nonzero, values[:-1], 1.0),
-                0.0,
-            )
-            return returns
+            values = np.array(daily, dtype=float)
+            denom = np.where(values[:-1] != 0, values[:-1], 1.0)
+            returns = np.diff(values) / denom
+            return returns[np.isfinite(returns)]
         except Exception as e:
             logger.error("Error computing daily returns for VaR: %s", e)
             return np.array([])
@@ -311,30 +308,27 @@ class PerformanceTracker:
         return float((strat_ret - bench_ret) / abs(bench_ret))
 
     def get_sortino_ratio(self, risk_free_rate: float = 0.0) -> float:
-        """🎯 Phase 2: Sortino ratio measuring downside risk-adjusted return."""
-        if len(self.equity_curve) < 20:
+        """Annualised Sortino ratio computed from daily-close equity samples."""
+        daily = self._daily_close_values()
+        if len(daily) < 5:
             return 0.0
-            
-        values = [float(v) for _, v in self.equity_curve]
-        returns = np.diff(values) / np.array(values[:-1])
-        
-        if len(returns) == 0:
+        try:
+            values = np.array(daily, dtype=float)
+            returns = np.diff(values) / np.maximum(values[:-1], 1e-9)
+            returns = returns[np.isfinite(returns)]
+            if len(returns) == 0:
+                return 0.0
+            mean_excess = float(np.mean(returns)) - risk_free_rate / 252
+            downside = returns[returns < 0]
+            if len(downside) == 0:
+                return 0.0
+            downside_dev = float(np.std(downside))
+            if downside_dev <= 1e-8:
+                return 0.0
+            return float(mean_excess / downside_dev * np.sqrt(252))
+        except Exception as e:
+            logger.error("Error calculating Sortino ratio: %s", e)
             return 0.0
-            
-        mean_return = np.mean(returns)
-        # Filter only negative returns for downside deviation
-        downside_returns = returns[returns < 0]
-        
-        if len(downside_returns) == 0:
-            return 0.0 # No downside volatility
-            
-        downside_dev = np.std(downside_returns)
-        
-        if downside_dev <= 1e-8:
-            return 0.0
-            
-        # Annualized Sortino (assuming daily bars/updates, adjust 252 if using higher freq)
-        return float((mean_return - risk_free_rate) / downside_dev * np.sqrt(252))
 
     def get_profit_factor(self) -> float:
         """🎯 Phase 2: Gross Profit / Gross Loss"""

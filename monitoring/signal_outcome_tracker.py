@@ -21,6 +21,7 @@ from dataclasses import dataclass, field, asdict
 from collections import defaultdict
 import numpy as np
 import pandas as pd
+from monitoring.prometheus_metrics import PrometheusMetrics
 
 logger = logging.getLogger(__name__)
 
@@ -325,6 +326,18 @@ class SignalOutcomeTracker:
                     outcome.return_10d = window_return
                 elif window == 20:
                     outcome.return_20d = window_return
+                
+                # Record prediction drift (MAE) to Prometheus
+                try:
+                    metrics = PrometheusMetrics()
+                    drift = abs(outcome.signal_value - window_return)
+                    metrics.update_prediction_drift(
+                        symbol=outcome.symbol,
+                        window=f"{window}d",
+                        drift=drift
+                    )
+                except Exception:
+                    pass
 
         # Calculate MFE/MAE for each window
         for window in [5, 10, 20]:

@@ -14,6 +14,7 @@ Features:
 
 import asyncio
 import logging
+import math
 import time
 from datetime import datetime
 from typing import Dict, Optional, Callable, Any, List, Set
@@ -22,6 +23,7 @@ import httpx
 
 from config import ApexConfig
 from core.symbols import AssetClass, parse_symbol, normalize_symbol
+from monitoring.prometheus_metrics import PrometheusMetrics
 
 logger = logging.getLogger(__name__)
 
@@ -60,10 +62,15 @@ class AlpacaConnector:
 
         # Price cache
         self._price_cache: Dict[str, float] = {}
+        self._price_cache_ts: Dict[str, float] = {}
         self._quote_task: Optional[asyncio.Task] = None
+        self._reconnect_delay: float = 30.0
 
         # Pending orders tracking
         self._pending_orders: Dict[str, str] = {}  # symbol -> order_id
+
+        # Reconnect health tracking
+        self._portfolio_fail_count: int = 0  # Consecutive get_portfolio_value failures
 
         # Execution metrics (same structure as IBKRConnector)
         self.execution_metrics: Dict[str, Any] = {
@@ -197,11 +204,146 @@ class AlpacaConnector:
             pairs = pairs[:limit]
         return pairs
 
+    @staticmethod
+    def _fear_greed_score_mult(fg: float) -> float:
+        """Contrarian F&G multiplier: 1.20 at extreme fear (fg=0), 0.80 at extreme greed (fg=100)."""
+        return 1.20 - 0.40 * (fg / 100.0)
+
+    async def scan_crypto_momentum_leaders(
+        self,
+        top_n: int = 8,
+        min_volume_usd: float = 500_000.0,
+        anchors: Optional[List[str]] = None,
+        excluded: Optional[set] = None,
+        fear_greed: Optional[float] = None,
+    ) -> List[str]:
+        """Rank all active Alpaca USD crypto pairs by 24-hour momentum × liquidity.
+
+        Uses a single batched call to ``/v1beta3/crypto/us/snapshots`` per 50
+        symbols — no per-symbol HTTP round-trips.
+
+        Scoring: ``|Δ24h%| × log1p(vol_usd / 1_000_000)``
+          - ``|Δ24h%|`` rewards fast-moving coins over static ones.
+          - ``log1p`` ensures adequate liquidity without letting BTC's raw
+            dollar volume overwhelm every other pair.
+
+        Anchor symbols (BTC/USD, ETH/USD by default) are always included
+        regardless of their score.  Symbols in ``excluded`` are silently
+        skipped.
+
+        Returns a list of ``CRYPTO:``-prefixed APEX symbols (e.g.
+        ``["CRYPTO:BTC/USD", "CRYPTO:SOL/USD", ...]``).
+
+        IBKR equity universe is completely untouched — this method only
+        produces a list; the caller decides whether to update
+        ``_dynamic_crypto_symbols``.
+        """
+        import math
+
+        # ── 1. Ensure we have a fresh asset list ──────────────────────────
+        if not self._active_crypto_symbols:
+            await self._refresh_active_crypto_symbols()
+        if not self._active_crypto_symbols:
+            logger.warning("CryptoMomentumScan: no active crypto symbols known — aborting")
+            return []
+
+        _excluded: set = {s.upper() for s in (excluded or set())}
+        _anchor_alpaca: List[str] = []
+        for a in (anchors or ["BTC/USD", "ETH/USD"]):
+            a_clean = a.upper().replace("CRYPTO:", "").strip()
+            if a_clean not in _anchor_alpaca:
+                _anchor_alpaca.append(a_clean)
+
+        # ── 2. Build candidate list (USD-quoted only, not excluded) ───────
+        candidates: List[str] = []
+        for raw in sorted(self._active_crypto_symbols):
+            if "/" not in raw:
+                continue
+            base, quote = raw.split("/", 1)
+            base = base.strip().upper()
+            quote = quote.strip().upper()
+            if quote not in ("USD", "USDT", "USDC"):
+                continue
+            apex_key = f"CRYPTO:{base}/{quote}"
+            if apex_key in _excluded or raw in _excluded:
+                continue
+            candidates.append(raw)  # Alpaca format, e.g. "SOL/USD"
+
+        if not candidates:
+            logger.warning("CryptoMomentumScan: candidate list empty after filtering")
+            return []
+
+        # ── 3. Batch snapshot requests (50 per call) ──────────────────────
+        scores: dict = {}   # alpaca_sym -> float score
+        BATCH = 50
+        for i in range(0, len(candidates), BATCH):
+            batch = candidates[i : i + BATCH]
+            try:
+                data = await self._request(
+                    "GET",
+                    "/v1beta3/crypto/us/snapshots",
+                    base_url=self.DATA_BASE_URL,
+                    params={"symbols": ",".join(batch)},
+                )
+            except Exception as exc:
+                logger.warning("CryptoMomentumScan: snapshot request failed: %s", exc)
+                continue
+
+            snapshots = {}
+            if isinstance(data, dict):
+                # API returns {"snapshots": {...}} or the dict directly
+                snapshots = data.get("snapshots", data)
+
+            for sym, snap in snapshots.items():
+                if not isinstance(snap, dict):
+                    continue
+                daily = snap.get("dailyBar") or {}
+                o   = float(daily.get("o") or 0)
+                c   = float(daily.get("c") or 0)
+                v   = float(daily.get("v") or 0)   # base-currency volume
+                vw  = float(daily.get("vw") or 0)  # volume-weighted avg price
+                if o <= 0 or v <= 0:
+                    continue
+                price = vw if vw > 0 else c
+                if price <= 0:
+                    continue
+                vol_usd = v * price
+                if vol_usd < min_volume_usd:
+                    continue
+                delta_pct = abs(c - o) / o  # dimensionless; 0.05 = 5%
+                fg_mult = self._fear_greed_score_mult(fear_greed) if fear_greed is not None else 1.0
+                score = delta_pct * math.log1p(vol_usd / 1_000_000.0) * fg_mult
+                scores[sym] = score
+
+        if not scores:
+            logger.warning(
+                "CryptoMomentumScan: no qualifying pairs (min_vol_usd=%.0f) — "
+                "returning anchors only", min_volume_usd
+            )
+            return [f"CRYPTO:{a}" for a in _anchor_alpaca if a in set(candidates)]
+
+        # ── 4. Rank and select top_n ──────────────────────────────────────
+        ranked = sorted(scores, key=lambda s: scores[s], reverse=True)
+        selected_alpaca: List[str] = list(_anchor_alpaca)  # anchors first
+        for sym in ranked:
+            if len(selected_alpaca) >= top_n:
+                break
+            if sym not in selected_alpaca:
+                selected_alpaca.append(sym)
+
+        result = [f"CRYPTO:{s}" for s in selected_alpaca]
+        fg_str = f" fg={fear_greed:.0f}" if fear_greed is not None else ""
+        logger.info(
+            "CryptoMomentumScan: top %d from %d candidates (min_vol=$%.0f%s): %s",
+            len(result), len(scores), min_volume_usd, fg_str, ", ".join(result),
+        )
+        return result
+
     # Known crypto base assets for reverse mapping
     _CRYPTO_BASES = {
         "BTC", "ETH", "SOL", "ADA", "XRP", "DOT", "LTC", "BCH",
         "DOGE", "AVAX", "LINK", "MATIC", "XLM", "XMR", "ETC",
-        "AAVE", "UNI", "SHIB", "ATOM",
+        "AAVE", "UNI", "SHIB", "ATOM", "FIL", "CRV", "BAT", "RENDER",
     }
 
     def _from_alpaca_symbol(self, alpaca_symbol: str) -> str:
@@ -215,6 +357,30 @@ class AlpacaConnector:
                 if quote in ("USD", "USDT", "USDC"):
                     return f"CRYPTO:{base}/{quote}"
         return alpaca_symbol
+
+    @staticmethod
+    def _safe_float(value: Any, default: float = 0.0) -> float:
+        """Convert arbitrary API values to finite floats without raising."""
+        try:
+            parsed = float(value)
+        except (TypeError, ValueError):
+            return float(default)
+        if not math.isfinite(parsed):
+            return float(default)
+        return float(parsed)
+
+    async def _ensure_connected_for_account_reads(self) -> bool:
+        """Reconnect lazily when account endpoints are queried before connect()."""
+        if self.offline_mode:
+            return False
+        if self._client is not None and self._connected:
+            return True
+        try:
+            await self.connect()
+            return self._client is not None and self._connected
+        except Exception as exc:
+            logger.warning("Alpaca account read reconnect failed: %s", exc)
+            return False
 
     # ------------------------------------------------------------------
     # HTTP layer
@@ -246,10 +412,15 @@ class AlpacaConnector:
     ) -> Any:
         """Make authenticated API request with retry."""
         if not self._client:
-            raise ConnectionError("Not connected. Call connect() first.")
+            # Client not yet initialized — connector hasn't connected yet.
+            # Return None so callers like get_portfolio_value() can use their cache gracefully.
+            logger.debug("Alpaca _request called before connect() — client not ready, returning None")
+            return None
         # Allow initial account probe during connect() before _connected flips true.
         if not self._connected and path != "/v2/account":
-            raise ConnectionError("Not connected. Call connect() first.")
+            logger.debug("Alpaca _request called before connected flag set (path=%s) — returning None", path)
+            return None
+
 
         url = f"{base_url or self.base_url}{path}"
         await self._throttle()
@@ -263,7 +434,7 @@ class AlpacaConnector:
                     headers=self._headers,
                     json=json_body,
                     params=params,
-                    timeout=15.0,
+                    timeout=getattr(ApexConfig, "ALPACA_HTTP_TIMEOUT_SECONDS", 8.0),
                 )
 
                 if resp.status_code in (200, 201, 204):
@@ -322,6 +493,10 @@ class AlpacaConnector:
         logger.info("Connecting to Alpaca Paper Trading API...")
 
         try:
+            if self._client:
+                await self._client.aclose()
+                self._client = None
+                
             self._client = httpx.AsyncClient()
             account = await self._request("GET", "/v2/account")
 
@@ -422,6 +597,7 @@ class AlpacaConnector:
             if bp > 0 and ap > 0:
                 price = (bp + ap) / 2.0
                 self._price_cache[normalized] = price
+                self._price_cache_ts[normalized] = time.time()
                 if self.data_callback:
                     self.data_callback(normalized)
                 return price
@@ -516,22 +692,77 @@ class AlpacaConnector:
         )
 
     async def _poll_quotes_loop(self, symbols: list) -> None:
-        """Background polling loop for crypto quotes."""
+        """Background polling loop for crypto quotes with stale-data reconnect watchdog."""
         chunk_size = 25
         cycle_count = 0
+        # Stale-data watchdog: counts consecutive cycles where we received 0 fresh quotes
+        _stale_cycles = 0
+        _STALE_CYCLE_LIMIT = 3   # 3 × 10s = 30s of zero fresh data forces reconnect
+
         while True:
             try:
                 cycle_count += 1
-                if self.offline_mode or not self._connected or self._client is None:
+                if not symbols:
+                    await asyncio.sleep(15)
+                    continue
+                if self.offline_mode:
                     await asyncio.sleep(15)
                     continue
 
-                # Periodically check account status
-                if cycle_count % 30 == 0:  # Every 30 * 10s = 5 minutes
+                if not self._connected or self._client is None:
+                    try:
+                        logger.info("Alpaca quote loop disconnected. Attempting reconnect...")
+                        await self.connect()
+                        self._reconnect_delay = 30.0  # Reset on success
+                        cycle_count = 0
+                        _stale_cycles = 0
+                    except Exception as exc:
+                        logger.warning("Alpaca reconnect failed: %s — retry in %.0fs", exc, self._reconnect_delay)
+                        await asyncio.sleep(self._reconnect_delay)
+                        self._reconnect_delay = min(self._reconnect_delay * 2, 300.0)
+                    continue
+
+                # ─── Stale-data watchdog ──────────────────────────────────────
+                # If we have symbols actively subscribed but ALL prices are older
+                # than 90s, the HTTP client is silently broken (no exception raised,
+                # but data has stopped flowing). Force a reconnect.
+                if symbols and self._price_cache_ts:
+                    now = time.time()
+                    oldest_fresh = max(self._price_cache_ts.get(normalize_symbol(s), 0.0) for s in symbols)
+                    if (now - oldest_fresh) > 90.0:
+                        _stale_cycles += 1
+                        if _stale_cycles >= _STALE_CYCLE_LIMIT:
+                            logger.warning(
+                                "Alpaca watchdog: prices stale for >90s (%d cycles) — forcing reconnect",
+                                _stale_cycles,
+                            )
+                            self._connected = False
+                            if self._client:
+                                try:
+                                    await self._client.aclose()
+                                except Exception:
+                                    pass
+                            self._client = None
+                            _stale_cycles = 0
+                            continue
+                    else:
+                        _stale_cycles = 0  # Reset on fresh data
+
+                # Periodically check account status (every 5 minutes)
+                if cycle_count % 30 == 0:
                     account = await self._request("GET", "/v2/account")
                     if not account or "id" not in account:
-                        logger.warning("Alpaca connection health check failed. May be disconnected.")
+                        logger.warning("Alpaca connection health check failed — marking disconnected")
+                        self._connected = False
+                        if self._client:
+                            try:
+                                await self._client.aclose()
+                            except Exception:
+                                pass
+                        self._client = None
+                        continue
 
+                fresh_count = 0
                 for i in range(0, len(symbols), chunk_size):
                     batch = symbols[i:i + chunk_size]
                     alpaca_to_normalized: Dict[str, str] = {}
@@ -553,17 +784,39 @@ class AlpacaConnector:
                         ap = float(quote.get("ap", 0.0) or 0.0)
                         if bp > 0 and ap > 0:
                             self._price_cache[normalized] = (bp + ap) / 2.0
+                            self._price_cache_ts[normalized] = time.time()
+                            fresh_count += 1
                             if self.data_callback:
                                 self.data_callback(normalized)
                         else:
                             # Fallback to per-symbol fetch to keep legacy behavior.
                             await self.get_market_price(normalized)
+
+                if fresh_count == 0 and symbols:
+                    _stale_cycles += 1
+                    logger.debug("Alpaca poll: 0 fresh quotes in this cycle (stale=%d)", _stale_cycles)
+                else:
+                    _stale_cycles = 0
+
                 await asyncio.sleep(10)
             except asyncio.CancelledError:
                 break
             except Exception as e:
                 logger.error(f"Quote polling error: {e}")
                 await asyncio.sleep(30)
+
+    def get_quote_age(self, symbol: str) -> float:
+        """
+        Returns the age of the cached quote in seconds. 
+        Returns 999999.0 if no quote exists.
+        """
+        try:
+            normalized = normalize_symbol(symbol)
+            if normalized in self._price_cache_ts:
+                return time.time() - self._price_cache_ts[normalized]
+        except:
+            pass
+        return 999999.0
 
     # ------------------------------------------------------------------
     # Order execution
@@ -615,17 +868,103 @@ class AlpacaConnector:
 
             alpaca_sym = self._to_alpaca_symbol(symbol)
 
-            order_body = {
-                "symbol": alpaca_sym,
-                "qty": str(quantity),
-                "side": side.lower(),
-                "type": "market",
-                "time_in_force": "gtc",
-            }
+            # ✅ PRE-TRADE BUYING POWER GUARD
+            # Alpaca crypto uses non-marginable buying power for fills.
+            # If the notional exceeds available cash we'll get a 403 rejection.
+            if side == "BUY":
+                try:
+                    account = await self._request("GET", "/v2/account")
+                    # Alpaca crypto purchases cap at the minimum of cash available or non-marginable bp
+                    cash_cap = float(account.get("cash", 0) or 0)
+                    non_margin = float(account.get("non_marginable_buying_power", 0) or 0)
+                    bp = float(account.get("buying_power", 0) or 0)
+                    raw_avail = min(cash_cap, non_margin, bp) if min(cash_cap, non_margin, bp) > 0 else 0
+                    
+                    # Prevent concurrent overspend: track outgoing nominally over the last 10 seconds
+                    now_ts = time.time()
+                    if not hasattr(self, "_crypto_spend_blocks"):
+                        self._crypto_spend_blocks = []
+                    self._crypto_spend_blocks = [(ts, amt) for ts, amt in getattr(self, "_crypto_spend_blocks") if now_ts - ts < 10.0]
+                    pending_spend = sum(amt for ts, amt in self._crypto_spend_blocks)
+                    avail = max(0.0, raw_avail - pending_spend)
 
-            logger.info(
-                f"Placing {side} {quantity} {alpaca_sym} @ ~${expected_price:.2f} (Alpaca)"
+                    notional = quantity * expected_price
+                    # Apply a 95% safety margin to avoid edge-case over-spend
+                    max_notional = avail * 0.95
+                    if notional > max_notional:
+                        if max_notional <= 0:
+                            logger.warning(
+                                "🚫 %s: BUY blocked — Alpaca buying power is $0 (net of pending trades)",
+                                symbol
+                            )
+                            self.write_dead_letter(symbol, side, quantity, "no_buying_power")
+                            return None
+                        # Scale down quantity to what we can afford
+                        reduced_qty = max_notional / expected_price
+                        reduced_qty = round(reduced_qty, 6)
+                        
+                        logger.warning(
+                            "⚠️ %s: Reducing BUY qty %.4f→%.4f (notional $%.2f > available $%.2f @ 95%%)",
+                            symbol, quantity, reduced_qty, notional, avail
+                        )
+                        quantity = reduced_qty
+                        if quantity <= 0:
+                            self.write_dead_letter(symbol, side, quantity, "no_buying_power")
+                            return None
+                    
+                    # ✅ Alpaca minimum order notional check ($10)
+                    ALPACA_MIN_NOTIONAL = 10.0
+                    actual_notional = quantity * expected_price
+                    if actual_notional < ALPACA_MIN_NOTIONAL:
+                        logger.warning(
+                            "⏭️ %s: Skipping — scaled notional $%.2f < $%.0f Alpaca minimum",
+                            symbol, actual_notional, ALPACA_MIN_NOTIONAL
+                        )
+                        return None
+                    
+                    # Add to tracking blocks right before firing order
+                    self._crypto_spend_blocks.append((time.time(), actual_notional))
+
+                except Exception as bp_err:
+                    logger.debug("Buying power check failed (non-fatal): %s", bp_err)
+
+
+            # ── Exit limit order: try limit first, fall back to market ────────────
+            # Data: P75 exit slippage = 29.2 bps. A sell-limit at -30 bps captures
+            # ~75% of exits at reduced slippage; 25% fall back to market.
+            _use_exit_limit = (
+                side == "SELL"
+                and getattr(ApexConfig, "ALPACA_EXIT_USE_LIMIT", True)
+                and not force_market
             )
+            _limit_offset_bps = float(getattr(ApexConfig, "ALPACA_EXIT_LIMIT_OFFSET_BPS", 30))
+            _limit_price = round(expected_price * (1 - _limit_offset_bps / 10000), 6) if _use_exit_limit else None
+
+            if _use_exit_limit and _limit_price:
+                order_body = {
+                    "symbol": alpaca_sym,
+                    "qty": str(quantity),
+                    "side": "sell",
+                    "type": "limit",
+                    "limit_price": str(_limit_price),
+                    "time_in_force": "gtc",
+                }
+                logger.info(
+                    "Placing SELL LIMIT %s %.6f %s @ $%.4f (limit, offset=%.0f bps, mid=$%.2f)",
+                    symbol, quantity, alpaca_sym, _limit_price, _limit_offset_bps, expected_price,
+                )
+            else:
+                order_body = {
+                    "symbol": alpaca_sym,
+                    "qty": str(quantity),
+                    "side": side.lower(),
+                    "type": "market",
+                    "time_in_force": "gtc",
+                }
+                logger.info(
+                    "Placing %s %s %.6f @ ~$%.2f (market)",
+                    side, alpaca_sym, quantity, expected_price,
+                )
 
             data = await self._request("POST", "/v2/orders", json_body=order_body)
 
@@ -638,14 +977,59 @@ class AlpacaConnector:
             order_id = data["id"]
             status = data.get("status", "")
 
-            # For market orders, poll until filled
+            # Poll until filled; if limit times out, cancel and retry as market
             if status in ("new", "accepted", "pending_new"):
-                fill_data = await self._wait_for_fill(order_id, timeout=30)
+                _limit_wait = int(getattr(ApexConfig, "ALPACA_EXIT_LIMIT_WAIT_SECONDS", 8))
+                _market_wait = int(getattr(ApexConfig, "ALPACA_FILL_WAIT_SECONDS", 10))
+                _poll_timeout = _limit_wait if _use_exit_limit else _market_wait
+                fill_data = await self._wait_for_fill(order_id, timeout=_poll_timeout)
                 if fill_data:
                     data = fill_data
+                elif _use_exit_limit and order_id:
+                    # Limit missed — cancel and retry as market
+                    try:
+                        await self._request("DELETE", f"/v2/orders/{order_id}")
+                        logger.info(
+                            "AlpacaConnector: limit exit missed for %s after %ds — "
+                            "retrying as market order",
+                            symbol, _limit_wait,
+                        )
+                    except Exception as _ce:
+                        logger.warning("AlpacaConnector: limit cancel failed: %s", _ce)
+                    # Market fallback
+                    market_body = {
+                        "symbol": alpaca_sym,
+                        "qty": str(quantity),
+                        "side": "sell",
+                        "type": "market",
+                        "time_in_force": "gtc",
+                    }
+                    mkt_data = await self._request("POST", "/v2/orders", json_body=market_body)
+                    if mkt_data and "id" in mkt_data:
+                        mkt_fill = await self._wait_for_fill(mkt_data["id"], timeout=_market_wait)
+                        data = mkt_fill or mkt_data
+                    else:
+                        logger.error("AlpacaConnector: market fallback order rejected: %s", mkt_data)
+                elif order_id:
+                    # Market order timed out — cancel dangling order
+                    try:
+                        await self._request("DELETE", f"/v2/orders/{order_id}")
+                        logger.warning(
+                            "AlpacaConnector: cancelled unfilled market order %s for %s after %ds",
+                            order_id, symbol, _market_wait,
+                        )
+                        data = {
+                            "id": order_id,
+                            "status": "canceled",
+                            "filled_qty": 0,
+                            "filled_avg_price": 0,
+                        }
+                    except Exception as _ce:
+                        logger.warning("AlpacaConnector: cancel order failed: %s", _ce)
 
-            filled_qty = float(data.get("filled_qty", 0))
-            filled_price = float(data.get("filled_avg_price", 0))
+            filled_qty = self._safe_float(data.get("filled_qty", 0))
+            filled_price = self._safe_float(data.get("filled_avg_price", 0))
+            status = str(data.get("status", status) or "").lower()
 
             if filled_qty > 0 and filled_price > 0:
                 sign = 1 if side == "BUY" else -1
@@ -680,6 +1064,16 @@ class AlpacaConnector:
                     "status": "FILLED",
                 }
 
+            if status in ("cancelled", "canceled", "expired", "rejected"):
+                self._pending_orders.pop(symbol, None)
+                logger.warning(
+                    "AlpacaConnector: order %s for %s closed without a fill (status=%s)",
+                    order_id,
+                    symbol,
+                    status,
+                )
+                return None
+
             # Order pending
             self._pending_orders[symbol] = order_id
             logger.info(f"{side} {quantity} {symbol} order pending (id: {order_id})")
@@ -702,13 +1096,15 @@ class AlpacaConnector:
             return None
 
     async def _wait_for_fill(
-        self, order_id: str, timeout: int = 30
+        self, order_id: str, timeout: int = 10
     ) -> Optional[dict]:
         """Poll for order fill status."""
         start = time.time()
         while time.time() - start < timeout:
             await asyncio.sleep(0.5)
             data = await self._request("GET", f"/v2/orders/{order_id}")
+            if not isinstance(data, dict):
+                continue
             status = data.get("status", "")
             if status == "filled":
                 return data
@@ -783,19 +1179,61 @@ class AlpacaConnector:
     # ------------------------------------------------------------------
 
     async def get_portfolio_value(self) -> float:
-        """Get total portfolio value (Upgrade J: proper logging + fallback)."""
+        """Get total portfolio value with reconnect circuit breaker."""
+        reconnect_attempted = False
+        for attempt in range(4): # 0-3, total 4 attempts
+            try:
+                if (self._client is None or not self._connected) and not reconnect_attempted:
+                    reconnect_attempted = True
+                    await self._ensure_connected_for_account_reads()
+                account = await self._request("GET", "/v2/account")
+                if isinstance(account, dict) and "equity" in account:
+                    equity = self._safe_float(account.get("equity", 0))
+                    if equity > 0:
+                        self._last_equity = equity  # Cache for dashboard
+                        self._portfolio_fail_count = 0  # Reset on success
+                        return equity
+                # If account is None or not a dict with 'equity', it's a soft failure, retry
+                logger.error(f"Alpaca get_portfolio_value: _request returned invalid data (attempt {attempt+1}): {account}")
+                if attempt == 0 and not reconnect_attempted:
+                    reconnect_attempted = True
+                    await self._ensure_connected_for_account_reads()
+            except Exception as e:
+                logger.error(f"Alpaca portfolio value fetch error (attempt {attempt+1}): {type(e).__name__}: {e}")
+            
+            if attempt < 3: # Don't sleep after the last attempt
+                await asyncio.sleep(2.0)
+        
+        # If all retries fail or return invalid data, proceed to the original error handling
+        # or return the cached value.
+        # The original code had a broader try/except for the whole method.
+        # We'll keep the circuit breaker logic for persistent failures.
         try:
-            account = await self._request("GET", "/v2/account")
-            equity = float(account.get("equity", 0) or 0)
-            if equity > 0:
-                self._last_equity = equity  # Cache for dashboard
-            return equity
-        except Exception as e:
+            # This block is reached if the loop above didn't return a valid equity.
+            # We'll treat this as a failure for the circuit breaker.
+            raise RuntimeError("Failed to get valid portfolio value after multiple attempts")
+        except Exception as e: # Catch the RuntimeError or any other exception that might have occurred
+            self._portfolio_fail_count += 1
             cached = getattr(self, "_last_equity", 0.0)
             logger.warning(
-                "Alpaca get_portfolio_value failed (%s: %s); returning cached $%.2f",
-                type(e).__name__, e, cached,
+                "Alpaca get_portfolio_value failed (%s: %s); returning cached $%.2f [fail#%d]",
+                type(e).__name__, e, cached, self._portfolio_fail_count,
             )
+            # After 3 consecutive failures, tear down the HTTP client so the
+            # poll loop's reconnect logic will create a fresh one.
+            if self._portfolio_fail_count >= 3:
+                logger.warning(
+                    "Alpaca: %d consecutive portfolio failures — forcing reconnect",
+                    self._portfolio_fail_count,
+                )
+                self._connected = False
+                if self._client:
+                    try:
+                        asyncio.get_event_loop().create_task(self._client.aclose())
+                    except Exception:
+                        pass
+                self._client = None
+                self._portfolio_fail_count = 0
             return cached
 
     async def get_account_cash(self) -> float:
@@ -945,6 +1383,13 @@ class AlpacaConnector:
         self.execution_metrics["total_trades"] += 1
         self.execution_metrics["total_slippage"] += abs(slippage_bps)
         self.execution_metrics["total_commission"] += commission
+
+        # Record to Prometheus
+        try:
+            metrics = PrometheusMetrics()
+            metrics.record_execution_slippage(abs(slippage_bps))
+        except Exception:
+            pass
 
         self.execution_metrics["slippage_history"].append(
             {

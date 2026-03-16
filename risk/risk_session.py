@@ -16,6 +16,7 @@ import collections
 from pathlib import Path
 
 from config import ApexConfig
+from monitoring.alert_aggregator import fire_alert, AlertSeverity as AlertSev
 
 logger = logging.getLogger(__name__)
 
@@ -38,11 +39,16 @@ class CircuitBreaker:
             'pnl': pnl
         })
 
-        # Update consecutive losses
-        if pnl < 0:
+        # Only count a trade as a "loss" if the absolute loss exceeds the minimum
+        # threshold. This prevents micro-losses from partial fills (e.g., 10 TWAP
+        # tranches each losing $5) from falsely tripping the circuit breaker.
+        min_loss = float(getattr(ApexConfig, 'CIRCUIT_BREAKER_MIN_LOSS_USD', 25.0))
+        if pnl < -min_loss:
             self.consecutive_losses += 1
-        else:
+        elif pnl > 0:
+            # Only reset on a meaningful profit (any positive PnL resets the streak)
             self.consecutive_losses = 0
+        # pnl in [-min_loss, 0]: micro-loss — don't increment OR reset the counter
 
         # Check consecutive loss limit
         if ApexConfig.CIRCUIT_BREAKER_ENABLED:
@@ -58,6 +64,7 @@ class CircuitBreaker:
             logger.error(f"🚨 CIRCUIT BREAKER TRIPPED: {reason}")
             logger.error(f"   Trading halted at {self.trip_time}")
             logger.error(f"   Cooldown: {ApexConfig.CIRCUIT_BREAKER_COOLDOWN_HOURS} hours")
+            fire_alert("circuit_breaker", f"Circuit breaker TRIPPED: {reason}", AlertSev.CRITICAL)
 
     def check_and_reset(self) -> bool:
         """
@@ -77,6 +84,7 @@ class CircuitBreaker:
         if datetime.now() - self.trip_time >= cooldown:
             logger.info("✅ Circuit breaker cooldown complete - trading resumed")
             self.reset()
+            fire_alert("circuit_breaker", "Circuit breaker cooldown complete — trading resumed", AlertSev.INFO)
             return True
 
         remaining = cooldown - (datetime.now() - self.trip_time)
@@ -84,6 +92,45 @@ class CircuitBreaker:
             f"⏳ Circuit breaker active - {remaining.total_seconds() / 3600:.1f}h remaining"
         )
         return False
+
+    def check_early_reset(
+        self,
+        window_hours: float = 2.0,
+        max_loss_usd: float = 50.0,
+        daily_loss_pct: float = 0.0,
+        max_daily_loss_pct: float = 0.015,
+    ) -> bool:
+        """
+        Attempt an early reset of the circuit breaker.
+
+        Conditions (all must be true):
+        1. CB is currently tripped.
+        2. daily_loss_pct < max_daily_loss_pct (day not still bleeding badly).
+        3. No trade in the last `window_hours` had a loss > `max_loss_usd`.
+
+        Returns True if reset was performed.
+        """
+        if not self.is_tripped:
+            return False
+        if daily_loss_pct >= max_daily_loss_pct:
+            return False
+        cutoff = datetime.now() - timedelta(hours=window_hours)
+        recent_big_losses = [
+            t for t in self.recent_trades
+            if t["timestamp"] > cutoff and t["pnl"] < -max_loss_usd
+        ]
+        if recent_big_losses:
+            return False
+        # All conditions met — reset
+        self.is_tripped = False
+        self.trip_reason = None
+        self.trip_time = None
+        logger.info(
+            f"CircuitBreaker: early reset approved "
+            f"(no losses >${max_loss_usd:.0f} in last {window_hours:.1f}h, "
+            f"daily_loss={daily_loss_pct:.2%} < {max_daily_loss_pct:.2%})"
+        )
+        return True
 
     def reset(self):
         """Reset the circuit breaker."""
@@ -125,6 +172,13 @@ class RiskSession:
         self._crypto_24h_ref_capital: float = 0.0
         self._crypto_24h_ref_time: datetime = datetime.utcnow()
 
+        # ── 60-minute rolling intraday drawdown gate ──────────────────────
+        # Stores (utc_timestamp, capital_value) tuples — maxlen caps memory at
+        # ~1 value/s × 3600s = 3600 entries max even in the hottest loop.
+        # NOT persisted to disk: ephemeral intraday state, intentionally resets
+        # on engine restart to avoid a cold-start false-trigger.
+        self._intraday_pnl_snapshots: collections.deque = collections.deque(maxlen=3600)
+
         # Load state on init
         self.load_state()
 
@@ -164,9 +218,11 @@ class RiskSession:
                 logger.warning(
                     f"[RiskSession/{self.user_id}] day_start_capital {self.day_start_capital:,.0f} "
                     f"is implausible vs current {value:,.0f} (ratio={ratio:.2f}). "
-                    f"Resetting to current value to prevent false circuit trip."
+                    f"Resetting all baselines to current value to prevent false circuit trip."
                 )
                 self.day_start_capital = value
+                self.starting_capital = value
+                self.peak_capital = value
                 changed = True
 
         return changed
@@ -270,6 +326,18 @@ class RiskSession:
         self.circuit_breaker.reset()
         self.save_state()
         return True
+
+    def check_early_circuit_breaker_reset(self, daily_loss_pct: float = 0.0) -> bool:
+        """
+        Attempt an early automatic circuit breaker reset using calibrated thresholds.
+        Returns True if the CB was reset.
+        """
+        return self.circuit_breaker.check_early_reset(
+            window_hours=getattr(ApexConfig, "CIRCUIT_BREAKER_EARLY_RESET_HOURS", 2.0),
+            max_loss_usd=getattr(ApexConfig, "CIRCUIT_BREAKER_EARLY_RESET_MAX_LOSS_USD", 50.0),
+            daily_loss_pct=daily_loss_pct,
+            max_daily_loss_pct=getattr(ApexConfig, "CIRCUIT_BREAKER_EARLY_RESET_MAX_DAILY_LOSS_PCT", 0.015),
+        )
 
     def set_starting_capital(self, capital: float):
         """Set starting capital and initialize tracking."""
@@ -392,6 +460,100 @@ class RiskSession:
             logger.error(f"Error checking crypto rolling loss for {self.user_id}: {e}")
             return {"crypto_pnl_24h": 0.0, "crypto_return_24h": 0.0, "breached": False,
                     "limit": getattr(ApexConfig, "CRYPTO_MAX_DAILY_LOSS", 0.05)}
+
+    def push_capital_snapshot(self, capital: float) -> None:
+        """Record a capital snapshot for the rolling intraday drawdown gate.
+
+        Called every risk-check cycle (typically every 60 s).  Pure in-memory
+        append — zero I/O, zero blocking.  The deque is bounded (maxlen=3600)
+        so memory is always O(1) regardless of session length.
+
+        Stale broker values (repeated identical readings during an API outage)
+        are safe: the gate computes the *peak* inside the window, so duplicate
+        readings simply preserve the last known high-water mark without
+        artificially depressing it.
+        """
+        try:
+            val = float(capital)
+        except (TypeError, ValueError):
+            return
+        if val > 0:
+            self._intraday_pnl_snapshots.append((datetime.utcnow(), val))
+
+    def check_intraday_rolling_dd(self, current_value: float) -> Dict:
+        """Check whether the rolling intraday drawdown gate should block new entries.
+
+        Scans every capital snapshot taken within the last WINDOW_MINUTES and
+        finds the peak.  If (current_value - peak) / peak < -MAX_LOSS_PCT the
+        gate is *active* — the execution loop will refuse NEW entries.
+
+        CRITICAL INVARIANT: this method NEVER blocks exits.  The caller is
+        responsible for only consulting this result for entry decisions.
+
+        Returns a dict with at minimum:
+            breached (bool), rolling_loss_pct (float), window_peak (float),
+            window_minutes (int), limit (float)
+        """
+        _default = {
+            "breached": False,
+            "rolling_loss_pct": 0.0,
+            "window_peak": float(current_value or 0),
+            "window_minutes": int(getattr(ApexConfig, "INTRADAY_DD_WINDOW_MINUTES", 60)),
+            "limit": float(getattr(ApexConfig, "INTRADAY_DD_MAX_LOSS_PCT", 0.015)),
+        }
+
+        if not getattr(ApexConfig, "INTRADAY_DD_GATE_ENABLED", True):
+            return _default
+
+        try:
+            current_value = float(current_value)
+        except (TypeError, ValueError):
+            return _default
+
+        if current_value <= 0:
+            return _default
+
+        window_min = int(getattr(ApexConfig, "INTRADAY_DD_WINDOW_MINUTES", 60))
+        max_loss   = float(getattr(ApexConfig, "INTRADAY_DD_MAX_LOSS_PCT", 0.015))
+
+        if not self._intraday_pnl_snapshots:
+            return _default
+
+        # Only consider snapshots within the rolling window.
+        # Using a list comprehension over a bounded deque is O(n) with n ≤ 3600
+        # (≈ 3 600 floats) — negligible latency even at 1-second tick rate.
+        cutoff = datetime.utcnow() - timedelta(minutes=window_min)
+        window_values = [v for ts, v in self._intraday_pnl_snapshots if ts >= cutoff]
+
+        if not window_values:
+            return _default
+
+        window_peak = max(window_values)
+        if window_peak <= 0:
+            return _default
+
+        rolling_loss_pct = (current_value - window_peak) / window_peak  # negative = loss
+        breached = rolling_loss_pct < -max_loss
+
+        if breached:
+            logger.warning(
+                "🚨 INTRADAY DD GATE [%s]: rolling loss %.2f%% exceeds limit %.1f%% "
+                "(window=%d min, peak=$%,.2f now=$%,.2f) — new entries BLOCKED",
+                self.user_id,
+                rolling_loss_pct * 100,
+                max_loss * 100,
+                window_min,
+                window_peak,
+                current_value,
+            )
+
+        return {
+            "breached":          breached,
+            "rolling_loss_pct":  rolling_loss_pct,
+            "window_peak":       window_peak,
+            "window_minutes":    window_min,
+            "limit":             max_loss,
+        }
 
     def check_drawdown(self, current_value: float) -> Dict:
         """Check if drawdown limit breached."""

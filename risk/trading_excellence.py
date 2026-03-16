@@ -18,6 +18,26 @@ from typing import Dict, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
+# ── Dynamic exit thresholds (updated by ThresholdCalibrator at runtime) ───────
+# These start at the same hardcoded defaults, but get replaced by calibrated
+# values derived from actual winning/losing trade history at startup and every 6h.
+_ACTIVE_PARAMS: dict = {
+    "weak_signal_loss_threshold_pct": -0.50,
+    "no_signal_loss_threshold_pct":   -0.01,
+}
+
+
+def update_excellence_params(params: dict) -> None:
+    """
+    Push calibrated threshold values into the module-level _ACTIVE_PARAMS dict.
+    Thread-safe via Python's GIL on dict assignment.
+    Called by execution loop after ThresholdCalibrator runs.
+    """
+    global _ACTIVE_PARAMS
+    for k in ("weak_signal_loss_threshold_pct", "no_signal_loss_threshold_pct"):
+        if k in params and params[k] is not None:
+            _ACTIVE_PARAMS[k] = float(params[k])
+
 
 class MismatchSeverity(Enum):
     """Severity levels for signal-position mismatches."""
@@ -568,14 +588,31 @@ def quick_mismatch_check(
     position_side: str,
     signal: float,
     confidence: float,
-    pnl_pct: float
+    pnl_pct: float,
+    hold_hours: float = 0.0,
 ) -> Tuple[bool, str]:
     """
     Quick check for signal-position mismatch without full object.
 
+    hold_hours drives time-decay thresholds:
+      < 1h  → wider grace (-0.80%) — let fresh entries breathe
+      1-4h  → normal thresholds from calibration
+      > 4h  → tighten by 50% — stale positions shouldn't linger in loss
+
     Returns:
         Tuple of (should_exit, reason)
     """
+    _wt = _ACTIVE_PARAMS["weak_signal_loss_threshold_pct"]
+    _nt = _ACTIVE_PARAMS["no_signal_loss_threshold_pct"]
+
+    # Time-decay adjustment
+    if hold_hours < 1.0:
+        _wt = min(_wt, -0.80)   # New entry: wider grace
+        _nt = min(_nt, -0.05)
+    elif hold_hours > 4.0:
+        _wt = _wt * 0.50        # Stale: tighten (e.g. -0.50 → -0.25)
+        _nt = _nt * 0.50
+
     # LONG position checks
     if position_side == 'LONG':
         if signal < -0.30 and confidence > 0.70:
@@ -584,8 +621,13 @@ def quick_mismatch_check(
             return True, f"Signal turned bearish ({signal:+.2f})"
         if signal < 0.05 and pnl_pct > 5:
             return True, f"Weak signal ({signal:+.2f}) with {pnl_pct:.1f}% profit - take profits"
-        if signal < 0.05 and pnl_pct < -1:
-            return True, f"Weak signal ({signal:+.2f}) with {pnl_pct:.1f}% loss - exit"
+        if signal < 0.05 and pnl_pct < _wt:
+            return True, (
+                f"Weak signal ({signal:+.2f}) with {pnl_pct:.1f}% loss "
+                f"(thresh={_wt:.2f}%, held={hold_hours:.1f}h) - exit"
+            )
+        if abs(signal) < 0.02 and pnl_pct < _nt:
+            return True, f"No signal ({signal:+.4f}) with {pnl_pct:.1f}% loss - exit"
 
     # SHORT position checks
     elif position_side == 'SHORT':
@@ -595,7 +637,12 @@ def quick_mismatch_check(
             return True, f"Signal turned bullish ({signal:+.2f})"
         if signal > -0.05 and pnl_pct > 5:
             return True, f"Weak signal ({signal:+.2f}) with {pnl_pct:.1f}% profit - take profits"
-        if signal > -0.05 and pnl_pct < -1:
-            return True, f"Weak signal ({signal:+.2f}) with {pnl_pct:.1f}% loss - exit"
+        if signal > -0.05 and pnl_pct < _wt:
+            return True, (
+                f"Weak signal ({signal:+.2f}) with {pnl_pct:.1f}% loss "
+                f"(thresh={_wt:.2f}%, held={hold_hours:.1f}h) - exit"
+            )
+        if abs(signal) < 0.02 and pnl_pct < _nt:
+            return True, f"No signal ({signal:+.4f}) with {pnl_pct:.1f}% loss - exit"
 
     return False, ""

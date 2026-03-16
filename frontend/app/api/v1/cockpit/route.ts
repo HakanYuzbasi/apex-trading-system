@@ -1367,25 +1367,6 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
       cached: socialAuditFromCache,
     },
     alerts,
-    notes: [
-      `Equity positions: ${openPositions}, option contracts: ${optionPositions}, total lines: ${openPositionsTotal}.`,
-      `Derivatives table currently includes ${derivatives.length} option legs exported from IBKR.`,
-      activeBroker !== "none" && activeBroker !== "multi"
-        ? `Execution routing is pinned to ${String(activeBroker).toUpperCase()} (other configured brokers stay idle/read-only).`
-        : "Execution routing has no single active broker pin.",
-      usePortfolioPositionsPrimary
-        ? "Primary equity rows are sourced from /portfolio/positions (Alpaca + IBKR) and enriched with daemon signal fields."
-        : "Primary equity rows are sourced from daemon /positions plus state reconciliation.",
-      usingPositionCache
-        ? "Position and derivatives tables are temporarily served from cached snapshot due transient upstream degradation."
-        : "Position and derivatives tables are currently served from live upstream snapshots.",
-      socialAuditFromCache
-        ? "Social Governor audit is currently served from cached snapshot due upstream degradation."
-        : "Social Governor audit feed is live.",
-      dailyPnlSource === "broker_fills"
-        ? "Daily PnL is sourced from broker fill-realized ledger (not unrealized inference)."
-        : "Daily PnL may include inferred unrealized fallback when broker fill ledger is unavailable.",
-      `USP engine score: ${uspScore.toFixed(1)}/100 (${uspBand.replaceAll("_", " ")}).`,
-    ],
+    notes: [],
   });
 }

@@ -293,7 +293,7 @@ class TestFeatureNormalization:
         features.loc[features.index[0], 'momentum_20'] = np.nan
 
         # Fill missing values
-        filled = features.fillna(method='ffill').fillna(0)
+        filled = features.ffill().fillna(0)
 
         assert not filled.isna().any().any()
 

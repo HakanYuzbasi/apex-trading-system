@@ -98,10 +98,24 @@ class SignalIntegrityMonitor:
         # Outcome tracking for calibration check
         self._confidence_outcomes: Dict[str, List[dict]] = defaultdict(list)
 
+        # Cooldown registry: symbol -> last quarantine timestamp
+        # Prevents the expiry→immediate-re-quarantine loop for daily-bar models
+        # whose signals are legitimately stable intra-day.
+        self._quarantine_history: Dict[str, datetime] = {}
+
         logger.info(
             f"SignalIntegrityMonitor initialized: window={window_size}, "
             f"stuck_threshold={stuck_threshold}"
         )
+
+    @staticmethod
+    def _normalize_symbol(symbol: str) -> str:
+        """Canonicalize symbol to avoid duplicate buffers for AVAX/USD vs CRYPTO:AVAX/USD."""
+        try:
+            from core.symbols import parse_symbol
+            return parse_symbol(symbol).normalized
+        except Exception:
+            return symbol
 
     def record_signal(
         self,
@@ -112,6 +126,7 @@ class SignalIntegrityMonitor:
         data_quality: float = 1.0,
     ):
         """Record a signal observation for monitoring."""
+        symbol = self._normalize_symbol(symbol)  # deduplicate bare vs CRYPTO: prefixed
         record = _SignalRecord(
             signal=signal,
             confidence=confidence,
@@ -146,20 +161,55 @@ class SignalIntegrityMonitor:
 
     def is_quarantined(self, symbol: str) -> bool:
         """Check if a symbol is currently quarantined."""
+        symbol = self._normalize_symbol(symbol)
         if symbol not in self._quarantined:
             return False
         if datetime.now() > self._quarantined[symbol]:
             del self._quarantined[symbol]
             logger.info(f"Quarantine expired for {symbol}")
             return False
+        # Equity quarantines set during non-market hours (due to stale signals)
+        # are lifted when the market opens so trading can begin at the open.
+        if not self._is_crypto_symbol(symbol) and self._is_equity_market_open():
+            del self._quarantined[symbol]
+            logger.info(f"Quarantine lifted for {symbol}: market is now open")
+            return False
         return True
 
-    def auto_quarantine(self, symbol: str, duration_minutes: Optional[int] = None):
-        """Quarantine a symbol for the specified duration."""
+    def auto_quarantine(
+        self,
+        symbol: str,
+        duration_minutes: Optional[int] = None,
+        is_flatline: bool = False,
+        cooldown_minutes: int = 30,
+    ):
+        """Quarantine a symbol for the specified duration.
+
+        For daily-bar ML models, signals legitimately remain stable intra-day.
+        A 30-minute cooldown prevents the expiry→immediate-re-quarantine loop
+        that causes zero-fill paralysis.  The cooldown is BYPASSED when
+        ``is_flatline=True`` (std == 0.000) because that indicates a total
+        model crash and must always be acted upon immediately.
+        """
+        symbol = self._normalize_symbol(symbol)
+
+        # Check cooldown — skip re-quarantine unless it's a genuine flatline.
+        if not is_flatline and symbol in self._quarantine_history:
+            elapsed = (datetime.now() - self._quarantine_history[symbol]).total_seconds() / 60
+            if elapsed < cooldown_minutes:
+                logger.debug(
+                    f"Quarantine suppressed for {symbol}: cooldown active "
+                    f"({elapsed:.1f}/{cooldown_minutes} min elapsed)"
+                )
+                return
+
         minutes = duration_minutes or self.quarantine_minutes
         expiration = datetime.now() + timedelta(minutes=minutes)
         self._quarantined[symbol] = expiration
-        logger.warning(f"Symbol {symbol} quarantined until {expiration}")
+        self._quarantine_history[symbol] = datetime.now()
+        logger.warning(
+            f"Symbol {symbol} {'[FLATLINE] ' if is_flatline else ''}quarantined until {expiration}"
+        )
 
     def check_integrity(
         self, symbol: Optional[str] = None
@@ -174,6 +224,8 @@ class SignalIntegrityMonitor:
             SignalHealthReport with alerts and overall health status
         """
         alerts: List[IntegrityAlert] = []
+        if symbol is not None:
+            symbol = self._normalize_symbol(symbol)
         symbols = [symbol] if symbol else list(self._buffers.keys())
 
         for sym in symbols:
@@ -191,11 +243,16 @@ class SignalIntegrityMonitor:
                 self._check_confidence_calibration(sym),
             ]
 
+            _quarantined_this_cycle = False
             for alert in checks:
                 if alert is not None:
                     alerts.append(alert)
-                    if alert.auto_quarantine:
-                        self.auto_quarantine(sym)
+                    if alert.auto_quarantine and not _quarantined_this_cycle:
+                        # Pass is_flatline=True when metric_value is exactly 0.0
+                        # so the cooldown gate is bypassed for genuine model crashes.
+                        _is_flatline = (alert.metric_value == 0.0)
+                        self.auto_quarantine(sym, is_flatline=_is_flatline)
+                        _quarantined_this_cycle = True
 
         # Clean expired quarantines
         expired = [s for s, t in self._quarantined.items() if datetime.now() > t]
@@ -216,26 +273,74 @@ class SignalIntegrityMonitor:
 
     # ─── Individual Checks ─────────────────────────────────────────
 
+    @staticmethod
+    def _is_equity_market_open() -> bool:
+        """Return True if NYSE is currently in regular session (9:30–16:00 ET, Mon–Fri)."""
+        try:
+            from zoneinfo import ZoneInfo
+            et = ZoneInfo("America/New_York")
+        except ImportError:
+            try:
+                import pytz
+                et = pytz.timezone("America/New_York")
+            except ImportError:
+                return True  # can't determine — don't suppress
+        now_et = datetime.now(tz=et)
+        if now_et.weekday() >= 5:  # Saturday=5, Sunday=6
+            return False
+        open_time = now_et.replace(hour=9, minute=30, second=0, microsecond=0)
+        close_time = now_et.replace(hour=16, minute=0, second=0, microsecond=0)
+        return open_time <= now_et <= close_time
+
+    @staticmethod
+    def _is_crypto_symbol(symbol: str) -> bool:
+        s = symbol.upper()
+        return (
+            s.startswith("CRYPTO:")
+            or s.endswith("/USD")
+            or s.endswith("-USD")
+            or s.endswith("USDT")
+            or s.endswith("BTC")
+        )
+
     def _check_stuck_signals(self, symbol: str) -> Optional[IntegrityAlert]:
         """Detect when signals are stuck at the same value."""
         buf = list(self._buffers[symbol])
         if len(buf) < self.stuck_threshold:
             return None
 
-        recent = [r.signal for r in buf[-self.stuck_threshold:]]
+        # Signals are legitimately constant during non-market hours because IBKR doesn't
+        # stream price updates overnight.  This includes CRYPTO: the ML model uses equity
+        # macro factors (SPY, VIX, sector ETFs) as inputs; when those go flat at 4 PM ET
+        # the crypto signal also flatlines.  Skip the stuck check for ALL symbols outside
+        # equity market hours to prevent an infinite 60-min quarantine loop overnight.
+        if not self._is_equity_market_open():
+            return None
 
-        # Check if all recent values are within epsilon of each other
-        if max(recent) - min(recent) < 0.02:
+        recent = [r.signal for r in buf[-self.stuck_threshold:]]
+        signal_range = max(recent) - min(recent)
+
+        # Threshold rationale: a daily-bar ML model naturally produces a very narrow
+        # spread intra-day because all 90-second cycles share the same daily feature bar.
+        # The only genuine anomaly worth quarantining is when the model's output is
+        # COMPLETELY FROZEN to 3+ decimal places (range < 0.001) — this indicates a
+        # data-pipeline failure (e.g. NaN propagation, dead ML runner) NOT legitimate
+        # stable signal output.  The 30-min cooldown in auto_quarantine() breaks the
+        # expiry→re-quarantine loop for borderline cases; std=0.000 exact flatlines
+        # bypass the cooldown (is_flatline=True) to guarantee immediate quarantine.
+        if signal_range < 0.001:
+            # Classify severity: exact flatline = model crash, tiny range = suspicious
+            is_flatline = signal_range == 0.0
             return IntegrityAlert(
                 alert_type="stuck_signal",
                 severity=AlertSeverity.CRITICAL,
                 symbol=symbol,
                 message=(
-                    f"Signal stuck at {recent[-1]:.3f} for "
-                    f"{self.stuck_threshold} observations"
+                    f"{'[FLATLINE] ' if is_flatline else ''}Signal stuck at {recent[-1]:.3f} for "
+                    f"{self.stuck_threshold} observations (range={signal_range:.5f})"
                 ),
-                metric_value=max(recent) - min(recent),
-                threshold=0.02,
+                metric_value=signal_range,
+                threshold=0.001,
                 auto_quarantine=True,
             )
         return None
@@ -299,21 +404,39 @@ class SignalIntegrityMonitor:
 
     def _check_signal_volatility(self, symbol: str) -> Optional[IntegrityAlert]:
         """Detect abnormal signal volatility (too stable or too erratic)."""
+        # Outside equity market hours all signals legitimately flatten because IBKR/yfinance
+        # stop streaming price updates.  Skip the low-volatility (too-stable) quarantine in
+        # that window to avoid mass-quarantining every symbol at market close — both equity
+        # AND crypto (crypto ML signals use equity macro factors which also go flat at night).
+        if not self._is_equity_market_open():
+            return None
+
         recent = [r.signal for r in list(self._buffers[symbol])[-30:]]
         if len(recent) < 15:
             return None
 
         signal_std = float(np.std(recent))
 
-        # Too stable = model might be stuck or ignoring data
-        if signal_std < 0.03:
+        # Too stable = model might be stuck or ignoring data.
+        # Threshold rationale: a daily-bar ML model retraining once per day will
+        # produce nearly identical signal values across consecutive 90-second intra-day
+        # cycles — typical intra-day std is 0.001–0.02.  The floor of 0.001 fires ONLY
+        # when the model outputs are numerically indistinguishable (machine-epsilon level)
+        # which indicates a data-pipeline failure (dead feature feed, NaN silent fill).
+        # For std=0.000 exact (complete flatline) the is_flatline flag is set so the
+        # 30-min cooldown gate is bypassed and quarantine is always enforced immediately.
+        if signal_std < 0.001:
+            is_flatline = signal_std == 0.0
             return IntegrityAlert(
                 alert_type="signal_volatility_low",
                 severity=AlertSeverity.CRITICAL,
                 symbol=symbol,
-                message=f"Signal volatility abnormally low: std={signal_std:.4f}",
+                message=(
+                    f"{'[FLATLINE] ' if is_flatline else ''}Signal volatility abnormally low: "
+                    f"std={signal_std:.5f}"
+                ),
                 metric_value=signal_std,
-                threshold=0.03,
+                threshold=0.001,
                 auto_quarantine=True,
             )
 

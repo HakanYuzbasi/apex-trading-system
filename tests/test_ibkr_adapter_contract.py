@@ -1,7 +1,7 @@
 import pytest
 import asyncio
 import time
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock
 
 from execution.ibkr_adapter import IBKRAdapter, IBKRAdapterException, CircuitBreakerOpenException
 
@@ -37,14 +37,15 @@ async def test_successful_call_caches_value(adapter):
 async def test_timeout_triggers_stale_fallback(adapter):
     # Seed cache
     await adapter.get_market_price("AAPL")
-    
-    # Simulate timeout natively in asyncio
-    adapter.connector.get_market_price = AsyncMock(side_effect=asyncio.TimeoutError("Simulated timeout breaker"))
-    
-    with patch("asyncio.wait_for", side_effect=asyncio.TimeoutError):
-        # Should fallback to 150.0 instead of crashing explicitly
-        price = await adapter.get_market_price("AAPL")
-        
+
+    async def _timeouting_price(*args, **kwargs):
+        raise asyncio.TimeoutError("Simulated timeout breaker")
+
+    adapter.connector.get_market_price = _timeouting_price
+
+    # Should fallback to 150.0 instead of crashing explicitly
+    price = await adapter.get_market_price("AAPL")
+
     assert price == 150.0
     assert adapter._error_count == 1
 

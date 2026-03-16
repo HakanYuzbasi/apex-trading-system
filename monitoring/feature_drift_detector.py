@@ -10,7 +10,7 @@ import json
 from pathlib import Path
 from typing import Dict, Optional, List
 from datetime import datetime
-from monitoring.alert_aggregator import send_alert, AlertSeverity
+from monitoring.alert_aggregator import fire_alert, AlertSeverity
 
 logger = logging.getLogger(__name__)
 
@@ -114,14 +114,13 @@ class FeatureDriftDetector:
                 
                 drifted_features[feature_name] = drift_info
                 
-                # Send alert
-                send_alert(
-                    alert_type="FEATURE_DRIFT",
-                    message=f"Feature '{feature_name}' drifted: "
-                           f"z-score={z_score:.2f} (current={current_value:.4f}, "
-                           f"baseline={baseline_mean:.4f}±{baseline_std:.4f})",
-                    severity=AlertSeverity.WARNING if z_score < 5 else AlertSeverity.ERROR,
-                    metadata=drift_info
+                # Send alert (non-blocking)
+                fire_alert(
+                    "feature_drift",
+                    f"Feature '{feature_name}' drifted: "
+                    f"z={z_score:.2f} (current={current_value:.4f}, "
+                    f"baseline={baseline_mean:.4f}±{baseline_std:.4f})",
+                    AlertSeverity.WARNING if z_score < 5 else AlertSeverity.CRITICAL,
                 )
                 
                 # Record drift event

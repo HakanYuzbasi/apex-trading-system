@@ -490,9 +490,9 @@ async def stream_trading_state():
             # Redis-first read: sub-ms when Redis is warm, falls back to mtime cache
             current_state = await async_read_trading_state()
 
-            # Periodically fetch aggregated equity (every ~15 seconds to avoid API limits)
+            # Periodically fetch aggregated equity (every ~120 seconds to avoid API limits)
             now_ts = time.time()
-            if now_ts - last_equity_update_time > 15:
+            if now_ts - last_equity_update_time > 120:
                 from services.broker.service import broker_service
                 try:
                     tenant_ids = await broker_service.list_tenant_ids()
@@ -784,6 +784,32 @@ async def get_sector_exposure(user=Depends(require_user)):
     return state.get("sector_exposure", {})
 
 
+@app.get("/ops/daily-report")
+async def get_daily_report(date: str = None, _user=Depends(require_user)):
+    """Daily P&L morning report — realized, unrealized, trend, system health."""
+    try:
+        from scripts.daily_report import build_daily_report
+        import asyncio
+        report = await asyncio.to_thread(build_daily_report, target_date=date, fetch_prices=False)
+        return report
+    except Exception as e:
+        logger.error(f"Daily report failed: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/ops/tca")
+async def get_tca_report(_user=Depends(require_user)):
+    """Transaction Cost Analysis — execution quality, slippage & P&L attribution."""
+    try:
+        from monitoring.tca_report import build_tca_report
+        import asyncio
+        report = await asyncio.to_thread(build_tca_report)
+        return report
+    except Exception as e:
+        logger.error(f"TCA report failed: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @app.get("/ops/kill-switch")
 async def get_kill_switch_control(_user=Depends(require_user)):
     """Read operational kill-switch control command state."""
@@ -1064,7 +1090,8 @@ async def get_social_governor_decisions(
     bounded_limit = min(max(int(limit), 1), 2000)
     user_id = str(getattr(user, "user_id", "") or getattr(user, "id", "") or "")
     repo = _social_audit_repo_for_user(user_id)
-    events = repo.load_events(
+    events = await asyncio.to_thread(
+        repo.load_events,
         limit=bounded_limit,
         asset_class=asset_class,
         regime=regime,
@@ -1126,10 +1153,17 @@ async def websocket_endpoint(websocket: WebSocket):
             "equity_breakdown": tenant_equity_snapshot.get("breakdown", []),
         })
         while True:
-            data = await websocket.receive_text()
-            if PROMETHEUS_AVAILABLE and WEBSOCKET_MESSAGES_TOTAL is not None:
-                WEBSOCKET_MESSAGES_TOTAL.labels(direction="inbound").inc()
-            logger.info(f"Received command: {data}")
+            try:
+                data = await asyncio.wait_for(websocket.receive_text(), timeout=45.0)
+                if PROMETHEUS_AVAILABLE and WEBSOCKET_MESSAGES_TOTAL is not None:
+                    WEBSOCKET_MESSAGES_TOTAL.labels(direction="inbound").inc()
+                logger.info(f"Received command: {data}")
+            except asyncio.TimeoutError:
+                # No message in 45 s — send a ping to check if client is still alive.
+                try:
+                    await websocket.send_json({"type": "ping"})
+                except Exception:
+                    raise WebSocketDisconnect(code=1001)
     except WebSocketDisconnect:
         await manager.disconnect(websocket)
         if PROMETHEUS_AVAILABLE and WEBSOCKET_CONNECTIONS is not None:

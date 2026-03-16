@@ -171,7 +171,7 @@ start_trading() {
   fi
   check_live_trading_guard
   cd "$BASE_DIR"
-  "$BASE_DIR/venv/bin/python" main.py > "$MAIN_LOG_FILE" 2>&1 &
+  nohup "$BASE_DIR/venv/bin/python" main.py > "$MAIN_LOG_FILE" 2>&1 < /dev/null &
   echo $! > "$TRADING_PID_FILE"
   if ! wait_for_boot "Trading engine" "$TRADING_PID_FILE" "$MAIN_LOG_FILE" 4; then
     return 1
@@ -193,7 +193,7 @@ start_api() {
   if [[ "$api_reload" == "true" ]]; then
     api_args+=(--reload)
   fi
-  "$BASE_DIR/venv/bin/python" -m uvicorn "${api_args[@]}" > "$LOG_DIR/api.log" 2>&1 &
+  nohup "$BASE_DIR/venv/bin/python" -m uvicorn "${api_args[@]}" > "$LOG_DIR/api.log" 2>&1 < /dev/null &
   echo $! > "$API_PID_FILE"
   if ! wait_for_boot "API" "$API_PID_FILE" "$LOG_DIR/api.log" 6; then
     return 1
@@ -212,7 +212,7 @@ start_frontend() {
   free_port 3001
   rm -f "$BASE_DIR/frontend/.next/dev/lock" 2>/dev/null || true
   sleep 1
-  npm run dev > "$LOG_DIR/frontend.log" 2>&1 &
+  nohup npm run dev > "$LOG_DIR/frontend.log" 2>&1 < /dev/null &
   echo $! > "$FRONTEND_PID_FILE"
   if ! wait_for_boot "Frontend" "$FRONTEND_PID_FILE" "$LOG_DIR/frontend.log" 6; then
     return 1

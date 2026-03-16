@@ -55,37 +55,78 @@ class SocialDecisionAuditRepository:
         asset_class: Optional[str] = None,
         regime: Optional[str] = None,
     ) -> List[Dict[str, Any]]:
-        """Load merged events from legacy fallback files and primary runtime file."""
+        """Load the most recent events from all files.
+
+        When no filters are active, uses a fast tail-read (reads from the end of
+        the file) so 3+ MB files don't block for 1–2 s on every API call.
+        Filtered queries still do a full scan since we can't skip arbitrary rows.
+        """
         if limit <= 0:
             return []
         asset_filter = str(asset_class).upper().strip() if asset_class else None
         regime_filter = str(regime).lower().strip() if regime else None
+        filtered = bool(asset_filter or regime_filter)
+
         rows: List[Dict[str, Any]] = []
         seen_keys: set[str] = set()
+
         for path in [*self.fallback_filepaths, self.filepath]:
             if not path.exists():
                 continue
-            with open(path, "r", encoding="utf-8") as f:
-                for line in f:
-                    line = line.strip()
-                    if not line:
-                        continue
-                    try:
-                        payload = json.loads(line)
-                    except Exception:
-                        continue
-                    if not isinstance(payload, dict):
-                        continue
-                    if asset_filter and str(payload.get("asset_class", "")).upper() != asset_filter:
-                        continue
-                    if regime_filter and str(payload.get("regime", "")).lower() != regime_filter:
-                        continue
-                    dedupe_key = str(payload.get("hash") or payload.get("audit_id") or line)
-                    if dedupe_key in seen_keys:
-                        continue
-                    seen_keys.add(dedupe_key)
-                    rows.append(payload)
+            lines = (
+                self._read_all_lines(path) if filtered
+                else self._tail_lines(path, limit * 4)  # overshoot for dedup
+            )
+            for line in lines:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    payload = json.loads(line)
+                except Exception:
+                    continue
+                if not isinstance(payload, dict):
+                    continue
+                if asset_filter and str(payload.get("asset_class", "")).upper() != asset_filter:
+                    continue
+                if regime_filter and str(payload.get("regime", "")).lower() != regime_filter:
+                    continue
+                dedupe_key = str(payload.get("hash") or payload.get("audit_id") or line)
+                if dedupe_key in seen_keys:
+                    continue
+                seen_keys.add(dedupe_key)
+                rows.append(payload)
+
         return rows[-limit:]
+
+    @staticmethod
+    def _read_all_lines(path: Path) -> List[str]:
+        with open(path, "r", encoding="utf-8") as f:
+            return f.readlines()
+
+    @staticmethod
+    def _tail_lines(path: Path, n: int) -> List[str]:
+        """Return the last n lines of a file without reading the whole thing."""
+        chunk = 1 << 14  # 16 KB chunks
+        collected: List[bytes] = []
+        total_read = 0
+        with open(path, "rb") as f:
+            f.seek(0, 2)
+            size = f.tell()
+            pos = size
+            while pos > 0 and total_read < chunk * 64:
+                read_size = min(chunk, pos)
+                pos -= read_size
+                f.seek(pos)
+                data = f.read(read_size)
+                collected.append(data)
+                total_read += read_size
+                # Stop once we have enough newlines
+                combined = b"".join(reversed(collected))
+                if combined.count(b"\n") > n + 1:
+                    break
+        combined = b"".join(reversed(collected))
+        return combined.decode("utf-8", errors="replace").splitlines()[-n:]
 
     def _last_hash(self) -> Optional[str]:
         """Return last known hash, preferring the primary runtime file."""

@@ -219,6 +219,8 @@ def main():
                        help='Model directory')
     parser.add_argument('--enable-deep-learning', action='store_true',
                        help='Enable LSTM and Transformer models (requires torch)')
+    parser.add_argument('--atomic-replace', type=str,
+                       help='If provided, safely rename the --model-dir to this target directory once training is fully complete.')
 
     args = parser.parse_args()
     
@@ -269,6 +271,22 @@ def main():
         logger.info("\n" + "="*80)
         logger.info("✅ TRAINING COMPLETE")
         logger.info("="*80)
+        
+        if args.atomic_replace:
+            import time
+            final_dir = args.atomic_replace
+            backup_dir = f"{final_dir}_backup_{int(time.time())}"
+            try:
+                if os.path.exists(final_dir):
+                    os.rename(final_dir, backup_dir)
+                    logger.info(f"Backed up existing models to {backup_dir}")
+                os.rename(args.model_dir, final_dir)
+                logger.info(f"Atomically replaced {final_dir} with new models from {args.model_dir}")
+                args.model_dir = final_dir # For the final print statement
+            except Exception as e:
+                logger.error(f"Failed atomic replacement: {e}")
+                raise
+
         logger.info(f"Models saved to: {args.model_dir}")
         logger.info(f"Training date: {generator.training_date}")
         logger.info("\n🚀 Next steps:")

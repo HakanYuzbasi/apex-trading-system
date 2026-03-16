@@ -101,6 +101,12 @@ class ExecutionShield:
         self._slippage_budget_usage: Dict[str, deque] = defaultdict(
             lambda: deque(maxlen=slippage_budget_window)
         )
+        # EMA of slippage per symbol — initialized to pessimistic prior (full expected slippage).
+        # Decays naturally as real fills arrive. Prevents paying "tuition" on first N trades.
+        self._slippage_ema: Dict[str, float] = {}   # EMA value per symbol
+        self._slippage_ema_count: Dict[str, int] = {}  # Number of real fills seen
+        self._slippage_ema_alpha: float = 0.30        # EMA decay — higher = more responsive
+        self._cold_start_fills: int = 3               # Fills required before trusting EMA fully
 
         # Expensive execution list
         self._expensive_symbols: set = set()
@@ -213,6 +219,16 @@ class ExecutionShield:
         # Record in history
         self._slippage_history[symbol].append(slippage_bps)
         self._slippage_budget_usage[symbol].append(abs(slippage_bps))
+
+        # Update EMA — blend real fill into the EMA state
+        alpha = self._slippage_ema_alpha
+        prior = self._slippage_ema.get(symbol)
+        if prior is None:
+            # First fill: initialize EMA to the observed slippage (overrides cold-start)
+            self._slippage_ema[symbol] = abs(slippage_bps)
+        else:
+            self._slippage_ema[symbol] = alpha * abs(slippage_bps) + (1 - alpha) * prior
+        self._slippage_ema_count[symbol] = self._slippage_ema_count.get(symbol, 0) + 1
 
         # Update totals
         self._total_executions += 1
@@ -382,10 +398,7 @@ class ExecutionShield:
         """
         spread_bps = self._compute_spread_bps(bid, ask) if bid > 0 and ask > 0 else 0.0
         half_spread_bps = spread_bps / 2.0
-        avg_slippage_bps = self.get_avg_slippage(symbol)
-        if avg_slippage_bps <= 0:
-            # Cold-start proxy before fills are available.
-            avg_slippage_bps = max(1.0, self.max_slippage_bps * 0.5)
+        avg_slippage_bps = self.get_avg_slippage(symbol)  # pessimistic prior until fills arrive
         expected_cost_bps = half_spread_bps + avg_slippage_bps
         conf = max(0.0, min(1.0, float(confidence)))
         expected_edge_bps = abs(float(signal_strength)) * float(signal_to_edge_bps) * (0.4 + 0.6 * conf)
@@ -420,11 +433,18 @@ class ExecutionShield:
         return 1.0
 
     def get_avg_slippage(self, symbol: str) -> float:
-        """Get average slippage for a symbol in basis points."""
-        history = self._slippage_history.get(symbol)
-        if not history or len(history) == 0:
-            return 0.0
-        return float(np.mean(list(history)))
+        """Get average slippage for a symbol in basis points.
+
+        Returns the EMA value if at least one real fill has been recorded.
+        Before any fills, returns the pessimistic cold-start proxy (= full max_slippage)
+        so the edge gate blocks entries until we have real execution data.
+        """
+        ema_val = self._slippage_ema.get(symbol)
+        if ema_val is not None:
+            return ema_val
+        # Cold-start: use full expected slippage as a pessimistic prior, but cap at 20.0 bps
+        # so large budget limits (like 156 bps for crypto) don't break the edge equation.
+        return min(max(self.max_slippage_bps * 0.25, 8.0), 20.0)
 
     def is_expensive_symbol(self, symbol: str) -> bool:
         """Check if a symbol has expensive execution costs."""

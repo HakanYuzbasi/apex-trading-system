@@ -25,8 +25,8 @@ from uuid import uuid4
 class PreTradeLimitConfig:
     enabled: bool = True
     fail_closed: bool = True
-    max_order_notional: float = 250_000.0
-    max_order_shares: int = 10_000
+    max_order_notional: float = 50_000.0         # Equity / general limit
+    max_order_notional_crypto: float = 100_000.0  # Crypto limit (BTC ~$83k/coin needs headroom)
     max_price_deviation_bps: float = 250.0
     max_participation_rate: float = 0.10
     max_gross_exposure_ratio: float = 2.0
@@ -68,24 +68,27 @@ class PreTradeRiskGateway:
 
         qty = int(abs(quantity))
         px = float(price)
-        if qty <= 0 or px <= 0:
-            return PreTradeDecision(False, "invalid_order", "Invalid quantity/price", {"qty": qty, "price": px})
+        eval_price = px if px > 0 else float(reference_price or 0.0)
 
-        notional = qty * px
-        if qty > self.config.max_order_shares:
-            return PreTradeDecision(
-                False,
-                "max_order_shares",
-                f"Order shares {qty} exceed limit {self.config.max_order_shares}",
-                {"qty": qty, "limit": self.config.max_order_shares},
-            )
+        if qty <= 0 or eval_price <= 0:
+            return PreTradeDecision(False, "invalid_order", "Invalid quantity/price", {"qty": qty, "price": px, "eval_price": eval_price})
 
-        if notional > self.config.max_order_notional:
+        notional = qty * eval_price
+
+        # Use asset-class-specific notional limit: crypto has single coins > $50k (e.g. BTC)
+        asset_class_upper = str(asset_class).upper()
+        is_crypto = asset_class_upper in ("CRYPTO", "CRYPTOCURRENCY") or "/USD" in str(symbol)
+        notional_limit = (
+            self.config.max_order_notional_crypto if is_crypto
+            else self.config.max_order_notional
+        )
+
+        if notional > notional_limit:
             return PreTradeDecision(
                 False,
                 "max_order_notional",
-                f"Order notional ${notional:,.0f} exceeds limit ${self.config.max_order_notional:,.0f}",
-                {"notional": notional, "limit": self.config.max_order_notional},
+                f"Order notional ${notional:,.0f} exceeds limit ${notional_limit:,.0f}",
+                {"notional": notional, "limit": notional_limit, "asset_class": asset_class_upper},
             )
 
         if reference_price and reference_price > 0:

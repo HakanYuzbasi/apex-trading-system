@@ -281,6 +281,8 @@ class UltimateSignalGenerator:
         self.regime_imputers: Dict[str, SimpleImputer] = {}
         self.regime_weights: Dict[str, Dict[str, float]] = {}
         self.regime_features: Dict[str, List[str]] = {}
+        self._missing_regime_bundles: set[str] = set()
+        self._missing_regime_warnings_emitted: set[str] = set()
         
         # Training state
         self.is_trained = False
@@ -875,7 +877,7 @@ class UltimateSignalGenerator:
         
         try:
             # Extract prices for regime detection
-            if isinstance(data, pd.DataFrame):
+            if hasattr(data, 'get') and 'Close' in data:
                 prices = data['Close']
             else:
                 prices = data
@@ -895,14 +897,24 @@ class UltimateSignalGenerator:
                 emit_transition_logs=False,
             )
             regime = assessment.primary_regime
-            current_price = float(prices.iloc[-1])
+            _last_price_val = prices.iloc[-1]
+            if isinstance(_last_price_val, pd.Series):
+                current_price = float(_last_price_val.iloc[-1] if len(_last_price_val) > 0 else 0.0)
+            else:
+                current_price = float(_last_price_val)
             
             # Update tracker with latest price (verify past predictions)
             self.tracker.on_price_update(symbol, current_price)
             
             # Get regime models
             if regime not in self.regime_models or not self.regime_models[regime]:
-                logger.warning(f"No models for {regime}, using neutral")
+                if regime not in self._missing_regime_warnings_emitted:
+                    logger.warning(
+                        "No models for %s, using neutral (model_dir=%s)",
+                        regime,
+                        self.model_dir,
+                    )
+                    self._missing_regime_warnings_emitted.add(regime)
                 regime = MarketRegime.NEUTRAL.value
             
             models = self.regime_models[regime]
@@ -960,8 +972,10 @@ class UltimateSignalGenerator:
                     continue
                 try:
                     pred_return = model.predict(features_sc)[0]
-                    # Adaptive scaling: less aggressive compression preserves signal
-                    sig = np.tanh(pred_return * 8)
+                    # Gain multiplier: tanh(pred * 20) gives 0.12-0.29 range for typical
+                    # pred_return values of 0.006-0.015, unlocking MODERATE/STRONG signals.
+                    # Old value of 8 was universally squashing every signal into WEAK band.
+                    sig = np.tanh(pred_return * 30)  # Gain 20→30: pushes typical 0.006-0.015 pred into MODERATE band
                     raw_signals.append(sig)
                     signal_names.append(name)
                 except:
@@ -1176,11 +1190,14 @@ class UltimateSignalGenerator:
             
             self.prediction_history = deque(metadata.get('prediction_history', []), maxlen=100)
             self.outcome_history = deque(metadata.get('outcome_history', []), maxlen=100)
+            self._missing_regime_bundles = set()
+            self._missing_regime_warnings_emitted = set()
             
             # Load models for each regime
             for regime in [r.value for r in MarketRegime]:
                 regime_dir = f"{self.model_dir}/{regime}"
                 if not os.path.exists(regime_dir):
+                    self._missing_regime_bundles.add(regime)
                     continue
                 
                 self.regime_models[regime] = {}
@@ -1223,6 +1240,16 @@ class UltimateSignalGenerator:
                             model.fit(dummy_X, dummy_y)
                             model._net.load_state_dict(checkpoint['net_state'])
                             self.regime_models[regime][dl_name] = model
+
+                if not self.regime_models[regime]:
+                    self._missing_regime_bundles.add(regime)
+
+            if self._missing_regime_bundles:
+                logger.warning(
+                    "Missing trained regime bundles for %s under %s; falling back to neutral when detected",
+                    sorted(self._missing_regime_bundles),
+                    self.model_dir,
+                )
             
             self.is_trained = True
             logger.info(f"✅ Models loaded from {self.model_dir}")

@@ -202,6 +202,7 @@ class TestBacktestEngineMetrics:
             initial_capital=100_000,
             slippage_bps=0.0,
             use_dynamic_slippage=False,
+            max_order_notional=200_000,  # allow 900 shares @ ~$100 = $90k
         )
         np.random.seed(42)
         n = 300

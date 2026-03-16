@@ -535,14 +535,15 @@ class TestRiskGuardUnit:
         assert ok is False
         assert reason == "max_order_notional"
 
-    def test_max_order_shares_blocks(self):
-        rg = RiskGuard(max_order_shares=500)
+    def test_max_order_notional_blocks(self):
+        rg = RiskGuard(max_order_notional=50000)
         rg.reset(100_000)
-        rg.on_new_bar(100_000, datetime(2024, 1, 2), 0)
-
-        ok, reason = rg.can_enter("AAPL", "BUY", 600, 10.0, 100_000, n_positions=0, bar_idx=0)
-        assert ok is False
-        assert reason == "max_order_shares"
+        rg.on_new_bar(100_000, datetime(2024, 1, 2), 1)  # initialize guard
+        eq = 100_000
+        # Should be blocked: 60000 qty * $1 = $60k > $50k limit
+        allowed, reason = rg.can_enter("AAPL", "BUY", 60000, 1.0, eq, 0, 1)
+        assert not allowed
+        assert reason == "max_order_notional"
 
     def test_uninitalized_guard_allows_all(self):
         """When reset() was never called, all entries are allowed (backward compat)."""

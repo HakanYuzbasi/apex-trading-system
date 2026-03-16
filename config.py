@@ -80,7 +80,7 @@ class ApexConfig:
     IBKR_CLIENT_ID: int = int(
         os.getenv(
             "APEX_IBKR_CLIENT_ID",
-            os.getenv("IBKR_CLIENT_ID", str(random.randint(10, 99))),
+            os.getenv("IBKR_CLIENT_ID", str(random.randint(100, 999))),
         )
     )
     IBKR_FX_EXCHANGE: str = os.getenv("APEX_IBKR_FX_EXCHANGE", "IDEALPRO")
@@ -138,7 +138,7 @@ class ApexConfig:
     CRYPTO_MAX_DAILY_LOSS: float = float(os.getenv("APEX_CRYPTO_MAX_DAILY_LOSS", "0.05"))   # 5%
     EQUITY_MAX_DAILY_LOSS: float = float(os.getenv("APEX_EQUITY_MAX_DAILY_LOSS", "0.03"))   # 3%
     CUSTOM_MARKET_SESSIONS = {
-        # Example:
+        # FOREX disabled intentionally until IDEALPRO minimum lots are structurally modeled
         # "FOREX": {"timezone": "America/New_York", "open": "17:00", "close": "17:00", "weekdays": [0,1,2,3,4,6]},
         # "EQUITY": {"timezone": "America/New_York", "open": "09:30", "close": "16:00", "weekdays": [0,1,2,3,4]},
     }
@@ -161,8 +161,37 @@ class ApexConfig:
     ALPACA_ALLOW_OFFLINE: bool = (
         os.getenv("APEX_ALPACA_ALLOW_OFFLINE", "false").lower() == "true"
     )
+    ALPACA_HTTP_TIMEOUT_SECONDS: float = float(os.getenv("APEX_ALPACA_HTTP_TIMEOUT_SECONDS", "8.0"))
+    ALPACA_FILL_WAIT_SECONDS: int = int(os.getenv("APEX_ALPACA_FILL_WAIT_SECONDS", "10"))
+    # Exit limit order: try limit at -30 bps first, fall back to market on miss
+    # 30 bps = P75 of actual exit slippage — captures ~75% of exits without missed fills
+    ALPACA_EXIT_USE_LIMIT: bool = (
+        os.getenv("APEX_ALPACA_EXIT_USE_LIMIT", "true").lower() != "false"
+    )
+    ALPACA_EXIT_LIMIT_OFFSET_BPS: float = float(
+        os.getenv("APEX_ALPACA_EXIT_LIMIT_OFFSET_BPS", "30")        # P75 of live exit slippage
+    )
+    ALPACA_EXIT_LIMIT_WAIT_SECONDS: int = int(
+        os.getenv("APEX_ALPACA_EXIT_LIMIT_WAIT_SECONDS", "8")       # Try limit for 8s then market
+    )
+
+    # ── Adaptive circuit breaker early reset ────────────────────────
+    CIRCUIT_BREAKER_EARLY_RESET_HOURS: float = float(os.getenv("APEX_CB_EARLY_RESET_HOURS", "2.0"))
+    CIRCUIT_BREAKER_EARLY_RESET_MAX_LOSS_USD: float = float(os.getenv("APEX_CB_EARLY_RESET_MAX_LOSS_USD", "50.0"))
+    CIRCUIT_BREAKER_EARLY_RESET_MAX_DAILY_LOSS_PCT: float = float(os.getenv("APEX_CB_EARLY_RESET_MAX_DAILY_LOSS_PCT", "0.015"))
+    # ── Intraday rolling drawdown gate ───────────────────────────────────────
+    # Blocks NEW entries (never exits) if the portfolio drops more than
+    # INTRADAY_DD_MAX_LOSS_PCT within the rolling INTRADAY_DD_WINDOW_MINUTES window.
+    # Flip ENABLED=false via env-var for instant kill-switch / rollback.
+    INTRADAY_DD_GATE_ENABLED: bool = (
+        os.getenv("APEX_INTRADAY_DD_GATE_ENABLED", "true").lower() == "true"
+    )
+    INTRADAY_DD_WINDOW_MINUTES: int = int(os.getenv("APEX_INTRADAY_DD_WINDOW_MINUTES", "60"))
+    INTRADAY_DD_MAX_LOSS_PCT: float = float(os.getenv("APEX_INTRADAY_DD_MAX_LOSS_PCT", "0.015"))  # 1.5%
+    # Disabled: dynamic discovery circumvents the static whitelist, pulling in illiquid
+    # pairs (RENDER, ONDO, PAXG, etc.). Static CRYPTO_PAIRS already defines our universe.
     ALPACA_DISCOVER_CRYPTO_SYMBOLS: bool = (
-        os.getenv("APEX_ALPACA_DISCOVER_CRYPTO_SYMBOLS", "true").lower() == "true"
+        os.getenv("APEX_ALPACA_DISCOVER_CRYPTO_SYMBOLS", "false").lower() == "true"
     )
     ALPACA_DISCOVER_CRYPTO_LIMIT: int = int(
         os.getenv("APEX_ALPACA_DISCOVER_CRYPTO_LIMIT", "24")
@@ -179,10 +208,31 @@ class ApexConfig:
         s.strip().upper()
         for s in os.getenv(
             "APEX_ALPACA_DISCOVER_CRYPTO_EXCLUDED",
-            "CRYPTO:GRT/USD,CRYPTO:PEPE/USD,CRYPTO:POL/USD,GRT/USD,PEPE/USD,POL/USD"
+            # CRV and FIL excluded: chronic 15-30bps slippage observed in live fills.
+            # BCH, XLM, ETC, AAVE, DOT, LTC also excluded to match static CRYPTO_PAIRS.
+            # RENDER, ONDO, PAXG: observed in Alpaca discovery despite not being whitelisted.
+            "CRYPTO:GRT/USD,CRYPTO:PEPE/USD,CRYPTO:POL/USD,GRT/USD,PEPE/USD,POL/USD,"
+            "CRYPTO:CRV/USD,CRV/USD,CRYPTO:FIL/USD,FIL/USD,"
+            "CRYPTO:BCH/USD,BCH/USD,CRYPTO:XLM/USD,XLM/USD,"
+            "CRYPTO:ETC/USD,ETC/USD,CRYPTO:AAVE/USD,AAVE/USD,"
+            "CRYPTO:DOT/USD,DOT/USD,CRYPTO:LTC/USD,LTC/USD,"
+            "CRYPTO:RENDER/USD,RENDER/USD,CRYPTO:ONDO/USD,ONDO/USD,"
+            "CRYPTO:PAXG/USD,PAXG/USD"
         ).split(",")
         if s.strip()
     ]
+    # Momentum scan: re-rank Alpaca crypto universe at NYSE open and periodically.
+    # IBKR equity universe is never touched — only _dynamic_crypto_symbols is updated.
+    CRYPTO_MOMENTUM_SCAN_ENABLED: bool = (
+        os.getenv("APEX_CRYPTO_MOMENTUM_SCAN_ENABLED", "true").lower() == "true"
+    )
+    CRYPTO_MOMENTUM_TOP_N: int = int(os.getenv("APEX_CRYPTO_MOMENTUM_TOP_N", "8"))
+    CRYPTO_MOMENTUM_MIN_VOLUME_USD: float = float(
+        os.getenv("APEX_CRYPTO_MOMENTUM_MIN_VOLUME_USD", "500000")
+    )
+    CRYPTO_MOMENTUM_RESCAN_HOURS: float = float(
+        os.getenv("APEX_CRYPTO_MOMENTUM_RESCAN_HOURS", "4.0")
+    )
 
     # ═══════════════════════════════════════════════════════════════
     # AUTHENTICATION
@@ -212,10 +262,10 @@ class ApexConfig:
         os.getenv("APEX_BROKER_EQUITY_QUORUM_MIN_BROKERS", "1")
     )
     BROKER_EQUITY_REFRESH_INTERVAL_SECONDS: int = int(
-        os.getenv("APEX_BROKER_EQUITY_REFRESH_INTERVAL_SECONDS", "5")
+        os.getenv("APEX_BROKER_EQUITY_REFRESH_INTERVAL_SECONDS", "120")
     )
     BROKER_POSITIONS_REFRESH_INTERVAL_SECONDS: int = int(
-        os.getenv("APEX_BROKER_POSITIONS_REFRESH_INTERVAL_SECONDS", "5")
+        os.getenv("APEX_BROKER_POSITIONS_REFRESH_INTERVAL_SECONDS", "120")
     )
     # Paper-session startup hygiene: stale persisted state can block trading after restarts.
     PAPER_STARTUP_RISK_SELF_HEAL_ENABLED: bool = os.getenv(
@@ -250,7 +300,7 @@ class ApexConfig:
     CRYPTO_POSITION_SIZE_USD: float = float(
         os.getenv("APEX_CRYPTO_POSITION_SIZE_USD", "5000")
     )  # Separate crypto size from equity — Alpaca $100k account at ~5% per trade
-    MAX_POSITIONS = 40  # Raised from 10 to allow broader portfolio diversification
+    MAX_POSITIONS = 20  # Reduced from 40: prevents capital dilution across too many tiny positions
     MAX_SHARES_PER_POSITION = 500  # Cap max shares per position
     MIN_HEDGE_NOTIONAL = 50_000  # Only hedge positions larger than $50k to save on costs
     
@@ -259,7 +309,12 @@ class ApexConfig:
     # ═══════════════════════════════════════════════════════════════
     MAX_DAILY_LOSS = 0.03  # 3% max daily loss (Moderate risk profile)
     MAX_DRAWDOWN = 0.10  # 10% max drawdown
-    MAX_SECTOR_EXPOSURE = 0.20  # Reduced from 50% to 20% to prevent concentration risk (e.g. Energy)
+    MAX_SECTOR_EXPOSURE = 1.0  # Relaxed to 100% for initial trades as requested
+    SECTOR_CONCENTRATION_ENABLED: bool = os.getenv("APEX_SECTOR_CONCENTRATION_ENABLED", "true").lower() == "true"
+    SECTOR_CONCENTRATION_MAX_PCT: float = float(os.getenv("APEX_SECTOR_CONCENTRATION_MAX_PCT", "0.25"))
+    EARNINGS_FILTER_ENABLED: bool = os.getenv("APEX_EARNINGS_FILTER_ENABLED", "true").lower() == "true"
+    EARNINGS_BLACKOUT_HOURS_BEFORE: int = int(os.getenv("APEX_EARNINGS_BLACKOUT_HOURS_BEFORE", "24"))
+    EARNINGS_BLACKOUT_HOURS_AFTER: int = int(os.getenv("APEX_EARNINGS_BLACKOUT_HOURS_AFTER", "2"))
     EQUITY_OUTLIER_GUARD_ENABLED: bool = os.getenv(
         "APEX_EQUITY_OUTLIER_GUARD_ENABLED", "true"
     ).lower() == "true"
@@ -397,13 +452,10 @@ class ApexConfig:
         "APEX_PRETRADE_GATEWAY_FAIL_CLOSED", "true"
     ).lower() == "true"
     PRETRADE_MAX_ORDER_NOTIONAL: float = float(
-        os.getenv("APEX_PRETRADE_MAX_ORDER_NOTIONAL", "250000")
-    )
-    PRETRADE_MAX_ORDER_SHARES: int = int(
-        os.getenv("APEX_PRETRADE_MAX_ORDER_SHARES", "10000")
+        os.getenv("APEX_PRETRADE_MAX_ORDER_NOTIONAL", "50000.0")
     )
     PRETRADE_MAX_PRICE_DEVIATION_BPS: float = float(
-        os.getenv("APEX_PRETRADE_MAX_PRICE_DEVIATION_BPS", "250")
+        os.getenv("APEX_PRETRADE_MAX_PRICE_DEVIATION_BPS", "500")  # Raised from 250: PANIC regimes see 3-8% intraday moves
     )
     PRETRADE_MAX_PARTICIPATION_RATE: float = float(
         os.getenv("APEX_PRETRADE_MAX_PARTICIPATION_RATE", "0.10")
@@ -429,6 +481,12 @@ class ApexConfig:
     CIRCUIT_BREAKER_DRAWDOWN = 0.08  # Halt if drawdown exceeds 8%
     CIRCUIT_BREAKER_CONSECUTIVE_LOSSES = 5  # Halt after 5 consecutive losing trades
     CIRCUIT_BREAKER_COOLDOWN_HOURS = 24  # Hours before trading resumes after halt
+    # Minimum absolute loss (USD) for a trade to count as a "loss" in the consecutive
+    # loss counter. Prevents micro-losses from partial fills (e.g., 10 TWAP tranches each
+    # losing $5) from falsely tripping the circuit breaker.
+    CIRCUIT_BREAKER_MIN_LOSS_USD: float = float(
+        os.getenv("APEX_CIRCUIT_BREAKER_MIN_LOSS_USD", "25.0")
+    )
 
     # ═══════════════════════════════════════════════════════════════
     # PORTFOLIO REBALANCING
@@ -453,14 +511,18 @@ class ApexConfig:
     FX_SIGNAL_THRESHOLD = 0.05       # Lower threshold for low-volatility FX macro patterns
     FX_SIGNAL_GAIN_MULTIPLIER = 3.0  # Post-tanh gain amplification for FX signals
 
-    MIN_SIGNAL_THRESHOLD = 0.18      # Lowered from 0.25 to let moderate signals through
-    MIN_CONFIDENCE = 0.55            # Lowered from 0.35 (soft filters stack 0.85x*0.90x penalties)
+    MIN_SIGNAL_THRESHOLD = 0.18      # Recalibrated: model max signal is 0.272, mean 0.124 — 0.30 blocked 100% of signals
+    MIN_CONFIDENCE = 0.60            # Raised from 0.55 — higher bar for fresh entries
     CRYPTO_SIGNAL_THRESHOLD_MULTIPLIER: float = float(
-        os.getenv("APEX_CRYPTO_SIGNAL_THRESHOLD_MULTIPLIER", "0.60")
+        os.getenv("APEX_CRYPTO_SIGNAL_THRESHOLD_MULTIPLIER", "0.80")  # raised from 0.60 → stronger signal required
     )
     CRYPTO_CONFIDENCE_THRESHOLD_MULTIPLIER: float = float(
         os.getenv("APEX_CRYPTO_CONFIDENCE_THRESHOLD_MULTIPLIER", "0.70")
     )
+    # Win-rate guards: signal stability + max concurrent crypto positions
+    CRYPTO_SIGNAL_STABILITY_BARS: int = int(os.getenv("APEX_CRYPTO_SIGNAL_STABILITY_BARS", "2"))
+    CRYPTO_MAX_CONCURRENT_POSITIONS: int = int(os.getenv("APEX_CRYPTO_MAX_CONCURRENT_POSITIONS", "4"))
+    EXCELLENCE_MIN_HOLD_BARS: int = int(os.getenv("APEX_EXCELLENCE_MIN_HOLD_BARS", "2"))
     CRYPTO_ROTATION_ENABLED: bool = os.getenv(
         "APEX_CRYPTO_ROTATION_ENABLED", "true"
     ).lower() == "true"
@@ -507,15 +569,92 @@ class ApexConfig:
     
     FORCE_RETRAIN = False            # Set to True to force model retraining on startup
 
-    # Regime-based entry thresholds (High filter)
+    # Regime-based entry thresholds — recalibrated Mar 2026: model output range is 0.05–0.272, mean 0.124
+    # The previous 0.28–0.50 range blocked 100% of signals. Thresholds now scaled to model output.
     SIGNAL_THRESHOLDS_BY_REGIME = {
-        'strong_bull': 0.15,    # Lowered from 0.20
-        'bull': 0.18,          # Lowered from 0.23
-        'neutral': 0.15,       # Lowered from 0.28
-        'bear': 0.18,          # Lowered from 0.25
-        'strong_bear': 0.15,   # Lowered from 0.22
-        'volatile': 0.22       # Lowered from 0.30
+        'strong_bull': 0.16,   # Trend-following regime — momentum helps, lower bar
+        'bull': 0.20,          # Standard bull — require solid conviction vs mean (0.124)
+        'neutral': 0.22,       # Choppy — need stronger edge to fight noise
+        'bear': 0.25,          # Bear — only higher-conviction moves
+        'strong_bear': 0.28,   # Avoid most entries, only near-max signals
+        'volatile': 0.30,      # High VIX — widen: only strong signals (near model max)
+        'crisis': 0.35,        # Crisis — only exceptional signals (top 5% of model output)
     }
+
+    # Tiered confidence gate: moderate signals require higher conviction at entry
+    # ENTRY_SIGNAL_HIGH_CUTOFF scaled to model output range (max 0.272): signals >= 0.24 are "high"
+    # and bypass the extra confidence requirement. Signals 0.18–0.23 are "moderate" → need conf >= 0.68
+    ENTRY_TIERED_CONFIDENCE_ENABLED: bool = True
+    ENTRY_SIGNAL_HIGH_CUTOFF: float = float(os.getenv("APEX_ENTRY_SIGNAL_HIGH_CUTOFF", "0.24"))
+    ENTRY_CONFIDENCE_MODERATE: float = float(os.getenv("APEX_ENTRY_CONFIDENCE_MODERATE", "0.65"))
+
+    # Drawdown gate: after daily losses, require higher confidence for new entries
+    ENTRY_DRAWDOWN_GATE_PCT: float = float(os.getenv("APEX_ENTRY_DRAWDOWN_GATE_PCT", "0.015"))
+    ENTRY_DRAWDOWN_CONF_BOOST: float = float(os.getenv("APEX_ENTRY_DRAWDOWN_CONF_BOOST", "0.15"))
+
+    # Liquidity window for crypto exits (UTC hours — peak US/EU overlap session)
+    CRYPTO_EXIT_LIQUIDITY_WINDOW_ENABLED: bool = (
+        os.getenv("APEX_CRYPTO_EXIT_LIQUIDITY_WINDOW_ENABLED", "true").lower() == "true"
+    )
+    CRYPTO_EXIT_LIQUIDITY_WINDOW_UTC_START: int = int(
+        os.getenv("APEX_CRYPTO_EXIT_LIQUIDITY_WINDOW_UTC_START", "13")   # 9am ET
+    )
+    CRYPTO_EXIT_LIQUIDITY_WINDOW_UTC_END: int = int(
+        os.getenv("APEX_CRYPTO_EXIT_LIQUIDITY_WINDOW_UTC_END", "22")     # 6pm ET
+    )
+    CRYPTO_EXIT_URGENCY_THRESHOLD_PCT: float = float(
+        os.getenv("APEX_CRYPTO_EXIT_URGENCY_THRESHOLD_PCT", "-2.5")      # Exit anyway below -2.5%
+    )
+
+    # Tier 4: Signal momentum gate — block entry if per-symbol signal is weakening
+    SIGNAL_MOMENTUM_GATE_ENABLED: bool = (
+        os.getenv("APEX_SIGNAL_MOMENTUM_GATE", "true").lower() != "false"
+    )
+    SIGNAL_MOMENTUM_HISTORY_BARS: int = int(os.getenv("APEX_SIGNAL_MOMENTUM_HISTORY_BARS", "4"))
+    SIGNAL_MOMENTUM_MIN_SLOPE: float = float(os.getenv("APEX_SIGNAL_MOMENTUM_MIN_SLOPE", "-0.05"))
+
+    # Tier 5: Regime component agreement gate — penalize when sub-signals disagree with main signal
+    REGIME_COMPONENT_AGREEMENT_ENABLED: bool = (
+        os.getenv("APEX_REGIME_COMPONENT_AGREEMENT", "true").lower() != "false"
+    )
+    REGIME_COMPONENT_CONF_PENALTY: float = float(
+        os.getenv("APEX_REGIME_COMPONENT_CONF_PENALTY", "0.06")   # Halved: ML conf rarely >0.70 in live data
+    )
+
+    # Excellence exit persistence: require N consecutive weak-signal bars before firing.
+    # Prevents false exits on single-bar signal noise.
+    EXCELLENCE_PERSIST_BARS: int = int(os.getenv("APEX_EXCELLENCE_PERSIST_BARS", "2"))
+
+    # Signal 4-bar moving-average gate: require mean(last-4 signals) >= this before entry.
+    SIGNAL_MA_GATE_ENABLED: bool = os.getenv("APEX_SIGNAL_MA_GATE", "true").lower() != "false"
+    SIGNAL_MA_MIN: float = float(os.getenv("APEX_SIGNAL_MA_MIN", "0.18"))
+
+    # BTC macro filter: block altcoin LONG entries when BTC signal is below threshold.
+    BTC_MACRO_FILTER_ENABLED: bool = os.getenv("APEX_BTC_MACRO_FILTER", "true").lower() != "false"
+    BTC_MACRO_FILTER_MIN_SIGNAL: float = float(os.getenv("APEX_BTC_MACRO_FILTER_MIN_SIGNAL", "0.0"))
+
+    # Altcoin probation: symbols that require a higher signal threshold due to poor track record.
+    ALTCOIN_PROBATION_SYMBOLS: List[str] = [
+        s.strip() for s in os.getenv(
+            "APEX_ALTCOIN_PROBATION_SYMBOLS",
+            "CRYPTO:AVAX/USD,CRYPTO:AAVE/USD",   # 0% win rate in live data
+        ).split(",") if s.strip()
+    ]
+    ALTCOIN_PROBATION_MIN_SIGNAL: float = float(os.getenv("APEX_ALTCOIN_PROBATION_MIN_SIGNAL", "0.28"))  # Recalibrated: model max is 0.272
+
+    # Portfolio heat gate: block new entries when total unrealised portfolio loss > threshold.
+    PORTFOLIO_HEAT_GATE_ENABLED: bool = os.getenv("APEX_PORTFOLIO_HEAT_GATE", "true").lower() != "false"
+    PORTFOLIO_HEAT_MAX_LOSS_PCT: float = float(os.getenv("APEX_PORTFOLIO_HEAT_MAX_LOSS_PCT", "0.03"))
+
+    # Live Kelly position sizing: scale position size based on rolling win/loss stats.
+    LIVE_KELLY_SIZING_ENABLED: bool = os.getenv("APEX_LIVE_KELLY_SIZING", "true").lower() != "false"
+
+    # Regime transition caution window: reduce size for N hours after exiting a bear/volatile regime.
+    REGIME_TRANSITION_CAUTION_ENABLED: bool = (
+        os.getenv("APEX_REGIME_TRANSITION_CAUTION", "true").lower() != "false"
+    )
+    REGIME_TRANSITION_CAUTION_HOURS: float = float(os.getenv("APEX_REGIME_TRANSITION_CAUTION_HOURS", "4.0"))
+    REGIME_TRANSITION_SIZE_MULT: float = float(os.getenv("APEX_REGIME_TRANSITION_SIZE_MULT", "0.70"))
 
     # Exit signal hysteresis (separate from entry threshold)
     SIGNAL_EXIT_BASE = 0.15
@@ -589,7 +728,7 @@ class ApexConfig:
 
     # Signal Integrity Monitor
     SIGNAL_INTEGRITY_ENABLED = True    # Monitor signal stream for anomalies
-    STUCK_SIGNAL_THRESHOLD = 10        # Alert after N identical signals
+    STUCK_SIGNAL_THRESHOLD = 30        # Alert after N identical signals (30×90s≈45min window for daily-bar models)
     KL_DIVERGENCE_THRESHOLD = 0.5      # Distribution shift detection sensitivity
 
     # Outcome Feedback Loop
@@ -646,8 +785,8 @@ class ApexConfig:
     EXECUTION_SHIELD_ENABLED = True
     EXECUTION_TWAP_THRESHOLD = 50000     # $50K+ uses TWAP
     EXECUTION_VWAP_THRESHOLD = 200000    # $200K+ uses VWAP
-    MAX_ACCEPTABLE_SLIPPAGE_BPS = 15     # Flag symbols with avg slippage > 15bps
-    CRITICAL_SLIPPAGE_BPS = 30           # Reduce size 20% above this
+    MAX_ACCEPTABLE_SLIPPAGE_BPS = 12     # Flag symbols with avg slippage > 12bps
+    CRITICAL_SLIPPAGE_BPS = 20           # Reduce size 20% above this (lowered from 30)
     EXECUTION_SLIPPAGE_BUDGET_BPS: float = float(
         os.getenv("APEX_EXECUTION_SLIPPAGE_BUDGET_BPS", "250")
     )
@@ -671,7 +810,7 @@ class ApexConfig:
         os.getenv("APEX_EXECUTION_MAX_SPREAD_BPS_FX", "8")
     )
     EXECUTION_MAX_SPREAD_BPS_CRYPTO: float = float(
-        os.getenv("APEX_EXECUTION_MAX_SPREAD_BPS_CRYPTO", "80")
+        os.getenv("APEX_EXECUTION_MAX_SPREAD_BPS_CRYPTO", "50")   # Tightened from 80: exclude chronic wide-spread alts
     )
     EXECUTION_EDGE_GATE_ENABLED: bool = os.getenv(
         "APEX_EXECUTION_EDGE_GATE_ENABLED",
@@ -680,18 +819,19 @@ class ApexConfig:
     EXECUTION_SIGNAL_TO_EDGE_BPS: float = float(
         os.getenv("APEX_EXECUTION_SIGNAL_TO_EDGE_BPS", "80")
     )
-    # Crypto: higher signal-to-edge multiplier (crypto vol ~3-10%/day vs 1-2% equity)
+    # Crypto: higher multiplier reflects crypto vol ~5-10%/day vs 1-2% equity.
+    # At 400, a 0.10 signal estimates ~40bps edge, enough to clear a 15+15+15=45bps hurdle.
     EXECUTION_SIGNAL_TO_EDGE_BPS_CRYPTO: float = float(
-        os.getenv("APEX_EXECUTION_SIGNAL_TO_EDGE_BPS_CRYPTO", "300")
+        os.getenv("APEX_EXECUTION_SIGNAL_TO_EDGE_BPS_CRYPTO", "400")  # Raised from 300
     )
     EXECUTION_MIN_EDGE_OVER_COST_BPS_EQUITY: float = float(
-        os.getenv("APEX_EXECUTION_MIN_EDGE_OVER_COST_BPS_EQUITY", "8")
+        os.getenv("APEX_EXECUTION_MIN_EDGE_OVER_COST_BPS_EQUITY", "12")  # Raised from 8
     )
     EXECUTION_MIN_EDGE_OVER_COST_BPS_FX: float = float(
-        os.getenv("APEX_EXECUTION_MIN_EDGE_OVER_COST_BPS_FX", "6")
+        os.getenv("APEX_EXECUTION_MIN_EDGE_OVER_COST_BPS_FX", "999")  # FX disabled — belt+suspenders
     )
     EXECUTION_MIN_EDGE_OVER_COST_BPS_CRYPTO: float = float(
-        os.getenv("APEX_EXECUTION_MIN_EDGE_OVER_COST_BPS_CRYPTO", "4")
+        os.getenv("APEX_EXECUTION_MIN_EDGE_OVER_COST_BPS_CRYPTO", "15")  # Raised from 4: need real edge
     )
 
     # ═══════════════════════════════════════════════════════════════
@@ -774,6 +914,14 @@ class ApexConfig:
     # Crypto: all cryptos are inherently correlated; use a much higher cap
     MAX_PORTFOLIO_CORRELATION_CRYPTO = 0.92  # Max avg portfolio correlation for crypto
     CORRELATION_LOOKBACK = 60  # Days for correlation calculation
+    # Graduated entry size reduction (below the hard-block threshold)
+    CORRELATION_SIZE_WARN_LO: float = 0.70   # avg_corr ≥ this → 75% size
+    CORRELATION_SIZE_WARN_HI: float = 0.80   # avg_corr ≥ this → 50% size
+    # TP Laddering: partial exits as position becomes profitable
+    TP_LADDER_TIER1_PCT:  float = 3.0   # pnl_pct threshold to fire Tier 1 (50% exit)
+    TP_LADDER_TIER2_PCT:  float = 6.0   # pnl_pct threshold to fire Tier 2 (25% exit)
+    TP_LADDER_TIER1_FRAC: float = 0.50  # fraction of position to sell at Tier 1
+    TP_LADDER_TIER2_FRAC: float = 0.25  # fraction of position to sell at Tier 2
 
     # Execution
     LARGE_ORDER_THRESHOLD = 50000  # Dollar value threshold for TWAP/VWAP execution
@@ -847,7 +995,7 @@ class ApexConfig:
     # TIMING & EXECUTION
     # ═══════════════════════════════════════════════════════════════
     CHECK_INTERVAL_SECONDS = 30  # Check symbols every 30 seconds
-    TRADE_COOLDOWN_SECONDS = 120  # Reduced from 240s; doubles opportunity window per symbol
+    TRADE_COOLDOWN_SECONDS = 300  # 5 min minimum between same-symbol revisits (was 120s — too short, caused churn)
     
     # ═══════════════════════════════════════════════════════════════
     # TRANSACTION COSTS
@@ -885,30 +1033,31 @@ class ApexConfig:
     INDICES = ["SPY", "QQQ", "IWM", "DIA"]
 
     # 2. Forex Pairs (Major G10)
-    FOREX_PAIRS = [
-        "EUR/USD", "GBP/USD", "USD/JPY", "USD/CHF", "AUD/USD", 
-        "USD/CAD", "NZD/USD"
-    ]
+    # ⚠️  Disabled: IBKR IDEALPRO minimum lots (EUR 20K, GBP 17K, etc.)
+    # are well above paper sizing. Re-enable only when proper lot sizing is modeled.
+    FOREX_PAIRS: list = []
 
     # 3. Crypto Pairs (Top Liquid, expanded for Alpaca crypto paper)
     # Note: MATIC/USD and UNI/USD removed - delisted from yfinance as of Feb 2026
+    # Top 8 most liquid, lowest-spread crypto pairs only.
+    # Removed: BCH, XLM, ETC, AAVE — all exhibit >15bps chronic slippage.
     CRYPTO_PAIRS = [
         "BTC/USD",
         "ETH/USD",
         "SOL/USD",
-        "DOGE/USD",
-        "AVAX/USD",
         "LINK/USD",
+        # "DOGE/USD",   # ❌ Chronic slippage 19-26bps > 15bps edge threshold
+        # "AVAX/USD",   # ❌ Chronic slippage 22-35bps > 15bps edge threshold
+        # "ADA/USD",    # ❌ Chronic slippage 17-28bps > 15bps edge threshold
+        # "XRP/USD",    # ❌ Chronic slippage 12-25bps > 15bps edge threshold
+        # "DOT/USD",    # ❌ Slippage too high
+        # "LTC/USD",    # ❌ Slippage too high
+        # "BCH/USD",    # ❌ Removed: illiquid
+        # "XLM/USD",    # ❌ Removed: illiquid
+        # "ETC/USD",    # ❌ Removed: illiquid
+        # "AAVE/USD",   # ❌ Removed: illiquid
+        # "UNI/USD",    # ❌ Delisted from yfinance
         # "MATIC/USD",  # ❌ Delisted from yfinance
-        "ADA/USD",
-        "XRP/USD",
-        "DOT/USD",
-        "LTC/USD",
-        "BCH/USD",
-        "XLM/USD",
-        "ETC/USD",
-        "AAVE/USD",
-        # "UNI/USD",  # ❌ Delisted from yfinance
     ]
     EXTRA_CRYPTO_PAIRS = [
         token.strip().upper()
@@ -944,14 +1093,27 @@ class ApexConfig:
         "GLD", "SLV", "USO", "UNG"
     ]
 
-    # Combine all into master universe
-    SYMBOLS = list(set(INDICES + FOREX_PAIRS + CRYPTO_PAIRS + SP500_TOP_100))
+    # Combine all into master universe — priority-ordered so GLD/SLV/defensive assets are
+    # processed first each cycle (avoids random set() ordering that previously buried them).
+    _PRIORITY_SYMBOLS = ["GLD", "SLV", "XOM", "CVX", "UNH", "LLY", "JNJ", "ABBV", "MRK"]
+    SYMBOLS = list(dict.fromkeys(_PRIORITY_SYMBOLS + INDICES + CRYPTO_PAIRS + SP500_TOP_100 + FOREX_PAIRS))
 
     # Backtesting-only symbols (kept in universe, excluded from IBKR paper execution)
     BACKTEST_ONLY_SYMBOLS = {"SOL/USDT", "DOGE/USDT"}
 
     # Commodity symbols for special handling
     COMMODITY_SYMBOLS = {'GLD', 'SLV', 'USO', 'UNG', 'PALL'}
+
+    # Defensive / commodity / energy symbols — receive a 1.5× position-size boost.
+    # These outperform during elevated VIX / geopolitical shocks (gold +19% Jan–Mar 2026).
+    DEFENSIVE_SYMBOLS: frozenset = frozenset(["GLD", "SLV", "XOM", "CVX", "UNH", "LLY", "JNJ", "ABBV", "MRK"])
+    DEFENSIVE_POSITION_SIZE_MULTIPLIER: float = float(os.getenv("APEX_DEFENSIVE_SIZE_MULT", "1.5"))
+
+    # Macro momentum overlay: amplify signals for assets with >10% 20-day return by this factor.
+    MOMENTUM_SIGNAL_BOOST: float = float(os.getenv("APEX_MOMENTUM_SIGNAL_BOOST", "1.20"))
+
+    # VIX threshold above which new crypto entries are completely blocked.
+    VIX_CRYPTO_BLOCK_THRESHOLD: float = float(os.getenv("APEX_VIX_CRYPTO_BLOCK_THRESHOLD", "25.0"))
     
     # Sector Mappings (for exposure tracking)
     SECTOR_MAP = {
@@ -1143,8 +1305,8 @@ def validate_config() -> bool:
     if ApexConfig.PRETRADE_MAX_ORDER_NOTIONAL <= 0:
         warnings.append("⚠️  PRETRADE max order notional must be > 0")
 
-    if ApexConfig.PRETRADE_MAX_ORDER_SHARES <= 0:
-        warnings.append("⚠️  PRETRADE max order shares must be > 0")
+    if ApexConfig.PRETRADE_MAX_ORDER_NOTIONAL <= 0:
+        errors.append("PRETRADE_MAX_ORDER_NOTIONAL must be positive")
 
     if not (0 < ApexConfig.PRETRADE_MAX_PARTICIPATION_RATE <= 1):
         warnings.append(

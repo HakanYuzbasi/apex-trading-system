@@ -23,6 +23,8 @@ from dataclasses import dataclass
 from enum import Enum
 import math
 
+from core.symbols import parse_symbol, AssetClass
+
 # Allow nested event loops for ib_insync compatibility
 try:
     import nest_asyncio
@@ -343,8 +345,14 @@ class OptionsTrader:
                 return []
 
             # Get options chain from IBKR
-            # Note: Requires ib_insync options support
-            contract = await self.ibkr.get_contract(symbol)
+            parsed = parse_symbol(symbol)
+            
+            # Fast-fail for asset classes that don't have option chains
+            if parsed.asset_class in (AssetClass.FOREX, AssetClass.CRYPTO):
+                logger.debug(f"No options available for {symbol} (unsupported asset class)")
+                return []
+
+            contract = await self.ibkr.get_contract(symbol, require_qualified=True)
             if not contract:
                 return []
 
@@ -512,7 +520,7 @@ class OptionsTrader:
         )
 
         if not chain:
-            logger.error(f"No options available for {symbol}")
+            logger.debug(f"No options available for {symbol}")
             return None
 
         # Select put by delta
@@ -596,7 +604,7 @@ class OptionsTrader:
         )
 
         if not chain:
-            logger.error(f"No options available for {symbol}")
+            logger.debug(f"No options available for {symbol}")
             return None
 
         # Select call by delta

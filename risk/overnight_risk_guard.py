@@ -24,7 +24,9 @@ from typing import Dict, List, Optional, Set, Tuple
 from dataclasses import dataclass
 from datetime import datetime, time
 from enum import Enum
+import pytz
 import numpy as np
+
 
 logger = logging.getLogger(__name__)
 
@@ -115,8 +117,26 @@ class OvernightRiskGuard:
 
     def get_market_phase(self, current_time: Optional[datetime] = None) -> MarketPhase:
         """Determine current market phase."""
-        now = current_time or datetime.now()
+        # Convert incoming time to US/Eastern
+        if current_time:
+            now = current_time
+        else:
+            # Convert system local time to US/Eastern
+            now = datetime.now()
+        
+        try:
+            eastern = pytz.timezone("America/New_York")
+            if now.tzinfo is None:
+                # Assume local if no tz, then convert to UTC, then to Eastern
+                # Simpler: just localize and convert
+                now = now.astimezone(eastern)
+            else:
+                now = now.astimezone(eastern)
+        except Exception as e:
+            logger.error(f"Timezone conversion failed in OvernightRiskGuard: {e}")
+            
         t = now.time()
+
 
         # Check if weekend
         if now.weekday() >= 5:
@@ -135,10 +155,11 @@ class OvernightRiskGuard:
             return MarketPhase.CLOSED
 
         # Regular hours - calculate minutes to close and since open
-        close_dt = datetime.combine(now.date(), self.market_close)
-        open_dt = datetime.combine(now.date(), self.market_open)
+        close_dt = datetime.combine(now.date(), self.market_close).replace(tzinfo=now.tzinfo)
+        open_dt = datetime.combine(now.date(), self.market_open).replace(tzinfo=now.tzinfo)
         minutes_to_close = (close_dt - now).total_seconds() / 60
         minutes_since_open = (now - open_dt).total_seconds() / 60
+
 
         if minutes_to_close <= self.final_reduction_minutes:
             return MarketPhase.FINAL_MINUTES
@@ -171,13 +192,16 @@ class OvernightRiskGuard:
             OvernightRiskAssessment with recommendations
         """
         now = current_time or datetime.now()
+        # Ensure we use US/Eastern for phase determination
         phase = self.get_market_phase(now)
+
 
         # Calculate minutes to close
         minutes_to_close = None
         if phase not in [MarketPhase.CLOSED, MarketPhase.AFTER_HOURS, MarketPhase.PRE_MARKET]:
-            close_dt = datetime.combine(now.date(), self.market_close)
+            close_dt = datetime.combine(now.date(), self.market_close).replace(tzinfo=now.tzinfo)
             minutes_to_close = max(0, int((close_dt - now).total_seconds() / 60))
+
 
         # Calculate overnight VaR
         overnight_var = self._calculate_overnight_var(positions, capital, vix_level)
@@ -333,9 +357,10 @@ class OvernightRiskGuard:
         if phase in [MarketPhase.CLOSED, MarketPhase.AFTER_HOURS, MarketPhase.PRE_MARKET]:
             return False
 
-        close_dt = datetime.combine(now.date(), self.market_close)
+        close_dt = datetime.combine(now.date(), self.market_close).replace(tzinfo=now.tzinfo)
         minutes_to_close = (close_dt - now).total_seconds() / 60
         return minutes_to_close <= minutes
+
 
     def get_diagnostics(self) -> Dict:
         """Return guard state for monitoring."""

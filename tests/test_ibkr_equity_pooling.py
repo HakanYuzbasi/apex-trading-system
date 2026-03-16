@@ -111,13 +111,22 @@ def test_fetch_ibkr_equity_blocking_connection_failure(monkeypatch: pytest.Monke
         def connect(self, host: str, port: int, clientId: int, timeout: int, readonly: bool) -> None:  # noqa: N803
             raise RuntimeError("connect failed")
 
+        @property
+        def errorEvent(self):
+            class _Event:
+                def __iadd__(self, callback):
+                    return self
+            return _Event()
+
         def isConnected(self) -> bool:  # noqa: N802
             return False
 
     monkeypatch.setattr("services.broker.service.IB", FakeIB)
 
-    with pytest.raises(RuntimeError, match="connect failed"):
+    with pytest.raises(ApexBrokerError) as exc_info:
         BrokerService._fetch_ibkr_equity_blocking({"host": "127.0.0.1", "port": 7497, "client_id": 1}, client_id=1)
+
+    assert exc_info.value.code == "IBKR_CONNECT_FAILED"
 
 
 def test_fetch_ibkr_equity_blocking_creates_event_loop_in_worker_thread(
@@ -164,3 +173,85 @@ def test_fetch_ibkr_equity_blocking_creates_event_loop_in_worker_thread(
     assert thread.is_alive() is False
     assert "error" not in failure
     assert result["value"] == 888.0
+
+
+@pytest.mark.asyncio
+async def test_fetch_connection_equity_retries_client_id_conflicts(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = BrokerService()
+    connection = _ibkr_connection()
+    monkeypatch.setattr(
+        service,
+        "_decrypt_credentials",
+        lambda _: {"host": "127.0.0.1", "port": 7497, "client_id": 12},
+    )
+
+    lease_ids = iter([211, 212])
+
+    async def fake_allocate(preferred_id=None, ttl=None):
+        return next(lease_ids)
+
+    async def fake_release(client_id):
+        return None
+
+    monkeypatch.setattr("services.broker.service.lease_manager.allocate", fake_allocate)
+    monkeypatch.setattr("services.broker.service.lease_manager.release", fake_release)
+
+    attempts = {"count": 0}
+
+    def fake_fetch(creds, client_id):
+        attempts["count"] += 1
+        if attempts["count"] == 1:
+            raise ApexBrokerError(
+                code="IBKR_CLIENT_ID_IN_USE",
+                message="IBKR rejected the API client ID because it is already in use",
+                context={"client_id": client_id},
+            )
+        return 987.65
+
+    monkeypatch.setattr(service, "_fetch_ibkr_equity_blocking", fake_fetch)
+
+    snapshot = await service._fetch_equity_with_fallback(connection)
+
+    assert attempts["count"] == 2
+    assert snapshot.value == 987.65
+    assert snapshot.stale is False
+
+
+def test_fetch_ibkr_equity_blocking_surfaces_paper_disclaimer(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FakeEvent:
+        def __init__(self) -> None:
+            self._callbacks = []
+
+        def __iadd__(self, callback):
+            self._callbacks.append(callback)
+            return self
+
+        def fire(self, req_id: int, error_code: int, error_string: str, contract=None) -> None:
+            for callback in self._callbacks:
+                callback(req_id, error_code, error_string, contract)
+
+    class FakeIB:
+        def __init__(self) -> None:
+            self._connected = False
+            self.errorEvent = FakeEvent()
+
+        def connect(self, host: str, port: int, clientId: int, timeout: int, readonly: bool) -> None:  # noqa: N803
+            self.errorEvent.fire(-1, 10141, "Paper trading disclaimer must first be accepted for API connection.")
+            raise RuntimeError("connection reset by peer")
+
+        def isConnected(self) -> bool:  # noqa: N802
+            return self._connected
+
+    monkeypatch.setattr("services.broker.service.IB", FakeIB)
+
+    with pytest.raises(ApexBrokerError) as exc_info:
+        BrokerService._fetch_ibkr_equity_blocking(
+            {"host": "127.0.0.1", "port": 7497, "client_id": 1},
+            client_id=1,
+        )
+
+    assert exc_info.value.code == "IBKR_PAPER_DISCLAIMER_REQUIRED"

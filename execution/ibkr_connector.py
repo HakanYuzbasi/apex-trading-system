@@ -18,7 +18,7 @@ import time
 from datetime import datetime
 from typing import Dict, Optional, Callable, TypeVar, Any
 from functools import wraps
-from ib_insync import IB, Stock, Option, MarketOrder, LimitOrder, util, Contract
+from ib_insync import IB, Stock, Option, MarketOrder, LimitOrder, util, Contract, TagValue
 try:
     from ib_insync import Forex, Crypto
 except Exception as _import_err:
@@ -31,6 +31,7 @@ import pandas as pd
 from config import ApexConfig
 from execution.metrics_store import ExecutionMetricsStore
 from core.symbols import AssetClass, parse_symbol, normalize_symbol, is_market_open
+from monitoring.prometheus_metrics import PrometheusMetrics
 
 logger = logging.getLogger(__name__)
 
@@ -141,8 +142,20 @@ class IBKRConnector:
         self.account = None
         self.offline_mode = False
 
-        # Cache for contracts
+        # Fatal error flag for unrecoverable API connection states (e.g., unaccepted disclaimers)
+        self._fatal_error: Optional[str] = None
+        self.ib.errorEvent += self._on_error
+
+        # Cache for contracts (in-memory; reloaded from disk on startup)
         self.contracts = {}
+
+        # Disk-backed contract cache: avoids qualifyContractsAsync timeouts on restart
+        self._contract_cache_path = ApexConfig.DATA_DIR / "ibkr_contract_cache.json"
+        self._load_contract_disk_cache()
+        
+        # Concurrency limit for qualifyContractsAsync storms on startup
+        self._qualify_semaphore = asyncio.Semaphore(5)
+        self._cache_lock = asyncio.Lock()
 
         # Market data request IDs
         self.req_id_counter = 0
@@ -156,13 +169,22 @@ class IBKRConnector:
         # Execution metrics tracking (Persistent)
         self.metrics_store = ExecutionMetricsStore(ApexConfig.DATA_DIR / "execution_metrics.json")
         
-        # Event-driven streaming state
+        # Event-driven streaming state (Centralized Stream Manager)
         self.tickers: Dict[str, Any] = {}
-        self.active_streams: int = 0
-        self.MAX_STREAMS = getattr(ApexConfig, "IBKR_MAX_STREAMS", 200)
+        self.stream_registry: Dict[int, Any] = {}  # conId -> ticker (Tracks all active reqMktData)
+        self.active_streams: int = 0        
+        # IBKR sets a hard limit on concurrent market data lines (typically 100).
+        # We cap at 85 to leave room for TWS UI and snapshot requests.
+        self.MAX_STREAMS = getattr(ApexConfig, "IBKR_MAX_STREAMS", 85)
+        self._stream_lock = asyncio.Lock()
         
         # Callback for data updates (used by Data Watchdog)
         self.data_callback: Optional[Callable[[str], None]] = None
+
+        # Real-time fill callback: called instantly on every IBKR execution detail.
+        # Signature: on_fill_callback(symbol: str, side: str, filled_qty: float, avg_price: float)
+        # Set by execution_loop.py to update self.positions without waiting for the poll loop.
+        self.on_fill_callback: Optional[Callable[[str, str, float, float], None]] = None
 
         # Normalized broker pair mapping for paper trading
         self.ibkr_pair_map = self._build_ibkr_pair_map()
@@ -299,6 +321,71 @@ class IBKRConnector:
             pass
         return 0.0
 
+    async def _request_snapshot_price(self, contract, normalized: str) -> float:
+        """
+        Request a one-shot IBKR market-data snapshot (reqMktData snapshot=True).
+
+        Used as a fallback when the streaming subscription returns no price after
+        the initial wait.  IBKR throttling / pacing violations are handled with a
+        5-second timeout; on timeout we gracefully return 0.0 so the calling cycle
+        simply skips this symbol rather than crashing the execution loop.
+
+        Returns:
+            Price float > 0 on success, 0.0 on failure.
+        """
+        try:
+            await self._throttle_ibkr("snapshot_price_fallback")
+            ticker = self.ib.reqMktData(contract, '', False, True)  # True = snapshot
+            price = 0.0
+            # Poll up to 5 seconds (50 × 100ms) — longer than 3s to tolerate light
+            # IBKR gateway lag and pacing delays without unnecessary failures.
+            for _ in range(50):
+                await asyncio.sleep(0.1)
+                mp = ticker.marketPrice()
+                if not pd.isna(mp) and mp > 0:
+                    price = float(mp)
+                    break
+                last = getattr(ticker, 'last', 0)
+                close = getattr(ticker, 'close', 0)
+                bid = getattr(ticker, 'bid', 0)
+                ask = getattr(ticker, 'ask', 0)
+                if not pd.isna(last) and last > 0:
+                    price = float(last)
+                    break
+                if not pd.isna(close) and close > 0:
+                    price = float(close)
+                    break
+                if not pd.isna(bid) and not pd.isna(ask) and bid > 0 and ask > 0:
+                    price = (float(bid) + float(ask)) / 2.0
+                    break
+            # Always cancel the one-shot subscription to avoid leaking subscriptions
+            try:
+                self.ib.cancelMktData(contract)
+            except Exception:
+                pass
+            if price > 0:
+                logger.info(
+                    "event=snapshot_price_success symbol=%s price=%.4f",
+                    normalized, price
+                )
+            else:
+                logger.debug(
+                    "event=snapshot_price_empty symbol=%s — skipping cycle for this symbol",
+                    normalized
+                )
+            return price
+        except asyncio.TimeoutError:
+            logger.debug(
+                "event=snapshot_price_timeout symbol=%s — skipping cycle gracefully",
+                normalized
+            )
+            return 0.0
+        except Exception as exc:
+            logger.debug("event=snapshot_price_error symbol=%s error=%s", normalized, exc)
+            return 0.0
+
+
+
     def _map_for_broker(self, parsed):
         if not getattr(ApexConfig, "IBKR_USE_PAIR_MAP", True):
             return parsed
@@ -320,11 +407,22 @@ class IBKRConnector:
         )
         return mapped_parsed
 
+    def _on_error(self, reqId: int, errorCode: int, errorString: str, contract: Any):
+        """Handle real-time errors from IBKR API to catch fatal connection conditions."""
+        if errorCode == 10141:
+            self._fatal_error = f"Error {errorCode}: {errorString}"
+            logger.critical(f"❌ IBKR UNRECOVERABLE ERROR: {self._fatal_error}")
+
     def _on_disconnected(self):
         """Handle disconnection from IBKR."""
         if getattr(self, "_reconnect_task", None) and not self._reconnect_task.done():
             logger.debug("IBKR disconnected – reconnect already in progress, skipping duplicate")
             return
+        
+        if self._fatal_error:
+            logger.error(f"IBKR disconnected due to fatal error. Reconnection ABORTED.")
+            return
+
         logger.warning("IBKR disconnected. Attempting to reconnect...")
         self._reconnect_task = asyncio.create_task(self._reconnect_with_backoff())
 
@@ -372,6 +470,55 @@ class IBKRConnector:
                 if self.data_callback:
                     self.data_callback(symbol)
 
+    def _on_exec_details(self, trade, fill) -> None:
+        """Real-time fill handler — fired instantly by ib_insync on every (partial) fill.
+
+        ``trade`` is an ib_insync Trade object.  ``fill`` is an Execution object
+        with fields: execution.side ('BOT'/'SLD'), execution.shares, execution.avgPrice.
+
+        We parse the underlying contract into an APEX-normalized symbol and
+        forward to ``on_fill_callback`` so execution_loop.py can update
+        self.positions immediately — without waiting for the 2-5 minute
+        reconciliation polling cycle.
+        """
+        try:
+            contract = getattr(trade, "contract", None) or getattr(fill, "contract", None)
+            if contract is None:
+                return
+
+            symbol = self._symbol_from_contract(contract)
+            if not symbol:
+                return
+
+            exec_obj = getattr(fill, "execution", fill)     # fill IS the Execution in some versions
+            side_raw = str(getattr(exec_obj, "side", "")).upper()   # 'BOT' or 'SLD'
+            filled_qty = float(getattr(exec_obj, "shares", 0.0) or 0.0)
+            avg_price = float(getattr(exec_obj, "avgPrice", 0.0) or 0.0)
+
+            if filled_qty <= 0:
+                return
+
+            # Normalise IBKR's 'BOT'/'SLD' to 'BUY'/'SELL'
+            side = "BUY" if side_raw in ("BOT", "BUY") else "SELL"
+
+            logger.debug(
+                "event=ibkr_fill_realtime symbol=%s side=%s qty=%.4f price=%.4f",
+                symbol, side, filled_qty, avg_price,
+            )
+
+            if callable(self.on_fill_callback):
+                self.on_fill_callback(symbol, side, filled_qty, avg_price)
+
+        except Exception as exc:
+            logger.warning("_on_exec_details error: %s", exc)
+
+    def set_fill_callback(self, callback: Callable[[str, str, float, float], None]) -> None:
+        """Register a fill callback to be called on every real-time IBKR execution detail.
+
+        Signature: callback(symbol, side, filled_qty, avg_price)
+        """
+        self.on_fill_callback = callback
+
     def record_execution_metrics(
         self,
         symbol: str,
@@ -392,6 +539,14 @@ class IBKRConnector:
             slippage_bps = ((fill_price - expected_price) / expected_price) * 10000
         else:
             slippage_bps = 0.0
+
+        # Record to Prometheus
+        try:
+            from monitoring.prometheus_metrics import PrometheusMetrics
+            metrics = PrometheusMetrics()
+            metrics.record_execution_slippage(abs(slippage_bps))
+        except Exception:
+            pass
 
         self.metrics_store.record_metrics(
             slippage_bps=slippage_bps,
@@ -444,6 +599,7 @@ class IBKRConnector:
     @with_retry(retryable_exceptions=(ConnectionError, TimeoutError, OSError))
     async def connect(self):
         """Connect to Interactive Brokers with delayed market data."""
+        self._fatal_error = None
         logger.info(f"🔌 Connecting to IBKR at {self.host}:{self.port}...")
         
         try:
@@ -464,15 +620,17 @@ class IBKRConnector:
                     
                     logger.info(f"🔑 Lease manager returned client ID {current_client_id} (preferred={preferred})")
                     await asyncio.wait_for(
-                        self.ib.connectAsync(self.host, self.port, clientId=current_client_id),
-                        timeout=getattr(ApexConfig, "IBKR_CONNECT_TIMEOUT", 10)
+                        # timeout=15: Since TWS paper trading accounts have gigabytes of 
+                        # historical execution data, we cap the initial sync at 15s. 
+                        # ib_insync will cleanly catch these 15s inner timeouts, log 
+                        # "proceeding without full execution history", and return the connection!
+                        self.ib.connectAsync(self.host, self.port, clientId=current_client_id, timeout=15),
+                        timeout=240,
                     )
                     
-                    # Wait briefly to catch immediate Server Error 326 (clientId already in use)
-                    await asyncio.sleep(2.0)
-                    if not self.ib.isConnected():
-                        # Connection dropped immediately, likely a client ID collision
-                        raise ConnectionError(f"clientId {current_client_id} rejected by peer")
+                    # Give TWS a brief moment to settle session state
+                    await asyncio.sleep(1.0)
+                    logger.info(f"✅ Connected to IBKR with clientId {current_client_id}")
                     
                     # Start heartbeat task to keep lease alive
                     if getattr(self, "_heartbeat_task", None) is None:
@@ -490,26 +648,42 @@ class IBKRConnector:
                         self._heartbeat_task = asyncio.create_task(_heartbeat())
                     break
 
-                except (Exception, asyncio.TimeoutError) as conn_err:
+                except (Exception, asyncio.TimeoutError, asyncio.CancelledError) as conn_err:
                     # Release the failed lease immediately
                     if getattr(self, "_active_client_id", None):
                         await lease_manager.release(self._active_client_id)
                         self._active_client_id = None
-                        
+
+                    if self._fatal_error:
+                        logger.error(f"❌ Aborting IBKR connection sequence due to fatal error: {self._fatal_error}")
+                        raise RuntimeError(f"IBKR connect aborted: {self._fatal_error}")
+
                     err_str = str(conn_err)
                     is_collision = ("clientId" in err_str and "already in use" in err_str) or "rejected by peer" in err_str
-                    is_timeout = isinstance(conn_err, asyncio.TimeoutError) or "TimeoutError" in err_str
-                    
+                    is_timeout = (
+                        isinstance(conn_err, (asyncio.TimeoutError, asyncio.CancelledError))
+                        or "TimeoutError" in err_str
+                        or "CancelledError" in err_str
+                    )
+
                     if (is_collision or is_timeout) and id_attempt < max_id_retries - 1:
-                        logger.warning(f"⚠️  Connection failed with clientId {current_client_id} (collision/timeout), retrying allocation...")
+                        logger.warning(
+                            "⚠️  Connection failed with clientId %d (%s), retrying allocation in 5s...",
+                            current_client_id,
+                            type(conn_err).__name__,
+                        )
                         # Ensure ib_insync is fully disconnected before next attempt
                         try:
                             self.ib.disconnect()
                         except Exception:
                             pass
-                        await asyncio.sleep(2)
+                        await asyncio.sleep(5)  # give TWS more time (was 2s)
                         continue
-                    raise
+                    # Last attempt or non-retriable error — re-raise as plain Exception
+                    # so the outer handler can catch it cleanly without cancelling tasks
+                    raise RuntimeError(
+                        f"IBKR connect failed (attempt {id_attempt + 1}/{max_id_retries}): {type(conn_err).__name__}: {conn_err}"
+                    ) from conn_err
             
             # ✅ Phase 2.2: Configurable market data type
             # Type 1 = Live (requires paid subscription)
@@ -536,6 +710,12 @@ class IBKRConnector:
             # Hook up data event listener
             self.ib.pendingTickersEvent += self._on_data_update
             self.ib.disconnectedEvent += self._on_disconnected
+            # ─── Real-time fill listener ──────────────────────────────────
+            # ib_insync fires execDetailsEvent immediately on every partial or
+            # full fill. We use this to update local position state without
+            # waiting for the periodic reconciliation loop.
+            self.ib.execDetailsEvent += self._on_exec_details
+            logger.info("✅ IBKR real-time fill listener registered (execDetailsEvent)")
             
         except Exception as e:
             logger.error(f"❌ Failed to connect to IBKR: {e}")
@@ -572,15 +752,14 @@ class IBKRConnector:
             finally:
                 self._active_client_id = None
     
-    async def get_contract(self, symbol: str) -> Optional[Contract]:
+    async def get_contract(self, symbol: str, require_qualified: bool = False) -> Optional[Contract]:
         """
         Get or create contract (equity, forex, or crypto).
-        
-        Args:
-            symbol: Stock ticker (e.g., 'AAPL')
-            
-        Returns:
-            Stock contract or None if not found
+
+        When ``require_qualified`` is False (default) the method returns an
+        unqualified contract immediately if TWS doesn't respond to
+        qualifyContractsAsync within the timeout — so the caller is never
+        blocked for more than ~5 seconds on a broken TWS session.
         """
         try:
             parsed = parse_symbol(symbol)
@@ -597,7 +776,7 @@ class IBKRConnector:
                 broker_parsed.normalized,
             )
         else:
-            logger.info(
+            logger.debug(
                 "event=symbol_normalization input=%s normalized=%s broker=%s",
                 parsed.raw,
                 parsed.normalized,
@@ -611,39 +790,161 @@ class IBKRConnector:
         try:
             contract = self._build_contract(broker_parsed)
 
-            # If offline or not connected, return unqualified contract for logging/tests
+            # If offline or not connected, return unqualified contract immediately
             if self.offline_mode or not self.ib.isConnected():
                 self.contracts[key] = contract
-                logger.info("event=ibkr_offline_contract symbol=%s broker=%s", parsed.normalized, broker_parsed.normalized)
+                logger.debug("event=ibkr_offline_contract symbol=%s broker=%s", parsed.normalized, broker_parsed.normalized)
+                return contract
+                
+            # IBKR does not reliably qualify standard CRYPTO streams via qualifyContractsAsync
+            if parsed.asset_class == AssetClass.CRYPTO:
+                self.contracts[key] = contract
                 return contract
 
             # Qualify contract (get full details from IBKR)
-            await self._throttle_ibkr("qualify_contract")
-            qualified = await self.ib.qualifyContractsAsync(contract)
+            # Throttle only when we're going to the network.
             
-            if qualified:
-                self.contracts[key] = qualified[0]
-                return qualified[0]
-            else:
-                if parsed.asset_class == AssetClass.FOREX:
-                    for fallback in self._fx_fallback_contracts(broker_parsed):
-                        await self._throttle_ibkr("qualify_contract_fx_fallback")
-                        fallback_qualified = await self.ib.qualifyContractsAsync(fallback)
-                        if fallback_qualified:
-                            self.contracts[key] = fallback_qualified[0]
-                            logger.warning(
-                                "⚠️  FX fallback contract qualified for %s via exchange=%s",
-                                parsed.normalized,
-                                getattr(fallback_qualified[0], "exchange", "unknown"),
-                            )
-                            return fallback_qualified[0]
-                logger.warning(f"⚠️  Could not qualify contract for {parsed.normalized}")
-                return None
-                
+            async with self._qualify_semaphore:
+                await self._throttle_ibkr("qualify_contract")
+                try:
+                    qualified = await asyncio.wait_for(self.ib.qualifyContractsAsync(contract), timeout=15.0)
+                except asyncio.TimeoutError:
+                    logger.warning(
+                        "⚠️  qualifyContractsAsync timed out for %s — using unqualified contract",
+                        parsed.normalized,
+                    )
+                    # Cache the unqualified contract so we don't retry on every call
+                    self.contracts[key] = contract
+                    return contract if not require_qualified else None
+
+                if qualified:
+                    self.contracts[key] = qualified[0]
+                    await self._save_contract_to_disk_cache(key, qualified[0])  # persist for next restart
+                    return qualified[0]
+                else:
+                    if parsed.asset_class == AssetClass.FOREX:
+                        for fallback in self._fx_fallback_contracts(broker_parsed):
+                            await self._throttle_ibkr("qualify_contract_fx_fallback")
+                            try:
+                                fallback_qualified = await asyncio.wait_for(self.ib.qualifyContractsAsync(fallback), timeout=15.0)
+                            except asyncio.TimeoutError:
+                                fallback_qualified = []
+                            if fallback_qualified:
+                                self.contracts[key] = fallback_qualified[0]
+                                await self._save_contract_to_disk_cache(key, fallback_qualified[0])  # persist
+                                logger.warning(
+                                    "⚠️  FX fallback contract qualified for %s via exchange=%s",
+                                    parsed.normalized,
+                                    getattr(fallback_qualified[0], "exchange", "unknown"),
+                                )
+                                return fallback_qualified[0]
+                    # Fall back to unqualified
+                    logger.warning(
+                        "⚠️  Could not qualify contract for %s — using unqualified",
+                        parsed.normalized,
+                    )
+                    self.contracts[key] = contract
+                    return contract if not require_qualified else None
+
         except Exception as e:
             logger.error(f"❌ Error getting contract for {parsed.normalized}: {e}")
             return None
     
+    # ─── Contract Disk Cache ────────────────────────────────────────────
+
+    def _load_contract_disk_cache(self) -> None:
+        """Load previously qualified contracts from disk into self.contracts."""
+        import json
+        from datetime import datetime, timedelta
+        try:
+            if not self._contract_cache_path.exists():
+                return
+            data = json.loads(self._contract_cache_path.read_text())
+            now = datetime.utcnow()
+            max_age = timedelta(days=7)
+            loaded = 0
+            for sym, entry in data.items():
+                try:
+                    cached_at = datetime.fromisoformat(entry["cached_at"])
+                    if now - cached_at > max_age:
+                        continue  # stale — re-qualify next time
+                    contract = Contract(
+                        conId=entry["conId"],
+                        symbol=entry["symbol"],
+                        secType=entry["secType"],
+                        exchange=entry["exchange"],
+                        currency=entry["currency"],
+                    )
+                    self.contracts[sym] = contract
+                    loaded += 1
+                except Exception:
+                    continue
+            if loaded:
+                logger.info("💾 Loaded %d cached IBKR contracts from disk (skipping qualifyContractsAsync)", loaded)
+        except Exception as exc:
+            logger.debug("Contract disk cache load failed (non-fatal): %s", exc)
+
+    async def _save_contract_to_disk_cache(self, normalized_symbol: str, contract) -> None:
+        """Persist a newly qualified contract to the disk cache safely."""
+        import json
+        import fcntl
+        from datetime import datetime
+        async with self._cache_lock:
+            try:
+                if not self._contract_cache_path.exists():
+                    self._contract_cache_path.write_text("{}")
+                    
+                with open(self._contract_cache_path, "r+") as f:
+                    fcntl.flock(f, fcntl.LOCK_EX)
+                    try:
+                        try:
+                            data = json.load(f)
+                        except json.JSONDecodeError:
+                            data = {}  # Overwrite corrupted file
+                            
+                        data[normalized_symbol] = {
+                            "conId": getattr(contract, "conId", 0),
+                            "symbol": getattr(contract, "symbol", ""),
+                            "secType": getattr(contract, "secType", ""),
+                            "exchange": getattr(contract, "exchange", ""),
+                            "currency": getattr(contract, "currency", ""),
+                            "cached_at": datetime.utcnow().isoformat(),
+                        }
+                        
+                        f.seek(0)
+                        f.truncate()
+                        json.dump(data, f, indent=2)
+                    finally:
+                        fcntl.flock(f, fcntl.LOCK_UN)
+            except Exception as exc:
+                logger.warning("Contract disk cache save failed: %s", exc)
+
+    # ─── Contract Lookup ────────────────────────────────────────────────
+
+    async def _qualify_contract_semaphored(self, symbol: str, semaphore: asyncio.Semaphore) -> None:
+        """Try to qualify a single contract, limiting concurrency via semaphore."""
+        async with semaphore:
+            await self.get_contract(symbol)  # result cached in self.contracts
+
+    async def prewarm_contracts(self, symbols: list, concurrency: int = 5) -> None:
+        """
+        Pre-qualify a list of contracts concurrently.
+        Uses a semaphore to cap in-flight TWS requests and avoids hammering TWS.
+        """
+        if self.offline_mode or not self.ib.isConnected():
+            return
+        sem = asyncio.Semaphore(concurrency)
+        tasks = [
+            self._qualify_contract_semaphored(s, sem)
+            for s in symbols
+            if parse_symbol(s).normalized not in self.contracts  # skip already cached
+            if True  # parse may raise; get_contract handles it safely
+        ]
+        if tasks:
+            logger.info("⚡ Pre-warming %d contracts (concurrency=%d)…", len(tasks), concurrency)
+            await asyncio.gather(*tasks, return_exceptions=True)
+            logger.info("✅ Contract pre-warm complete")
+
     async def stream_quotes(self, symbols: list):
         """
         Start streaming quotes for a list of symbols (Free-Tier Safe).
@@ -662,45 +963,67 @@ class IBKRConnector:
                     if parsed.asset_class != AssetClass.EQUITY:
                         await self.get_contract(symbol)
                 logger.warning("event=stream_quotes_skipped reason=ibkr_offline symbols=%d", len(symbols))
-                self.tickers.clear()
-                self.active_streams = 0
                 return
-            # Smart management: prioritize positions and top symbols
-            # Stop existing streams if over limit or refreshing
-            for ticker in list(self.tickers.values()):
-                self.ib.cancelMktData(ticker.contract)
-            
-            self.tickers.clear()
-            self.active_streams = 0
-            
-            # Take top N symbols to avoid pacing violations
-            target_symbols = symbols[:self.MAX_STREAMS]
-            skipped = len(symbols) - len(target_symbols)
-            
-            if skipped > 0:
-                logger.warning(f"⚠️  Capping streams at {self.MAX_STREAMS} (skipping {skipped} symbols)")
-            
-            count = 0
-            for symbol in target_symbols:
-                try:
-                    normalized = self._normalize_symbol(symbol)
-                except ValueError:
-                    logger.warning(f"⚠️  Skipping invalid symbol for streaming: {symbol}")
-                    continue
 
-                contract = await self.get_contract(symbol)
-                if contract:
-                    # snapshot=False enables streaming
-                    await self._throttle_ibkr("stream_mkt_data")
-                    ticker = self.ib.reqMktData(contract, '', False, False)
-                    self.tickers[normalized] = ticker
-                    count += 1
-            
-            self.active_streams = count
-            logger.info(f"✅ Started streaming {count} symbols (Delayed-Frozen Type 4)")
-            
+            async with self._stream_lock:
+                # 1. Normalize and deduplicate incoming symbols
+                normalized_incoming = set()
+                incoming_map = {}
+                for s in symbols:
+                    try:
+                        norm = self._normalize_symbol(s)
+                        if norm not in normalized_incoming:
+                            normalized_incoming.add(norm)
+                            incoming_map[norm] = s
+                    except ValueError:
+                        continue
+
+                # 2. Hard limit check to protect against IBKR pacing violations
+                if len(normalized_incoming) > self.MAX_STREAMS:
+                    # Sort deterministically so we drop predictably if passed too many
+                    sorted_incoming = list(normalized_incoming)[:self.MAX_STREAMS]
+                    normalized_incoming = set(sorted_incoming)
+                    logger.warning(
+                        "⚠️ Capping incoming IBKR streams at %d (skipped %d)",
+                        self.MAX_STREAMS, len(incoming_map) - self.MAX_STREAMS
+                    )
+
+                # 3. Identify differences
+                current_active = set(self.tickers.keys())
+                to_cancel = current_active - normalized_incoming
+                to_add = normalized_incoming - current_active
+
+                # 4. Cancel stale streams directly
+                for sym in to_cancel:
+                    ticker = self.tickers.pop(sym, None)
+                    if ticker:
+                        self.ib.cancelMktData(ticker.contract)
+                        self.stream_registry.pop(ticker.contract.conId, None)
+
+                # 5. Subscribe to new streams
+                add_count = 0
+                for sym in to_add:
+                    original_symbol = incoming_map[sym]
+                    contract = await self.get_contract(original_symbol)
+                    if contract:
+                        await self._throttle_ibkr("stream_mkt_data")
+                        ticker = self.ib.reqMktData(contract, '', False, False)
+                        self.tickers[sym] = ticker
+                        self.stream_registry[contract.conId] = ticker
+                        add_count += 1
+                
+                self.active_streams = len(self.tickers)
+                
+                if to_cancel or to_add:
+                    logger.info(
+                        "✅ IBKR Stream Sync: Cancelled %d, Added %d (Total Active: %d/%d)",
+                        len(to_cancel), add_count, self.active_streams, self.MAX_STREAMS
+                    )
+                else:
+                    logger.debug("⚡ IBKR Stream Sync: No changes required (Active: %d)", self.active_streams)
+                    
         except Exception as e:
-            logger.error(f"Error starting streams: {e}")
+            logger.error(f"Error syncing streams: {e}")
 
     @with_retry(max_retries=3, retryable_exceptions=(ConnectionError, TimeoutError))
     async def get_market_price(self, symbol: str) -> float:
@@ -772,8 +1095,8 @@ class IBKRConnector:
                 if not pd.isna(last) and last > 0: return float(last)
                 if not pd.isna(close) and close > 0: return float(close)
             
-            # Wait for price data to arrive (max 2 seconds - reverted from 10s)
-            for _ in range(20):
+            # Wait for price data to arrive (max 5 seconds - increased from 2s to reduce noise)
+            for _ in range(50):
                 await asyncio.sleep(0.1)
                 if not pd.isna(price) and price > 0:
                     logger.debug(f"✅ Got streaming price for {normalized}: ${price:.2f}")
@@ -796,16 +1119,44 @@ class IBKRConnector:
                     logger.debug(f"✅ Got fallback streaming price for {normalized}: ${price:.2f}")
                     return float(price)
             
-            # Still no price after 2 seconds - fall back to data provider
-            logger.warning(f"⚠️  No streaming price for {normalized} after 2s")
+            # Still no price after 5 seconds.
+            # Step 1: Try a one-shot IBKR snapshot request (reqMktData snapshot=True).
+            # This handles cases where the streaming subscription is stale but IBKR
+            # can still serve a delayed/frozen quote via a snapshot pull (5s window).
+            # If the snapshot also times out, we skip this symbol gracefully rather
+            # than crashing the execution loop (per user feedback on IBKR pacing).
+            logger.debug(f"⚠️  No streaming price for {normalized} after 5s — attempting snapshot fallback")
+            if contract:
+                snapshot_price = await self._request_snapshot_price(contract, normalized)
+                if snapshot_price > 0:
+                    return snapshot_price
+            # Step 2: Data-provider fallback (only active when USE_DATA_FALLBACK_FOR_PRICES=True)
+            logger.warning(f"⚠️  No streaming price for {normalized} after 5s — snapshot also empty")
             price = self._fallback_price(normalized, reason="ibkr_no_stream_price")
             if price > 0:
                 return float(price)
             return 0.0
-            
         except Exception as e:
             logger.debug(f"Error getting price for {symbol}: {e}")
             return 0.0
+
+    def get_quote_age(self, symbol: str) -> float:
+        """
+        Returns the age of the cached quote in seconds. 
+        Returns 999999.0 if no quote exists.
+        """
+        try:
+            normalized = self._normalize_symbol(symbol)
+            if normalized in self.tickers:
+                ticker = self.tickers[normalized]
+                if ticker.time:
+                    # ticker.time is timezone-aware UTC datetime in ib_insync
+                    from datetime import datetime, timezone
+                    now = datetime.now(timezone.utc) if ticker.time.tzinfo else datetime.utcnow()
+                    return (now - ticker.time).total_seconds()
+        except:
+            pass
+        return 999999.0
 
     async def get_quote(self, symbol: str) -> Dict[str, float]:
         """Get latest bid/ask/mid quote for spread controls."""
@@ -1149,7 +1500,9 @@ class IBKRConnector:
 
             # Create market order
             action = 'BUY' if side.upper() == 'BUY' else 'SELL'
-            order = MarketOrder(action, quantity)
+            order = MarketOrder(action, quantity, outsideRth=True)
+            if parsed.asset_class == AssetClass.FOREX:
+                order.tif = 'GTC'
 
             # Place order
             trade = self.ib.placeOrder(contract, order)
@@ -1258,7 +1611,11 @@ class IBKRConnector:
             logger.info(f"   💰 Limit @ ${limit_price:.2f} (buffer: {buffer*100:.1f}%, conf: {confidence:.2f})")
             
             # Create limit order
-            order = LimitOrder(action, quantity, limit_price)
+            order = LimitOrder(action, quantity, limit_price, outsideRth=True)
+            order.algoStrategy = 'Adaptive'
+            order.algoParams = [TagValue('adaptivePriority', 'Normal')]
+            if parsed.asset_class == AssetClass.FOREX:
+                order.tif = 'GTC'
             
             # Place order
             trade = self.ib.placeOrder(contract, order)
@@ -1383,7 +1740,11 @@ class IBKRConnector:
                     except Exception:
                         pass
 
-                order = LimitOrder(action, quantity, limit_price)
+                order = LimitOrder(action, quantity, limit_price, outsideRth=True)
+                order.algoStrategy = 'Adaptive'
+                order.algoParams = [TagValue('adaptivePriority', 'Normal')]
+                if parsed.asset_class == AssetClass.FOREX:
+                    order.tif = 'GTC'
                 active_trade = self.ib.placeOrder(contract, order)
 
                 # Poll for fill during the patience window
@@ -1676,7 +2037,14 @@ class IBKRConnector:
             for i, params in enumerate(attempts):
                 contract = Option(**params)
                 await self._throttle_ibkr("qualify_option_contract")
-                qualified = await self.ib.qualifyContractsAsync(contract)
+                try:
+                    qualified = await asyncio.wait_for(
+                        self.ib.qualifyContractsAsync(contract),
+                        timeout=10
+                    )
+                except asyncio.TimeoutError:
+                    logger.warning(f"🕒 Timeout qualifying option contract {symbol} {expiry} - Step {i+1}")
+                    continue
                 if qualified:
                     self.contracts[cache_key] = qualified[0]
                     if i > 0:
@@ -1756,9 +2124,29 @@ class IBKRConnector:
             if not contract:
                 return {}
 
-            # Request market data
+            # Request market data via StreamManager to avoid Error 101
             await self._throttle_ibkr("snapshot_option_data")
+            
+            # Ensure we have room for this stream
+            if len(self.stream_registry) >= self.MAX_STREAMS:
+                # Evict the oldest non-position stream from self.tickers if possible
+                evicted = False
+                for sym, ticker in list(self.tickers.items()):
+                    if ticker.contract.conId in self.stream_registry:
+                        logger.debug(f"📐 Evicting stream {sym} to make room for option snapshot")
+                        self.ib.cancelMktData(ticker.contract)
+                        self.stream_registry.pop(ticker.contract.conId, None)
+                        self.tickers.pop(sym, None)
+                        evicted = True
+                        break
+                if not evicted and self.stream_registry:
+                    # Just pick one and cancel it
+                    cid, t = next(iter(self.stream_registry.items()))
+                    self.ib.cancelMktData(t.contract)
+                    self.stream_registry.pop(cid)
+
             ticker = self.ib.reqMktData(contract, '', False, False)
+            self.stream_registry[contract.conId] = ticker
 
             # Wait for data (max 3 seconds)
             for _ in range(30):
@@ -1767,6 +2155,7 @@ class IBKRConnector:
                     break
 
             self.ib.cancelMktData(contract)
+            self.stream_registry.pop(contract.conId, None)
 
             bid = self._finite_float(getattr(ticker, "bid", 0.0), 0.0)
             ask = self._finite_float(getattr(ticker, "ask", 0.0), 0.0)
@@ -1875,7 +2264,7 @@ class IBKRConnector:
                 logger.info(f"   🔄 Switching to LMT order for paper trading safety (${limit_price:.2f})")
 
             if order_type == 'MKT':
-                order = MarketOrder(action, quantity, tif='GTC')
+                order = MarketOrder(action, quantity, tif='DAY')
                 logger.info(f"📈 Option Market Order: {action} {quantity} {symbol} {expiry} {strike}{right}")
             else:
                 # Ensure we have a valid limit price
@@ -1885,8 +2274,10 @@ class IBKRConnector:
 
                 # Round to 2 decimals for USD options
                 limit_price = max(0.01, round(limit_price, 2))
-                
-                order = LimitOrder(action, quantity, limit_price, tif='GTC')
+
+                order = LimitOrder(action, quantity, limit_price, tif='DAY')
+                order.algoStrategy = 'Adaptive'
+                order.algoParams = [TagValue('adaptivePriority', 'Normal')]
                 logger.info(f"💰 Option Limit Order: {action} {quantity} {symbol} {expiry} {strike}{right} @ ${limit_price:.2f}")
 
             # Place order

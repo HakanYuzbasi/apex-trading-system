@@ -366,6 +366,18 @@ class PrometheusMetrics:
             'Data fetching latency',
             registry=self.registry
         )
+        self.execution_slippage_bps = Histogram(
+            'apex_execution_slippage_bps',
+            'Execution slippage in basis points',
+            buckets=[0, 1, 2, 5, 10, 25, 50, 100],
+            registry=self.registry
+        )
+        self.frontend_ws_latency_ms = Histogram(
+            'apex_frontend_ws_latency_ms',
+            'Frontend WebSocket latency in milliseconds',
+            buckets=[10, 50, 100, 250, 500, 1000],
+            registry=self.registry
+        )
 
     def _init_model_metrics(self):
         """Initialize ML model metrics."""
@@ -394,6 +406,12 @@ class PrometheusMetrics:
         self.model_predictions_total = Counter(
             'apex_model_predictions_total',
             'Total model predictions made',
+            registry=self.registry
+        )
+        self.model_prediction_drift = Gauge(
+            'apex_model_prediction_drift_mae',
+            'Mean Absolute Error of model predictions vs actual returns',
+            ['symbol', 'window'],
             registry=self.registry
         )
 
@@ -731,6 +749,18 @@ class PrometheusMetrics:
         self.position_pnl.labels(symbol=symbol).set(pnl)
         self.position_pnl_percent.labels(symbol=symbol).set(pnl_pct)
 
+    def record_execution_slippage(self, slippage_bps: float):
+        """Record execution slippage in basis points."""
+        if not self.enabled:
+            return
+        self.execution_slippage_bps.observe(slippage_bps)
+
+    def record_frontend_latency(self, latency_ms: float):
+        """Record frontend WebSocket latency in milliseconds."""
+        if not self.enabled:
+            return
+        self.frontend_ws_latency_ms.observe(latency_ms)
+
     # ===================
     # Trading Updates
     # ===================
@@ -947,6 +977,12 @@ class PrometheusMetrics:
         if not self.enabled:
             return
         self.model_predictions_total.inc()
+
+    def update_prediction_drift(self, symbol: str, window: str, drift: float):
+        """Update model prediction drift metric (MAE)."""
+        if not self.enabled:
+            return
+        self.model_prediction_drift.labels(symbol=symbol, window=window).set(drift)
 
     # ===================
     # Governor/Kill-Switch

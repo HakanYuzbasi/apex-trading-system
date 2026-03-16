@@ -20,6 +20,8 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Dict, List, Optional, Any
 
+from core.symbols import normalize_symbol
+
 logger = logging.getLogger(__name__)
 
 
@@ -84,6 +86,101 @@ class PerformanceAttributionTracker:
         self.social_impacts: List[Dict[str, Any]] = []
         self._load_state()
 
+    @staticmethod
+    def _canonical_symbol(symbol: str) -> str:
+        try:
+            return normalize_symbol(symbol)
+        except Exception:
+            return str(symbol or "").strip().upper()
+
+    def _merge_open_position_rows(
+        self,
+        existing: Optional[Dict[str, Any]],
+        incoming: Dict[str, Any],
+        canonical_symbol: str,
+    ) -> Dict[str, Any]:
+        if not existing:
+            merged = dict(incoming)
+            merged["symbol"] = canonical_symbol
+            merged["quantity"] = float(incoming.get("quantity", 0.0) or 0.0)
+            return merged
+
+        existing_side = str(existing.get("side", "")).upper()
+        incoming_side = str(incoming.get("side", "")).upper()
+        existing_qty = float(existing.get("quantity", 0.0) or 0.0)
+        incoming_qty = float(incoming.get("quantity", 0.0) or 0.0)
+
+        if existing_side and incoming_side and existing_side != incoming_side:
+            merged = dict(incoming)
+            merged["symbol"] = canonical_symbol
+            merged["quantity"] = incoming_qty
+            return merged
+
+        total_qty = existing_qty + incoming_qty
+        if total_qty <= 0:
+            merged = dict(incoming)
+            merged["symbol"] = canonical_symbol
+            merged["quantity"] = incoming_qty
+            return merged
+
+        def _weighted(field: str, default: float = 0.0) -> float:
+            left = float(existing.get(field, default) or default)
+            right = float(incoming.get(field, default) or default)
+            return ((left * existing_qty) + (right * incoming_qty)) / total_qty
+
+        merged = dict(existing)
+        merged.update(incoming)
+        merged["symbol"] = canonical_symbol
+        merged["quantity"] = total_qty
+        for field in (
+            "entry_price",
+            "entry_signal",
+            "entry_confidence",
+            "risk_multiplier",
+            "vix_multiplier",
+            "governor_size_multiplier",
+            "entry_slippage_bps",
+        ):
+            merged[field] = _weighted(field)
+
+        try:
+            existing_time = str(existing.get("entry_time") or "")
+            incoming_time = str(incoming.get("entry_time") or "")
+            merged["entry_time"] = min(t for t in (existing_time, incoming_time) if t)
+        except ValueError:
+            merged["entry_time"] = existing.get("entry_time") or incoming.get("entry_time")
+
+        if existing.get("source") != incoming.get("source"):
+            merged["source"] = "merged_entry"
+        return merged
+
+    def normalize_open_positions(self) -> bool:
+        """Canonicalize open-position keys and merge duplicate symbol spellings."""
+        if not self.open_positions:
+            return False
+
+        normalized: Dict[str, Dict[str, Any]] = {}
+        changed = False
+
+        for raw_symbol, raw_entry in list(self.open_positions.items()):
+            canonical_symbol = self._canonical_symbol(raw_symbol)
+            entry = dict(raw_entry or {})
+            entry["symbol"] = canonical_symbol
+            normalized[canonical_symbol] = self._merge_open_position_rows(
+                normalized.get(canonical_symbol),
+                entry,
+                canonical_symbol,
+            )
+            if raw_symbol != canonical_symbol:
+                changed = True
+
+        if set(normalized.keys()) != set(self.open_positions.keys()):
+            changed = True
+
+        if changed:
+            self.open_positions = normalized
+        return changed
+
     def record_entry(
         self,
         *,
@@ -108,8 +205,10 @@ class PerformanceAttributionTracker:
         if quantity <= 0 or entry_price <= 0:
             return
 
+        canonical_symbol = self._canonical_symbol(symbol)
+
         entry = EntryAttribution(
-            symbol=symbol,
+            symbol=canonical_symbol,
             asset_class=str(asset_class).upper(),
             sleeve=sleeve,
             side=side.upper(),
@@ -126,7 +225,11 @@ class PerformanceAttributionTracker:
             entry_slippage_bps=float(entry_slippage_bps or 0.0),
             source=source,
         )
-        self.open_positions[symbol] = asdict(entry)
+        self.open_positions[canonical_symbol] = self._merge_open_position_rows(
+            self.open_positions.get(canonical_symbol),
+            asdict(entry),
+            canonical_symbol,
+        )
         self._save_state()
 
     def record_exit(
@@ -156,7 +259,18 @@ class PerformanceAttributionTracker:
         if quantity <= 0 or exit_price <= 0:
             return
 
-        entry_ctx = self.open_positions.pop(symbol, None) or {}
+        canonical_symbol = self._canonical_symbol(symbol)
+
+        # Try exact symbol first, then fallback to strip/add CRYPTO: prefix so
+        # mismatches between Alpaca format (BTC/USD) and internal (CRYPTO:BTC/USD)
+        # don't leave stale phantom entries in open_positions.
+        entry_ctx = self.open_positions.pop(canonical_symbol, None)
+        if entry_ctx is None:
+            entry_ctx = self.open_positions.pop(symbol, None)
+        if entry_ctx is None:
+            _alt = symbol[len("CRYPTO:"):] if symbol.startswith("CRYPTO:") else f"CRYPTO:{symbol}"
+            entry_ctx = self.open_positions.pop(_alt, None)
+        entry_ctx = entry_ctx or {}
 
         entry_price = float(entry_ctx.get("entry_price", entry_price_fallback) or 0.0)
         if entry_price <= 0:
@@ -191,7 +305,7 @@ class PerformanceAttributionTracker:
         )
 
         closed = ClosedTradeAttribution(
-            symbol=symbol,
+            symbol=canonical_symbol,
             asset_class=str(entry_ctx.get("asset_class", asset_class_fallback)).upper(),
             sleeve=str(entry_ctx.get("sleeve", sleeve_fallback)),
             side=str(entry_ctx.get("side", side_fallback)).upper(),
@@ -392,12 +506,15 @@ class PerformanceAttributionTracker:
             self.open_positions = state.get("open_positions", {}) or {}
             self.closed_trades = state.get("closed_trades", []) or []
             self.social_impacts = state.get("social_impacts", []) or []
+            normalized = self.normalize_open_positions()
             logger.info(
                 "📈 Restored attribution state: open=%d closed=%d social=%d",
                 len(self.open_positions),
                 len(self.closed_trades),
                 len(self.social_impacts),
             )
+            if normalized:
+                self._save_state()
         except Exception as exc:
             logger.error("Failed to load performance attribution state: %s", exc)
 

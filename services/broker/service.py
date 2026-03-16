@@ -55,10 +55,13 @@ class BrokerService:
         self._equity_locks: Dict[str, asyncio.Lock] = {}
         self._positions_locks: Dict[str, asyncio.Lock] = {}
         self._equity_refresh_ttl_seconds: int = int(
-            os.getenv("APEX_BROKER_EQUITY_REFRESH_INTERVAL_SECONDS", "5")
+            os.getenv("APEX_BROKER_EQUITY_REFRESH_INTERVAL_SECONDS", "120")
         )
         self._positions_refresh_ttl_seconds: int = int(
-            os.getenv("APEX_BROKER_POSITIONS_REFRESH_INTERVAL_SECONDS", "5")
+            os.getenv("APEX_BROKER_POSITIONS_REFRESH_INTERVAL_SECONDS", "120")
+        )
+        self._ibkr_connect_retry_attempts: int = int(
+            os.getenv("APEX_IBKR_CONNECT_RETRY_ATTEMPTS", "3")
         )
 
     # ─────────────────────────────────────────
@@ -168,20 +171,119 @@ class BrokerService:
 
     async def connect_ibkr(self, host: str, port: int, client_id: int) -> IB:
         """Establishes and validates an IBKR connection."""
-        ib = IB()
-        try:
-            await ib.connectAsync(host, port, clientId=client_id, timeout=5)
-            if not ib.isConnected():
-                raise ConnectionError("IBKR connection check failed")
-            ib.disconnect()
-            return ib
-        except Exception as e:
-            logger.error(f"IBKR connection failed: {e}")
-            raise ApexBrokerError(
-                code="IBKR_CONNECT_FAILED",
-                message="Failed to connect to IBKR",
-                context={"host": host, "port": port, "client_id": client_id, "error": str(e)},
-            ) from e
+        last_error: Optional[ApexBrokerError] = None
+        for attempt in range(self._ibkr_connect_retry_attempts):
+            allocated_id = await lease_manager.allocate(preferred_id=client_id, ttl=30)
+            ib = IB()
+            fatal_error: Dict[str, Any] = {}
+
+            def _on_error(req_id: int, error_code: int, error_string: str, contract: Any) -> None:
+                if int(error_code) == 10141:
+                    fatal_error["message"] = error_string
+
+            error_event = getattr(ib, "errorEvent", None)
+            if error_event is not None:
+                error_event += _on_error
+            try:
+                await ib.connectAsync(host, port, clientId=allocated_id, timeout=30)
+                if fatal_error.get("message"):
+                    raise self._classify_ibkr_error(
+                        host=host,
+                        port=port,
+                        client_id=allocated_id,
+                        error=RuntimeError(fatal_error["message"]),
+                        fatal_message=fatal_error["message"],
+                    )
+                if not ib.isConnected():
+                    raise ConnectionError("IBKR connection check failed")
+                ib.disconnect()
+                return ib
+            except Exception as exc:
+                error = exc if isinstance(exc, ApexBrokerError) else self._classify_ibkr_error(
+                    host=host,
+                    port=port,
+                    client_id=allocated_id,
+                    error=exc,
+                    fatal_message=fatal_error.get("message"),
+                )
+                last_error = error
+                logger.error("IBKR connection failed for clientId %s: %s", allocated_id, error)
+                if attempt >= self._ibkr_connect_retry_attempts - 1 or not self._is_retryable_ibkr_error(error):
+                    raise error from exc
+                await asyncio.sleep(1.0)
+            finally:
+                if ib.isConnected():
+                    ib.disconnect()
+                await lease_manager.release(allocated_id)
+
+        if last_error is not None:
+            raise last_error
+        raise ApexBrokerError(
+            code="IBKR_CONNECT_FAILED",
+            message="Failed to connect to IBKR",
+            context={"host": host, "port": port, "client_id": client_id},
+        )
+
+    @staticmethod
+    def _classify_ibkr_error(
+        host: str,
+        port: int,
+        client_id: Optional[int],
+        error: Exception,
+        fatal_message: Optional[str] = None,
+    ) -> ApexBrokerError:
+        detail = str(fatal_message or error or "").strip()
+        lowered = detail.lower()
+        context = {
+            "host": host,
+            "port": port,
+            "client_id": client_id,
+            "error": detail or type(error).__name__,
+        }
+
+        if fatal_message or "paper trading disclaimer" in lowered or "10141" in lowered:
+            return ApexBrokerError(
+                code="IBKR_PAPER_DISCLAIMER_REQUIRED",
+                message="IBKR paper trading disclaimer must be accepted in TWS/Gateway before API access is allowed",
+                context=context,
+            )
+        if "already in use" in lowered or ("clientid" in lowered and "in use" in lowered):
+            return ApexBrokerError(
+                code="IBKR_CLIENT_ID_IN_USE",
+                message="IBKR rejected the API client ID because it is already in use",
+                context=context,
+            )
+        if (
+            isinstance(error, (TimeoutError, asyncio.TimeoutError))
+            or "timeout" in lowered
+            or "timed out" in lowered
+        ):
+            return ApexBrokerError(
+                code="IBKR_CONNECT_TIMEOUT",
+                message="IBKR API connection timed out",
+                context=context,
+            )
+        if "connection reset by peer" in lowered or "peer closed connection" in lowered:
+            return ApexBrokerError(
+                code="IBKR_CONNECTION_RESET",
+                message="IBKR peer reset the API connection",
+                context=context,
+            )
+        return ApexBrokerError(
+            code="IBKR_CONNECT_FAILED",
+            message="Failed to connect to IBKR",
+            context=context,
+        )
+
+    @staticmethod
+    def _is_retryable_ibkr_error(error: Exception) -> bool:
+        if not isinstance(error, ApexBrokerError):
+            return False
+        return error.code in {
+            "IBKR_CLIENT_ID_IN_USE",
+            "IBKR_CONNECT_TIMEOUT",
+            "IBKR_CONNECTION_RESET",
+        }
 
     async def validate_credentials(self, broker_type: BrokerType, credentials: Dict[str, Any], environment: str = "paper") -> bool:
         """Validates credentials by attempting a connection."""
@@ -354,7 +456,7 @@ class BrokerService:
                 context={"connection_id": connection.id, "broker_type": connection.broker_type.value, "error": str(exc)},
             ) from exc
 
-    _POSITIONS_FETCH_TIMEOUT_SECONDS = 12
+    _POSITIONS_FETCH_TIMEOUT_SECONDS = 45
 
     async def _fetch_connection_positions(
         self,
@@ -376,25 +478,46 @@ class BrokerService:
             )
 
         if connection.broker_type == BrokerType.IBKR:
-            # 🎯 Allocate unique clientId from lease manager
-            allocated_id = await lease_manager.allocate(
-                preferred_id=connection.client_id,
-                ttl=30  # Short TTL for single fetch
-            )
-            try:
-                return await asyncio.wait_for(
-                    asyncio.to_thread(
-                        self._fetch_ibkr_positions_blocking,
-                        source_name=connection.name,
-                        source_id=connection.id,
-                        client_id=allocated_id,
-                        credentials=credentials,
-                        as_of=as_of,
-                    ),
-                    timeout=self._POSITIONS_FETCH_TIMEOUT_SECONDS,
+            last_error: Optional[Exception] = None
+            for attempt in range(self._ibkr_connect_retry_attempts):
+                allocated_id = await lease_manager.allocate(
+                    preferred_id=connection.client_id,
+                    ttl=30,
                 )
-            finally:
-                await lease_manager.release(allocated_id)
+                try:
+                    return await asyncio.wait_for(
+                        asyncio.to_thread(
+                            self._fetch_ibkr_positions_blocking,
+                            source_name=connection.name,
+                            source_id=connection.id,
+                            client_id=allocated_id,
+                            credentials=credentials,
+                            as_of=as_of,
+                        ),
+                        timeout=self._POSITIONS_FETCH_TIMEOUT_SECONDS,
+                    )
+                except Exception as exc:
+                    error = exc if isinstance(exc, ApexBrokerError) else self._classify_ibkr_error(
+                        host=str(credentials.get("host", "127.0.0.1")),
+                        port=int(credentials.get("port", 7497)),
+                        client_id=allocated_id,
+                        error=exc,
+                    )
+                    last_error = error
+                    if attempt >= self._ibkr_connect_retry_attempts - 1 or not self._is_retryable_ibkr_error(error):
+                        raise error from exc
+                    logger.warning(
+                        "Retrying IBKR position fetch for %s after %s (attempt %d/%d)",
+                        connection.id,
+                        error.code,
+                        attempt + 1,
+                        self._ibkr_connect_retry_attempts,
+                    )
+                    await asyncio.sleep(1.0)
+                finally:
+                    await lease_manager.release(allocated_id)
+            if last_error is not None:
+                raise last_error
 
         raise ApexBrokerError(
             code="BROKER_UNSUPPORTED",
@@ -492,8 +615,25 @@ class BrokerService:
             asyncio.set_event_loop(owned_loop)
 
         ib = IB()
+        fatal_error: Dict[str, Any] = {}
+
+        def _on_error(req_id: int, error_code: int, error_string: str, contract: Any) -> None:
+            if int(error_code) == 10141:
+                fatal_error["message"] = error_string
+
+        error_event = getattr(ib, "errorEvent", None)
+        if error_event is not None:
+            error_event += _on_error
         try:
-            ib.connect(host, port, clientId=ib_client_id, timeout=5, readonly=True)
+            ib.connect(host, port, clientId=ib_client_id, timeout=30, readonly=True)
+            if fatal_error.get("message"):
+                raise BrokerService._classify_ibkr_error(
+                    host=host,
+                    port=port,
+                    client_id=ib_client_id,
+                    error=RuntimeError(fatal_error["message"]),
+                    fatal_message=fatal_error["message"],
+                )
             portfolio_by_conid: Dict[int, Any] = {}
             for item in ib.portfolio():
                 con_id = int(getattr(getattr(item, "contract", None), "conId", 0) or 0)
@@ -553,6 +693,14 @@ class BrokerService:
                     "source_status": "ok",
                 })
             return rows
+        except Exception as exc:
+            raise exc if isinstance(exc, ApexBrokerError) else BrokerService._classify_ibkr_error(
+                host=host,
+                port=port,
+                client_id=ib_client_id,
+                error=exc,
+                fatal_message=fatal_error.get("message"),
+            ) from exc
         finally:
             if ib.isConnected():
                 ib.disconnect()
@@ -680,7 +828,7 @@ class BrokerService:
                 context={"connection_id": connection.id, "broker_type": connection.broker_type.value, "error": str(exc)},
             ) from exc
 
-    _EQUITY_FETCH_TIMEOUT_SECONDS = 10
+    _EQUITY_FETCH_TIMEOUT_SECONDS = 45
 
     async def _fetch_connection_equity(
         self,
@@ -707,30 +855,51 @@ class BrokerService:
             )
 
         if connection.broker_type == BrokerType.IBKR:
-            # 🎯 Allocate unique clientId from lease manager
-            allocated_id = await lease_manager.allocate(
-                preferred_id=connection.client_id,
-                ttl=30  # Short TTL for single fetch
-            )
-            try:
-                equity = await asyncio.wait_for(
-                    asyncio.to_thread(
-                        self._fetch_ibkr_equity_blocking,
-                        credentials,
-                        allocated_id,
-                    ),
-                    timeout=self._EQUITY_FETCH_TIMEOUT_SECONDS,
+            last_error: Optional[Exception] = None
+            for attempt in range(self._ibkr_connect_retry_attempts):
+                allocated_id = await lease_manager.allocate(
+                    preferred_id=connection.client_id,
+                    ttl=30,
                 )
-                return BrokerEquitySnapshot(
-                    value=float(equity),
-                    broker="ibkr",
-                    stale=False,
-                    as_of=datetime.utcnow().isoformat() + "Z",
-                    source=connection.name,
-                    source_id=connection.id,
-                )
-            finally:
-                await lease_manager.release(allocated_id)
+                try:
+                    equity = await asyncio.wait_for(
+                        asyncio.to_thread(
+                            self._fetch_ibkr_equity_blocking,
+                            credentials,
+                            allocated_id,
+                        ),
+                        timeout=self._EQUITY_FETCH_TIMEOUT_SECONDS,
+                    )
+                    return BrokerEquitySnapshot(
+                        value=float(equity),
+                        broker="ibkr",
+                        stale=False,
+                        as_of=datetime.utcnow().isoformat() + "Z",
+                        source=connection.name,
+                        source_id=connection.id,
+                    )
+                except Exception as exc:
+                    error = exc if isinstance(exc, ApexBrokerError) else self._classify_ibkr_error(
+                        host=str(credentials.get("host", "127.0.0.1")),
+                        port=int(credentials.get("port", 7497)),
+                        client_id=allocated_id,
+                        error=exc,
+                    )
+                    last_error = error
+                    if attempt >= self._ibkr_connect_retry_attempts - 1 or not self._is_retryable_ibkr_error(error):
+                        raise error from exc
+                    logger.warning(
+                        "Retrying IBKR equity fetch for %s after %s (attempt %d/%d)",
+                        connection.id,
+                        error.code,
+                        attempt + 1,
+                        self._ibkr_connect_retry_attempts,
+                    )
+                    await asyncio.sleep(1.0)
+                finally:
+                    await lease_manager.release(allocated_id)
+            if last_error is not None:
+                raise last_error
 
         raise ApexBrokerError(
             code="BROKER_UNSUPPORTED",
@@ -765,8 +934,25 @@ class BrokerService:
             owned_loop = asyncio.new_event_loop()
             asyncio.set_event_loop(owned_loop)
         ib = IB()
+        fatal_error: Dict[str, Any] = {}
+
+        def _on_error(req_id: int, error_code: int, error_string: str, contract: Any) -> None:
+            if int(error_code) == 10141:
+                fatal_error["message"] = error_string
+
+        error_event = getattr(ib, "errorEvent", None)
+        if error_event is not None:
+            error_event += _on_error
         try:
-            ib.connect(host, port, clientId=ib_client_id, timeout=5, readonly=True)
+            ib.connect(host, port, clientId=ib_client_id, timeout=30, readonly=True)
+            if fatal_error.get("message"):
+                raise BrokerService._classify_ibkr_error(
+                    host=host,
+                    port=port,
+                    client_id=ib_client_id,
+                    error=RuntimeError(fatal_error["message"]),
+                    fatal_message=fatal_error["message"],
+                )
             summary_rows = ib.accountSummary()
             for row in summary_rows:
                 if getattr(row, "tag", "") == "NetLiquidation":
@@ -776,6 +962,14 @@ class BrokerService:
                 message="NetLiquidation tag not found in IBKR account summary",
                 context={"host": host, "port": port, "client_id": ib_client_id},
             )
+        except Exception as exc:
+            raise exc if isinstance(exc, ApexBrokerError) else BrokerService._classify_ibkr_error(
+                host=host,
+                port=port,
+                client_id=ib_client_id,
+                error=exc,
+                fatal_message=fatal_error.get("message"),
+            ) from exc
         finally:
             if ib.isConnected():
                 ib.disconnect()

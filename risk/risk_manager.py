@@ -141,6 +141,18 @@ class RiskManager:
         """Manually reset the circuit breaker for a user."""
         return self._get_or_create_session(user_id or self.default_user_id).manual_reset_circuit_breaker(requested_by, reason)
 
+    def check_early_circuit_breaker_reset(self, daily_loss_pct: float = 0.0, user_id: str = None) -> bool:
+        """Attempt an early automatic circuit breaker reset. Returns True if CB was reset."""
+        return self._get_or_create_session(user_id or self.default_user_id).check_early_circuit_breaker_reset(daily_loss_pct)
+
+    def push_capital_snapshot(self, capital: float, user_id: str = None) -> None:
+        """Record a capital snapshot for the rolling intraday drawdown gate. Zero I/O."""
+        self._get_or_create_session(user_id or self.default_user_id).push_capital_snapshot(capital)
+
+    def check_intraday_rolling_dd(self, current_value: float, user_id: str = None) -> dict:
+        """Check rolling intraday drawdown gate. Returns dict with 'breached' key."""
+        return self._get_or_create_session(user_id or self.default_user_id).check_intraday_rolling_dd(current_value)
+
     # ----------------------------------------------------------------
     # Shared Logic (Stateless)
     # ----------------------------------------------------------------

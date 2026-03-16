@@ -13,8 +13,7 @@ def _gateway(tmp_path):
     return PreTradeRiskGateway(
         config=PreTradeLimitConfig(
             enabled=True,
-            max_order_notional=250_000,
-            max_order_shares=10_000,
+            max_order_notional=50_000.0,
             max_price_deviation_bps=250,
             max_participation_rate=0.10,
             max_gross_exposure_ratio=2.0,
@@ -87,14 +86,16 @@ def test_pretrade_gateway_blocks_adv_participation_and_gross_exposure(tmp_path):
     assert blocked_participation.allowed is False
     assert blocked_participation.reason_code == "adv_participation"
 
+    # capital=100k, MSFT=1000@190=$190k (1.9×), order=499@100=$49.9k (< $50k notional limit)
+    # projected=$239.9k / $100k = 2.4× > 2.0 limit → gross_exposure fires before notional
     blocked_gross = gate.evaluate_entry(
         symbol="AAPL",
         asset_class="EQUITY",
         side="BUY",
-        quantity=2_000,
+        quantity=499,
         price=100.0,
-        capital=1_000_000.0,
-        current_positions={"MSFT": 10_000},
+        capital=100_000.0,
+        current_positions={"MSFT": 1_000},
         price_cache={"MSFT": 190.0},
     )
     assert blocked_gross.allowed is False

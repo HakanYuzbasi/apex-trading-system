@@ -37,9 +37,9 @@ class TestVIXRegimeManager(unittest.TestCase):
         mult = self.vix_manager._calculate_risk_multiplier(15.0, 0.0, VIXRegime.NORMAL)
         self.assertEqual(mult, 1.0)
         
-        # Panic
+        # Panic — tuned to 0.45 to preserve some participation even in crash regimes.
         mult = self.vix_manager._calculate_risk_multiplier(45.0, 0.0, VIXRegime.PANIC)
-        self.assertEqual(mult, 0.25)
+        self.assertEqual(mult, 0.45)
         
         # Spike adjustment
         mult_spike = self.vix_manager._calculate_risk_multiplier(15.0, 0.25, VIXRegime.NORMAL)

@@ -225,14 +225,28 @@ class SentimentAnalyzer:
         
         return result
 
+    @staticmethod
+    def _to_yfinance_symbol(symbol: str) -> str:
+        """Convert Apex internal symbol format to yfinance ticker."""
+        # Strip CRYPTO: prefix (e.g. CRYPTO:ETH/USD → ETH/USD)
+        s = symbol.upper()
+        for prefix in ("CRYPTO:", "FX:", "OPT:"):
+            if s.startswith(prefix):
+                s = s[len(prefix):]
+                break
+        # Convert slash to dash (e.g. ETH/USD → ETH-USD, BTC/USD → BTC-USD)
+        s = s.replace("/", "-")
+        return s
+
     def _get_recent_prices(self, symbol: str) -> pd.Series:
         """Helper to get recent prices for action-based sentiment fallback."""
         try:
             if not YFINANCE_AVAILABLE:
                 return pd.Series()
-            
-            # Try Yahoo Finance for stocks
-            ticker = yf.Ticker(symbol)
+
+            # Convert Apex symbol format to yfinance ticker
+            yf_symbol = self._to_yfinance_symbol(symbol)
+            ticker = yf.Ticker(yf_symbol)
             hist = ticker.history(period="1mo")
             if not hist.empty:
                 return hist['Close']
@@ -255,9 +269,10 @@ class SentimentAnalyzer:
         max_retries = 3
         delays = [2, 4, 8]
         
+        yf_symbol = self._to_yfinance_symbol(symbol)
         for attempt in range(max_retries + 1):
             try:
-                ticker = yf.Ticker(symbol)
+                ticker = yf.Ticker(yf_symbol)
                 news = ticker.news
                 
                 if not news:
@@ -268,7 +283,8 @@ class SentimentAnalyzer:
                 
                 headlines = []
                 for item in news[:20]:  # Limit to 20 most recent
-                    title = item.get('title', '')
+                    # yfinance >=0.2.x changed format: title is now nested under 'content'
+                    title = item.get('title', '') or item.get('content', {}).get('title', '')
                     if title:
                         headlines.append(title)
                 

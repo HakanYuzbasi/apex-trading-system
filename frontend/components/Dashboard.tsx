@@ -526,7 +526,6 @@ export default function Dashboard({ isPublic = false }: { isPublic?: boolean }) 
     return sleevesSnapshot;
   }, [cockpitSleeves, confirmedFlatSleeves, sleevesSnapshot]);
 
-  const notes = useMemo(() => cockpit?.notes ?? [], [cockpit?.notes]);
   const usp = cockpit?.usp;
   const brokerRuntime = useMemo(() => {
     const rows = cockpit?.status?.brokers ?? [];
@@ -1360,11 +1359,6 @@ export default function Dashboard({ isPublic = false }: { isPublic?: boolean }) 
                   </div>
                 </div>
 
-                {notes.map((note) => (
-                  <p key={note} className="mb-2 rounded-lg border border-border/70 bg-background/60 px-3 py-2 text-xs text-muted-foreground">
-                    {note}
-                  </p>
-                ))}
 
                 {selectedSourceId && brokerSources.length > 0 && (() => {
                   const src = brokerSources.find(s => s.id === selectedSourceId);

@@ -171,3 +171,63 @@ def test_summary_aggregates_by_sleeve_and_asset_class(tmp_path):
     assert summary["social_governor"]["events"] == 1
     assert summary["social_governor"]["blocked_alpha_opportunity"] == pytest.approx(120.0)
     assert summary["social_governor"]["avoided_drawdown_estimate"] == pytest.approx(260.0)
+
+
+def test_tracker_load_normalizes_and_merges_crypto_symbol_variants(tmp_path):
+    state_path = tmp_path / "performance_attribution.json"
+    state_path.write_text(
+        """
+{
+  "updated_at": "2026-03-12T10:43:13.875729",
+  "open_positions": {
+    "ETH/USD": {
+      "symbol": "ETH/USD",
+      "asset_class": "CRYPTO",
+      "sleeve": "crypto_sleeve",
+      "side": "LONG",
+      "quantity": 1.0,
+      "entry_price": 2000.0,
+      "entry_time": "2026-03-12T09:34:45.409061",
+      "entry_signal": 0.25,
+      "entry_confidence": 0.4,
+      "governor_tier": "green",
+      "governor_regime": "trend",
+      "risk_multiplier": 1.0,
+      "vix_multiplier": 0.9,
+      "governor_size_multiplier": 1.0,
+      "entry_slippage_bps": 1.0,
+      "source": "live_entry"
+    },
+    "CRYPTO:ETH/USD": {
+      "symbol": "CRYPTO:ETH/USD",
+      "asset_class": "CRYPTO",
+      "sleeve": "crypto_sleeve",
+      "side": "LONG",
+      "quantity": 2.0,
+      "entry_price": 2100.0,
+      "entry_time": "2026-03-12T07:11:21.766184",
+      "entry_signal": 0.45,
+      "entry_confidence": 0.58,
+      "governor_tier": "green",
+      "governor_regime": "default",
+      "risk_multiplier": 1.0,
+      "vix_multiplier": 1.0,
+      "governor_size_multiplier": 1.0,
+      "entry_slippage_bps": 0.0,
+      "source": "startup_signal_refresh"
+    }
+  },
+  "closed_trades": [],
+  "social_impacts": []
+}
+""".strip(),
+        encoding="utf-8",
+    )
+
+    tracker = PerformanceAttributionTracker(data_dir=tmp_path, max_closed_trades=100)
+
+    assert sorted(tracker.open_positions.keys()) == ["CRYPTO:ETH/USD"]
+    entry = tracker.open_positions["CRYPTO:ETH/USD"]
+    assert entry["symbol"] == "CRYPTO:ETH/USD"
+    assert entry["quantity"] == pytest.approx(3.0)
+    assert entry["entry_price"] == pytest.approx((1.0 * 2000.0 + 2.0 * 2100.0) / 3.0)

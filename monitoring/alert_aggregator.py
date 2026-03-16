@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import os
@@ -11,6 +12,7 @@ from enum import Enum
 from pathlib import Path
 from typing import Any, Dict, Optional
 
+import aiohttp
 import requests
 
 logger = logging.getLogger(__name__)
@@ -147,6 +149,68 @@ class AlertAggregator:
             logger.exception("Slack delivery failed")
             raise RuntimeError("Slack delivery failed") from exc
 
+    async def _async_send_to_slack(self, event: Dict[str, Any]) -> None:
+        """Non-blocking Slack delivery via aiohttp. Failure is logged, never raised."""
+        if not self.slack_webhook_url:
+            return
+        payload = {
+            "text": f"[{event['severity'].upper()}] {event['alert_type']}: {event['message']}",
+            "attachments": [{
+                "color": self._slack_color(event["severity"]),
+                "fields": [
+                    {"title": "Type",      "value": event["alert_type"], "short": True},
+                    {"title": "Severity",  "value": event["severity"],   "short": True},
+                    {"title": "Timestamp", "value": event["timestamp"],  "short": False},
+                ],
+            }],
+        }
+        try:
+            timeout = aiohttp.ClientTimeout(total=5.0)
+            async with aiohttp.ClientSession(timeout=timeout) as session:
+                async with session.post(self.slack_webhook_url, json=payload) as resp:
+                    if resp.status >= 400:
+                        text = await resp.text()
+                        logger.warning("AlertAggregator: Slack returned %d: %s", resp.status, text[:200])
+        except asyncio.TimeoutError:
+            logger.warning("AlertAggregator: Slack webhook timed out (5s)")
+        except Exception as exc:
+            logger.warning("AlertAggregator: Slack delivery failed: %s", exc)
+
+    def fire_alert(
+        self,
+        alert_type: str,
+        message: str,
+        severity: AlertSeverity = AlertSeverity.WARNING,
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        """
+        Non-blocking alert dispatch. Rate-checks sync (O(1)), fires HTTP as background task.
+        Safe to call from any async context. No-ops silently if no event loop is running.
+        """
+        if not self.should_send_alert(alert_type, message):
+            return
+
+        alert_key = self._get_alert_key(alert_type, message)
+        count = self.alert_counts.get(alert_key, 1)
+        display_msg = f"{message} (occurred {count}x)" if count > 1 else message
+
+        event = {
+            "alert_type": alert_type,
+            "message": display_msg,
+            "severity": severity.value,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "metadata": metadata or {},
+        }
+
+        if self.log_file:
+            self._write_to_log(event)
+
+        try:
+            asyncio.get_event_loop().create_task(self._async_send_to_slack(event))
+        except RuntimeError:
+            # No running event loop (tests, CLI scripts) — skip Slack, log only
+            logger.warning("ALERT [%s] %s: %s", severity.value.upper(), alert_type, display_msg)
+
     def _send_to_pagerduty(self, event: Dict[str, Any]) -> None:
         """Trigger PagerDuty incident using Events API v2."""
         if not self.pagerduty_routing_key:
@@ -229,3 +293,13 @@ def send_alert(
     """Send a routed alert using the global aggregator."""
     aggregator = get_alert_aggregator()
     aggregator.send_alert(alert_type, message, severity, metadata)
+
+
+def fire_alert(
+    alert_type: str,
+    message: str,
+    severity: AlertSeverity = AlertSeverity.WARNING,
+    metadata: Optional[Dict[str, Any]] = None,
+) -> None:
+    """Non-blocking, rate-limited alert via global aggregator. Safe to call anywhere."""
+    get_alert_aggregator().fire_alert(alert_type, message, severity, metadata)

@@ -266,12 +266,12 @@ def setup_logging(
         # DB drivers — every SQL query/operation is DEBUG, far too noisy
         "aiosqlite",
         "peewee",
-        "sqlalchemy.engine",
         # IBKR wire protocol is DEBUG flood; WARNING keeps connect/disconnect events
         "ib_insync.client",
         "ib_insync.wrapper",
     ):
         logging.getLogger(noisy).setLevel(logging.WARNING)
+
 
     # ------------------------------------------------------------------
     # Demote benign IBKR connectivity blips (1100/1102) from ERROR→INFO

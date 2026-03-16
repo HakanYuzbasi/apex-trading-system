@@ -295,11 +295,12 @@ class EnhancedSignalFilter:
             result['reason'] = f"VIX {vix_level:.1f} < {self.vix_no_shorts_below} - no new shorts"
             return result
 
-        # Reduce size in elevated VIX
+        # Reduce size in elevated VIX — tuned 2026-03-11
+        # Old: VIX 20=100%, VIX 30=50%  (too steep; -29% at VIX=25)
+        # New: VIX 20=100%, VIX 40=50%  (gentler slope; -14% at VIX=25)
         if vix_level > 20:
             result['reduce_size'] = True
-            # Linear reduction: VIX 20 = 100%, VIX 30 = 50%
-            result['size_multiplier'] = max(0.5, 1.0 - (vix_level - 20) / 20)
+            result['size_multiplier'] = max(0.5, 1.0 - (vix_level - 20) / 40)
 
         return result
 

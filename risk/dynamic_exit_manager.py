@@ -314,8 +314,8 @@ class DynamicExitManager:
         return DynamicExitLevels(
             stop_loss_pct=float(np.clip(stop_pct, 0.02, 0.15)),  # 2-15%
             take_profit_pct=float(np.clip(target_pct, 0.03, 0.25)),  # 3-25%
-            trailing_activation_pct=float(np.clip(trail_activation, 0.01, 0.05)),
-            trailing_distance_pct=float(np.clip(trail_distance, 0.01, 0.05)),
+            trailing_activation_pct=float(np.clip(trail_activation, 0.01, 0.15)), # Allow up to 15% to match stops
+            trailing_distance_pct=float(np.clip(trail_distance, 0.01, 0.15)), # Allow up to 15% to match stops
             max_hold_days=int(np.clip(max_hold, 3, 30)),  # 3-30 days
             signal_exit_threshold=float(np.clip(signal_exit, 0.15, 0.60)),
             urgency=urgency,

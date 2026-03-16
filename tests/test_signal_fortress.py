@@ -333,6 +333,7 @@ class TestSignalIntegrityMonitor:
             kl_threshold=0.5,
             quarantine_minutes=10,
         )
+        self.monitor._is_equity_market_open = lambda: True
 
     def test_normal_signals_healthy(self):
         """Normal signal stream should report healthy."""
@@ -349,14 +350,16 @@ class TestSignalIntegrityMonitor:
         assert len(report.alerts) == 0
 
     def test_stuck_signal_detected(self):
-        """Repeated identical signals should trigger quarantine."""
+        """Repeated identical signals should trigger quarantine.
+        Uses ETH/USD (crypto) because equity quarantines are auto-cleared at market open.
+        """
         for i in range(15):
-            self.monitor.record_signal("AAPL", signal=0.25, confidence=0.5, regime="bull")
+            self.monitor.record_signal("ETH/USD", signal=0.25, confidence=0.5, regime="bull")
 
-        report = self.monitor.check_integrity("AAPL")
+        report = self.monitor.check_integrity("ETH/USD")
         stuck_alerts = [a for a in report.alerts if a.alert_type == "stuck_signal"]
         assert len(stuck_alerts) > 0
-        assert self.monitor.is_quarantined("AAPL")
+        assert self.monitor.is_quarantined("ETH/USD")
 
     def test_low_volatility_detected(self):
         """Very stable signals (near-zero std) should trigger alert."""
