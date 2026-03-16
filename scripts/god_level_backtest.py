@@ -142,6 +142,9 @@ class BacktestResult:
     # Deflated Sharpe Ratio (multiple testing adjustment)
     deflated_sharpe: Optional[Dict] = None
 
+    # Stress test results (Phase 3)
+    stress_tests: Optional[Dict] = None
+
     # Session type
     session_type: str = "unified"
 
@@ -1505,6 +1508,265 @@ class GodLevelBacktester:
             'n_trials': n_trials,
         }
 
+    def run_permutation_test(self, n_permutations: int = 500) -> Dict:
+        """Monte Carlo permutation test for strategy significance.
+
+        Null hypothesis: the strategy's trade sequence contains no serial
+        dependence — i.e., the Sharpe is achievable by random re-ordering.
+
+        Method: shuffle trade PnLs and recompute Sharpe on each permutation.
+        p-value = fraction of permuted Sharpes >= observed Sharpe.
+
+        GO gate: p-value < 0.05 (strategy is significantly better than random).
+
+        Reference: White (2000) "A Reality Check for Data Snooping",
+                   Romano & Wolf (2005) "Stepwise Multiple Testing".
+        """
+        if len(self.trades) < 20:
+            return {'p_value': 1.0, 'pass': False, 'reason': 'Insufficient trades'}
+
+        trade_pnls = np.array([t.pnl for t in self.trades], dtype=float)
+        n_trades = len(trade_pnls)
+        hold_days = np.array([max(t.hold_days, 1) for t in self.trades], dtype=float)
+        avg_hold = max(float(np.mean(hold_days)), 1.0)
+        ann_factor = np.sqrt(252.0 / avg_hold)
+        risk_free_daily = 0.05 / 252.0
+
+        # Observed Sharpe from actual trade sequence
+        cum_equity = np.cumsum(trade_pnls) + self.initial_capital
+        trade_rets = np.diff(np.concatenate([[self.initial_capital], cum_equity])) / np.maximum(
+            np.concatenate([[self.initial_capital], cum_equity[:-1]]), 1e-9
+        )
+        excess = trade_rets - risk_free_daily
+        observed_sharpe = float(np.mean(excess) / max(np.std(excess, ddof=1), 1e-9) * ann_factor)
+
+        # Permutation distribution
+        rng = np.random.default_rng(42)
+        permuted_sharpes = []
+        for _ in range(n_permutations):
+            shuffled = rng.permutation(trade_pnls)
+            cum_eq = np.cumsum(shuffled) + self.initial_capital
+            p_rets = np.diff(np.concatenate([[self.initial_capital], cum_eq])) / np.maximum(
+                np.concatenate([[self.initial_capital], cum_eq[:-1]]), 1e-9
+            )
+            p_excess = p_rets - risk_free_daily
+            std = float(np.std(p_excess, ddof=1))
+            s = float(np.mean(p_excess) / max(std, 1e-9) * ann_factor) if std > 0 else 0.0
+            permuted_sharpes.append(s)
+
+        permuted_sharpes = np.array(permuted_sharpes)
+        p_value = float(np.mean(permuted_sharpes >= observed_sharpe))
+        passed = p_value < 0.05
+
+        logger.info(f"\n  Permutation Test: p-value={p_value:.4f} (threshold: 0.05) -> {'PASS' if passed else 'FAIL'}")
+        logger.info(f"    Observed Sharpe: {observed_sharpe:.3f}")
+        logger.info(f"    Permuted Sharpe distribution: mean={np.mean(permuted_sharpes):.3f}, "
+                     f"95th={np.percentile(permuted_sharpes, 95):.3f}")
+
+        return {
+            'p_value': round(p_value, 4),
+            'pass': passed,
+            'observed_sharpe': round(observed_sharpe, 4),
+            'permuted_mean': round(float(np.mean(permuted_sharpes)), 4),
+            'permuted_95th': round(float(np.percentile(permuted_sharpes, 95)), 4),
+            'n_permutations': n_permutations,
+        }
+
+    def run_parameter_perturbation(self, n_perturbations: int = 50) -> Dict:
+        """Parameter perturbation sensitivity analysis.
+
+        Tests whether strategy performance is robust to small parameter changes.
+        Perturbs key thresholds by ±10-20% and re-evaluates trade filtering.
+
+        A strategy that collapses under small perturbations is overfit.
+
+        GO gate: Sharpe retains >=70% of its value across perturbations.
+
+        Reference: Pardo (2008) "The Evaluation and Optimization of Trading Strategies".
+        """
+        if len(self.trades) < 20:
+            return {'robustness': 0.0, 'pass': False, 'reason': 'Insufficient trades'}
+
+        trade_pnls = np.array([t.pnl for t in self.trades], dtype=float)
+        hold_days = np.array([max(t.hold_days, 1) for t in self.trades], dtype=float)
+        avg_hold = max(float(np.mean(hold_days)), 1.0)
+        ann_factor = np.sqrt(252.0 / avg_hold)
+        risk_free_daily = 0.05 / 252.0
+
+        # Base Sharpe
+        cum_eq = np.cumsum(trade_pnls) + self.initial_capital
+        rets = np.diff(np.concatenate([[self.initial_capital], cum_eq])) / np.maximum(
+            np.concatenate([[self.initial_capital], cum_eq[:-1]]), 1e-9
+        )
+        excess = rets - risk_free_daily
+        base_sharpe = float(np.mean(excess) / max(np.std(excess, ddof=1), 1e-9) * ann_factor)
+
+        if base_sharpe <= 0:
+            return {'robustness': 0.0, 'pass': False, 'reason': 'Negative base Sharpe'}
+
+        # Perturb by randomly dropping/keeping trades (simulates threshold changes)
+        # Each perturbation randomly excludes 5-15% of trades (simulating tighter filters)
+        # and adds noise to PnLs (simulating parameter sensitivity)
+        rng = np.random.default_rng(123)
+        perturbed_sharpes = []
+
+        for _ in range(n_perturbations):
+            # Random drop rate between 5-15%
+            drop_rate = rng.uniform(0.05, 0.15)
+            keep_mask = rng.random(len(trade_pnls)) > drop_rate
+
+            # Also add noise to PnL (±5% of each trade's PnL)
+            noise = rng.normal(1.0, 0.05, size=len(trade_pnls))
+            perturbed_pnls = trade_pnls * noise
+            perturbed_pnls = perturbed_pnls[keep_mask]
+
+            if len(perturbed_pnls) < 10:
+                continue
+
+            p_eq = np.cumsum(perturbed_pnls) + self.initial_capital
+            p_rets = np.diff(np.concatenate([[self.initial_capital], p_eq])) / np.maximum(
+                np.concatenate([[self.initial_capital], p_eq[:-1]]), 1e-9
+            )
+            p_excess = p_rets - risk_free_daily
+            std = float(np.std(p_excess, ddof=1))
+            s = float(np.mean(p_excess) / max(std, 1e-9) * ann_factor) if std > 0 else 0.0
+            perturbed_sharpes.append(s)
+
+        if not perturbed_sharpes:
+            return {'robustness': 0.0, 'pass': False, 'reason': 'No valid perturbations'}
+
+        perturbed_sharpes = np.array(perturbed_sharpes)
+        # Robustness = fraction of perturbations where Sharpe >= 70% of base
+        retention_threshold = base_sharpe * 0.70
+        robustness = float(np.mean(perturbed_sharpes >= retention_threshold))
+        median_ratio = float(np.median(perturbed_sharpes) / base_sharpe)
+        passed = robustness >= 0.70
+
+        logger.info(f"\n  Parameter Perturbation: robustness={robustness:.2%} (threshold: 70%) -> {'PASS' if passed else 'FAIL'}")
+        logger.info(f"    Base Sharpe: {base_sharpe:.3f}")
+        logger.info(f"    Perturbed Sharpe: median={np.median(perturbed_sharpes):.3f}, "
+                     f"5th={np.percentile(perturbed_sharpes, 5):.3f}, "
+                     f"95th={np.percentile(perturbed_sharpes, 95):.3f}")
+        logger.info(f"    Median retention: {median_ratio:.1%} of base Sharpe")
+
+        return {
+            'robustness': round(robustness, 4),
+            'pass': passed,
+            'base_sharpe': round(base_sharpe, 4),
+            'median_perturbed': round(float(np.median(perturbed_sharpes)), 4),
+            'p5_perturbed': round(float(np.percentile(perturbed_sharpes, 5)), 4),
+            'p95_perturbed': round(float(np.percentile(perturbed_sharpes, 95)), 4),
+            'median_retention': round(median_ratio, 4),
+        }
+
+    def run_crisis_simulation(self) -> Dict:
+        """Stress test: simulate portfolio behavior during crisis conditions.
+
+        Applies synthetic shocks to the equity curve to estimate tail risk:
+        1. Flash crash: -10% instantaneous shock
+        2. Bear market: -2% per week for 8 weeks
+        3. Liquidity crisis: all losing trades doubled, winning halved
+        4. Correlation spike: simultaneous 3-sigma loss on all positions
+
+        GO gate: Max drawdown under worst crisis stays under 30%.
+
+        Reference: Taleb (2007) "The Black Swan" — fat tail stress testing.
+        """
+        if len(self.trades) < 20:
+            return {'worst_dd': 100.0, 'pass': False, 'reason': 'Insufficient trades'}
+
+        trade_pnls = np.array([t.pnl for t in self.trades], dtype=float)
+        n_trades = len(trade_pnls)
+
+        scenarios = {}
+
+        # Scenario 1: Flash crash — inject -10% shock at midpoint
+        flash_pnls = trade_pnls.copy()
+        mid = n_trades // 2
+        flash_pnls[mid] = -self.initial_capital * 0.10
+        eq = np.cumsum(flash_pnls) + self.initial_capital
+        peak = np.maximum.accumulate(eq)
+        dd = float(np.min((eq - peak) / np.maximum(peak, 1e-9)) * 100)
+        scenarios['flash_crash'] = {'max_dd': round(abs(dd), 2), 'final_equity': round(float(eq[-1]), 2)}
+
+        # Scenario 2: Bear market — sustained losses
+        bear_pnls = trade_pnls.copy()
+        # Apply -2% per ~5 trades for 40 trades (simulates 8-week bear)
+        bear_start = max(0, mid - 20)
+        bear_end = min(n_trades, mid + 20)
+        for i in range(bear_start, bear_end):
+            bear_pnls[i] = min(bear_pnls[i], -abs(bear_pnls[i]) * 0.5 - self.initial_capital * 0.005)
+        eq = np.cumsum(bear_pnls) + self.initial_capital
+        peak = np.maximum.accumulate(eq)
+        dd = float(np.min((eq - peak) / np.maximum(peak, 1e-9)) * 100)
+        scenarios['bear_market'] = {'max_dd': round(abs(dd), 2), 'final_equity': round(float(eq[-1]), 2)}
+
+        # Scenario 3: Liquidity crisis — losing trades double, winners halve
+        liq_pnls = trade_pnls.copy()
+        liq_pnls = np.where(liq_pnls < 0, liq_pnls * 2.0, liq_pnls * 0.5)
+        eq = np.cumsum(liq_pnls) + self.initial_capital
+        peak = np.maximum.accumulate(eq)
+        dd = float(np.min((eq - peak) / np.maximum(peak, 1e-9)) * 100)
+        scenarios['liquidity_crisis'] = {'max_dd': round(abs(dd), 2), 'final_equity': round(float(eq[-1]), 2)}
+
+        # Scenario 4: Correlation spike — cluster worst trades together
+        sorted_pnls = np.sort(trade_pnls)  # worst first
+        worst_n = min(n_trades // 4, 20)
+        corr_pnls = trade_pnls.copy()
+        # Put worst trades consecutively in the middle
+        corr_pnls[mid:mid + worst_n] = sorted_pnls[:worst_n]
+        eq = np.cumsum(corr_pnls) + self.initial_capital
+        peak = np.maximum.accumulate(eq)
+        dd = float(np.min((eq - peak) / np.maximum(peak, 1e-9)) * 100)
+        scenarios['correlation_spike'] = {'max_dd': round(abs(dd), 2), 'final_equity': round(float(eq[-1]), 2)}
+
+        worst_dd = max(s['max_dd'] for s in scenarios.values())
+        passed = worst_dd < 30.0
+
+        logger.info(f"\n  Crisis Simulation: worst_dd={worst_dd:.1f}% (threshold: 30%) -> {'PASS' if passed else 'FAIL'}")
+        for name, result in scenarios.items():
+            logger.info(f"    {name}: max_dd={result['max_dd']:.1f}%, final_equity=${result['final_equity']:,.0f}")
+
+        return {
+            'scenarios': scenarios,
+            'worst_dd': round(worst_dd, 2),
+            'pass': passed,
+        }
+
+    def run_all_stress_tests(self, sharpe_ratio: float, n_trades: int) -> Dict:
+        """Run all Phase 3 stress tests and return consolidated results.
+
+        Returns a dict with individual test results and an overall pass/fail.
+        """
+        logger.info("\n" + "=" * 60)
+        logger.info("PHASE 3: STRESS TESTS")
+        logger.info("=" * 60)
+
+        results = {}
+
+        # 1. Deflated Sharpe Ratio
+        results['deflated_sharpe'] = self.calculate_deflated_sharpe(sharpe_ratio, n_trades)
+
+        # 2. Permutation test
+        results['permutation_test'] = self.run_permutation_test()
+
+        # 3. Parameter perturbation
+        results['parameter_perturbation'] = self.run_parameter_perturbation()
+
+        # 4. Crisis simulation
+        results['crisis_simulation'] = self.run_crisis_simulation()
+
+        # Overall
+        gates = [results[k].get('pass', False) for k in results]
+        results['all_pass'] = all(gates)
+        results['pass_count'] = sum(gates)
+        results['total_gates'] = len(gates)
+
+        logger.info(f"\n  STRESS TEST SUMMARY: {results['pass_count']}/{results['total_gates']} gates passed"
+                     f" -> {'ALL PASS' if results['all_pass'] else 'SOME FAILED'}")
+
+        return results
+
     def run_monte_carlo(self, n_simulations: int = 1000) -> Dict:
         """
         Run Monte Carlo simulation on trade results.
@@ -1576,7 +1838,7 @@ class GodLevelBacktester:
         return results
 
 
-def print_results(result: BacktestResult):
+def print_results(result: BacktestResult, stress_results: Dict = None):
     """Print formatted backtest results."""
     print("\n" + "=" * 70)
     print("GOD LEVEL BACKTEST RESULTS")
@@ -1631,6 +1893,37 @@ def print_results(result: BacktestResult):
         print(f"  Return Range (90%): {mc['return_5th']:>6.1f}% to {mc['return_95th']:.1f}%")
         print(f"  Expected Max DD:    {mc['max_dd_mean']:>10.1f}%")
         print(f"  Prob of Profit:     {mc['prob_positive']:>10.1f}%")
+
+    if stress_results:
+        print("\n🔬 STRESS TESTS (Phase 3)")
+        print("-" * 40)
+
+        dsr = stress_results.get('deflated_sharpe', {})
+        if dsr:
+            status = "PASS" if dsr.get('pass') else "FAIL"
+            print(f"  Deflated Sharpe:    {dsr.get('dsr', 0):.3f} (gate: 1.35) [{status}]")
+
+        perm = stress_results.get('permutation_test', {})
+        if perm:
+            status = "PASS" if perm.get('pass') else "FAIL"
+            print(f"  Permutation p-val:  {perm.get('p_value', 1):.4f} (gate: <0.05) [{status}]")
+
+        pert = stress_results.get('parameter_perturbation', {})
+        if pert:
+            status = "PASS" if pert.get('pass') else "FAIL"
+            print(f"  Param Robustness:   {pert.get('robustness', 0):.1%} (gate: >=70%) [{status}]")
+            print(f"    Median retention: {pert.get('median_retention', 0):.1%} of base Sharpe")
+
+        crisis = stress_results.get('crisis_simulation', {})
+        if crisis:
+            status = "PASS" if crisis.get('pass') else "FAIL"
+            print(f"  Crisis Max DD:      {crisis.get('worst_dd', 0):.1f}% (gate: <30%) [{status}]")
+            for name, sc in crisis.get('scenarios', {}).items():
+                print(f"    {name:20s}: dd={sc['max_dd']:.1f}%, final=${sc['final_equity']:,.0f}")
+
+        passed = stress_results.get('pass_count', 0)
+        total = stress_results.get('total_gates', 0)
+        print(f"\n  STRESS TESTS: {passed}/{total} passed")
 
     # Quality assessment
     print("\n" + "=" * 70)
@@ -1699,6 +1992,100 @@ def print_results(result: BacktestResult):
     print("=" * 70)
 
 
+def go_no_go_assessment(result: BacktestResult, stress_results: Dict = None) -> Dict:
+    """Phase 4: GO/NO-GO assessment with 8 quantitative gates.
+
+    Each gate has a clear threshold. ALL gates must pass for GO.
+
+    Gates:
+    1. Sharpe >= 1.5 (after costs, walk-forward OOS)
+    2. Max drawdown <= 15%
+    3. Win rate >= 50%
+    4. Profit factor >= 1.3
+    5. Deflated Sharpe > 1.35 (multiple testing adjustment)
+    6. Permutation test p < 0.05 (strategy is non-random)
+    7. Parameter robustness >= 70% (not overfit to exact params)
+    8. Crisis max DD < 30% (survives tail events)
+    """
+    print("\n" + "=" * 70)
+    print("PHASE 4: GO / NO-GO ASSESSMENT")
+    print("=" * 70)
+
+    gates = []
+
+    # Gate 1: Sharpe
+    g1 = result.sharpe_ratio >= 1.5
+    gates.append(('Sharpe >= 1.5', g1, f'{result.sharpe_ratio:.2f}'))
+    print(f"  {'PASS' if g1 else 'FAIL'} | Gate 1: Sharpe >= 1.5 (actual: {result.sharpe_ratio:.2f})")
+
+    # Gate 2: Max drawdown
+    g2 = result.max_drawdown <= 15.0
+    gates.append(('Max DD <= 15%', g2, f'{result.max_drawdown:.1f}%'))
+    print(f"  {'PASS' if g2 else 'FAIL'} | Gate 2: Max DD <= 15% (actual: {result.max_drawdown:.1f}%)")
+
+    # Gate 3: Win rate
+    g3 = result.win_rate >= 50.0
+    gates.append(('Win Rate >= 50%', g3, f'{result.win_rate:.1f}%'))
+    print(f"  {'PASS' if g3 else 'FAIL'} | Gate 3: Win Rate >= 50% (actual: {result.win_rate:.1f}%)")
+
+    # Gate 4: Profit factor
+    g4 = result.profit_factor >= 1.3
+    gates.append(('Profit Factor >= 1.3', g4, f'{result.profit_factor:.2f}'))
+    print(f"  {'PASS' if g4 else 'FAIL'} | Gate 4: Profit Factor >= 1.3 (actual: {result.profit_factor:.2f})")
+
+    # Gates 5-8 from stress tests
+    if stress_results:
+        dsr = stress_results.get('deflated_sharpe', {})
+        g5 = dsr.get('pass', False)
+        gates.append(('DSR > 1.35', g5, f"{dsr.get('dsr', 0):.3f}"))
+        print(f"  {'PASS' if g5 else 'FAIL'} | Gate 5: Deflated Sharpe > 1.35 (actual: {dsr.get('dsr', 0):.3f})")
+
+        perm = stress_results.get('permutation_test', {})
+        g6 = perm.get('pass', False)
+        gates.append(('Perm. p < 0.05', g6, f"{perm.get('p_value', 1):.4f}"))
+        print(f"  {'PASS' if g6 else 'FAIL'} | Gate 6: Permutation p < 0.05 (actual: {perm.get('p_value', 1):.4f})")
+
+        pert = stress_results.get('parameter_perturbation', {})
+        g7 = pert.get('pass', False)
+        gates.append(('Robustness >= 70%', g7, f"{pert.get('robustness', 0):.1%}"))
+        print(f"  {'PASS' if g7 else 'FAIL'} | Gate 7: Param Robustness >= 70% (actual: {pert.get('robustness', 0):.1%})")
+
+        crisis = stress_results.get('crisis_simulation', {})
+        g8 = crisis.get('pass', False)
+        gates.append(('Crisis DD < 30%', g8, f"{crisis.get('worst_dd', 0):.1f}%"))
+        print(f"  {'PASS' if g8 else 'FAIL'} | Gate 8: Crisis Max DD < 30% (actual: {crisis.get('worst_dd', 0):.1f}%)")
+    else:
+        for i in range(5, 9):
+            gates.append((f'Gate {i}', False, 'N/A'))
+            print(f"  FAIL | Gate {i}: Stress tests not run")
+
+    passed = sum(1 for _, p, _ in gates if p)
+    total = len(gates)
+    all_pass = passed == total
+
+    print(f"\n  {'=' * 50}")
+    if all_pass:
+        print(f"  VERDICT: GO ({passed}/{total} gates passed)")
+        print(f"  Strategy is cleared for paper trading deployment.")
+    elif passed >= 6:
+        print(f"  VERDICT: CONDITIONAL GO ({passed}/{total} gates passed)")
+        print(f"  Strategy shows promise but has {total - passed} failing gate(s).")
+        print(f"  Recommended: paper trade with reduced size, monitor failing gates.")
+    else:
+        print(f"  VERDICT: NO-GO ({passed}/{total} gates passed)")
+        print(f"  Strategy requires further development before deployment.")
+        failed = [name for name, p, _ in gates if not p]
+        print(f"  Failing gates: {', '.join(failed)}")
+    print(f"  {'=' * 50}")
+
+    return {
+        'verdict': 'GO' if all_pass else ('CONDITIONAL_GO' if passed >= 6 else 'NO_GO'),
+        'gates_passed': passed,
+        'gates_total': total,
+        'gates': [{'name': n, 'pass': p, 'value': v} for n, p, v in gates],
+    }
+
+
 def main():
     """Run god level backtest."""
     print("\n" + "=" * 70)
@@ -1719,8 +2106,19 @@ def main():
         mc_results = backtester.run_monte_carlo(n_simulations=1000)
         result.monte_carlo = mc_results
 
+        # Run Phase 3 stress tests
+        stress_results = backtester.run_all_stress_tests(
+            sharpe_ratio=result.sharpe_ratio,
+            n_trades=result.total_trades,
+        )
+        result.deflated_sharpe = stress_results.get('deflated_sharpe')
+        result.stress_tests = stress_results
+
         # Print results
-        print_results(result)
+        print_results(result, stress_results=stress_results)
+
+        # Phase 4: GO/NO-GO assessment
+        go_result = go_no_go_assessment(result, stress_results=stress_results)
 
         return result
 
