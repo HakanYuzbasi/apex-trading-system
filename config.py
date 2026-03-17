@@ -572,13 +572,13 @@ class ApexConfig:
     # Regime-based entry thresholds — recalibrated Mar 2026: model output range is 0.05–0.272, mean 0.124
     # The previous 0.28–0.50 range blocked 100% of signals. Thresholds now scaled to model output.
     SIGNAL_THRESHOLDS_BY_REGIME = {
-        'strong_bull': 0.16,   # Trend-following regime — momentum helps, lower bar
-        'bull': 0.20,          # Standard bull — require solid conviction vs mean (0.124)
-        'neutral': 0.22,       # Choppy — need stronger edge to fight noise
-        'bear': 0.25,          # Bear — only higher-conviction moves
-        'strong_bear': 0.28,   # Avoid most entries, only near-max signals
-        'volatile': 0.30,      # High VIX — widen: only strong signals (near model max)
-        'crisis': 0.35,        # Crisis — only exceptional signals (top 5% of model output)
+        'strong_bull': 0.15,    # Aggressive in strong uptrend
+        'bull': 0.18,           # Standard bull entry
+        'neutral': 0.18,        # Slightly tighter in neutral
+        'bear': 0.30,           # Raised: require strong conviction in bear
+        'strong_bear': 0.45,    # Raised: near-shutdown in strong bear (regime bleed fix)
+        'volatile': 0.25,       # Tighter in volatile
+        'crisis': 0.35,         # Crisis — only exceptional signals (top 5% of model output)
     }
 
     # Tiered confidence gate: moderate signals require higher conviction at entry
