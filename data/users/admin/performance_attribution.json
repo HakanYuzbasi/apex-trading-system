@@ -1,8 +1,8 @@
 {
-  "updated_at": "2026-03-01T23:54:13.111799",
+  "updated_at": "2026-03-17T13:01:09.385016",
   "open_positions": {
-    "AAVE/USD": {
-      "symbol": "AAVE/USD",
+    "CRYPTO:AAVE/USD": {
+      "symbol": "CRYPTO:AAVE/USD",
       "asset_class": "CRYPTO",
       "sleeve": "crypto_sleeve",
       "side": "SHORT",
@@ -19,8 +19,8 @@
       "entry_slippage_bps": 0.0,
       "source": "sim_entry"
     },
-    "ADA/USD": {
-      "symbol": "ADA/USD",
+    "CRYPTO:ADA/USD": {
+      "symbol": "CRYPTO:ADA/USD",
       "asset_class": "CRYPTO",
       "sleeve": "crypto_sleeve",
       "side": "SHORT",
