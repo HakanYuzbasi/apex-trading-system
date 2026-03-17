@@ -787,13 +787,13 @@ class GodLevelSignalGenerator:
     def _get_regime_weights(self, regime: MarketRegime) -> Dict[str, float]:
         """Get component weights based on market regime."""
         base_weights = {
-            'momentum': 0.15,
-            'mean_reversion': 0.10,
-            'trend': 0.15,
-            'volatility': 0.10,
-            'breakout': 0.10,
-            'ml_rf': 0.10,
-            'ml_gb': 0.10,
+            'momentum': 0.05,
+            'mean_reversion': 0.20,
+            'trend': 0.05,
+            'volatility': 0.05,
+            'breakout': 0.05,
+            'ml_rf': 0.20,
+            'ml_gb': 0.20,
             'ml_xgb': 0.10,
             'ml_lgb': 0.10
         }
@@ -804,16 +804,25 @@ class GodLevelSignalGenerator:
             base_weights['trend'] = 0.25
             base_weights['mean_reversion'] = 0.05
         elif regime == MarketRegime.STRONG_BEAR:
-            base_weights['momentum'] = 0.25
-            base_weights['trend'] = 0.25
-            base_weights['mean_reversion'] = 0.05
+            base_weights['momentum'] = 0.02
+            base_weights['trend'] = 0.02
+            base_weights['mean_reversion'] = 0.28
+            base_weights['breakout'] = 0.02
+            base_weights['volatility'] = 0.02
+            base_weights['ml_rf'] = 0.24
+            base_weights['ml_gb'] = 0.24
+            base_weights['ml_xgb'] = 0.08
+            base_weights['ml_lgb'] = 0.08
         elif regime == MarketRegime.NEUTRAL:
             base_weights['mean_reversion'] = 0.20
             base_weights['momentum'] = 0.10
         elif regime == MarketRegime.HIGH_VOLATILITY:
-            base_weights['volatility'] = 0.20
-            base_weights['breakout'] = 0.15
-            base_weights['momentum'] = 0.10
+            base_weights['volatility'] = 0.05
+            base_weights['breakout'] = 0.03
+            base_weights['momentum'] = 0.03
+            base_weights['mean_reversion'] = 0.25
+            base_weights['ml_rf'] = 0.22
+            base_weights['ml_gb'] = 0.22
 
         return base_weights
 

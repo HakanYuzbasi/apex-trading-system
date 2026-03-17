@@ -509,12 +509,12 @@ class ApexConfig:
 
     # Regime-based entry thresholds (High filter)
     SIGNAL_THRESHOLDS_BY_REGIME = {
-        'strong_bull': 0.15,    # Lowered from 0.20
-        'bull': 0.18,          # Lowered from 0.23
-        'neutral': 0.15,       # Lowered from 0.28
-        'bear': 0.18,          # Lowered from 0.25
-        'strong_bear': 0.15,   # Lowered from 0.22
-        'volatile': 0.22       # Lowered from 0.30
+        'strong_bull': 0.15,    # Aggressive in strong uptrend
+        'bull': 0.18,           # Standard bull entry
+        'neutral': 0.18,        # Slightly tighter in neutral
+        'bear': 0.30,           # Raised: require strong conviction in bear
+        'strong_bear': 0.45,    # Raised: near-shutdown in strong bear (regime bleed fix)
+        'volatile': 0.25        # Tighter in volatile
     }
 
     # Exit signal hysteresis (separate from entry threshold)
