@@ -48,7 +48,7 @@ class MarketDataFetcher:
         self._historical_cache_times: Dict[str, datetime] = {}  # cache_key -> timestamp
         self._lock = threading.Lock()
         self._last_request_time = 0
-        self._min_request_interval = 0.1  # 100ms between requests
+        self._min_request_interval = 1.0  # 1s between requests (yfinance 1.0 rate limits aggressively)
 
         if not YFINANCE_AVAILABLE:
             logger.error("yfinance is not installed. Market data will not be available.")
@@ -59,6 +59,22 @@ class MarketDataFetcher:
         if elapsed < self._min_request_interval:
             time.sleep(self._min_request_interval - elapsed)
         self._last_request_time = time.time()
+
+    def _retry_on_rate_limit(self, fn, max_retries=3):
+        """Retry a yfinance call with exponential backoff on rate limits."""
+        for attempt in range(max_retries):
+            try:
+                result = fn()
+                return result
+            except Exception as e:
+                err_str = str(e).lower()
+                if "rate" in err_str or "too many" in err_str or "429" in err_str:
+                    wait = (2 ** attempt) * 5  # 5s, 10s, 20s
+                    logger.warning(f"yfinance rate limited (attempt {attempt+1}/{max_retries}), waiting {wait}s...")
+                    time.sleep(wait)
+                else:
+                    raise
+        return None  # All retries exhausted
 
     def _map_for_data(self, parsed):
         """Map symbols for data providers (e.g., USDT/USDC -> USD)."""
@@ -308,8 +324,10 @@ class MarketDataFetcher:
             else:
                 period = '5y'
 
-            # Fetch data
-            df = ticker.history(period=period)
+            # Fetch data with retry on rate limits
+            df = self._retry_on_rate_limit(lambda: ticker.history(period=period))
+            if df is None:
+                df = pd.DataFrame()
 
             if df.empty:
                 logger.warning(f"No historical data for {parsed.normalized}")
@@ -348,7 +366,10 @@ class MarketDataFetcher:
         days: int = 252
     ) -> Dict[str, pd.DataFrame]:
         """
-        Fetch historical data for multiple symbols efficiently.
+        Fetch historical data for multiple symbols using sequential individual
+        downloads with rate limiting.  yfinance 1.0 aggressively rate-limits
+        batch ``yf.download()`` calls (parallel internal requests), so we use
+        individual fetches with a 0.5s inter-request delay for reliability.
 
         Args:
             symbols: List of ticker symbols
@@ -361,88 +382,11 @@ class MarketDataFetcher:
             return {s: pd.DataFrame() for s in symbols}
 
         results = {}
-        parsed_map = {}
         for symbol in symbols:
-            try:
-                parsed_map[symbol] = parse_symbol(symbol)
-            except ValueError:
-                logger.warning(f"Invalid symbol format for history fetch: {symbol}")
-                results[symbol] = pd.DataFrame()
-                continue
-            parsed_map[symbol] = self._map_for_data(parsed_map[symbol])
-
-        try:
-            self._rate_limit()
-
-            # Calculate period string
-            if days <= 30:
-                period = '1mo'
-            elif days <= 90:
-                period = '3mo'
-            elif days <= 180:
-                period = '6mo'
-            elif days <= 365:
-                period = '1y'
-            else:
-                period = '2y'
-
-            # Batch download
-            yf_map = {s: to_yfinance_ticker(parsed_map[s]) for s in symbols if s in parsed_map}
-            if not yf_map:
-                return results
-
-            tickers_str = ' '.join(yf_map.values())
-            data = yf.download(
-                tickers_str,
-                period=period,
-                progress=False,
-                threads=True,
-                group_by='ticker'
-            )
-
-            if data.empty:
-                # Fallback to individual fetching
-                for symbol in symbols:
-                    results[symbol] = self.fetch_historical_data(symbol, days)
-                return results
-
-            # Extract data for each symbol
-            for symbol in symbols:
-                if symbol not in parsed_map:
-                    continue
-                try:
-                    if len(yf_map) == 1:
-                        df = data.copy()
-                    else:
-                        yf_symbol = yf_map[symbol]
-                        if yf_symbol in data.columns.get_level_values(0):
-                            df = data[yf_symbol].copy()
-                        else:
-                            results[symbol] = self.fetch_historical_data(symbol, days)
-                            continue
-
-                    # Clean up
-                    df = df.dropna()
-                    if not df.empty:
-                        # Remove timezone
-                        if df.index.tz is not None:
-                            df.index = df.index.tz_localize(None)
-                        results[symbol] = df
-                    else:
-                        results[symbol] = pd.DataFrame()
-
-                except Exception as e:
-                    logger.debug(f"Error extracting data for {symbol}: {e}")
-                    results[symbol] = self.fetch_historical_data(symbol, days)
-
-            return results
-
-        except Exception as e:
-            logger.error(f"Error batch fetching historical data: {e}")
-            # Fallback to individual fetching
-            for symbol in symbols:
-                results[symbol] = self.fetch_historical_data(symbol, days)
-            return results
+            results[symbol] = self.fetch_historical_data(symbol, days)
+            # Small delay between individual fetches to avoid rate limiting
+            time.sleep(0.5)
+        return results
 
     def get_market_info(self, symbol: str) -> Dict:
         """

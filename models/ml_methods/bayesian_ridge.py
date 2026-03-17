@@ -25,13 +25,23 @@ class BayesianRidgeRegressor(BaseEstimator, RegressorMixin):
         self.lambda_2 = lambda_2
         self.clip_predictions = clip_predictions
         self._scaler = StandardScaler()
-        self._model = BayesianRidge(
-            n_iter=self.n_iter,
-            alpha_1=self.alpha_1,
-            alpha_2=self.alpha_2,
-            lambda_1=self.lambda_1,
-            lambda_2=self.lambda_2,
-        )
+        # sklearn >= 1.3 renamed n_iter → max_iter
+        try:
+            self._model = BayesianRidge(
+                max_iter=self.n_iter,
+                alpha_1=self.alpha_1,
+                alpha_2=self.alpha_2,
+                lambda_1=self.lambda_1,
+                lambda_2=self.lambda_2,
+            )
+        except TypeError:
+            self._model = BayesianRidge(
+                n_iter=self.n_iter,
+                alpha_1=self.alpha_1,
+                alpha_2=self.alpha_2,
+                lambda_1=self.lambda_1,
+                lambda_2=self.lambda_2,
+            )
         self.prediction_std_ = None
 
     def fit(self, X, y):

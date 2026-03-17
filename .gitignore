@@ -32,9 +32,11 @@ trades.csv
 trading_state.json
 
 # Runtime audit/data files (can be very large, regenerated at runtime)
-data/users/*/audit/*.jsonl
-data/users/*/audit/**/*.jsonl
-data/users/*/audit/*.json
+.run/
+.claude/
+data/*.lock
+data/users/**/*.json
+data/users/**/*.jsonl
 data/users/*/runtime/
 data/users/*/performance_attribution.json.bak*
 data/*.bak.*

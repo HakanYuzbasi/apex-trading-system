@@ -1230,8 +1230,8 @@ class ApexConfig:
 
     # Backtesting-only symbols (kept in universe, excluded from IBKR paper execution)
     BACKTEST_ONLY_SYMBOLS = {
-        "SOL/USDT", "DOGE/USDT",
-        "SUSHI/USD", "CRV/USD", "GRT/USD", "ICP/USD",  # Lower liquidity crypto
+        "CRYPTO:SOL/USDT", "CRYPTO:DOGE/USDT",
+        "CRYPTO:SUSHI/USD", "CRYPTO:CRV/USD", "CRYPTO:GRT/USD", "CRYPTO:ICP/USD",  # Lower liquidity crypto
     }
 
     # Commodity symbols for special handling

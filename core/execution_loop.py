@@ -1182,10 +1182,20 @@ class ApexTradingSystem:
 
     def _is_paper_session(self) -> bool:
         """Best-effort detection of paper session (IBKR paper port / Alpaca paper URL)."""
+        # Check connected IBKR instance
         if self.ibkr and getattr(self.ibkr, "port", None) == 7497:
             return True
+        # Check IBKR config even when disconnected (startup / reconnect scenarios)
+        ibkr_port = int(getattr(ApexConfig, "IBKR_PORT", 0) or 0)
+        if ibkr_port == 7497:
+            return True
+        # Check Alpaca URL in config (works even if Alpaca connector is None at startup)
         alpaca_base = str(getattr(ApexConfig, "ALPACA_BASE_URL", "") or "").lower()
-        if self.alpaca and "paper" in alpaca_base:
+        if "paper" in alpaca_base:
+            return True
+        # Check explicit environment setting
+        env = str(getattr(ApexConfig, "ENVIRONMENT", "") or "").lower()
+        if env == "paper":
             return True
         return not bool(getattr(ApexConfig, "LIVE_TRADING", True))
 
@@ -1835,38 +1845,30 @@ class ApexTradingSystem:
 
     async def _prefill_historical_data(self, symbols: List[str]):
         """
-        Idempotent batch pre-fill of historical data for new symbols.
+        Idempotent pre-fill of historical data for new symbols.
         Ensures signal generation doesn't skip symbols discovered at runtime.
+        Uses individual downloads with rate-limit-safe delays.
         """
         to_prefill = [s for s in symbols if s and s not in self.historical_data]
         if not to_prefill:
             return
 
         logger.info(f"🔄 Prefilling historical data for {len(to_prefill)} new symbols...")
-        
-        # Process in moderate batches to avoid API throttling
-        BATCH_SIZE = 25
-        for i in range(0, len(to_prefill), BATCH_SIZE):
-            batch = to_prefill[i:i+BATCH_SIZE]
+        loaded = 0
+        for symbol in to_prefill:
             try:
-                # Use days=5 for initialization (enough for momentum/regime detection)
-                batch_results = self.market_data.fetch_historical_batch(batch, days=5)
-                
-                loaded = 0
-                for symbol, data in batch_results.items():
-                    if not data.empty:
-                        self.historical_data[symbol] = data
-                        if 'Close' in data.columns:
-                            self.price_cache[symbol] = data['Close'].iloc[-1]
-                        loaded += 1
-                
-                logger.debug(f"   📥 Batch: {loaded}/{len(batch)} symbols loaded")
-                
-                if i + BATCH_SIZE < len(to_prefill):
-                    await asyncio.sleep(0.5)  # Throttle protection
-                    
+                data = await asyncio.to_thread(
+                    self.market_data.fetch_historical_data, symbol, 5
+                )
+                if not data.empty:
+                    self.historical_data[symbol] = data
+                    if 'Close' in data.columns:
+                        self.price_cache[symbol] = data['Close'].iloc[-1]
+                    loaded += 1
             except Exception as e:
-                logger.error(f"❌ Prefill failed for batch: {e}")
+                logger.debug(f"   Prefill failed for {symbol}: {e}")
+            await asyncio.sleep(0.6)
+        logger.debug(f"   📥 Prefill: {loaded}/{len(to_prefill)} symbols loaded")
 
     async def _fetch_fear_greed(self) -> float:
         """
@@ -2433,7 +2435,12 @@ class ApexTradingSystem:
             stream_symbols = list(set(list(self.positions.keys()) + self._runtime_symbols()))
             backtest_only = getattr(ApexConfig, "BACKTEST_ONLY_SYMBOLS", set()) or set()
             if backtest_only:
-                backtest_only_norm = {normalize_symbol(s) for s in backtest_only}
+                backtest_only_norm = set()
+                for s in backtest_only:
+                    try:
+                        backtest_only_norm.add(normalize_symbol(s))
+                    except (ValueError, Exception):
+                        backtest_only_norm.add(s)  # Keep raw string as fallback
                 stream_symbols = [
                     s for s in stream_symbols
                     if normalize_symbol(s) not in backtest_only_norm
@@ -2584,25 +2591,40 @@ class ApexTradingSystem:
         # Prevent stale persisted paper state from tripping risk/kill controls at startup.
         await self._sanitize_startup_state_for_paper()
 
-        # Pre-load historical data
+        # Pre-load historical data with rate-limit-safe sequential downloads
+        # yfinance 1.0 aggressively rate-limits; use individual calls with delays
         logger.info("📥 Loading historical data for ML training...")
         loaded = 0
         runtime_symbols = self._runtime_symbols()
         for i, symbol in enumerate(runtime_symbols, 1):
             if i % 10 == 0:
-                logger.info(f"   Loaded {i}/{len(runtime_symbols)} symbols...")
+                logger.info(f"   Loaded {loaded}/{i} symbols so far ({len(runtime_symbols)} total)...")
             try:
-                data = self.market_data.fetch_historical_data(symbol, days=400)
+                data = await asyncio.to_thread(
+                    self.market_data.fetch_historical_data, symbol, 400
+                )
                 if not data.empty:
                     self.historical_data[symbol] = data
+                    if 'Close' in data.columns:
+                        self.price_cache[symbol] = data['Close'].iloc[-1]
                     loaded += 1
                 else:
-                    logger.warning(f"⚠️  No historical data for {symbol}, removing from runtime universe")
                     self._failed_symbols.add(symbol)
             except Exception as e:
                 logger.debug(f"   Failed to load {symbol}: {e}")
-        
-        logger.info(f"✅ Loaded data for {loaded} symbols")
+                self._failed_symbols.add(symbol)
+            # Yield to event loop + rate limit (yfinance 1.0 needs ~0.5s between calls)
+            await asyncio.sleep(0.6)
+
+        if self._failed_symbols:
+            logger.warning(
+                "⚠️  %d/%d symbols failed to load data (will retry in main loop): %s%s",
+                len(self._failed_symbols),
+                len(runtime_symbols),
+                ", ".join(list(self._failed_symbols)[:10]),
+                " ..." if len(self._failed_symbols) > 10 else "",
+            )
+        logger.info(f"✅ Loaded data for {loaded}/{len(runtime_symbols)} symbols")
 
         # Initialize ATR-based stops for existing positions (now that we have historical data)
         if self.positions and (self.ibkr or self.alpaca):
