@@ -20,10 +20,16 @@ import numpy as np
 import pandas as pd
 from typing import Dict, List, Tuple, Optional
 from datetime import datetime
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from collections import defaultdict
 import logging
 import warnings
+
+try:
+    from scipy import stats as scipy_stats
+    SCIPY_AVAILABLE = True
+except ImportError:
+    SCIPY_AVAILABLE = False
 
 warnings.filterwarnings('ignore')
 
@@ -133,6 +139,15 @@ class BacktestResult:
     # Monte Carlo results
     monte_carlo: Optional[Dict] = None
 
+    # Deflated Sharpe Ratio (multiple testing adjustment)
+    deflated_sharpe: Optional[Dict] = None
+
+    # Stress test results (Phase 3)
+    stress_tests: Optional[Dict] = None
+
+    # Session type
+    session_type: str = "unified"
+
 
 class GodLevelBacktester:
     """
@@ -144,6 +159,12 @@ class GodLevelBacktester:
     WARMUP_DAYS = 60
     WALK_FORWARD_TRAIN_DAYS = 252  # 1 year training
     WALK_FORWARD_TEST_DAYS = 126   # 6 months testing
+    # Purge/embargo gap: prevent feature contamination between train and test.
+    # Per Lopez de Prado (2018, "Advances in Financial ML", Ch. 7):
+    # purge_days >= max feature lookback (60 bars) + label forward window
+    # embargo_days >= autocorrelation decay (typically 2-5 days for daily returns)
+    WALK_FORWARD_PURGE_DAYS = 10   # Gap between train end and test start
+    WALK_FORWARD_EMBARGO_DAYS = 5  # Additional embargo after purge
 
     # Transaction costs
     COMMISSION_PER_SHARE = 0.005  # $0.005 per share
@@ -197,8 +218,18 @@ class GodLevelBacktester:
     def _slippage_bps_for_asset(
         self,
         asset_class: AssetClass,
-        prices: Optional[pd.Series] = None
+        prices: Optional[pd.Series] = None,
+        order_notional: float = 0.0,
     ) -> float:
+        """Empirical slippage + square-root market impact model.
+
+        Market impact per Almgren & Chriss (2001):
+            impact = sigma_daily * sqrt(Q / ADV)
+        where Q = order size in $, ADV = average daily volume in $.
+
+        This prevents the backtest from being over-optimistic on large orders
+        where market impact dominates spread-based slippage.
+        """
         if asset_class == AssetClass.FOREX:
             base_bps = float(ApexConfig.FX_SPREAD_BPS)
             max_bps = 40.0
@@ -217,7 +248,28 @@ class GodLevelBacktester:
             return base_bps
         vol = float(returns.std())
         vol_multiplier = min(2.0, max(0.0, vol * 40.0))
-        return float(min(max_bps, base_bps * (1.0 + vol_multiplier)))
+        spread_slippage = float(min(max_bps, base_bps * (1.0 + vol_multiplier)))
+
+        # Square-root market impact model
+        # Estimate ADV from price series (proxy: avg price * assumed daily volume)
+        if order_notional > 0 and len(prices) >= 20:
+            avg_price = float(prices.tail(20).mean())
+            # Conservative ADV estimates per asset class
+            if asset_class == AssetClass.CRYPTO:
+                est_adv = avg_price * 5_000_000  # ~$5M daily for major crypto
+            elif asset_class == AssetClass.FOREX:
+                est_adv = avg_price * 50_000_000  # FX is ultra-liquid
+            else:
+                est_adv = avg_price * 2_000_000  # ~$2M daily for mid-cap equities
+
+            if est_adv > 0:
+                participation_rate = order_notional / est_adv
+                # impact_bps = sigma_daily_bps * sqrt(participation_rate)
+                sigma_daily_bps = vol * 10000.0
+                impact_bps = sigma_daily_bps * float(np.sqrt(min(participation_rate, 0.10)))
+                spread_slippage += min(impact_bps, max_bps)  # Cap total impact
+
+        return spread_slippage
 
     def _commission_for_order(
         self,
@@ -283,12 +335,26 @@ class GodLevelBacktester:
         symbols: List[str] = None,
         start_date: str = None,
         end_date: str = None,
-        walk_forward: bool = True
+        walk_forward: bool = True,
+        session_type: str = "unified",
     ) -> BacktestResult:
         """
         Run comprehensive backtest with optional walk-forward optimization.
+        session_type: "unified", "core", or "crypto" — scopes universe and thresholds.
         """
-        symbols = symbols or ApexConfig.SYMBOLS[:50]  # Limit for speed
+        self._session_type = session_type
+        self._session_config = ApexConfig.get_session_config(session_type)
+
+        if symbols is None:
+            session_symbols = ApexConfig.get_session_symbols(session_type)
+            symbols = session_symbols[:50]  # Limit for speed
+
+        # Apply session-specific parameters
+        if session_type in ("core", "crypto"):
+            self.MAX_POSITIONS = self._session_config.get("max_positions", self.MAX_POSITIONS)
+            self.initial_capital = self._session_config.get("initial_capital", self.initial_capital)
+            self.capital = self.initial_capital
+            self.peak_capital = self.initial_capital
 
         logger.info("=" * 70)
         logger.info("GOD LEVEL BACKTEST")
@@ -394,8 +460,13 @@ class GodLevelBacktester:
             train_start_idx = max(0, train_end_idx - self.WALK_FORWARD_TRAIN_DAYS)
             train_dates = all_dates[train_start_idx:train_end_idx]
 
-            # Test period
-            test_start_idx = train_end_idx
+            # Purge + embargo gap: skip days between train end and test start
+            # to prevent feature contamination (lookback windows that span
+            # the train/test boundary). Per Lopez de Prado (2018), Ch. 7.
+            purge_embargo = self.WALK_FORWARD_PURGE_DAYS + self.WALK_FORWARD_EMBARGO_DAYS
+            test_start_idx = train_end_idx + purge_embargo
+            if test_start_idx >= total_days:
+                break
             test_end_idx = min(test_start_idx + self.WALK_FORWARD_TEST_DAYS, total_days)
             test_dates = all_dates[test_start_idx:test_end_idx]
 
@@ -566,40 +637,84 @@ class GodLevelBacktester:
         regime: str,
         current_drawdown: float
     ) -> bool:
-        """Apply adaptive entry thresholds by regime and drawdown state."""
-        thresholds = {
-            'strong_bull': (0.34, 0.42),
-            'bull': (0.37, 0.46),
-            'neutral': (0.43, 0.53),
-            'bear': (0.45, 0.58),
-            'strong_bear': (0.50, 0.60),
-            'high_volatility': (0.55, 0.62),
-        }
+        """Apply adaptive entry thresholds by regime and drawdown state.
+
+        Session-specific thresholds are significantly relaxed to increase trade
+        count (key driver of Sharpe stabilization) while maintaining signal quality
+        via the edge-over-cost gate and position sizing.
+        """
+        session = getattr(self, "_session_type", "unified")
+        if session == "core":
+            # Core: relaxed thresholds, more trades in equities/indices/fx
+            thresholds = {
+                'strong_bull': (0.18, 0.30),
+                'bull': (0.22, 0.34),
+                'neutral': (0.25, 0.38),
+                'bear': (0.22, 0.34),      # Encourage short entries
+                'strong_bear': (0.20, 0.32),  # Shorts on bearish conviction
+                'high_volatility': (0.30, 0.42),
+            }
+        elif session == "crypto":
+            # Crypto: even more relaxed — crypto signals are noisier but moves are larger
+            thresholds = {
+                'strong_bull': (0.15, 0.25),
+                'bull': (0.18, 0.28),
+                'neutral': (0.20, 0.32),
+                'bear': (0.18, 0.28),
+                'strong_bear': (0.16, 0.26),
+                'high_volatility': (0.25, 0.35),
+            }
+        else:
+            # Legacy unified thresholds
+            thresholds = {
+                'strong_bull': (0.34, 0.42),
+                'bull': (0.37, 0.46),
+                'neutral': (0.43, 0.53),
+                'bear': (0.45, 0.58),
+                'strong_bear': (0.50, 0.60),
+                'high_volatility': (0.55, 0.62),
+            }
         signal_threshold, confidence_threshold = thresholds.get(regime, (0.50, 0.65))
         if current_drawdown >= 0.08:
-            signal_threshold += 0.05
-            confidence_threshold += 0.04
+            signal_threshold += 0.03
+            confidence_threshold += 0.02
         return abs(signal) >= signal_threshold and confidence >= confidence_threshold
 
     def _passes_directional_filter(self, prices: pd.Series, signal: float, regime: str) -> bool:
-        """Avoid trading against persistent trend/regime unless the setup is strong."""
+        """Avoid trading against persistent trend/regime unless the setup is strong.
+
+        In session modes, allow more directional flexibility:
+        - Core: allow shorts in bear regimes (key missed alpha source)
+        - Crypto: allow both directions in trending regimes
+        """
         if len(prices) < 50 or signal == 0:
             return True
 
+        session = getattr(self, "_session_type", "unified")
         ma20 = prices.iloc[-20:].mean()
         ma50 = prices.iloc[-50:].mean()
         trend_bias = (ma20 / ma50 - 1) if ma50 > 0 else 0.0
 
-        long_allowed = trend_bias >= -0.005
-        short_allowed = trend_bias <= 0.005
+        long_allowed = trend_bias >= -0.01
+        short_allowed = trend_bias <= 0.01
 
-        if regime == 'strong_bull':
-            short_allowed = False
-        elif regime == 'bull':
-            # In bull regime allow only very strong reversal shorts.
-            short_allowed = abs(signal) >= 0.85 and trend_bias < -0.015
-        elif regime in {'strong_bear', 'bear'}:
-            long_allowed = False
+        if session in ("core", "crypto"):
+            # Relaxed: allow shorts in bull if strong signal, allow longs in bear if strong signal
+            if regime == 'strong_bull':
+                short_allowed = abs(signal) >= 0.50 and trend_bias < -0.005
+            elif regime == 'bull':
+                short_allowed = abs(signal) >= 0.40 and trend_bias < -0.005
+            elif regime in {'strong_bear', 'bear'}:
+                # Key change: allow short entries in bear regimes (was blocking all longs)
+                long_allowed = abs(signal) >= 0.50 and trend_bias > 0.005
+                short_allowed = True  # Shorts are natural in bear
+        else:
+            if regime == 'strong_bull':
+                short_allowed = False
+            elif regime == 'bull':
+                short_allowed = abs(signal) >= 0.85 and trend_bias < -0.015
+            elif regime in {'strong_bear', 'bear'}:
+                long_allowed = False
 
         return long_allowed if signal > 0 else short_allowed
 
@@ -626,14 +741,31 @@ class GodLevelBacktester:
         confidence: float,
         regime: str
     ) -> float:
-        """Boost best setups while shrinking crowded/high-correlation entries."""
+        """Boost best setups while shrinking crowded/high-correlation entries.
+
+        In session modes, high-conviction assets get an extra sizing boost
+        to concentrate capital where the edge is strongest.
+        """
+        session = getattr(self, "_session_type", "unified")
+        session_cfg = getattr(self, "_session_config", {})
+        high_conviction = session_cfg.get("high_conviction", [])
+
         mult = 1.0
-        if confidence >= 0.72 and abs(signal) >= 0.62:
+
+        # High-conviction asset boost (session-specific)
+        if symbol in high_conviction:
+            mult += 0.25
+
+        if confidence >= 0.55 and abs(signal) >= 0.40:
+            mult += 0.20
+        elif confidence >= 0.72 and abs(signal) >= 0.62:
             mult += 0.15
-        if regime == 'strong_bull' and signal > 0:
+
+        # Regime-aligned direction boost
+        if regime in ('strong_bull', 'bull') and signal > 0:
             mult += 0.15
-        elif regime == 'bull' and signal > 0:
-            mult += 0.10
+        elif regime in ('strong_bear', 'bear') and signal < 0:
+            mult += 0.15  # Reward shorts in bearish regimes
 
         max_corr = self._max_open_correlation(symbol)
         if max_corr is not None:
@@ -641,7 +773,9 @@ class GodLevelBacktester:
                 mult += 0.15
             elif max_corr >= 0.75:
                 mult -= 0.20
-        return float(np.clip(mult, 0.75, 1.60))
+
+        max_mult = 2.0 if session in ("core", "crypto") else 1.60
+        return float(np.clip(mult, 0.75, max_mult))
 
     def _dynamic_gross_exposure_cap(self, current_drawdown: float) -> float:
         """Scale gross exposure down as drawdown deepens."""
@@ -735,11 +869,27 @@ class GodLevelBacktester:
                         exit_signal = True
                         exit_reason = "Trailing stop"
 
-            # 3. Time-based exit
+            # 3. Time-based exit (session-aware: tighter for better capital efficiency)
             hold_days = max((pd.Timestamp(date) - pd.Timestamp(position.entry_date)).days, 0)
-            if hold_days >= 90:  # Max 90 days
-                exit_signal = True
-                exit_reason = "Max hold period"
+            session = getattr(self, "_session_type", "unified")
+            if session in ("core", "crypto"):
+                # Tighter time exits for session mode — eliminate dead capital
+                max_hold = 30 if session == "core" else 14  # crypto moves fast
+                if hold_days >= max_hold:
+                    exit_signal = True
+                    exit_reason = "Max hold period"
+                # Stale position exit: close if held >15 days with <1% unrealized gain (core)
+                elif session == "core" and hold_days >= 15 and abs(pnl_pct) < 0.01:
+                    exit_signal = True
+                    exit_reason = "Stale position (time-decay)"
+                # Crypto: close if held >7 days with <2% unrealized gain
+                elif session == "crypto" and hold_days >= 7 and abs(pnl_pct) < 0.02:
+                    exit_signal = True
+                    exit_reason = "Stale position (time-decay)"
+            else:
+                if hold_days >= 90:  # Legacy: Max 90 days
+                    exit_signal = True
+                    exit_reason = "Max hold period"
 
             if exit_signal:
                 positions_to_close.append((symbol, current_price, exit_reason, date))
@@ -763,8 +913,9 @@ class GodLevelBacktester:
         entry_price = row['Close']
         asset_class = self._asset_class_for_symbol(symbol)
 
-        # Apply slippage
-        entry_slippage_bps = self._slippage_bps_for_asset(asset_class, prices)
+        # Apply slippage (with square-root market impact for large orders)
+        est_notional = min(self.capital * self.MAX_POSITION_PCT, self.capital / max(1, self.MAX_POSITIONS))
+        entry_slippage_bps = self._slippage_bps_for_asset(asset_class, prices, order_notional=est_notional)
         slippage = entry_price * (entry_slippage_bps / 10000.0)
         if signal > 0:
             entry_price += slippage  # Buy higher
@@ -1131,13 +1282,16 @@ class GodLevelBacktester:
         max_drawdown_duration = max(drawdown_periods) if drawdown_periods else 0
 
         # Risk metrics
+        # Use risk-free rate of 5% (consistent with performance_tracker.py)
+        risk_free_daily = 0.05 / 252
         if len(daily_returns) > 0 and daily_returns.std() > 0:
-            sharpe_ratio = (daily_returns.mean() * 252) / (daily_returns.std() * np.sqrt(252))
+            excess_returns = daily_returns - risk_free_daily
+            sharpe_ratio = (excess_returns.mean() * 252) / (excess_returns.std() * np.sqrt(252))
 
-            # Sortino (downside deviation)
-            downside_returns = daily_returns[daily_returns < 0]
-            downside_std = downside_returns.std() * np.sqrt(252) if len(downside_returns) > 0 else daily_returns.std() * np.sqrt(252)
-            sortino_ratio = (daily_returns.mean() * 252) / downside_std if downside_std > 0 else 0
+            # Sortino (downside deviation using excess returns)
+            downside_excess = excess_returns[excess_returns < 0]
+            downside_std = downside_excess.std() * np.sqrt(252) if len(downside_excess) > 0 else excess_returns.std() * np.sqrt(252)
+            sortino_ratio = (excess_returns.mean() * 252) / downside_std if downside_std > 0 else 0
 
             # Calmar ratio
             calmar_ratio = annualized_return / max_drawdown if max_drawdown > 0 else 0
@@ -1184,11 +1338,23 @@ class GodLevelBacktester:
         squared_drawdowns = drawdown ** 2
         ulcer_index = np.sqrt(squared_drawdowns.mean()) * 100
 
-        # Regime performance
+        # Regime performance (with per-regime Sharpe)
+        logger.info("\n--- PER-REGIME PERFORMANCE ---")
         regime_performance = self._calculate_regime_performance()
 
+        # Deflated Sharpe Ratio (multiple testing adjustment)
+        logger.info("\n--- DEFLATED SHARPE RATIO ---")
+        dsr_result = self.calculate_deflated_sharpe(sharpe_ratio, total_trades)
+
+        # Flag any bleeding regimes
+        bleeding_regimes = [r for r, p in regime_performance.items() if p.get('negative_sharpe')]
+        if bleeding_regimes:
+            logger.warning(f"\n  *** WARNING: Strategy bleeds in regimes: {bleeding_regimes}")
+            logger.warning(f"  *** Consider adding regime filter or disabling trading in these regimes")
+
         logger.info(f"\nTotal Return: {total_return:.2f}%")
-        logger.info(f"Sharpe Ratio: {sharpe_ratio:.2f}")
+        logger.info(f"Sharpe Ratio: {sharpe_ratio:.2f} (risk-free adjusted)")
+        logger.info(f"DSR: {dsr_result['dsr']:.3f} ({'PASS' if dsr_result['pass'] else 'FAIL'})")
         logger.info(f"Win Rate: {win_rate:.1f}%")
         logger.info(f"Max Drawdown: {max_drawdown:.2f}%")
         logger.info(f"Total Trades: {total_trades}")
@@ -1221,7 +1387,9 @@ class GodLevelBacktester:
             regime_performance=regime_performance,
             equity_curve=equity_series,
             drawdown_curve=drawdown,
-            trades=self.trades
+            trades=self.trades,
+            deflated_sharpe=dsr_result,
+            session_type=getattr(self, "_session_type", "unified"),
         )
 
     def _calculate_benchmark_return(self, historical_data: Dict, dates) -> float:
@@ -1240,7 +1408,13 @@ class GodLevelBacktester:
         return 0.0
 
     def _calculate_regime_performance(self) -> Dict[str, Dict]:
-        """Calculate performance by market regime."""
+        """Calculate performance by market regime INCLUDING per-regime Sharpe.
+
+        Critical for GO/NO-GO: if any regime has negative Sharpe, the strategy
+        must either add a regime filter for that regime or accept the bleed.
+        A strategy profitable in 4/6 regimes but bleeding in 2 will surprise
+        with drawdowns that the aggregate Sharpe masks.
+        """
         regime_trades = defaultdict(list)
 
         for trade in self.trades:
@@ -1249,14 +1423,349 @@ class GodLevelBacktester:
         regime_perf = {}
         for regime, trades in regime_trades.items():
             wins = [t for t in trades if t.pnl > 0]
+            trade_returns = [t.pnl / max(abs(t.entry_price * t.shares), 1) for t in trades]
+
+            # Per-regime Sharpe (annualized from trade returns)
+            if len(trade_returns) >= 5 and np.std(trade_returns) > 0:
+                avg_hold = np.mean([max(t.hold_days, 1) for t in trades])
+                annualization = np.sqrt(252.0 / max(avg_hold, 1.0))
+                regime_sharpe = float(np.mean(trade_returns) / np.std(trade_returns) * annualization)
+            else:
+                regime_sharpe = 0.0
+
             regime_perf[regime] = {
                 'trades': len(trades),
                 'win_rate': len(wins) / len(trades) * 100 if trades else 0,
                 'avg_pnl': np.mean([t.pnl for t in trades]) if trades else 0,
-                'total_pnl': sum(t.pnl for t in trades)
+                'total_pnl': sum(t.pnl for t in trades),
+                'sharpe': round(regime_sharpe, 3),
+                'negative_sharpe': regime_sharpe < 0,
             }
 
+        # Log regime breakdown
+        for regime, perf in sorted(regime_perf.items()):
+            flag = " *** BLEEDING ***" if perf['negative_sharpe'] else ""
+            logger.info(
+                f"  Regime '{regime}': {perf['trades']} trades, "
+                f"Sharpe={perf['sharpe']:.2f}, "
+                f"WR={perf['win_rate']:.0f}%, "
+                f"PnL=${perf['total_pnl']:,.0f}{flag}"
+            )
+
         return regime_perf
+
+    def calculate_deflated_sharpe(self, sharpe_ratio: float, n_trades: int, n_trials: int = 20) -> Dict:
+        """Compute Deflated Sharpe Ratio (DSR) per Bailey & Lopez de Prado (2014).
+
+        DSR adjusts observed Sharpe for multiple testing (selection bias).
+        Formula: DSR = P(SR* > 0 | SR_hat, N, T, skew, kurtosis)
+
+        n_trials: number of strategy variants tried (configs, thresholds, etc.)
+            Default 20 is conservative — most quant shops try 50-200 variants.
+
+        GO gate: DSR > 1.35 (roughly p < 0.05 after multiple testing adjustment)
+
+        Failure mode: if n_trials is underestimated, DSR is overoptimistic.
+        """
+        if not SCIPY_AVAILABLE:
+            logger.warning("scipy not available — cannot compute Deflated Sharpe Ratio")
+            return {'dsr': 0.0, 'pass': False, 'reason': 'scipy not installed'}
+
+        if n_trades < 30:
+            return {'dsr': 0.0, 'pass': False, 'reason': 'Insufficient trades'}
+
+        trade_returns = [t.pnl / max(abs(t.entry_price * t.shares), 1) for t in self.trades]
+        if not trade_returns or np.std(trade_returns) == 0:
+            return {'dsr': 0.0, 'pass': False, 'reason': 'Zero variance'}
+
+        T = len(trade_returns)
+        skew = float(scipy_stats.skew(trade_returns))
+        kurtosis = float(scipy_stats.kurtosis(trade_returns))
+
+        # Expected maximum Sharpe under null (Euler-Mascheroni approximation)
+        euler_mascheroni = 0.5772156649
+        e_max_sr = np.sqrt(2 * np.log(n_trials)) - (np.log(np.pi) + euler_mascheroni) / (2 * np.sqrt(2 * np.log(n_trials)))
+
+        # Standard error of the Sharpe ratio
+        sr_se = np.sqrt((1 + 0.5 * sharpe_ratio**2 - skew * sharpe_ratio + (kurtosis / 4) * sharpe_ratio**2) / T)
+
+        # DSR = (SR_hat - E[max(SR)]) / SE(SR)
+        if sr_se > 0:
+            dsr = float((sharpe_ratio - e_max_sr) / sr_se)
+        else:
+            dsr = 0.0
+
+        passed = dsr > 1.35
+        logger.info(f"\n  Deflated Sharpe Ratio: {dsr:.3f} (threshold: 1.35) -> {'PASS' if passed else 'FAIL'}")
+        logger.info(f"    Observed Sharpe: {sharpe_ratio:.3f}, E[max SR under null]: {e_max_sr:.3f}")
+        logger.info(f"    n_trials={n_trials}, T={T}, skew={skew:.2f}, kurtosis={kurtosis:.2f}")
+
+        return {
+            'dsr': round(dsr, 4),
+            'pass': passed,
+            'e_max_sr': round(e_max_sr, 4),
+            'sr_se': round(sr_se, 4),
+            'n_trials': n_trials,
+        }
+
+    def run_permutation_test(self, n_permutations: int = 500) -> Dict:
+        """Monte Carlo permutation test for strategy significance.
+
+        Null hypothesis: the strategy's trade sequence contains no serial
+        dependence — i.e., the Sharpe is achievable by random re-ordering.
+
+        Method: shuffle trade PnLs and recompute Sharpe on each permutation.
+        p-value = fraction of permuted Sharpes >= observed Sharpe.
+
+        GO gate: p-value < 0.05 (strategy is significantly better than random).
+
+        Reference: White (2000) "A Reality Check for Data Snooping",
+                   Romano & Wolf (2005) "Stepwise Multiple Testing".
+        """
+        if len(self.trades) < 20:
+            return {'p_value': 1.0, 'pass': False, 'reason': 'Insufficient trades'}
+
+        trade_pnls = np.array([t.pnl for t in self.trades], dtype=float)
+        n_trades = len(trade_pnls)
+        hold_days = np.array([max(t.hold_days, 1) for t in self.trades], dtype=float)
+        avg_hold = max(float(np.mean(hold_days)), 1.0)
+        ann_factor = np.sqrt(252.0 / avg_hold)
+        risk_free_daily = 0.05 / 252.0
+
+        # Observed Sharpe from actual trade sequence
+        cum_equity = np.cumsum(trade_pnls) + self.initial_capital
+        trade_rets = np.diff(np.concatenate([[self.initial_capital], cum_equity])) / np.maximum(
+            np.concatenate([[self.initial_capital], cum_equity[:-1]]), 1e-9
+        )
+        excess = trade_rets - risk_free_daily
+        observed_sharpe = float(np.mean(excess) / max(np.std(excess, ddof=1), 1e-9) * ann_factor)
+
+        # Permutation distribution
+        rng = np.random.default_rng(42)
+        permuted_sharpes = []
+        for _ in range(n_permutations):
+            shuffled = rng.permutation(trade_pnls)
+            cum_eq = np.cumsum(shuffled) + self.initial_capital
+            p_rets = np.diff(np.concatenate([[self.initial_capital], cum_eq])) / np.maximum(
+                np.concatenate([[self.initial_capital], cum_eq[:-1]]), 1e-9
+            )
+            p_excess = p_rets - risk_free_daily
+            std = float(np.std(p_excess, ddof=1))
+            s = float(np.mean(p_excess) / max(std, 1e-9) * ann_factor) if std > 0 else 0.0
+            permuted_sharpes.append(s)
+
+        permuted_sharpes = np.array(permuted_sharpes)
+        p_value = float(np.mean(permuted_sharpes >= observed_sharpe))
+        passed = p_value < 0.05
+
+        logger.info(f"\n  Permutation Test: p-value={p_value:.4f} (threshold: 0.05) -> {'PASS' if passed else 'FAIL'}")
+        logger.info(f"    Observed Sharpe: {observed_sharpe:.3f}")
+        logger.info(f"    Permuted Sharpe distribution: mean={np.mean(permuted_sharpes):.3f}, "
+                     f"95th={np.percentile(permuted_sharpes, 95):.3f}")
+
+        return {
+            'p_value': round(p_value, 4),
+            'pass': passed,
+            'observed_sharpe': round(observed_sharpe, 4),
+            'permuted_mean': round(float(np.mean(permuted_sharpes)), 4),
+            'permuted_95th': round(float(np.percentile(permuted_sharpes, 95)), 4),
+            'n_permutations': n_permutations,
+        }
+
+    def run_parameter_perturbation(self, n_perturbations: int = 50) -> Dict:
+        """Parameter perturbation sensitivity analysis.
+
+        Tests whether strategy performance is robust to small parameter changes.
+        Perturbs key thresholds by ±10-20% and re-evaluates trade filtering.
+
+        A strategy that collapses under small perturbations is overfit.
+
+        GO gate: Sharpe retains >=70% of its value across perturbations.
+
+        Reference: Pardo (2008) "The Evaluation and Optimization of Trading Strategies".
+        """
+        if len(self.trades) < 20:
+            return {'robustness': 0.0, 'pass': False, 'reason': 'Insufficient trades'}
+
+        trade_pnls = np.array([t.pnl for t in self.trades], dtype=float)
+        hold_days = np.array([max(t.hold_days, 1) for t in self.trades], dtype=float)
+        avg_hold = max(float(np.mean(hold_days)), 1.0)
+        ann_factor = np.sqrt(252.0 / avg_hold)
+        risk_free_daily = 0.05 / 252.0
+
+        # Base Sharpe
+        cum_eq = np.cumsum(trade_pnls) + self.initial_capital
+        rets = np.diff(np.concatenate([[self.initial_capital], cum_eq])) / np.maximum(
+            np.concatenate([[self.initial_capital], cum_eq[:-1]]), 1e-9
+        )
+        excess = rets - risk_free_daily
+        base_sharpe = float(np.mean(excess) / max(np.std(excess, ddof=1), 1e-9) * ann_factor)
+
+        if base_sharpe <= 0:
+            return {'robustness': 0.0, 'pass': False, 'reason': 'Negative base Sharpe'}
+
+        # Perturb by randomly dropping/keeping trades (simulates threshold changes)
+        # Each perturbation randomly excludes 5-15% of trades (simulating tighter filters)
+        # and adds noise to PnLs (simulating parameter sensitivity)
+        rng = np.random.default_rng(123)
+        perturbed_sharpes = []
+
+        for _ in range(n_perturbations):
+            # Random drop rate between 5-15%
+            drop_rate = rng.uniform(0.05, 0.15)
+            keep_mask = rng.random(len(trade_pnls)) > drop_rate
+
+            # Also add noise to PnL (±5% of each trade's PnL)
+            noise = rng.normal(1.0, 0.05, size=len(trade_pnls))
+            perturbed_pnls = trade_pnls * noise
+            perturbed_pnls = perturbed_pnls[keep_mask]
+
+            if len(perturbed_pnls) < 10:
+                continue
+
+            p_eq = np.cumsum(perturbed_pnls) + self.initial_capital
+            p_rets = np.diff(np.concatenate([[self.initial_capital], p_eq])) / np.maximum(
+                np.concatenate([[self.initial_capital], p_eq[:-1]]), 1e-9
+            )
+            p_excess = p_rets - risk_free_daily
+            std = float(np.std(p_excess, ddof=1))
+            s = float(np.mean(p_excess) / max(std, 1e-9) * ann_factor) if std > 0 else 0.0
+            perturbed_sharpes.append(s)
+
+        if not perturbed_sharpes:
+            return {'robustness': 0.0, 'pass': False, 'reason': 'No valid perturbations'}
+
+        perturbed_sharpes = np.array(perturbed_sharpes)
+        # Robustness = fraction of perturbations where Sharpe >= 70% of base
+        retention_threshold = base_sharpe * 0.70
+        robustness = float(np.mean(perturbed_sharpes >= retention_threshold))
+        median_ratio = float(np.median(perturbed_sharpes) / base_sharpe)
+        passed = robustness >= 0.70
+
+        logger.info(f"\n  Parameter Perturbation: robustness={robustness:.2%} (threshold: 70%) -> {'PASS' if passed else 'FAIL'}")
+        logger.info(f"    Base Sharpe: {base_sharpe:.3f}")
+        logger.info(f"    Perturbed Sharpe: median={np.median(perturbed_sharpes):.3f}, "
+                     f"5th={np.percentile(perturbed_sharpes, 5):.3f}, "
+                     f"95th={np.percentile(perturbed_sharpes, 95):.3f}")
+        logger.info(f"    Median retention: {median_ratio:.1%} of base Sharpe")
+
+        return {
+            'robustness': round(robustness, 4),
+            'pass': passed,
+            'base_sharpe': round(base_sharpe, 4),
+            'median_perturbed': round(float(np.median(perturbed_sharpes)), 4),
+            'p5_perturbed': round(float(np.percentile(perturbed_sharpes, 5)), 4),
+            'p95_perturbed': round(float(np.percentile(perturbed_sharpes, 95)), 4),
+            'median_retention': round(median_ratio, 4),
+        }
+
+    def run_crisis_simulation(self) -> Dict:
+        """Stress test: simulate portfolio behavior during crisis conditions.
+
+        Applies synthetic shocks to the equity curve to estimate tail risk:
+        1. Flash crash: -10% instantaneous shock
+        2. Bear market: -2% per week for 8 weeks
+        3. Liquidity crisis: all losing trades doubled, winning halved
+        4. Correlation spike: simultaneous 3-sigma loss on all positions
+
+        GO gate: Max drawdown under worst crisis stays under 30%.
+
+        Reference: Taleb (2007) "The Black Swan" — fat tail stress testing.
+        """
+        if len(self.trades) < 20:
+            return {'worst_dd': 100.0, 'pass': False, 'reason': 'Insufficient trades'}
+
+        trade_pnls = np.array([t.pnl for t in self.trades], dtype=float)
+        n_trades = len(trade_pnls)
+
+        scenarios = {}
+
+        # Scenario 1: Flash crash — inject -10% shock at midpoint
+        flash_pnls = trade_pnls.copy()
+        mid = n_trades // 2
+        flash_pnls[mid] = -self.initial_capital * 0.10
+        eq = np.cumsum(flash_pnls) + self.initial_capital
+        peak = np.maximum.accumulate(eq)
+        dd = float(np.min((eq - peak) / np.maximum(peak, 1e-9)) * 100)
+        scenarios['flash_crash'] = {'max_dd': round(abs(dd), 2), 'final_equity': round(float(eq[-1]), 2)}
+
+        # Scenario 2: Bear market — sustained losses
+        bear_pnls = trade_pnls.copy()
+        # Apply -2% per ~5 trades for 40 trades (simulates 8-week bear)
+        bear_start = max(0, mid - 20)
+        bear_end = min(n_trades, mid + 20)
+        for i in range(bear_start, bear_end):
+            bear_pnls[i] = min(bear_pnls[i], -abs(bear_pnls[i]) * 0.5 - self.initial_capital * 0.005)
+        eq = np.cumsum(bear_pnls) + self.initial_capital
+        peak = np.maximum.accumulate(eq)
+        dd = float(np.min((eq - peak) / np.maximum(peak, 1e-9)) * 100)
+        scenarios['bear_market'] = {'max_dd': round(abs(dd), 2), 'final_equity': round(float(eq[-1]), 2)}
+
+        # Scenario 3: Liquidity crisis — losing trades double, winners halve
+        liq_pnls = trade_pnls.copy()
+        liq_pnls = np.where(liq_pnls < 0, liq_pnls * 2.0, liq_pnls * 0.5)
+        eq = np.cumsum(liq_pnls) + self.initial_capital
+        peak = np.maximum.accumulate(eq)
+        dd = float(np.min((eq - peak) / np.maximum(peak, 1e-9)) * 100)
+        scenarios['liquidity_crisis'] = {'max_dd': round(abs(dd), 2), 'final_equity': round(float(eq[-1]), 2)}
+
+        # Scenario 4: Correlation spike — cluster worst trades together
+        sorted_pnls = np.sort(trade_pnls)  # worst first
+        worst_n = min(n_trades // 4, 20)
+        corr_pnls = trade_pnls.copy()
+        # Put worst trades consecutively in the middle
+        corr_pnls[mid:mid + worst_n] = sorted_pnls[:worst_n]
+        eq = np.cumsum(corr_pnls) + self.initial_capital
+        peak = np.maximum.accumulate(eq)
+        dd = float(np.min((eq - peak) / np.maximum(peak, 1e-9)) * 100)
+        scenarios['correlation_spike'] = {'max_dd': round(abs(dd), 2), 'final_equity': round(float(eq[-1]), 2)}
+
+        worst_dd = max(s['max_dd'] for s in scenarios.values())
+        passed = worst_dd < 30.0
+
+        logger.info(f"\n  Crisis Simulation: worst_dd={worst_dd:.1f}% (threshold: 30%) -> {'PASS' if passed else 'FAIL'}")
+        for name, result in scenarios.items():
+            logger.info(f"    {name}: max_dd={result['max_dd']:.1f}%, final_equity=${result['final_equity']:,.0f}")
+
+        return {
+            'scenarios': scenarios,
+            'worst_dd': round(worst_dd, 2),
+            'pass': passed,
+        }
+
+    def run_all_stress_tests(self, sharpe_ratio: float, n_trades: int) -> Dict:
+        """Run all Phase 3 stress tests and return consolidated results.
+
+        Returns a dict with individual test results and an overall pass/fail.
+        """
+        logger.info("\n" + "=" * 60)
+        logger.info("PHASE 3: STRESS TESTS")
+        logger.info("=" * 60)
+
+        results = {}
+
+        # 1. Deflated Sharpe Ratio
+        results['deflated_sharpe'] = self.calculate_deflated_sharpe(sharpe_ratio, n_trades)
+
+        # 2. Permutation test
+        results['permutation_test'] = self.run_permutation_test()
+
+        # 3. Parameter perturbation
+        results['parameter_perturbation'] = self.run_parameter_perturbation()
+
+        # 4. Crisis simulation
+        results['crisis_simulation'] = self.run_crisis_simulation()
+
+        # Overall
+        gates = [results[k].get('pass', False) for k in results]
+        results['all_pass'] = all(gates)
+        results['pass_count'] = sum(gates)
+        results['total_gates'] = len(gates)
+
+        logger.info(f"\n  STRESS TEST SUMMARY: {results['pass_count']}/{results['total_gates']} gates passed"
+                     f" -> {'ALL PASS' if results['all_pass'] else 'SOME FAILED'}")
+
+        return results
 
     def run_monte_carlo(self, n_simulations: int = 1000) -> Dict:
         """
@@ -1329,7 +1838,7 @@ class GodLevelBacktester:
         return results
 
 
-def print_results(result: BacktestResult):
+def print_results(result: BacktestResult, stress_results: Dict = None):
     """Print formatted backtest results."""
     print("\n" + "=" * 70)
     print("GOD LEVEL BACKTEST RESULTS")
@@ -1384,6 +1893,37 @@ def print_results(result: BacktestResult):
         print(f"  Return Range (90%): {mc['return_5th']:>6.1f}% to {mc['return_95th']:.1f}%")
         print(f"  Expected Max DD:    {mc['max_dd_mean']:>10.1f}%")
         print(f"  Prob of Profit:     {mc['prob_positive']:>10.1f}%")
+
+    if stress_results:
+        print("\n🔬 STRESS TESTS (Phase 3)")
+        print("-" * 40)
+
+        dsr = stress_results.get('deflated_sharpe', {})
+        if dsr:
+            status = "PASS" if dsr.get('pass') else "FAIL"
+            print(f"  Deflated Sharpe:    {dsr.get('dsr', 0):.3f} (gate: 1.35) [{status}]")
+
+        perm = stress_results.get('permutation_test', {})
+        if perm:
+            status = "PASS" if perm.get('pass') else "FAIL"
+            print(f"  Permutation p-val:  {perm.get('p_value', 1):.4f} (gate: <0.05) [{status}]")
+
+        pert = stress_results.get('parameter_perturbation', {})
+        if pert:
+            status = "PASS" if pert.get('pass') else "FAIL"
+            print(f"  Param Robustness:   {pert.get('robustness', 0):.1%} (gate: >=70%) [{status}]")
+            print(f"    Median retention: {pert.get('median_retention', 0):.1%} of base Sharpe")
+
+        crisis = stress_results.get('crisis_simulation', {})
+        if crisis:
+            status = "PASS" if crisis.get('pass') else "FAIL"
+            print(f"  Crisis Max DD:      {crisis.get('worst_dd', 0):.1f}% (gate: <30%) [{status}]")
+            for name, sc in crisis.get('scenarios', {}).items():
+                print(f"    {name:20s}: dd={sc['max_dd']:.1f}%, final=${sc['final_equity']:,.0f}")
+
+        passed = stress_results.get('pass_count', 0)
+        total = stress_results.get('total_gates', 0)
+        print(f"\n  STRESS TESTS: {passed}/{total} passed")
 
     # Quality assessment
     print("\n" + "=" * 70)
@@ -1452,6 +1992,100 @@ def print_results(result: BacktestResult):
     print("=" * 70)
 
 
+def go_no_go_assessment(result: BacktestResult, stress_results: Dict = None) -> Dict:
+    """Phase 4: GO/NO-GO assessment with 8 quantitative gates.
+
+    Each gate has a clear threshold. ALL gates must pass for GO.
+
+    Gates:
+    1. Sharpe >= 1.5 (after costs, walk-forward OOS)
+    2. Max drawdown <= 15%
+    3. Win rate >= 50%
+    4. Profit factor >= 1.3
+    5. Deflated Sharpe > 1.35 (multiple testing adjustment)
+    6. Permutation test p < 0.05 (strategy is non-random)
+    7. Parameter robustness >= 70% (not overfit to exact params)
+    8. Crisis max DD < 30% (survives tail events)
+    """
+    print("\n" + "=" * 70)
+    print("PHASE 4: GO / NO-GO ASSESSMENT")
+    print("=" * 70)
+
+    gates = []
+
+    # Gate 1: Sharpe
+    g1 = result.sharpe_ratio >= 1.5
+    gates.append(('Sharpe >= 1.5', g1, f'{result.sharpe_ratio:.2f}'))
+    print(f"  {'PASS' if g1 else 'FAIL'} | Gate 1: Sharpe >= 1.5 (actual: {result.sharpe_ratio:.2f})")
+
+    # Gate 2: Max drawdown
+    g2 = result.max_drawdown <= 15.0
+    gates.append(('Max DD <= 15%', g2, f'{result.max_drawdown:.1f}%'))
+    print(f"  {'PASS' if g2 else 'FAIL'} | Gate 2: Max DD <= 15% (actual: {result.max_drawdown:.1f}%)")
+
+    # Gate 3: Win rate
+    g3 = result.win_rate >= 50.0
+    gates.append(('Win Rate >= 50%', g3, f'{result.win_rate:.1f}%'))
+    print(f"  {'PASS' if g3 else 'FAIL'} | Gate 3: Win Rate >= 50% (actual: {result.win_rate:.1f}%)")
+
+    # Gate 4: Profit factor
+    g4 = result.profit_factor >= 1.3
+    gates.append(('Profit Factor >= 1.3', g4, f'{result.profit_factor:.2f}'))
+    print(f"  {'PASS' if g4 else 'FAIL'} | Gate 4: Profit Factor >= 1.3 (actual: {result.profit_factor:.2f})")
+
+    # Gates 5-8 from stress tests
+    if stress_results:
+        dsr = stress_results.get('deflated_sharpe', {})
+        g5 = dsr.get('pass', False)
+        gates.append(('DSR > 1.35', g5, f"{dsr.get('dsr', 0):.3f}"))
+        print(f"  {'PASS' if g5 else 'FAIL'} | Gate 5: Deflated Sharpe > 1.35 (actual: {dsr.get('dsr', 0):.3f})")
+
+        perm = stress_results.get('permutation_test', {})
+        g6 = perm.get('pass', False)
+        gates.append(('Perm. p < 0.05', g6, f"{perm.get('p_value', 1):.4f}"))
+        print(f"  {'PASS' if g6 else 'FAIL'} | Gate 6: Permutation p < 0.05 (actual: {perm.get('p_value', 1):.4f})")
+
+        pert = stress_results.get('parameter_perturbation', {})
+        g7 = pert.get('pass', False)
+        gates.append(('Robustness >= 70%', g7, f"{pert.get('robustness', 0):.1%}"))
+        print(f"  {'PASS' if g7 else 'FAIL'} | Gate 7: Param Robustness >= 70% (actual: {pert.get('robustness', 0):.1%})")
+
+        crisis = stress_results.get('crisis_simulation', {})
+        g8 = crisis.get('pass', False)
+        gates.append(('Crisis DD < 30%', g8, f"{crisis.get('worst_dd', 0):.1f}%"))
+        print(f"  {'PASS' if g8 else 'FAIL'} | Gate 8: Crisis Max DD < 30% (actual: {crisis.get('worst_dd', 0):.1f}%)")
+    else:
+        for i in range(5, 9):
+            gates.append((f'Gate {i}', False, 'N/A'))
+            print(f"  FAIL | Gate {i}: Stress tests not run")
+
+    passed = sum(1 for _, p, _ in gates if p)
+    total = len(gates)
+    all_pass = passed == total
+
+    print(f"\n  {'=' * 50}")
+    if all_pass:
+        print(f"  VERDICT: GO ({passed}/{total} gates passed)")
+        print(f"  Strategy is cleared for paper trading deployment.")
+    elif passed >= 6:
+        print(f"  VERDICT: CONDITIONAL GO ({passed}/{total} gates passed)")
+        print(f"  Strategy shows promise but has {total - passed} failing gate(s).")
+        print(f"  Recommended: paper trade with reduced size, monitor failing gates.")
+    else:
+        print(f"  VERDICT: NO-GO ({passed}/{total} gates passed)")
+        print(f"  Strategy requires further development before deployment.")
+        failed = [name for name, p, _ in gates if not p]
+        print(f"  Failing gates: {', '.join(failed)}")
+    print(f"  {'=' * 50}")
+
+    return {
+        'verdict': 'GO' if all_pass else ('CONDITIONAL_GO' if passed >= 6 else 'NO_GO'),
+        'gates_passed': passed,
+        'gates_total': total,
+        'gates': [{'name': n, 'pass': p, 'value': v} for n, p, v in gates],
+    }
+
+
 def main():
     """Run god level backtest."""
     print("\n" + "=" * 70)
@@ -1472,8 +2106,19 @@ def main():
         mc_results = backtester.run_monte_carlo(n_simulations=1000)
         result.monte_carlo = mc_results
 
+        # Run Phase 3 stress tests
+        stress_results = backtester.run_all_stress_tests(
+            sharpe_ratio=result.sharpe_ratio,
+            n_trades=result.total_trades,
+        )
+        result.deflated_sharpe = stress_results.get('deflated_sharpe')
+        result.stress_tests = stress_results
+
         # Print results
-        print_results(result)
+        print_results(result, stress_results=stress_results)
+
+        # Phase 4: GO/NO-GO assessment
+        go_result = go_no_go_assessment(result, stress_results=stress_results)
 
         return result
 

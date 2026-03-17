@@ -13,6 +13,7 @@ from datetime import datetime
 
 from core.execution_loop import ApexTradingSystem
 from services.broker.service import broker_service
+from config import ApexConfig
 
 logger = logging.getLogger(__name__)
 
@@ -107,9 +108,11 @@ class ExecutionManager:
                         self._spawn_tenant_loop(tenant_id)
                         
                 # 3. Check for stale tenants (Kill)
-                for tenant_id in list(self.tenants.keys()):
-                    if tenant_id not in active_tenant_ids:
-                        self._kill_tenant_loop(tenant_id)
+                # Tenant keys may be "tenant_id" or "tenant_id_core"/"tenant_id_crypto"
+                for session_key in list(self.tenants.keys()):
+                    base_tenant = session_key.rsplit("_core", 1)[0].rsplit("_crypto", 1)[0].rsplit("_unified", 1)[0]
+                    if base_tenant not in active_tenant_ids:
+                        self._kill_tenant_loop(session_key)
                         
                 # 4. Check for crashed tenant tasks (Restart)
                 for tenant_id, process in list(self.tenants.items()):
@@ -147,20 +150,38 @@ class ExecutionManager:
             await asyncio.sleep(10)  # Reconcile every 10 seconds
             
     def _spawn_tenant_loop(self, tenant_id: str):
-        """Spawn a new execution loop for a tenant."""
-        logger.info(f"🪐 Spawning new execution loop for tenant {tenant_id}...")
+        """Spawn execution loop(s) for a tenant. In dual mode, spawns Core + Crypto sessions."""
+        session_mode = getattr(ApexConfig, "SESSION_MODE", "unified")
+
+        if session_mode == "dual":
+            # Spawn Core session (equities + forex + indices, no crypto)
+            self._spawn_session(tenant_id, "core")
+            # Spawn Crypto session if sleeve is enabled
+            if getattr(ApexConfig, "CRYPTO_SLEEVE_ENABLED", True):
+                self._spawn_session(tenant_id, "crypto")
+        elif session_mode == "core_only":
+            self._spawn_session(tenant_id, "core")
+        elif session_mode == "crypto_only":
+            self._spawn_session(tenant_id, "crypto")
+        else:
+            # Unified (legacy) mode — single session with all assets
+            self._spawn_session(tenant_id, "unified")
+
+    def _spawn_session(self, tenant_id: str, session_type: str):
+        """Spawn a single execution session for a tenant."""
+        session_key = f"{tenant_id}_{session_type}" if session_type != "unified" else tenant_id
+        logger.info(f"🪐 Spawning {session_type} execution loop for tenant {tenant_id}...")
         try:
-            # Instantiate an isolated ApexTradingSystem for this tenant
-            system = ApexTradingSystem(tenant_id=tenant_id, broker_service=broker_service)
-            
-            # Start the loop dynamically
+            system = ApexTradingSystem(
+                tenant_id=tenant_id,
+                broker_service=broker_service,
+                session_type=session_type,
+            )
             loop_task = asyncio.create_task(system.run())
-            
-            self.tenants[tenant_id] = TenantProcess(tenant_id, system, loop_task)
-            logger.info(f"✅ Loop spawned successfully for {tenant_id}")
-            
+            self.tenants[session_key] = TenantProcess(session_key, system, loop_task)
+            logger.info(f"✅ {session_type.capitalize()} loop spawned for {tenant_id}")
         except Exception as e:
-            logger.error(f"❌ Failed to spawn loop for tenant {tenant_id}: {e}")
+            logger.error(f"❌ Failed to spawn {session_type} loop for {tenant_id}: {e}")
             
     def _kill_tenant_loop(self, tenant_id: str):
         """Gracefully kill an existing execution loop."""

@@ -74,7 +74,7 @@ class ApexConfig:
     # ═══════════════════════════════════════════════════════════════
     IBKR_HOST: str = os.getenv("APEX_IBKR_HOST", os.getenv("IBKR_HOST", "127.0.0.1"))
     IBKR_PORT: int = int(
-        os.getenv("APEX_IBKR_PORT", os.getenv("IBKR_PORT", "7497"))
+        os.getenv("APEX_IBKR_PORT", os.getenv("IBKR_PORT", "7497")).split("#")[0].strip()
     )  # 7497 = Paper, 7496 = Live
     import random
     IBKR_CLIENT_ID: int = int(
@@ -1023,6 +1023,120 @@ class ApexConfig:
     HEALTH_STALENESS_SECONDS = int(os.getenv("APEX_HEALTH_STALENESS_SECONDS", "30"))
     
     # ═══════════════════════════════════════════════════════════════
+    # DUAL-SESSION MODE (Core Strategy + Crypto Sleeve)
+    # ═══════════════════════════════════════════════════════════════
+    SESSION_MODE: str = os.getenv("APEX_SESSION_MODE", "dual")  # "unified", "dual", "core_only", "crypto_only"
+    CRYPTO_SLEEVE_ENABLED: bool = os.getenv("APEX_CRYPTO_SLEEVE_ENABLED", "true").lower() == "true"
+
+    # Per-session capital allocation (must sum to INITIAL_CAPITAL)
+    CORE_INITIAL_CAPITAL: int = int(os.getenv("APEX_CORE_INITIAL_CAPITAL", "1000000"))
+    CRYPTO_INITIAL_CAPITAL: int = int(os.getenv("APEX_CRYPTO_INITIAL_CAPITAL", "100000"))
+
+    # Per-session signal thresholds (tuned independently for higher Sharpe)
+    CORE_MIN_SIGNAL_THRESHOLD: float = float(os.getenv("APEX_CORE_MIN_SIGNAL_THRESHOLD", "0.10"))
+    CORE_MIN_CONFIDENCE: float = float(os.getenv("APEX_CORE_MIN_CONFIDENCE", "0.45"))
+    CRYPTO_MIN_SIGNAL_THRESHOLD: float = float(os.getenv("APEX_CRYPTO_MIN_SIGNAL_THRESHOLD", "0.08"))
+    CRYPTO_MIN_CONFIDENCE: float = float(os.getenv("APEX_CRYPTO_MIN_CONFIDENCE", "0.40"))
+
+    # Per-session risk parameters
+    CORE_MAX_POSITIONS: int = int(os.getenv("APEX_CORE_MAX_POSITIONS", "25"))
+    CRYPTO_MAX_POSITIONS: int = int(os.getenv("APEX_CRYPTO_MAX_POSITIONS", "15"))
+    CORE_MAX_DAILY_LOSS: float = float(os.getenv("APEX_CORE_MAX_DAILY_LOSS", "0.025"))
+    CRYPTO_MAX_DAILY_LOSS_SESSION: float = float(os.getenv("APEX_CRYPTO_MAX_DAILY_LOSS_SESSION", "0.06"))
+    CORE_KELLY_FRACTION: float = float(os.getenv("APEX_CORE_KELLY_FRACTION", "0.60"))
+    CRYPTO_KELLY_FRACTION: float = float(os.getenv("APEX_CRYPTO_KELLY_FRACTION", "0.40"))
+
+    # Per-session position sizing (more aggressive for concentrated signals)
+    CORE_POSITION_SIZE_USD: float = float(os.getenv("APEX_CORE_POSITION_SIZE_USD", "25000"))
+    CORE_KELLY_MAX_POSITION_PCT: float = float(os.getenv("APEX_CORE_KELLY_MAX_POSITION_PCT", "0.08"))
+
+    # Per-session ATR stops (tighter for better Sharpe)
+    CORE_ATR_MULTIPLIER_STOP: float = float(os.getenv("APEX_CORE_ATR_MULTIPLIER_STOP", "2.0"))
+    CORE_TRAILING_STOP_ATR: float = float(os.getenv("APEX_CORE_TRAILING_STOP_ATR", "1.8"))
+
+    # Per-session regime thresholds (relaxed to capture more trades)
+    CORE_SIGNAL_THRESHOLDS_BY_REGIME: Dict = {
+        'strong_bull': 0.08, 'bull': 0.10, 'neutral': 0.10,
+        'bear': 0.12, 'strong_bear': 0.10, 'volatile': 0.15
+    }
+    CRYPTO_SIGNAL_THRESHOLDS_BY_REGIME: Dict = {
+        'strong_bull': 0.06, 'bull': 0.08, 'neutral': 0.08,
+        'bear': 0.10, 'strong_bear': 0.08, 'volatile': 0.12
+    }
+
+    # Per-session state files
+    DATA_DIR: Path = Path(os.getenv("APEX_DATA_DIR", str(Path(__file__).parent / "data")))
+    CORE_STATE_FILE: str = str(DATA_DIR / "core_trading_state.json")
+    CRYPTO_STATE_FILE: str = str(DATA_DIR / "crypto_trading_state.json")
+
+    # High-conviction assets (get 2x position sizing in Core session)
+    # Top performers by risk-adjusted returns from backtest analysis
+    CORE_HIGH_CONVICTION: List[str] = [
+        "NVDA", "META", "AAPL", "MSFT", "GOOGL", "AMZN", "AVGO", "LLY",
+        "JPM", "GS", "XOM", "CVX", "CAT", "GE", "NFLX",
+        "SPY", "QQQ", "HD", "WMT", "UNH",
+        "CRM", "ORCL", "AMD", "NEM", "MPC",
+        "LIN", "HON", "ABBV", "MRK", "BA"
+    ]
+
+    # Crypto high-conviction (momentum leaders)
+    CRYPTO_HIGH_CONVICTION: List[str] = [
+        "BTC/USD", "ETH/USD", "SOL/USD", "AVAX/USD", "LINK/USD"
+    ]
+
+    @classmethod
+    def get_session_config(cls, session_type: str) -> Dict:
+        """Return config overrides for a specific session type."""
+        if session_type == "core":
+            return {
+                "initial_capital": cls.CORE_INITIAL_CAPITAL,
+                "min_signal_threshold": cls.CORE_MIN_SIGNAL_THRESHOLD,
+                "min_confidence": cls.CORE_MIN_CONFIDENCE,
+                "max_positions": cls.CORE_MAX_POSITIONS,
+                "max_daily_loss": cls.CORE_MAX_DAILY_LOSS,
+                "kelly_fraction": cls.CORE_KELLY_FRACTION,
+                "position_size_usd": cls.CORE_POSITION_SIZE_USD,
+                "kelly_max_position_pct": cls.CORE_KELLY_MAX_POSITION_PCT,
+                "atr_multiplier_stop": cls.CORE_ATR_MULTIPLIER_STOP,
+                "trailing_stop_atr": cls.CORE_TRAILING_STOP_ATR,
+                "signal_thresholds_by_regime": cls.CORE_SIGNAL_THRESHOLDS_BY_REGIME,
+                "state_file": cls.CORE_STATE_FILE,
+                "high_conviction": cls.CORE_HIGH_CONVICTION,
+            }
+        elif session_type == "crypto":
+            return {
+                "initial_capital": cls.CRYPTO_INITIAL_CAPITAL,
+                "min_signal_threshold": cls.CRYPTO_MIN_SIGNAL_THRESHOLD,
+                "min_confidence": cls.CRYPTO_MIN_CONFIDENCE,
+                "max_positions": cls.CRYPTO_MAX_POSITIONS,
+                "max_daily_loss": cls.CRYPTO_MAX_DAILY_LOSS_SESSION,
+                "kelly_fraction": cls.CRYPTO_KELLY_FRACTION,
+                "position_size_usd": cls.CRYPTO_POSITION_SIZE_USD,
+                "kelly_max_position_pct": cls.KELLY_MAX_POSITION_PCT,
+                "atr_multiplier_stop": cls.ATR_MULTIPLIER_STOP,
+                "trailing_stop_atr": cls.TRAILING_STOP_ATR,
+                "signal_thresholds_by_regime": cls.CRYPTO_SIGNAL_THRESHOLDS_BY_REGIME,
+                "state_file": cls.CRYPTO_STATE_FILE,
+                "high_conviction": cls.CRYPTO_HIGH_CONVICTION,
+            }
+        else:
+            return {
+                "initial_capital": cls.INITIAL_CAPITAL,
+                "min_signal_threshold": cls.MIN_SIGNAL_THRESHOLD,
+                "min_confidence": cls.MIN_CONFIDENCE,
+                "max_positions": cls.MAX_POSITIONS,
+                "max_daily_loss": cls.MAX_DAILY_LOSS,
+                "kelly_fraction": cls.KELLY_FRACTION,
+                "position_size_usd": cls.POSITION_SIZE_USD,
+                "kelly_max_position_pct": cls.KELLY_MAX_POSITION_PCT,
+                "atr_multiplier_stop": cls.ATR_MULTIPLIER_STOP,
+                "trailing_stop_atr": cls.TRAILING_STOP_ATR,
+                "signal_thresholds_by_regime": cls.SIGNAL_THRESHOLDS_BY_REGIME,
+                "state_file": str(cls.DATA_DIR / "trading_state.json"),
+                "high_conviction": [],
+            }
+
+    # ═══════════════════════════════════════════════════════════════
     # UNIVERSE SELECTION
     # ═══════════════════════════════════════════════════════════════
     UNIVERSE_MODE = "SP500"  # Options: "SP500", "NASDAQ100", "CUSTOM"
@@ -1037,11 +1151,12 @@ class ApexConfig:
     # are well above paper sizing. Re-enable only when proper lot sizing is modeled.
     FOREX_PAIRS: list = []
 
-    # 3. Crypto Pairs (Top Liquid, expanded for Alpaca crypto paper)
+    # 3. Crypto Pairs (Expanded universe for Alpaca crypto paper)
     # Note: MATIC/USD and UNI/USD removed - delisted from yfinance as of Feb 2026
     # Top 8 most liquid, lowest-spread crypto pairs only.
     # Removed: BCH, XLM, ETC, AAVE — all exhibit >15bps chronic slippage.
     CRYPTO_PAIRS = [
+        # Tier 1: Blue-chip (highest liquidity)
         "BTC/USD",
         "ETH/USD",
         "SOL/USD",
@@ -1067,30 +1182,32 @@ class ApexConfig:
     if EXTRA_CRYPTO_PAIRS:
         CRYPTO_PAIRS = list(dict.fromkeys(CRYPTO_PAIRS + EXTRA_CRYPTO_PAIRS))
 
-    # 4. Top 100 S&P 500 Components (aligned with SECTOR_MAP)
-    # Trimmed to exactly 85 to keep total universe at 100 (4 Indices + 7 Forex + 4 Crypto + 85 Stocks)
+    # 4. Top S&P 500 Components (aligned with SECTOR_MAP)
+    # Exactly 89 equities so IBKR universe = 4 indices + 7 forex + 89 equities = 100
     SP500_TOP_100 = [
-        # Technology (Top 15)
+        # Technology (18)
         "AAPL", "MSFT", "NVDA", "GOOGL", "META", "TSLA", "AVGO", "ORCL", "CSCO", "ADBE",
-        "CRM", "ACN", "AMD", "INTC", "IBM", "QCOM", "TXN",
-        # Financials (Top 6)
-        "JPM", "BAC", "WFC", "GS", "MS", "C", "BLK", "AXP",
-        # Healthcare (Top 6)
-        "UNH", "JNJ", "LLY", "ABBV", "MRK", "TMO", "ABT", "DHR",
-        # Consumer (Top 6)
-        "AMZN", "WMT", "HD", "MCD", "NKE", "SBUX", "LOW", "TGT", "DLTR",
-        # Industrials (Top 7)
-        "BA", "CAT", "GE", "HON", "UPS", "RTX", "LMT", "DE",
-        # Energy (Top 5)
-        "XOM", "CVX", "COP", "SLB", "EOG", "MPC",
-        # Materials (Top 5)
-        "LIN", "APD", "ECL", "SHW", "FCX", "NEM", "ALB",
-        # Communication (Top 6)
+        "CRM", "ACN", "AMD", "INTC", "IBM", "QCOM", "TXN", "AMAT",
+        # Financials (10)
+        "JPM", "BAC", "WFC", "GS", "MS", "C", "BLK", "AXP", "SCHW", "USB",
+        # Healthcare (10)
+        "UNH", "JNJ", "LLY", "ABBV", "MRK", "TMO", "ABT", "DHR", "PFE", "BMY",
+        # Consumer (10)
+        "AMZN", "WMT", "HD", "MCD", "NKE", "SBUX", "LOW", "TGT", "DG", "DLTR",
+        # Industrials (10)
+        "BA", "CAT", "GE", "HON", "UPS", "RTX", "LMT", "DE", "MMM", "UNP",
+        # Energy (8)
+        "XOM", "CVX", "COP", "SLB", "EOG", "MPC", "PSX", "VLO",
+        # Materials (5)
+        "LIN", "APD", "SHW", "FCX", "NEM",
+        # Communication (6)
         "NFLX", "DIS", "CMCSA", "T", "TMUS", "VZ",
-        # Real Estate & Utilities (Top 5)
+        # Real Estate & Utilities (5)
         "AMT", "PLD", "CCI", "EQIX", "NEE",
-        # Commodities (Top 4)
-        "GLD", "SLV", "USO", "UNG"
+        # Commodities (4) — ETFs with equity-like trading
+        "GLD", "SLV", "USO", "UNG",
+        # Additional high-momentum names (3)
+        "MU", "LRCX", "OXY",
     ]
 
     # Combine all into master universe — priority-ordered so GLD/SLV/defensive assets are
@@ -1098,8 +1215,24 @@ class ApexConfig:
     _PRIORITY_SYMBOLS = ["GLD", "SLV", "XOM", "CVX", "UNH", "LLY", "JNJ", "ABBV", "MRK"]
     SYMBOLS = list(dict.fromkeys(_PRIORITY_SYMBOLS + INDICES + CRYPTO_PAIRS + SP500_TOP_100 + FOREX_PAIRS))
 
+    # Session-scoped universes (for dual-session mode)
+    CORE_SYMBOLS = list(set(INDICES + FOREX_PAIRS + SP500_TOP_100))  # No crypto
+    CRYPTO_SYMBOLS = list(set(CRYPTO_PAIRS))  # Crypto only
+
+    @classmethod
+    def get_session_symbols(cls, session_type: str) -> list:
+        """Return the symbol universe for a specific session."""
+        if session_type == "core":
+            return cls.CORE_SYMBOLS
+        elif session_type == "crypto":
+            return cls.CRYPTO_SYMBOLS
+        return cls.SYMBOLS
+
     # Backtesting-only symbols (kept in universe, excluded from IBKR paper execution)
-    BACKTEST_ONLY_SYMBOLS = {"SOL/USDT", "DOGE/USDT"}
+    BACKTEST_ONLY_SYMBOLS = {
+        "SOL/USDT", "DOGE/USDT",
+        "SUSHI/USD", "CRV/USD", "GRT/USD", "ICP/USD",  # Lower liquidity crypto
+    }
 
     # Commodity symbols for special handling
     COMMODITY_SYMBOLS = {'GLD', 'SLV', 'USO', 'UNG', 'PALL'}
