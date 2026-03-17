@@ -31,6 +31,14 @@ equity_curve.csv
 trades.csv
 trading_state.json
 
+# Runtime audit/data files (can be very large, regenerated at runtime)
+data/users/*/audit/*.jsonl
+data/users/*/audit/**/*.jsonl
+data/users/*/audit/*.json
+data/users/*/runtime/
+data/users/*/performance_attribution.json.bak*
+data/*.bak.*
+
 # Model files (can be large)
 models/saved/
 *.pkl

@@ -4984,7 +4984,10 @@ class ApexTradingSystem:
                     if connector:
                         try:
                             exit_side = "SELL" if orphan_qty > 0 else "BUY"
-                            await connector.execute_order(symbol, exit_side, abs(orphan_qty))
+                            await asyncio.wait_for(
+                                connector.execute_order(symbol, exit_side, abs(orphan_qty)),
+                                timeout=30.0,
+                            )
                             async with self._position_lock:
                                 self.positions.pop(symbol, None)
                             # Clean up all per-position metadata to prevent stale data
@@ -4997,8 +5000,23 @@ class ApexTradingSystem:
                                 getattr(self, 'failed_exits', {}),
                             ):
                                 meta.pop(symbol, None)
-                        except Exception as _oe:
-                            logger.error("❌ Orphan exit failed for %s: %s", symbol, _oe)
+                        except (Exception, asyncio.TimeoutError) as _oe:
+                            # Track failed orphan exits to escalate after repeated failures
+                            _fail_dict = getattr(self, '_orphan_exit_failures', {})
+                            _fail_dict[symbol] = _fail_dict.get(symbol, 0) + 1
+                            self._orphan_exit_failures = _fail_dict
+                            _fail_count = _fail_dict[symbol]
+                            logger.error(
+                                "❌ Orphan exit failed for %s (attempt %d): %s",
+                                symbol, _fail_count, _oe,
+                            )
+                            if _fail_count >= 3:
+                                fire_alert(
+                                    "orphan_exit_stuck",
+                                    f"Orphan position {symbol} (qty={orphan_qty}) failed "
+                                    f"exit {_fail_count}x — manual intervention required",
+                                    AlertSev.CRITICAL,
+                                )
             else:
                 logger.info(f"⚠️ {symbol}: No historical data – skipping (data not yet loaded)")
             return
@@ -5050,6 +5068,11 @@ class ApexTradingSystem:
             # Check data freshness before signal generation
             if self.signal_decay_shield and not self.signal_decay_shield.is_data_tradeable(symbol):
                 logger.debug(f"🛡️ {symbol}: Data too stale, skipping signal generation")
+                # Clean up any pending entry placeholder to avoid blocking future entries
+                async with self._position_lock:
+                    if symbol in self._pending_entries:
+                        self.positions.pop(symbol, None)
+                        self._pending_entries.discard(symbol)
                 return
 
             # Generate signal (use institutional or standard)
@@ -5065,8 +5088,15 @@ class ApexTradingSystem:
             cs_signal = cs_data.get('signal', 0)
             
             # SOTA: Get News Sentiment (offloaded — analyze() does blocking time.sleep on retries)
-            sent_result = await asyncio.to_thread(self.sentiment_analyzer.analyze, symbol)
-            sent_signal = sent_result.sentiment_score
+            try:
+                sent_result = await asyncio.wait_for(
+                    asyncio.to_thread(self.sentiment_analyzer.analyze, symbol),
+                    timeout=10.0,
+                )
+                sent_signal = sent_result.sentiment_score
+            except asyncio.TimeoutError:
+                logger.debug("⏱️ %s: Sentiment analysis timed out (10s) — using neutral", symbol)
+                sent_signal = 0.0
 
             # Tier 5: component signals (populated in institutional path; defaults for fallback)
             _comp_momentum: float = 0.0
@@ -5545,10 +5575,13 @@ class ApexTradingSystem:
                 peak_price = self.position_peak_prices.get(symbol, price)
 
                 # Update peak price tracking
+                # LONG: track highest price (profit peak for trailing stop)
+                # SHORT: track lowest price (profit peak for trailing stop on shorts)
                 if current_pos > 0 and price > peak_price:
                     self.position_peak_prices[symbol] = price
                     peak_price = price
                 elif current_pos < 0 and price < peak_price:
+                    # For shorts, "peak" = lowest price = max unrealized profit
                     self.position_peak_prices[symbol] = price
                     peak_price = price
 
@@ -6166,6 +6199,9 @@ class ApexTradingSystem:
                 signal_threshold = ApexConfig.SIGNAL_THRESHOLDS_BY_REGIME.get(
                     self._current_regime, ApexConfig.MIN_SIGNAL_THRESHOLD
                 )
+            # Enforce MIN_SIGNAL_THRESHOLD as absolute floor (prevents regime
+            # thresholds like strong_bull=0.15 from bypassing the global min=0.18)
+            signal_threshold = max(signal_threshold, ApexConfig.MIN_SIGNAL_THRESHOLD)
 
             effective_signal_threshold = min(
                 0.95, signal_threshold + governor_controls.signal_threshold_boost
@@ -6618,22 +6654,24 @@ class ApexTradingSystem:
                         # SOTA: The InstitutionalRiskManager natively calculates volatility-adjusted sizes. 
                         # We must respect its output to maintain Risk Parity rather than destroying it 
                         # with a static dollar-value overwrite.
-                        shares = sizing.target_shares
-                        
+                        shares = float(sizing.target_shares)
+
                         # SOTA: Apply VIX-based risk multiplier
-                        shares = int(shares * self._vix_risk_multiplier)
+                        # NOTE: All sizing multipliers are applied in float to avoid
+                        # cascading int() truncation errors. Final int() at the end.
+                        shares = shares * self._vix_risk_multiplier
 
                         # ✅ Phase 1.4: Apply graduated circuit breaker risk multiplier
                         if self._risk_multiplier < 1.0:
-                            shares = int(shares * self._risk_multiplier)
-                            logger.info(f"   ⚠️ Risk reduced: {self._risk_multiplier:.0%} (VIX: {self._vix_risk_multiplier:.2f}) → {shares} shares")
+                            shares = shares * self._risk_multiplier
+                            logger.info(f"   ⚠️ Risk reduced: {self._risk_multiplier:.0%} (VIX: {self._vix_risk_multiplier:.2f}) → {shares:.1f} shares")
 
                         # 🏰 Signal Fortress: Apply per-symbol size multiplier
                         if self.threshold_optimizer:
                             size_mult = sym_thresholds.position_size_multiplier
                             if size_mult != 1.0:
-                                shares = max(1, int(shares * size_mult))
-                                logger.debug(f"   🏰 Adaptive size: {size_mult:.2f}x → {shares} shares")
+                                shares = shares * size_mult
+                                logger.debug(f"   🏰 Adaptive size: {size_mult:.2f}x → {shares:.1f} shares")
 
                         # 🏆 Excellence: Apply signal strength based size scaling
                         if hasattr(self, 'excellence_manager'):
@@ -6653,15 +6691,15 @@ class ApexTradingSystem:
                         if self.black_swan_guard:
                             bsg_mult = self.black_swan_guard.get_position_size_multiplier()
                             if bsg_mult < 1.0:
-                                shares = max(1, int(shares * bsg_mult))
-                                logger.info(f"   🛡️ BlackSwanGuard: {bsg_mult:.0%} → {shares} shares")
+                                shares = shares * bsg_mult
+                                logger.info(f"   🛡️ BlackSwanGuard: {bsg_mult:.0%} → {shares:.1f} shares")
 
                         # 🛡️ Signal Fortress V2: Apply Drawdown Cascade size multiplier
                         if self.drawdown_breaker:
                             dd_mult = self.drawdown_breaker.get_position_size_multiplier()
                             if dd_mult < 1.0:
-                                shares = max(1, int(shares * dd_mult))
-                                logger.info(f"   🛡️ DrawdownBreaker: {dd_mult:.0%} → {shares} shares")
+                                shares = shares * dd_mult
+                                logger.info(f"   🛡️ DrawdownBreaker: {dd_mult:.0%} → {shares:.1f} shares")
 
                         # 🔗 Correlation Regime: Reduce size during HERDING/CRISIS regimes.
                         # HERDING (avg_corr >= 0.60): 50% of normal — diversification is failing.
@@ -6675,9 +6713,9 @@ class ApexTradingSystem:
                             else:
                                 corr_mult = 1.0
                             if corr_mult < 1.0:
-                                shares = max(1, int(shares * corr_mult))
+                                shares = shares * corr_mult
                                 logger.info(
-                                    "   🔗 CorrelationBreaker [%s, avg=%.2f]: %.0f%% size → %d shares",
+                                    "   🔗 CorrelationBreaker [%s, avg=%.2f]: %.0f%% size → %.1f shares",
                                     _corr_regime.name,
                                     getattr(self, "_correlation_avg", 0.0),
                                     corr_mult * 100,
@@ -6687,17 +6725,17 @@ class ApexTradingSystem:
 
                         # 🔗 Per-entry correlation guard: graduated reduction for correlated entries
                         if _corr_size_mult < 1.0:
-                            shares = max(1, int(shares * _corr_size_mult))
+                            shares = shares * _corr_size_mult
 
                         # 🛡️ Signal Fortress V2: Apply Execution Shield slippage adjustment
                         if self.execution_shield:
                             slip_adj = self.execution_shield.get_slippage_adjustment(symbol)
                             if slip_adj < 1.0:
-                                shares = max(1, int(shares * slip_adj))
-                                logger.debug(f"   🛡️ ExecutionShield slippage adj: {slip_adj:.0%} → {shares} shares")
+                                shares = shares * slip_adj
+                                logger.debug(f"   🛡️ ExecutionShield slippage adj: {slip_adj:.0%} → {shares:.1f} shares")
 
                         if governor_controls.size_multiplier < 1.0:
-                            shares = max(1, int(shares * governor_controls.size_multiplier))
+                            shares = shares * governor_controls.size_multiplier
                             logger.info(
                                 f"   🧭 PerformanceGovernor: {governor_controls.size_multiplier:.0%} "
                                 f"size ({perf_snapshot.tier.value}, {governor_regime_key}) → {shares} shares"
@@ -6707,7 +6745,7 @@ class ApexTradingSystem:
                         if getattr(ApexConfig, "LIVE_KELLY_SIZING_ENABLED", True):
                             _kelly_m = getattr(self, "_live_kelly_mult", 1.0)
                             if _kelly_m != 1.0:
-                                shares = max(1, int(shares * _kelly_m))
+                                shares = shares * _kelly_m
                                 logger.info(
                                     "   📊 Kelly sizing: %.2fx → %d shares", _kelly_m, shares
                                 )
@@ -6744,7 +6782,7 @@ class ApexTradingSystem:
                                     "volatile_bear", "crisis", "stress", "panic",
                                 )
                                 if _was_bear and _h_since < _caution_h:
-                                    shares = max(1, int(shares * _severity_mult))
+                                    shares = shares * _severity_mult
                                     logger.info(
                                         "   🔄 Regime caution (%.1fh/%.1fh, conf=%.0f%%, "
                                         "%s→%s): %.0f%% size → %d shares",
@@ -6769,14 +6807,11 @@ class ApexTradingSystem:
                             if _eq_peak > 0 and _eq_now >= _eq_peak * (1.0 + _ratchet_trigger):
                                 _ratchet_scale = float(getattr(ApexConfig, "PROFIT_RATCHET_SIZE_SCALE", 0.6))
                                 _pre_ratchet = shares
-                                if str(asset_class).upper() == "CRYPTO":
-                                    shares = round(shares * _ratchet_scale, 6)
-                                else:
-                                    shares = max(1, int(shares * _ratchet_scale))
+                                shares = shares * _ratchet_scale
                                 if shares != _pre_ratchet:
                                     logger.info(
                                         "   🔒 AG Profit Ratchet: equity +%.1f%% above peak → "
-                                        "size scaled to %.0f%% (%d→%d shares)",
+                                        "size scaled to %.0f%% (%.1f→%.1f shares)",
                                         (_eq_now / _eq_peak - 1.0) * 100,
                                         _ratchet_scale * 100,
                                         _pre_ratchet, shares,
@@ -6796,12 +6831,17 @@ class ApexTradingSystem:
                         if symbol in _defensive_syms and str(asset_class).upper() != "CRYPTO":
                             _def_mult = float(getattr(ApexConfig, 'DEFENSIVE_POSITION_SIZE_MULTIPLIER', 1.5))
                             _pre_def = shares
-                            shares = int(shares * _def_mult)
+                            shares = shares * _def_mult
                             if shares != _pre_def:
                                 logger.info(
-                                    "   🛡️ %s: Defensive boost +%.0f%% → %d shares",
+                                    "   🛡️ %s: Defensive boost +%.0f%% → %.1f shares",
                                     symbol, (_def_mult - 1) * 100, shares,
                                 )
+
+                        # Final int conversion: all multipliers applied in float to
+                        # prevent cascading truncation. Convert to int once here.
+                        if str(asset_class).upper() != "CRYPTO":
+                            shares = max(1, int(round(shares)))
 
                         if shares < 1:
                             # Crypto: Alpaca supports fractional quantities — compute from target notional
@@ -6951,7 +6991,18 @@ class ApexTradingSystem:
 
                     # ExecutionShield hard gates: spread gate + slippage budget.
                     if self.execution_shield:
-                        quote = await self._get_connector_quote(entry_connector, symbol)
+                        try:
+                            quote = await asyncio.wait_for(
+                                self._get_connector_quote(entry_connector, symbol),
+                                timeout=10.0,
+                            )
+                        except asyncio.TimeoutError:
+                            logger.warning("⏱️ %s: Broker quote timed out (10s) — skipping entry", symbol)
+                            async with self._position_lock:
+                                if symbol in self.positions:
+                                    del self.positions[symbol]
+                                self._pending_entries.discard(symbol)
+                            return
                         bid = float(quote.get("bid", 0.0) or 0.0)
                         ask = float(quote.get("ask", 0.0) or 0.0)
                         spread_limit_bps = self._spread_limit_bps_for_asset(asset_class)
@@ -7537,11 +7588,17 @@ class ApexTradingSystem:
                 end_idx = min(start_idx + BATCH_SIZE, total_ibkr)
                 batch_symbols = ibkr_symbols[start_idx:end_idx]
 
-                # Process batch in parallel
-                tasks = [self.process_symbol(symbol) for symbol in batch_symbols]
+                # Process batch in parallel (60s timeout per symbol prevents hangs)
+                _SYMBOL_TIMEOUT = float(getattr(ApexConfig, "PROCESS_SYMBOL_TIMEOUT_SECONDS", 60.0))
+                tasks = [
+                    asyncio.wait_for(self.process_symbol(symbol), timeout=_SYMBOL_TIMEOUT)
+                    for symbol in batch_symbols
+                ]
                 results = await asyncio.gather(*tasks, return_exceptions=True)
                 for sym, res in zip(batch_symbols, results):
-                    if isinstance(res, Exception):
+                    if isinstance(res, asyncio.TimeoutError):
+                        logger.error("⏱️ process_symbol TIMEOUT for %s (>%.0fs)", sym, _SYMBOL_TIMEOUT)
+                    elif isinstance(res, Exception):
                         logger.warning("⚠️ process_symbol exception for %s: %r", sym, res)
 
                 # Small delay between batches to allow cleanup of market data subscriptions
@@ -7551,10 +7608,16 @@ class ApexTradingSystem:
         # Process ALL Alpaca crypto symbols in one batch (no limit)
         if alpaca_symbols:
             logger.info(f"📊 Processing {len(alpaca_symbols)} Alpaca crypto symbols (no batch limit)")
-            tasks = [self.process_symbol(symbol) for symbol in alpaca_symbols]
+            _SYMBOL_TIMEOUT = float(getattr(ApexConfig, "PROCESS_SYMBOL_TIMEOUT_SECONDS", 60.0))
+            tasks = [
+                asyncio.wait_for(self.process_symbol(symbol), timeout=_SYMBOL_TIMEOUT)
+                for symbol in alpaca_symbols
+            ]
             results = await asyncio.gather(*tasks, return_exceptions=True)
             for sym, res in zip(alpaca_symbols, results):
-                if isinstance(res, Exception):
+                if isinstance(res, asyncio.TimeoutError):
+                    logger.error("⏱️ process_symbol TIMEOUT for %s (>%.0fs)", sym, _SYMBOL_TIMEOUT)
+                elif isinstance(res, Exception):
                     logger.warning("⚠️ process_symbol exception for %s: %r", sym, res)
 
     async def check_and_execute_rebalance(self, est_hour: float):

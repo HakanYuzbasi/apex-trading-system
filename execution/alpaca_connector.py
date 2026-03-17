@@ -516,6 +516,10 @@ class AlpacaConnector:
             logger.info(f"  Equity:  ${equity:,.2f}")
             logger.info(f"  Buying Power: ${buying_power:,.2f}")
 
+            # Reconcile pending orders: sync local _pending_orders with
+            # Alpaca's actual open orders to prevent ghost/duplicate orders.
+            await self._reconcile_pending_orders()
+
             if account.get("crypto_status") == "ACTIVE":
                 logger.info("  Crypto:  ACTIVE")
                 await self._refresh_active_crypto_symbols()
@@ -1304,6 +1308,41 @@ class AlpacaConnector:
                 logger.info("Loaded %d pending Alpaca orders from %s", len(data), p)
         except Exception as e:
             logger.warning("Failed to load pending orders: %s", e)
+
+    async def _reconcile_pending_orders(self) -> None:
+        """Reconcile local _pending_orders with Alpaca's actual open orders.
+
+        Removes entries from _pending_orders that no longer exist on Alpaca
+        (filled, cancelled, or expired), preventing ghost orders and duplicate
+        entries on reconnect.
+        """
+        if not self._pending_orders:
+            return
+        try:
+            open_orders = await self._request("GET", "/v2/orders?status=open")
+            if open_orders is None:
+                logger.warning("Alpaca order reconciliation: could not fetch open orders")
+                return
+            # Build set of Alpaca open order IDs
+            alpaca_open_ids = {o.get("id") for o in open_orders if isinstance(o, dict)}
+            # Check each local pending order
+            stale = []
+            for sym, order_id in list(self._pending_orders.items()):
+                if order_id not in alpaca_open_ids:
+                    stale.append(sym)
+            for sym in stale:
+                self._pending_orders.pop(sym, None)
+            if stale:
+                logger.info(
+                    "Alpaca order reconciliation: removed %d stale pending orders "
+                    "(filled/cancelled): %s",
+                    len(stale), stale,
+                )
+            else:
+                logger.debug("Alpaca order reconciliation: all %d pending orders confirmed open",
+                             len(self._pending_orders))
+        except Exception as e:
+            logger.warning("Alpaca order reconciliation failed: %s", e)
 
     # ------------------------------------------------------------------
     # UPGRADE D: Pre-trade spread gate — reject entry if spread too wide
