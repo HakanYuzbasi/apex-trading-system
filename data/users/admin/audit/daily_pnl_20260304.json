@@ -1,0 +1,15 @@
+{
+  "date": "2026-03-04",
+  "updated_at": "2026-03-06T12:34:09.671077Z",
+  "day_start_capital": null,
+  "end_capital": null,
+  "daily_pnl": null,
+  "daily_pnl_pct": null,
+  "max_drawdown_pct": null,
+  "open_positions": null,
+  "fills_buy": 202,
+  "fills_sell": 0,
+  "notional_traded": 1426258.75,
+  "regime": "unknown",
+  "note": "capital data not available for this historical day"
+}

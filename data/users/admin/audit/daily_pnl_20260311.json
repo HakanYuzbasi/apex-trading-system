@@ -1,0 +1,16 @@
+{
+  "date": "2026-03-11",
+  "updated_at": "2026-03-11T22:59:36.095722Z",
+  "day_start_capital": 1262294.84,
+  "end_capital": 1262215.51,
+  "daily_pnl": -79.3300000000745,
+  "daily_pnl_pct": -0.0063,
+  "max_drawdown_pct": 0.0339,
+  "open_positions": 3,
+  "fills_buy": 15,
+  "fills_sell": 0,
+  "notional_traded": 40906.26,
+  "regime": "bull",
+  "vix_multiplier": 0.9,
+  "cycle_count": 144
+}
