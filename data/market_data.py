@@ -297,9 +297,11 @@ class MarketDataFetcher:
         # Check cache
         if use_cache and cache_key in self._historical_cache:
             cached_df = self._historical_cache[cache_key]
-            # Check if cache is recent (within 1 hour)
+            # 4-hour TTL: daily historical bars don't change intraday, so no need
+            # to re-fetch more than once per session.  This prevents 120+ symbols
+            # from hammering yfinance simultaneously on every cache miss after restart.
             if hasattr(cached_df, '_cache_time'):
-                if (datetime.now() - cached_df._cache_time).total_seconds() < 3600:
+                if (datetime.now() - cached_df._cache_time).total_seconds() < 14400:
                     return cached_df.copy()
 
         try:
@@ -358,6 +360,70 @@ class MarketDataFetcher:
 
         except Exception as e:
             logger.error(f"Error fetching historical data for {parsed.normalized}: {e}")
+            return pd.DataFrame()
+
+    def fetch_intraday_data(
+        self,
+        symbol: str,
+        interval: str = "5m",
+        period: str = "1d",
+        use_cache: bool = True,
+    ) -> pd.DataFrame:
+        """
+        Fetch intraday OHLCV bars.
+
+        Args:
+            symbol: Trading symbol
+            interval: Bar interval — '1m', '5m', '15m', '30m', '1h'
+            period: Lookback period — '1d', '5d', '1mo'
+            use_cache: Cache with 5-minute TTL
+
+        Returns:
+            DataFrame with columns: Open, High, Low, Close, Volume
+        """
+        if not YFINANCE_AVAILABLE:
+            return pd.DataFrame()
+
+        try:
+            parsed = parse_symbol(symbol)
+        except ValueError:
+            logger.warning("Invalid symbol for intraday fetch: %s", symbol)
+            return pd.DataFrame()
+
+        parsed = self._map_for_data(parsed)
+        cache_key = f"{parsed.normalized}_intra_{interval}_{period}"
+
+        if use_cache and cache_key in self._historical_cache:
+            cached_df = self._historical_cache[cache_key]
+            if hasattr(cached_df, "_cache_time"):
+                if (datetime.now() - cached_df._cache_time).total_seconds() < 300:  # 5-min TTL
+                    return cached_df.copy()
+
+        try:
+            self._rate_limit()
+            yf_symbol = to_yfinance_ticker(parsed)
+            ticker = yf.Ticker(yf_symbol)
+            df = self._retry_on_rate_limit(
+                lambda: ticker.history(period=period, interval=interval)
+            )
+            if df is None:
+                df = pd.DataFrame()
+
+            if df.empty:
+                return pd.DataFrame()
+
+            columns_to_keep = ["Open", "High", "Low", "Close", "Volume"]
+            df = df[[c for c in columns_to_keep if c in df.columns]]
+
+            if df.index.tz is not None:
+                df.index = df.index.tz_localize(None)
+
+            df._cache_time = datetime.now()
+            self._historical_cache[cache_key] = df.copy()
+            return df
+
+        except Exception as e:
+            logger.debug("Error fetching intraday data for %s: %s", parsed.normalized, e)
             return pd.DataFrame()
 
     def fetch_historical_batch(

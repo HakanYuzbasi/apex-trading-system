@@ -16,8 +16,11 @@ Exit philosophy:
 - Time decay on stale positions
 """
 
+import json
+import os
 import numpy as np
-from typing import Dict, Optional, Tuple
+from collections import deque
+from typing import Dict, List, Optional, Tuple
 from datetime import datetime
 from dataclasses import dataclass
 from enum import Enum
@@ -110,10 +113,168 @@ class DynamicExitManager:
         }
     }
 
+    # Adaptive multiplier learning: slow learning rate, bounded changes.
+    # Nudges regime multipliers toward better values based on real trade outcomes.
+    _ADAPT_LEARNING_RATE: float = 0.015      # per-trade nudge size
+    _ADAPT_MIN_TRADES: int = 8               # need ≥N outcomes before adapting
+    _ADAPT_STOP_MULT_BOUNDS: tuple = (0.50, 1.80)
+    _ADAPT_TARGET_MULT_BOUNDS: tuple = (0.60, 2.50)
+    _ADAPT_HOLD_MULT_BOUNDS: tuple = (0.30, 2.00)
+    _ADAPT_SIGNAL_MULT_BOUNDS: tuple = (0.50, 2.00)
+    _PERSIST_PATH: str = str(getattr(ApexConfig, "DATA_DIR", "data")) + "/exit_multipliers.json"
+
     def __init__(self):
         self.position_history: Dict[str, list] = {}  # Track P&L trajectory
         self.base_signal_exit = getattr(ApexConfig, "SIGNAL_EXIT_BASE", self.BASE_SIGNAL_EXIT)
-        logger.info("DynamicExitManager initialized")
+
+        # Adaptive multipliers — start from class-level REGIME_ADJUSTMENTS defaults,
+        # then drift toward better values based on observed trade outcomes.
+        import copy
+        self._adapted_multipliers: Dict[str, Dict[str, float]] = copy.deepcopy(self.REGIME_ADJUSTMENTS)
+
+        # Per-regime outcome buffer: list of dicts with exit_reason, pnl_pct, exit_signal
+        self._outcome_buffer: Dict[str, List[dict]] = {r: [] for r in self.REGIME_ADJUSTMENTS}
+
+        # Load previously learned multipliers from disk (persists across restarts)
+        self._load_multipliers()
+        logger.info("DynamicExitManager initialized (adaptive learning enabled)")
+
+    # ── Persistence ──────────────────────────────────────────────────────────
+
+    def _load_multipliers(self) -> None:
+        """Load previously adapted multipliers from disk."""
+        try:
+            if os.path.exists(self._PERSIST_PATH):
+                with open(self._PERSIST_PATH) as fh:
+                    saved = json.load(fh)
+                for regime, mults in saved.items():
+                    if regime in self._adapted_multipliers:
+                        self._adapted_multipliers[regime].update(mults)
+                logger.info("Loaded adapted exit multipliers from %s", self._PERSIST_PATH)
+        except Exception as e:
+            logger.debug("Could not load exit multipliers (non-fatal): %s", e)
+
+    def _save_multipliers(self) -> None:
+        """Persist adapted multipliers to disk."""
+        try:
+            os.makedirs(os.path.dirname(self._PERSIST_PATH), exist_ok=True)
+            with open(self._PERSIST_PATH, "w") as fh:
+                json.dump(self._adapted_multipliers, fh, indent=2)
+        except Exception as e:
+            logger.debug("Could not save exit multipliers (non-fatal): %s", e)
+
+    # ── Learning ─────────────────────────────────────────────────────────────
+
+    def record_closed_trade(
+        self,
+        regime: str,
+        exit_reason: str,
+        pnl_pct: float,
+        exit_signal: float = 0.0,
+    ) -> None:
+        """
+        Record a closed trade outcome and adapt regime multipliers.
+
+        Called once per position close from execution_loop. The learning logic:
+        - Stop-loss exits that are worse than -2× the base stop → stop was too tight
+          (noise triggered it) → nudge stop_mult UP.
+        - Stop-loss exits near exactly -base_stop → stop was appropriate.
+        - Take-profit exits → target was reachable → nudge target_mult slightly UP
+          (we can afford to aim a bit higher next time).
+        - Signal-decay exits that resulted in big losses → signal exit was too slow
+          → nudge signal_mult UP (be more sensitive next time).
+        - Long hold exits (>2× base hold_days) that were losers → hold too long
+          → nudge hold_mult DOWN.
+        """
+        _regime = regime.lower() if regime else "neutral"
+        if _regime not in self._outcome_buffer:
+            _regime = "neutral"
+
+        self._outcome_buffer[_regime].append({
+            "exit_reason": exit_reason,
+            "pnl_pct": float(pnl_pct),
+            "exit_signal": float(exit_signal),
+        })
+
+        # Adapt once we have enough data for this regime
+        buf = self._outcome_buffer[_regime]
+        if len(buf) >= self._ADAPT_MIN_TRADES:
+            self._adapt_multipliers(_regime, buf[-self._ADAPT_MIN_TRADES:])
+            # Keep rolling: don't accumulate forever
+            if len(buf) > self._ADAPT_MIN_TRADES * 3:
+                self._outcome_buffer[_regime] = buf[-self._ADAPT_MIN_TRADES:]
+
+    def _adapt_multipliers(self, regime: str, outcomes: List[dict]) -> None:
+        """
+        Nudge regime multipliers based on recent trade outcomes.
+        Learning rate is intentionally small to avoid wild oscillations.
+        """
+        lr = self._ADAPT_LEARNING_RATE
+        mults = self._adapted_multipliers[regime]
+
+        stop_exits    = [o for o in outcomes if "stop" in o["exit_reason"].lower()]
+        tp_exits      = [o for o in outcomes if "profit" in o["exit_reason"].lower()
+                                                or "take" in o["exit_reason"].lower()]
+        signal_exits  = [o for o in outcomes if "signal" in o["exit_reason"].lower()
+                                                or "decay" in o["exit_reason"].lower()]
+
+        # ── Stop-loss adaptation ──────────────────────────────────────────────
+        if stop_exits:
+            avg_stop_pnl = float(np.mean([o["pnl_pct"] for o in stop_exits]))
+            base_stop = self.BASE_STOP_LOSS_PCT * mults.get("stop_mult", 1.0)
+            # If average exit is much shallower than expected stop depth → stops too tight
+            if avg_stop_pnl > -base_stop * 0.60:
+                mults["stop_mult"] = float(np.clip(
+                    mults["stop_mult"] + lr, *self._ADAPT_STOP_MULT_BOUNDS
+                ))
+            # If average stop exit is extremely deep → stops firing too late
+            elif avg_stop_pnl < -base_stop * 1.50:
+                mults["stop_mult"] = float(np.clip(
+                    mults["stop_mult"] - lr, *self._ADAPT_STOP_MULT_BOUNDS
+                ))
+
+        # ── Take-profit adaptation ────────────────────────────────────────────
+        if tp_exits:
+            # If we're consistently hitting targets → room to aim higher
+            mults["target_mult"] = float(np.clip(
+                mults["target_mult"] + lr * 0.5, *self._ADAPT_TARGET_MULT_BOUNDS
+            ))
+
+        # ── Signal-exit adaptation ────────────────────────────────────────────
+        if signal_exits:
+            avg_sig_pnl = float(np.mean([o["pnl_pct"] for o in signal_exits]))
+            # If signal exits are ending in large losses → exiting too late → be more sensitive
+            if avg_sig_pnl < -0.015:
+                mults["signal_mult"] = float(np.clip(
+                    mults["signal_mult"] + lr, *self._ADAPT_SIGNAL_MULT_BOUNDS
+                ))
+            # If signal exits are small losses / near breakeven → exits are timely
+            elif avg_sig_pnl > -0.005:
+                mults["signal_mult"] = float(np.clip(
+                    mults["signal_mult"] - lr * 0.5, *self._ADAPT_SIGNAL_MULT_BOUNDS
+                ))
+
+        # ── Hold-time adaptation ──────────────────────────────────────────────
+        loser_exits = [o for o in outcomes if o["pnl_pct"] < -0.01]
+        if len(loser_exits) > len(outcomes) * 0.6:
+            # >60% losers in this regime → holding too long → shorten hold
+            mults["hold_mult"] = float(np.clip(
+                mults["hold_mult"] - lr, *self._ADAPT_HOLD_MULT_BOUNDS
+            ))
+        elif len(loser_exits) < len(outcomes) * 0.3:
+            # <30% losers → doing well → can hold slightly longer
+            mults["hold_mult"] = float(np.clip(
+                mults["hold_mult"] + lr * 0.5, *self._ADAPT_HOLD_MULT_BOUNDS
+            ))
+
+        self._adapted_multipliers[regime] = mults
+        self._save_multipliers()
+        logger.info(
+            "📈 ExitManager adapted [%s]: stop=%.2f target=%.2f hold=%.2f signal=%.2f",
+            regime,
+            mults.get("stop_mult", 1.0), mults.get("target_mult", 1.0),
+            mults.get("hold_mult", 1.0), mults.get("signal_mult", 1.0),
+        )
 
     def calculate_exit_levels(
         self,
@@ -165,8 +326,10 @@ class DynamicExitManager:
         holding_days = (datetime.now() - entry_time).days
         (datetime.now() - entry_time).total_seconds() / 3600
 
-        # === 1. REGIME ADJUSTMENTS ===
-        regime_adj = self.REGIME_ADJUSTMENTS.get(regime, self.REGIME_ADJUSTMENTS['neutral'])
+        # === 1. REGIME ADJUSTMENTS (adaptive — drifts toward better values per trade) ===
+        regime_adj = self._adapted_multipliers.get(
+            regime, self._adapted_multipliers.get('neutral', self.REGIME_ADJUSTMENTS['neutral'])
+        )
 
         # Adjust for side in bearish regimes
         if side == 'LONG' and regime in ['bear', 'strong_bear']:

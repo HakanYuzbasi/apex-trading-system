@@ -264,8 +264,19 @@ class InstitutionalRiskManager:
         """
         constraints_hit = []
 
+        # Crypto-aware sizing parameters.
+        # A crypto-only account (BTC/ETH/SOL/LINK) has 4 positions with
+        # expected high cross-correlation — using equity parameters crushes
+        # sizes to <$300 per position on a $79K account.
+        # Crypto assets also have 2–3× higher annual vol than equities, so
+        # the target_portfolio_vol must scale accordingly.
+        _is_crypto = (asset_class == AssetClass.CRYPTO)
+        _eff_max_pos_pct   = 0.20   if _is_crypto else self.config.max_position_pct    # 20% per coin
+        _eff_target_vol    = 0.30   if _is_crypto else self.config.target_portfolio_vol # 30% for crypto
+        _eff_max_positions = 4      if _is_crypto else self.config.max_positions
+
         # 1. BASE SIZE - percentage of capital
-        base_value = self.current_capital * self.config.max_position_pct
+        base_value = self.current_capital * _eff_max_pos_pct
         int(base_value / price) if price > 0 else 0
 
         # 2. SIGNAL-ADJUSTED SIZE
@@ -285,17 +296,20 @@ class InstitutionalRiskManager:
             if position_vol > 0:
                 # Target: position_vol * weight = target_contribution
                 # Solve for weight: weight = target_contribution / position_vol
-                target_vol_contribution = self.config.target_portfolio_vol / max(self.config.max_positions, 1)
+                target_vol_contribution = _eff_target_vol / max(_eff_max_positions, 1)
                 vol_weight = target_vol_contribution / position_vol
 
-                vol_adjusted_value = self.current_capital * min(vol_weight, self.config.max_position_pct)
+                vol_adjusted_value = self.current_capital * min(vol_weight, _eff_max_pos_pct)
 
                 if vol_adjusted_value < signal_adjusted_value:
                     constraints_hit.append(f"vol_scaled:{position_vol:.2%}")
 
         # 4. CORRELATION PENALTY
+        # Skip for crypto: a dedicated crypto account is intentionally
+        # concentrated in correlated assets (BTC/ETH/SOL/LINK all move together).
+        # Penalising for correlation defeats the purpose of the crypto sleeve.
         correlation_penalty = 1.0
-        if current_positions:
+        if current_positions and not _is_crypto:
             avg_correlation = self._calculate_avg_correlation(symbol, list(current_positions.keys()))
             if avg_correlation > 0.3:
                 # Reduce size for highly correlated positions

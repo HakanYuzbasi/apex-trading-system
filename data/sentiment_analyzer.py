@@ -39,7 +39,11 @@ class SentimentResult:
     neutral_count: int
     top_headlines: List[str]
     analyzed_at: datetime
-    
+    # Extended fields populated when NewsAggregator is available
+    momentum: float = 0.0               # sentiment improving (+) or deteriorating (-)
+    fear_greed_index: Optional[int] = None  # Alternative.me 0-100 (crypto)
+    sources_count: int = 1              # number of independent sources
+
     def to_dict(self) -> Dict:
         return {
             'symbol': self.symbol,
@@ -50,7 +54,10 @@ class SentimentResult:
             'negative_count': self.negative_count,
             'neutral_count': self.neutral_count,
             'top_headlines': self.top_headlines[:3],
-            'analyzed_at': self.analyzed_at.isoformat()
+            'analyzed_at': self.analyzed_at.isoformat(),
+            'momentum': self.momentum,
+            'fear_greed_index': self.fear_greed_index,
+            'sources_count': self.sources_count,
         }
 
 
@@ -86,17 +93,62 @@ class SentimentAnalyzer:
     def __init__(self, cache_minutes: int = 30):
         """
         Initialize sentiment analyzer.
-        
+
         Args:
             cache_minutes: Cache duration for news
         """
         self.cache_minutes = cache_minutes
         self._cache: Dict[str, Tuple[SentimentResult, datetime]] = {}
-        
+
         from config import ApexConfig
         self.enabled = getattr(ApexConfig, "SENTIMENT_API_ENABLED", True)
-        logger.info(f"SentimentAnalyzer initialized (keyword-based, API enabled: {self.enabled})")
+
+        # Lazy-init NewsAggregator (avoids import at module load time)
+        self._news_aggregator = None
+        try:
+            from data.news_aggregator import NewsAggregator
+            self._news_aggregator = NewsAggregator()
+        except Exception as _e:
+            logger.debug("NewsAggregator unavailable, using Yahoo Finance only: %s", _e)
+
+        logger.info(
+            "SentimentAnalyzer initialized (keyword-based, API enabled: %s, "
+            "NewsAggregator: %s)",
+            self.enabled,
+            "yes" if self._news_aggregator is not None else "no",
+        )
     
+    async def get_enhanced_sentiment(self, symbol: str) -> SentimentResult:
+        """
+        Async wrapper: tries NewsAggregator first, falls back to Yahoo Finance analyze().
+
+        NewsAggregator provides multi-source sentiment (CryptoPanic + Alternative.me +
+        Yahoo Finance) with 160+ term lexicon, momentum tracking, and Fear&Greed index.
+        Falls back to the classic keyword-based analyze() if aggregator is unavailable.
+        """
+        import asyncio
+        if self._news_aggregator is not None:
+            try:
+                news_ctx = await self._news_aggregator.get_news_context(symbol)
+                return SentimentResult(
+                    symbol=symbol,
+                    sentiment_score=float(news_ctx.sentiment),
+                    confidence=float(news_ctx.confidence),
+                    news_count=news_ctx.sources_count,
+                    positive_count=max(0, int(news_ctx.sentiment * news_ctx.sources_count)),
+                    negative_count=max(0, int(-news_ctx.sentiment * news_ctx.sources_count)),
+                    neutral_count=0,
+                    top_headlines=list(news_ctx.headlines[:5]),
+                    analyzed_at=datetime.now(),
+                    momentum=float(news_ctx.momentum),
+                    fear_greed_index=news_ctx.fear_greed_index,
+                    sources_count=news_ctx.sources_count,
+                )
+            except Exception as _e:
+                logger.debug("get_enhanced_sentiment: NewsAggregator failed (%s), using Yahoo fallback", _e)
+        # Fallback: run sync analyze() off the event loop
+        return await asyncio.to_thread(self.analyze, symbol)
+
     def check_connectivity(self) -> bool:
         """Test Yahoo Finance news API connectivity on startup."""
         if not self.enabled:
@@ -266,30 +318,30 @@ class SentimentAnalyzer:
             return []
             
         import time
-        max_retries = 3
-        delays = [2, 4, 8]
-        
+        max_retries = 1          # Was 3 — reduced to prevent 14s blocking sleep cascade
+        delays = [0.5, 1.0]     # Was [2, 4, 8] — sub-second retries to stay within 10s timeout
+
         yf_symbol = self._to_yfinance_symbol(symbol)
         for attempt in range(max_retries + 1):
             try:
                 ticker = yf.Ticker(yf_symbol)
                 news = ticker.news
-                
+
                 if not news:
                     if attempt < max_retries:
                         time.sleep(delays[attempt])
                         continue
                     return []
-                
+
                 headlines = []
                 for item in news[:20]:  # Limit to 20 most recent
                     # yfinance >=0.2.x changed format: title is now nested under 'content'
                     title = item.get('title', '') or item.get('content', {}).get('title', '')
                     if title:
                         headlines.append(title)
-                
+
                 return headlines
-                
+
             except Exception as e:
                 if attempt < max_retries:
                     logger.debug(f"News fetch failed for {symbol} (attempt {attempt+1}/{max_retries+1}): {e}")
@@ -297,7 +349,7 @@ class SentimentAnalyzer:
                 else:
                     logger.warning(f"⚠️ Yahoo Finance news API failed for {symbol} after {max_retries+1} attempts: HTTP/Connection Error: {e}")
                     return []
-        
+
         return []
     
     def _score_headline(self, headline: str) -> float:

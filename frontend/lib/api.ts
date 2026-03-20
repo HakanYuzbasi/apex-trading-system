@@ -93,6 +93,22 @@ export type SleeveAttribution = {
   execution_drag_pct_of_gross: number;
 };
 
+export type SocialAuditEvent = {
+  audit_id: string;
+  timestamp: string | null;
+  asset_class: string;
+  regime: string;
+  policy_version: string;
+  decision_hash: string;
+  block_new_entries: boolean;
+  gross_exposure_multiplier: number;
+  combined_risk_score: number;
+  verified_event_probability: number;
+  prediction_verification_failures: number;
+  verified_event_count: number;
+  reasons: string[];
+};
+
 export type CockpitData = {
   timestamp: string | null;
   positions: CockpitPosition[];
@@ -101,6 +117,8 @@ export type CockpitData = {
   attribution?: {
     sleeves: SleeveAttribution[];
   };
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  status?: any;
   [key: string]: unknown;
 };
 
@@ -145,10 +163,11 @@ const jsonFetcher = async (url: string) => {
 
 export function useCockpitData(isPublic = false) {
   const path = isPublic ? "/api/public/cockpit" : "/api/v1/cockpit";
-  return useSWR<CockpitData>(getApiUrl(path), jsonFetcher, {
+  const { data, isLoading, isValidating, error } = useSWR<CockpitData>(getApiUrl(path), jsonFetcher, {
     refreshInterval: 5000,
     revalidateOnFocus: true,
   });
+  return { data: data ?? null, isLoading, isValidating, isError: !!error, error };
 }
 
 export function useMetrics(isPublic = false) {

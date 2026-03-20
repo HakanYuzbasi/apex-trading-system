@@ -114,6 +114,56 @@ def _bounded_int(value: Any, minimum: int, maximum: int, fallback: int = 0) -> i
     return rounded
 
 
+def _win_rate_from_audit(lookback_days: int = 7) -> Tuple[Optional[float], int]:
+    """Compute win_rate and closed_trade count from trade audit JSONL files.
+
+    Returns (win_rate, closed_trades) or (None, 0) if no exit data found.
+    Reads the last `lookback_days` of audit files so intraday metrics are
+    always fresh even when the engine's performance_tracker has symbol-key issues.
+    """
+    try:
+        from datetime import timedelta
+        exits = []
+        today = datetime.utcnow()
+        for days_back in range(lookback_days):
+            date = today - timedelta(days=days_back)
+            # Check both admin and admin-1 audit dirs (depends on auth config)
+            for user_id in ("admin", "admin-1"):
+                audit_path = (
+                    ApexConfig.DATA_DIR
+                    / "users"
+                    / user_id
+                    / "audit"
+                    / f"trade_audit_{date.strftime('%Y%m%d')}.jsonl"
+                )
+                if not audit_path.exists():
+                    continue
+                for line in audit_path.read_text(encoding="utf-8").splitlines():
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        row = json.loads(line)
+                    except Exception:
+                        continue
+                    # Accept both 'event' and 'event_type' field names
+                    evt = str(row.get("event", row.get("event_type", ""))).upper()
+                    if evt == "EXIT":
+                        pnl = row.get("pnl_pct")
+                        if pnl is not None:
+                            try:
+                                exits.append(float(pnl))
+                            except (TypeError, ValueError):
+                                pass
+        if not exits:
+            return None, 0
+        wins = sum(1 for p in exits if p > 0)
+        return wins / len(exits), len(exits)
+    except Exception as e:
+        logger.debug("_win_rate_from_audit error: %s", e)
+        return None, 0
+
+
 def sanitize_execution_metrics(raw: Dict[str, Any]) -> Dict[str, Any]:
     """
     Sanitize top-level execution KPIs for API responses.
@@ -214,6 +264,16 @@ def sanitize_execution_metrics(raw: Dict[str, Any]) -> Dict[str, Any]:
         COUNT_MAX,
         fallback=0,
     )
+
+    # Override win_rate and closed-trade count from audit JSONL files.
+    # The performance_tracker has symbol-key mismatches (ETH/USD vs CRYPTO:ETH/USD)
+    # and missing BUY records for startup-restored positions, making its win_rate
+    # unreliable. The audit files are the single source of truth.
+    _audit_win_rate, _audit_closed = _win_rate_from_audit()
+    if _audit_closed > 0:
+        win_rate = _audit_win_rate  # type: ignore[assignment]
+        # Use audit closed-trade count as total_trades floor (more accurate than tracker)
+        total_trades = max(total_trades, _audit_closed)
 
     broker_heartbeats_raw = raw.get("broker_heartbeats")
     broker_heartbeats: Dict[str, Dict[str, Any]] = {}
@@ -332,13 +392,15 @@ def read_trading_state() -> Dict:
         daily_source = str(data.get("daily_pnl_source", "")).strip().lower()
         has_broker_truth_daily = daily_source == "broker_fills" or ("daily_pnl_realized" in data)
 
-        # Update total_pnl if we have position P&L data
+        # Update total_pnl / daily_pnl to include live unrealized P&L
         if total_position_pnl != 0:
-            starting_capital = data.get("starting_capital", data.get("capital", 0))
-            if starting_capital > 0:
-                data["total_pnl"] = round(total_position_pnl, 2)
-                if not has_broker_truth_daily:
-                    data["daily_pnl"] = round(total_position_pnl, 2)  # Approximate as daily only when broker-truth is absent
+            data["total_pnl"] = round(total_position_pnl, 2)
+            if has_broker_truth_daily:
+                # Add live unrealized on top of realized fills
+                realized = float(data.get("daily_pnl_realized", data.get("daily_pnl", 0)) or 0)
+                data["daily_pnl"] = round(realized + total_position_pnl, 2)
+            else:
+                data["daily_pnl"] = round(total_position_pnl, 2)
 
         sanitized = _sanitize_floats(data)
         _state_cache_data = sanitized
@@ -382,6 +444,7 @@ def read_session_state(session_type: str) -> Dict:
     # Enrich with live prices
     price_cache, _ = read_price_cache()
     positions = data.get("positions", {})
+    total_position_pnl = 0.0
     for symbol, pos in positions.items():
         live_price = price_cache.get(symbol, 0)
         avg_price = pos.get("avg_price", 0)
@@ -394,6 +457,22 @@ def read_session_state(session_type: str) -> Dict:
             else:
                 pos["pnl"] = round((avg_price - live_price) * abs(qty), 2)
                 pos["pnl_pct"] = round((avg_price / live_price - 1) * 100, 2) if live_price > 0 else 0.0
+            total_position_pnl += pos["pnl"]
+
+    # Update daily_pnl / total_pnl to include unrealized P&L
+    daily_source = str(data.get("daily_pnl_source", "")).strip().lower()
+    has_broker_truth = daily_source == "broker_fills" or "daily_pnl_realized" in data
+    if has_broker_truth:
+        # Engine has broker-truth realized fills; add live unrealized on top
+        realized = float(data.get("daily_pnl_realized", data.get("daily_pnl", 0)) or 0)
+        combined = round(realized + total_position_pnl, 2)
+        if combined != 0:
+            data["daily_pnl"] = combined
+            data["total_pnl"] = combined
+    elif total_position_pnl != 0:
+        # No broker truth — use position P&L as approximation
+        data["daily_pnl"] = round(total_position_pnl, 2)
+        data["total_pnl"] = round(total_position_pnl, 2)
 
     return _sanitize_floats(data)
 

@@ -16,7 +16,7 @@ function SessionCard({
   sessionType: "core" | "crypto";
   label: string;
   description: string;
-  icon: React.ElementType;
+  icon: React.ComponentType<{ className?: string }>;
   href: string;
 }) {
   const { data: metrics } = useSessionMetrics(sessionType);

@@ -161,7 +161,7 @@ class ApexConfig:
     ALPACA_ALLOW_OFFLINE: bool = (
         os.getenv("APEX_ALPACA_ALLOW_OFFLINE", "false").lower() == "true"
     )
-    ALPACA_HTTP_TIMEOUT_SECONDS: float = float(os.getenv("APEX_ALPACA_HTTP_TIMEOUT_SECONDS", "8.0"))
+    ALPACA_HTTP_TIMEOUT_SECONDS: float = float(os.getenv("APEX_ALPACA_HTTP_TIMEOUT_SECONDS", "20.0"))
     ALPACA_FILL_WAIT_SECONDS: int = int(os.getenv("APEX_ALPACA_FILL_WAIT_SECONDS", "10"))
     # Exit limit order: try limit at -30 bps first, fall back to market on miss
     # 30 bps = P75 of actual exit slippage — captures ~75% of exits without missed fills
@@ -298,8 +298,8 @@ class ApexConfig:
     )
     POSITION_SIZE_USD = float(os.getenv("APEX_POSITION_SIZE_USD", "20000"))  # Default $20k
     CRYPTO_POSITION_SIZE_USD: float = float(
-        os.getenv("APEX_CRYPTO_POSITION_SIZE_USD", "5000")
-    )  # Separate crypto size from equity — Alpaca $100k account at ~5% per trade
+        os.getenv("APEX_CRYPTO_POSITION_SIZE_USD", "10000")
+    )  # Notional cap per crypto position — $10K (~13% of $79K account, 4 pairs max)
     MAX_POSITIONS = 20  # Reduced from 40: prevents capital dilution across too many tiny positions
     MAX_SHARES_PER_POSITION = 500  # Cap max shares per position
     MIN_HEDGE_NOTIONAL = 50_000  # Only hedge positions larger than $50k to save on costs
@@ -312,6 +312,16 @@ class ApexConfig:
     MAX_SECTOR_EXPOSURE = 1.0  # Relaxed to 100% for initial trades as requested
     SECTOR_CONCENTRATION_ENABLED: bool = os.getenv("APEX_SECTOR_CONCENTRATION_ENABLED", "true").lower() == "true"
     SECTOR_CONCENTRATION_MAX_PCT: float = float(os.getenv("APEX_SECTOR_CONCENTRATION_MAX_PCT", "0.25"))
+
+    # Factor hedger — portfolio beta / factor exposure monitor
+    FACTOR_HEDGER_ENABLED: bool = os.getenv("APEX_FACTOR_HEDGER_ENABLED", "true").lower() == "true"
+    FACTOR_BETA_WARN_THRESHOLD: float = float(os.getenv("APEX_FACTOR_BETA_WARN_THRESHOLD", "1.20"))
+    FACTOR_BETA_URGENT_THRESHOLD: float = float(os.getenv("APEX_FACTOR_BETA_URGENT_THRESHOLD", "1.80"))
+    FACTOR_HEDGER_LOOKBACK_DAYS: int = int(os.getenv("APEX_FACTOR_HEDGER_LOOKBACK_DAYS", "20"))
+    # HHI concentration gate: shrinks new position size when book is concentrated
+    HHI_CONCENTRATION_GATE_ENABLED: bool = os.getenv("APEX_HHI_GATE", "true").lower() == "true"
+    HHI_CONCENTRATION_WARN: float = float(os.getenv("APEX_HHI_WARN", "0.25"))   # start shrinking above this
+    HHI_CONCENTRATION_HARD: float = float(os.getenv("APEX_HHI_HARD", "0.45"))   # max 50% shrink at this level
     EARNINGS_FILTER_ENABLED: bool = os.getenv("APEX_EARNINGS_FILTER_ENABLED", "true").lower() == "true"
     EARNINGS_BLACKOUT_HOURS_BEFORE: int = int(os.getenv("APEX_EARNINGS_BLACKOUT_HOURS_BEFORE", "24"))
     EARNINGS_BLACKOUT_HOURS_AFTER: int = int(os.getenv("APEX_EARNINGS_BLACKOUT_HOURS_AFTER", "2"))
@@ -386,6 +396,20 @@ class ApexConfig:
     KILL_SWITCH_HISTORICAL_MDD_BASELINE: float = float(
         os.getenv("APEX_KILL_SWITCH_HISTORICAL_MDD_BASELINE", "0.08")
     )
+
+    # ── Volatility Targeting ──────────────────────────────────────────────────
+    VOL_TARGET_ANN: float = float(os.getenv("APEX_VOL_TARGET_ANN", "0.15"))          # 15% annual vol target
+    VOL_TARGET_LOOKBACK_DAYS: int = int(os.getenv("APEX_VOL_TARGET_LOOKBACK_DAYS", "20"))
+    VOL_TARGET_MIN_DAYS: int = int(os.getenv("APEX_VOL_TARGET_MIN_DAYS", "5"))
+    VOL_TARGET_MIN_MULT: float = float(os.getenv("APEX_VOL_TARGET_MIN_MULT", "0.30"))
+    VOL_TARGET_MAX_MULT: float = float(os.getenv("APEX_VOL_TARGET_MAX_MULT", "2.00"))
+
+    # ── Drawdown-Adaptive Leverage ────────────────────────────────────────────
+    DRAWDOWN_ADAPTIVE_LEVERAGE_ENABLED: bool = (
+        os.getenv("APEX_DRAWDOWN_ADAPTIVE_LEVERAGE_ENABLED", "true").lower() == "true"
+    )
+    DD_LEV_TIER1_PCT: float = float(os.getenv("APEX_DD_LEV_TIER1_PCT", "-0.02"))   # -2% → 50% size
+    DD_LEV_TIER2_PCT: float = float(os.getenv("APEX_DD_LEV_TIER2_PCT", "-0.04"))   # -4% → 25% size
 
     # Social-media shock governor (attention/sentiment + verified prediction odds)
     SOCIAL_SHOCK_GOVERNOR_ENABLED: bool = os.getenv(
@@ -511,7 +535,12 @@ class ApexConfig:
     FX_SIGNAL_THRESHOLD = 0.05       # Lower threshold for low-volatility FX macro patterns
     FX_SIGNAL_GAIN_MULTIPLIER = 3.0  # Post-tanh gain amplification for FX signals
 
-    MIN_SIGNAL_THRESHOLD = 0.18      # Recalibrated: model max signal is 0.272, mean 0.124 — 0.30 blocked 100% of signals
+    # ── Intraday 5-minute bar features ───────────────────────────────────────
+    INTRADAY_FEATURES_ENABLED: bool = True
+    INTRADAY_INTERVAL: str = "5m"     # Bar interval for intraday data
+    INTRADAY_PERIOD: str = "1d"       # Lookback for intraday data
+
+    MIN_SIGNAL_THRESHOLD = 0.15      # Recalibrated: lowered from 0.18 to allow moderate signals through — hedge dampener already risk-adjusts
     MIN_CONFIDENCE = 0.60            # Raised from 0.55 — higher bar for fresh entries
     CRYPTO_SIGNAL_THRESHOLD_MULTIPLIER: float = float(
         os.getenv("APEX_CRYPTO_SIGNAL_THRESHOLD_MULTIPLIER", "0.80")  # raised from 0.60 → stronger signal required
@@ -519,10 +548,36 @@ class ApexConfig:
     CRYPTO_CONFIDENCE_THRESHOLD_MULTIPLIER: float = float(
         os.getenv("APEX_CRYPTO_CONFIDENCE_THRESHOLD_MULTIPLIER", "0.70")
     )
+    # ATR hard stop enforcement (per-cycle price check against position_stops)
+    ATR_STOP_ENFORCEMENT_ENABLED: bool = os.getenv("APEX_ATR_STOP_ENFORCEMENT", "true").lower() == "true"
+
     # Win-rate guards: signal stability + max concurrent crypto positions
     CRYPTO_SIGNAL_STABILITY_BARS: int = int(os.getenv("APEX_CRYPTO_SIGNAL_STABILITY_BARS", "2"))
     CRYPTO_MAX_CONCURRENT_POSITIONS: int = int(os.getenv("APEX_CRYPTO_MAX_CONCURRENT_POSITIONS", "4"))
+    # Crypto-wide consecutive loss pause: after N crypto losses in a row, pause all crypto entries
+    CRYPTO_CONSEC_LOSS_PAUSE_COUNT: int = int(os.getenv("APEX_CRYPTO_CONSEC_LOSS_PAUSE_COUNT", "3"))
+    CRYPTO_CONSEC_LOSS_PAUSE_HOURS: float = float(os.getenv("APEX_CRYPTO_CONSEC_LOSS_PAUSE_HOURS", "4.0"))
+    # ── Scale-in on winning positions ─────────────────────────────────────────
+    # Adds 25% to an open position once it is up SCALE_IN_PROFIT_PCT% and signal
+    # remains strong (≥ SCALE_IN_MIN_SIGNAL) in the same direction. Fires once per
+    # position (reset when position closes). Long-only by design (scale-in shorts
+    # disabled — gap risk asymmetric).
+    SCALE_IN_ENABLED: bool = os.getenv("APEX_SCALE_IN_ENABLED", "true").lower() == "true"
+    SCALE_IN_PROFIT_PCT: float = float(os.getenv("APEX_SCALE_IN_PROFIT_PCT", "1.5"))
+    SCALE_IN_MIN_SIGNAL: float = float(os.getenv("APEX_SCALE_IN_MIN_SIGNAL", "0.18"))
+    SCALE_IN_SIZE_PCT: float = float(os.getenv("APEX_SCALE_IN_SIZE_PCT", "0.25"))
+
     EXCELLENCE_MIN_HOLD_BARS: int = int(os.getenv("APEX_EXCELLENCE_MIN_HOLD_BARS", "2"))
+    # Minimum minutes a position must be held before excellence exit can fire.
+    # Raised to 90 min: crypto needs time to develop — 30 min was killing trades at first pullback.
+    EXCELLENCE_MIN_HOLD_MINUTES: float = float(os.getenv("APEX_EXCELLENCE_MIN_HOLD_MINUTES", "90"))
+    # Quick-mismatch grace loss threshold for crypto positions held < 1h (wider due to volatility).
+    # Equity uses -0.80%; crypto uses this wider threshold so normal intraday swings don't trigger exits.
+    QUICK_MISMATCH_GRACE_CRYPTO_PCT: float = float(os.getenv("APEX_QUICK_MISMATCH_GRACE_CRYPTO_PCT", "-2.0"))
+    # Per-position hedge force-exit threshold (%) during correlation crisis.
+    # Exit fires when corr >= 0.85 AND position loss exceeds this level.
+    # Raised from 1.0% to 2.0% to avoid exiting on normal intraday volatility.
+    HEDGE_PER_POSITION_FORCE_EXIT_PCT: float = float(os.getenv("APEX_HEDGE_PER_POSITION_FORCE_EXIT_PCT", "2.0"))
     CRYPTO_ROTATION_ENABLED: bool = os.getenv(
         "APEX_CRYPTO_ROTATION_ENABLED", "true"
     ).lower() == "true"
@@ -569,28 +624,47 @@ class ApexConfig:
     
     FORCE_RETRAIN = False            # Set to True to force model retraining on startup
 
-    # Regime-based entry thresholds — recalibrated Mar 2026: model output range is 0.05–0.272, mean 0.124
-    # The previous 0.28–0.50 range blocked 100% of signals. Thresholds now scaled to model output.
+    # Regime-based entry thresholds — calibrated Mar 2026 to model output range [0.05, 0.272], mean 0.124.
+    # MATHEMATICAL CONSTRAINT: all thresholds MUST be < model output max (0.272).
+    # These thresholds apply to entries ALIGNED with the regime direction:
+    #   bull  → LONG entries, bear → SHORT entries.
+    # Counter-trend entries (LONG in bear, SHORT in bull) are gated by
+    #   REGIME_COUNTER_TREND_SIGNAL_MULT applied on top of these thresholds.
     SIGNAL_THRESHOLDS_BY_REGIME = {
-        'strong_bull': 0.15,    # Aggressive in strong uptrend
-        'bull': 0.18,           # Standard bull entry
-        'neutral': 0.18,        # Slightly tighter in neutral
-        'bear': 0.30,           # Raised: require strong conviction in bear
-        'strong_bear': 0.45,    # Raised: near-shutdown in strong bear (regime bleed fix)
-        'volatile': 0.25,       # Tighter in volatile
-        'crisis': 0.35,         # Crisis — only exceptional signals (top 5% of model output)
+        'strong_bull': 0.14,    # ~p40: aggressive in confirmed uptrend (breadth wide)
+        'bull': 0.17,           # ~p55: standard bull — moderate conviction
+        'neutral': 0.18,        # ~p60: slightly tighter in directionless tape
+        'bear': 0.15,           # ~p50: LOWER — aligned SHORT entries easier in bear
+        'strong_bear': 0.13,    # ~p40: LOWER — aligned SHORT entries easy in strong bear
+        'volatile': 0.17,       # ~p60: volatile — slightly tighter but allow both dirs
+        'crisis': 0.22,         # ~p85: crisis — only high-conviction signals
     }
 
+    # Counter-trend signal multiplier: going AGAINST the regime (LONG in bear, SHORT in bull)
+    # requires this multiple of the regime threshold.
+    # Example: bear threshold=0.15, mult=1.8 → counter-trend LONG needs signal >= 0.27
+    # strong_bear: 0.13 × 2.0 = 0.26 → effectively blocked (near model max)
+    REGIME_COUNTER_TREND_SIGNAL_MULT: float = float(
+        os.getenv("APEX_REGIME_COUNTER_TREND_SIGNAL_MULT", "1.8")
+    )
+    # Hard block LONGs in strong_bear regardless of signal strength
+    REGIME_STRONG_BEAR_LONG_BLOCK: bool = (
+        os.getenv("APEX_REGIME_STRONG_BEAR_LONG_BLOCK", "true").lower() == "true"
+    )
+
     # Tiered confidence gate: moderate signals require higher conviction at entry
-    # ENTRY_SIGNAL_HIGH_CUTOFF scaled to model output range (max 0.272): signals >= 0.24 are "high"
-    # and bypass the extra confidence requirement. Signals 0.18–0.23 are "moderate" → need conf >= 0.68
+    # ENTRY_SIGNAL_HIGH_CUTOFF: model ~p90 (0.272) — signals above this pass with floor confidence.
+    # Signals below cutoff are "moderate" and require conf >= ENTRY_CONFIDENCE_MODERATE.
+    # Raised back to 0.60 (2026-03-19 audit fix): 0.44 was too permissive — it allowed
+    # trades with confidence 0.44 on weak signals (signal=0.12), driving 0% win rate.
+    # With 0.60 base: weak signal (0.10) needs conf >= 0.55; strong signal needs >= 0.48.
     ENTRY_TIERED_CONFIDENCE_ENABLED: bool = True
-    ENTRY_SIGNAL_HIGH_CUTOFF: float = float(os.getenv("APEX_ENTRY_SIGNAL_HIGH_CUTOFF", "0.24"))
-    ENTRY_CONFIDENCE_MODERATE: float = float(os.getenv("APEX_ENTRY_CONFIDENCE_MODERATE", "0.65"))
+    ENTRY_SIGNAL_HIGH_CUTOFF: float = float(os.getenv("APEX_ENTRY_SIGNAL_HIGH_CUTOFF", "0.22"))   # p85 of model
+    ENTRY_CONFIDENCE_MODERATE: float = float(os.getenv("APEX_ENTRY_CONFIDENCE_MODERATE", "0.60"))  # raised from 0.44
 
     # Drawdown gate: after daily losses, require higher confidence for new entries
     ENTRY_DRAWDOWN_GATE_PCT: float = float(os.getenv("APEX_ENTRY_DRAWDOWN_GATE_PCT", "0.015"))
-    ENTRY_DRAWDOWN_CONF_BOOST: float = float(os.getenv("APEX_ENTRY_DRAWDOWN_CONF_BOOST", "0.15"))
+    ENTRY_DRAWDOWN_CONF_BOOST: float = float(os.getenv("APEX_ENTRY_DRAWDOWN_CONF_BOOST", "0.10"))  # raised from 0.08
 
     # Liquidity window for crypto exits (UTC hours — peak US/EU overlap session)
     CRYPTO_EXIT_LIQUIDITY_WINDOW_ENABLED: bool = (
@@ -655,6 +729,67 @@ class ApexConfig:
     )
     REGIME_TRANSITION_CAUTION_HOURS: float = float(os.getenv("APEX_REGIME_TRANSITION_CAUTION_HOURS", "4.0"))
     REGIME_TRANSITION_SIZE_MULT: float = float(os.getenv("APEX_REGIME_TRANSITION_SIZE_MULT", "0.70"))
+
+    # ── Session-aware entry windows ──────────────────────────────────────────
+    # Block new equity entries in the first N minutes after NYSE open (9:30 ET).
+    # Wide spreads and erratic price action in the opening auction distort signals.
+    SESSION_AWARE_ENTRY_ENABLED: bool = (
+        os.getenv("APEX_SESSION_AWARE_ENTRY", "true").lower() == "true"
+    )
+    EQUITY_ENTRY_AVOID_OPEN_MINUTES: int = int(
+        os.getenv("APEX_EQUITY_AVOID_OPEN_MIN", "5")   # avoid 9:30-9:35 ET
+    )
+    EQUITY_ENTRY_AVOID_CLOSE_MINUTES: int = int(
+        os.getenv("APEX_EQUITY_AVOID_CLOSE_MIN", "5")  # avoid 15:55-16:00 ET
+    )
+
+    # ── Weekly model retraining ───────────────────────────────────────────────
+    # Time-based retraining trigger to complement outcome-based trigger.
+    # Re-fits ML models once per week to absorb recent market regime changes.
+    WEEKLY_RETRAIN_ENABLED: bool = (
+        os.getenv("APEX_WEEKLY_RETRAIN_ENABLED", "true").lower() == "true"
+    )
+    WEEKLY_RETRAIN_INTERVAL_HOURS: int = int(
+        os.getenv("APEX_WEEKLY_RETRAIN_INTERVAL_HOURS", "168")  # 7 days
+    )
+
+    # ── Post-Earnings Announcement Drift (PEAD) signal ────────────────────────
+    # Stocks with positive EPS surprise tend to drift upward for 30-60 days.
+    # Stocks with negative EPS surprise drift down. This is a documented anomaly.
+    EARNINGS_PEAD_ENABLED: bool = (
+        os.getenv("APEX_EARNINGS_PEAD_ENABLED", "true").lower() == "true"
+    )
+    EARNINGS_PEAD_CACHE_TTL_SEC: int = int(
+        os.getenv("APEX_EARNINGS_PEAD_CACHE_TTL", "3600")   # 1 hour TTL
+    )
+    EARNINGS_PEAD_DECAY_HALFLIFE_DAYS: int = int(
+        os.getenv("APEX_EARNINGS_PEAD_DECAY_HALFLIFE_DAYS", "30")  # signal decays 50% in 30 days
+    )
+    EARNINGS_PEAD_MIN_SURPRISE: float = float(
+        os.getenv("APEX_EARNINGS_PEAD_MIN_SURPRISE", "0.05")  # 5% EPS beat to trigger
+    )
+    EARNINGS_PEAD_CONF_BOOST: float = float(
+        os.getenv("APEX_EARNINGS_PEAD_CONF_BOOST", "0.06")   # +6% conf when PEAD aligns with signal
+    )
+    EARNINGS_PEAD_CONTRA_PENALTY: float = float(
+        os.getenv("APEX_EARNINGS_PEAD_CONTRA_PENALTY", "0.10")  # -10% conf when going against PEAD
+    )
+    EARNINGS_PEAD_BLOCK_THRESHOLD: float = float(
+        os.getenv("APEX_EARNINGS_PEAD_BLOCK_THRESHOLD", "0.20")  # |surprise|>20% AND contra → block
+    )
+
+    # ── Put/Call Ratio signal ─────────────────────────────────────────────────
+    PCR_GATE_ENABLED: bool = os.getenv("APEX_PCR_GATE_ENABLED", "true").lower() == "true"
+    PCR_CACHE_TTL_SEC: int = int(os.getenv("APEX_PCR_CACHE_TTL", "3600"))
+    PCR_ALIGN_BOOST: float = float(os.getenv("APEX_PCR_ALIGN_BOOST", "0.04"))
+    PCR_CONTRA_PENALTY: float = float(os.getenv("APEX_PCR_CONTRA_PENALTY", "0.08"))
+
+    # ── Opening Range Breakout signal ─────────────────────────────────────────
+    ORB_GATE_ENABLED: bool = os.getenv("APEX_ORB_GATE_ENABLED", "true").lower() == "true"
+    ORB_MIN_RVOL: float = float(os.getenv("APEX_ORB_MIN_RVOL", "1.20"))
+    ORB_MIN_BREAKOUT_PCT: float = float(os.getenv("APEX_ORB_MIN_BREAKOUT_PCT", "0.003"))
+    ORB_CONF_BOOST: float = float(os.getenv("APEX_ORB_CONF_BOOST", "0.07"))
+    ORB_CONTRA_PENALTY: float = float(os.getenv("APEX_ORB_CONTRA_PENALTY", "0.10"))
 
     # Exit signal hysteresis (separate from entry threshold)
     SIGNAL_EXIT_BASE = 0.15
@@ -917,11 +1052,22 @@ class ApexConfig:
     # Graduated entry size reduction (below the hard-block threshold)
     CORRELATION_SIZE_WARN_LO: float = 0.70   # avg_corr ≥ this → 75% size
     CORRELATION_SIZE_WARN_HI: float = 0.80   # avg_corr ≥ this → 50% size
-    # TP Laddering: partial exits as position becomes profitable
+    # TP Laddering: partial exits as position becomes profitable.
+    # Lowered from 6%/12% to 3%/6%: with 0% win rate, capturing smaller gains
+    # is more important than waiting for large moves that never materialise.
+    # Tier 1 at 3% locks in 50% of position; Tier 2 at 6% takes another 25%.
     TP_LADDER_TIER1_PCT:  float = 3.0   # pnl_pct threshold to fire Tier 1 (50% exit)
     TP_LADDER_TIER2_PCT:  float = 6.0   # pnl_pct threshold to fire Tier 2 (25% exit)
     TP_LADDER_TIER1_FRAC: float = 0.50  # fraction of position to sell at Tier 1
     TP_LADDER_TIER2_FRAC: float = 0.25  # fraction of position to sell at Tier 2
+
+    # Hedge force-exit guard thresholds (Fix 2+3 from 2026-03-19 audit fixes)
+    # Minimum hold time before hedge portfolio-alarm path can force-exit a position.
+    # Prevents immediate re-exit of freshly entered positions on portfolio alarm days.
+    HEDGE_FORCE_EXIT_MIN_HOLD_MINUTES: float = 15.0
+    # Minimum per-position loss before portfolio-alarm force-exit fires.
+    # Stops exiting positions that are slightly negative (-0.1%) during alarm days.
+    HEDGE_FORCE_EXIT_MIN_POS_LOSS_PCT: float = 1.0
 
     # Execution
     LARGE_ORDER_THRESHOLD = 50000  # Dollar value threshold for TWAP/VWAP execution
@@ -929,7 +1075,12 @@ class ApexConfig:
 
     # Advanced Risk
     VAR_CONFIDENCE = 0.95  # VaR confidence level
-    MAX_PORTFOLIO_VAR = 0.03  # Maximum daily VaR (3%)
+    MAX_PORTFOLIO_VAR = 0.03  # Maximum daily VaR (3%) — equities
+    # Crypto assets have 2-4× equity vol; dedicated Alpaca session uses a
+    # higher VaR budget so a single BTC position doesn't block all other entries.
+    CRYPTO_MAX_PORTFOLIO_VAR: float = float(
+        os.getenv("APEX_CRYPTO_MAX_PORTFOLIO_VAR", "0.06")
+    )  # 6% crypto VaR limit
     DRAWDOWN_REDUCE_THRESHOLD = 0.05  # Reduce position size after 5% drawdown
     DRAWDOWN_HALT_THRESHOLD = 0.10  # Halt new trades after 10% drawdown
     
@@ -1035,8 +1186,193 @@ class ApexConfig:
     # Per-session signal thresholds (tuned independently for higher Sharpe)
     CORE_MIN_SIGNAL_THRESHOLD: float = float(os.getenv("APEX_CORE_MIN_SIGNAL_THRESHOLD", "0.10"))
     CORE_MIN_CONFIDENCE: float = float(os.getenv("APEX_CORE_MIN_CONFIDENCE", "0.45"))
-    CRYPTO_MIN_SIGNAL_THRESHOLD: float = float(os.getenv("APEX_CRYPTO_MIN_SIGNAL_THRESHOLD", "0.08"))
+    CRYPTO_MIN_SIGNAL_THRESHOLD: float = float(os.getenv("APEX_CRYPTO_MIN_SIGNAL_THRESHOLD", "0.12"))
     CRYPTO_MIN_CONFIDENCE: float = float(os.getenv("APEX_CRYPTO_MIN_CONFIDENCE", "0.40"))
+
+    # ── Macro Indicators ──────────────────────────────────────────────────────
+    MACRO_INDICATORS_ENABLED: bool = os.getenv("APEX_MACRO_INDICATORS_ENABLED", "true").lower() == "true"
+    # Equity size multiplier when yield curve is inverted (10Y < 2Y)
+    MACRO_YIELD_CURVE_INVERSION_SIZE_MULT: float = float(
+        os.getenv("APEX_MACRO_YIELD_CURVE_INVERSION_SIZE_MULT", "0.75")
+    )
+    # All-entry dampener when VIX futures are in backwardation (stress regime)
+    MACRO_VIX_BACKWARDATION_DAMPENER: float = float(
+        os.getenv("APEX_MACRO_VIX_BACKWARDATION_DAMPENER", "0.80")
+    )
+
+    # ── News Confirmation Gate ────────────────────────────────────────────────
+    NEWS_CONFIRMATION_GATE_ENABLED: bool = os.getenv("APEX_NEWS_CONFIRMATION_GATE_ENABLED", "true").lower() == "true"
+    # |sentiment| must exceed this to be considered a strong contradiction
+    NEWS_STRONG_CONTRADICTION_THRESHOLD: float = float(
+        os.getenv("APEX_NEWS_STRONG_CONTRADICTION_THRESHOLD", "0.40")
+    )
+    # Confidence below this + strong contradiction → block entry entirely
+    NEWS_CONTRADICTION_MIN_CONFIDENCE: float = float(
+        os.getenv("APEX_NEWS_CONTRADICTION_MIN_CONFIDENCE", "0.70")
+    )
+
+    # ── VWAP Deviation Gate ───────────────────────────────────────────────────
+    VWAP_GATE_ENABLED: bool = os.getenv("APEX_VWAP_GATE_ENABLED", "true").lower() == "true"
+    # Baseline max % deviation from 20d VWAP before blocking entry
+    VWAP_MAX_DEVIATION_PCT: float = float(os.getenv("APEX_VWAP_MAX_DEVIATION_PCT", "2.0"))
+    # Scale threshold with ATR so high-vol names aren't unfairly penalised
+    VWAP_ATR_ADJUST: bool = os.getenv("APEX_VWAP_ATR_ADJUST", "true").lower() == "true"
+
+    # ── RVOL (Relative Volume) Gate ───────────────────────────────────────────
+    RVOL_GATE_ENABLED: bool = os.getenv("APEX_RVOL_GATE_ENABLED", "true").lower() == "true"
+    # Block entries when today's volume < this fraction of 20-day average
+    RVOL_MIN_THRESHOLD: float = float(os.getenv("APEX_RVOL_MIN_THRESHOLD", "0.30"))
+
+    # ── Statistical (Hurst / OU) Features ────────────────────────────────────
+    HURST_FEATURE_ENABLED: bool = os.getenv("APEX_HURST_FEATURE_ENABLED", "true").lower() == "true"
+    HURST_LAGS: int = int(os.getenv("APEX_HURST_LAGS", "20"))
+
+    # ── Binary Direction Classifier ───────────────────────────────────────────
+    # Trains alongside regression ensemble; signal = prob_up * 2 - 1 ∈ [-1, 1]
+    BINARY_SIGNAL_ENABLED: bool = os.getenv("APEX_BINARY_SIGNAL_ENABLED", "true").lower() == "true"
+    BINARY_SIGNAL_WEIGHT: float = float(os.getenv("APEX_BINARY_SIGNAL_WEIGHT", "0.40"))
+    BINARY_LABEL_HORIZON_DAYS: int = int(os.getenv("APEX_BINARY_LABEL_HORIZON_DAYS", "1"))
+
+    # ── Funding Rate Signal (Binance perpetuals, crypto-only) ─────────────────
+    FUNDING_RATE_SIGNAL_ENABLED: bool = os.getenv("APEX_FUNDING_RATE_ENABLED", "true").lower() == "true"
+    FUNDING_EXTREME_THRESHOLD: float = float(os.getenv("APEX_FUNDING_EXTREME_THRESHOLD", "0.0010"))
+    FUNDING_SIGNAL_SCALE: float = float(os.getenv("APEX_FUNDING_SIGNAL_SCALE", "0.0015"))
+    FUNDING_RATE_CACHE_TTL: int = int(os.getenv("APEX_FUNDING_RATE_CACHE_TTL", "900"))
+
+    # ── Candlestick Pattern Signal ─────────────────────────────────────────────
+    PATTERN_SIGNAL_ENABLED: bool = os.getenv("APEX_PATTERN_SIGNAL_ENABLED", "true").lower() == "true"
+    PATTERN_TREND_WINDOW: int = int(os.getenv("APEX_PATTERN_TREND_WINDOW", "5"))
+
+    # ── Signal Aggregator (combines funding + pattern votes) ──────────────────
+    SIGNAL_AGGREGATOR_AGREE_BOOST: float = float(os.getenv("APEX_SA_AGREE_BOOST", "0.08"))
+    SIGNAL_AGGREGATOR_CONTRA_PENALTY: float = float(os.getenv("APEX_SA_CONTRA_PENALTY", "0.15"))
+    SIGNAL_AGGREGATOR_CONTRA_THRESHOLD: float = float(os.getenv("APEX_SA_CONTRA_THRESHOLD", "0.35"))
+    SIGNAL_AGGREGATOR_MIN_CONF_GATE: float = float(os.getenv("APEX_SA_MIN_CONF_GATE", "0.60"))
+
+    # ── Confidence-Proportional Sizing ─────────────────────────────────────────
+    # Scale size from CONF_SCALING_MIN_MULT at min_confidence → 1.0× at conf=1.0
+    CONF_PROPORTIONAL_SIZING_ENABLED: bool = os.getenv("APEX_CONF_PROPORTIONAL_SIZING", "true").lower() == "true"
+    CONF_SCALING_MIN_MULT: float = float(os.getenv("APEX_CONF_SCALING_MIN_MULT", "0.25"))
+
+    # ── ML Model Quality Gate ──────────────────────────────────────────────────
+    # Block live deployment if walk-forward directional accuracy is below this floor.
+    # A model worse than random (dir_acc < 0.50) has negative edge and will lose money.
+    # Set to 0.0 to disable the gate (always deploy regardless of quality).
+    MODEL_QUALITY_GATE_ENABLED: bool = os.getenv("APEX_MODEL_QUALITY_GATE", "true").lower() == "true"
+    MODEL_MIN_DIR_ACC: float = float(os.getenv("APEX_MODEL_MIN_DIR_ACC", "0.48"))
+
+    # ── Signal Consensus Gate ──────────────────────────────────────────────────
+    # N-of-M independent signal sources must agree on direction before entry.
+    # Hard block when agreement < MIN_AGREEMENT; soft confidence penalty when
+    # agreement < SOFT_THRESHOLD.
+    SIGNAL_CONSENSUS_GATE_ENABLED: bool = os.getenv("APEX_SIGNAL_CONSENSUS_GATE", "true").lower() == "true"
+    SIGNAL_CONSENSUS_MIN_AGREEMENT: float = float(os.getenv("APEX_SIGNAL_CONSENSUS_MIN_AGREE", "0.40"))
+    SIGNAL_CONSENSUS_SOFT_THRESHOLD: float = float(os.getenv("APEX_SIGNAL_CONSENSUS_SOFT_THRESH", "0.55"))
+    SIGNAL_CONSENSUS_CONF_PENALTY: float = float(os.getenv("APEX_SIGNAL_CONSENSUS_CONF_PENALTY", "0.10"))
+
+    # ── OFI from OHLCV ────────────────────────────────────────────────────────
+    # Number of recent OHLCV bars to measure order-flow imbalance over.
+    OFI_LOOKBACK_BARS: int = int(os.getenv("APEX_OFI_LOOKBACK_BARS", "5"))
+
+    # ── Regime-Adaptive Crypto Blend Weight ──────────────────────────────────
+    # Override the per-regime ML weight map with a single fixed value if set.
+    # Leave unset (empty string) to use the regime-aware defaults.
+    CRYPTO_ML_BLEND_WEIGHT: float = float(os.getenv("APEX_CRYPTO_ML_BLEND_WEIGHT", "0.0")) or 0.0
+    # 0.0 = use regime-adaptive map (default behaviour)
+
+    # ── Macro Confidence Gate ─────────────────────────────────────────────────
+    MACRO_CONFIDENCE_GATE_ENABLED: bool = os.getenv("APEX_MACRO_CONF_GATE", "true").lower() == "true"
+    MACRO_YIELD_CURVE_CONF_PENALTY: float = float(os.getenv("APEX_MACRO_YC_CONF_PENALTY", "0.92"))
+    MACRO_VIX_BACKWARDATION_CONF_PENALTY: float = float(os.getenv("APEX_MACRO_VIX_BACK_CONF_PENALTY", "0.88"))
+
+    # ── Sentiment Exit Gate ───────────────────────────────────────────────────
+    SENTIMENT_EXIT_GATE_ENABLED: bool = os.getenv("APEX_SENTIMENT_EXIT_GATE", "true").lower() == "true"
+    SENTIMENT_EXIT_CONTRA_THRESHOLD: float = float(os.getenv("APEX_SENTIMENT_EXIT_CONTRA_THRESH", "0.45"))
+    SENTIMENT_EXIT_MIN_LOSS_PCT: float = float(os.getenv("APEX_SENTIMENT_EXIT_MIN_LOSS_PCT", "-0.8"))
+
+    # ── Cross-Asset Divergence Gate ───────────────────────────────────────────
+    CROSS_ASSET_DIVERGENCE_GATE_ENABLED: bool = os.getenv("APEX_CROSS_ASSET_DIV_GATE", "true").lower() == "true"
+    CROSS_ASSET_DIV_MAX_PENALTY: float = float(os.getenv("APEX_CROSS_ASSET_DIV_MAX_PENALTY", "0.12"))
+    CROSS_ASSET_CONFIRM_BOOST: float = float(os.getenv("APEX_CROSS_ASSET_CONFIRM_BOOST", "0.03"))
+
+    # ── Online Learning ────────────────────────────────────────────────────────
+    # After each trade closes, the realized return is fed back to the GBM model
+    # for that (asset_class, regime) bucket via a warm-start mini-update.
+    ONLINE_LEARNING_ENABLED: bool = os.getenv("APEX_ONLINE_LEARNING", "true").lower() == "true"
+    ONLINE_UPDATE_TRIGGER_N: int = int(os.getenv("APEX_ONLINE_TRIGGER_N", "20"))
+
+    # ── BL Portfolio Sizing ────────────────────────────────────────────────────
+    BL_SIZING_ENABLED: bool = os.getenv("APEX_BL_SIZING", "true").lower() == "true"
+    BL_UPDATE_INTERVAL_CYCLES: int = int(os.getenv("APEX_BL_UPDATE_CYCLES", "30"))
+    BL_VIEW_SCALE: float = float(os.getenv("APEX_BL_VIEW_SCALE", "0.002"))
+    BL_MIN_SCALE: float = float(os.getenv("APEX_BL_MIN_SCALE", "0.40"))
+    BL_MAX_SCALE: float = float(os.getenv("APEX_BL_MAX_SCALE", "2.00"))
+
+    # ── Volatility-Spike Exit ──────────────────────────────────────────────────
+    VOL_SPIKE_EXIT_ENABLED: bool = os.getenv("APEX_VOL_SPIKE_EXIT", "true").lower() == "true"
+    VOL_SPIKE_LOOKBACK: int = int(os.getenv("APEX_VOL_SPIKE_LOOKBACK", "20"))
+    VOL_SPIKE_SIGMA: float = float(os.getenv("APEX_VOL_SPIKE_SIGMA", "2.0"))
+    VOL_SPIKE_MIN_LOSS_PCT: float = float(os.getenv("APEX_VOL_SPIKE_MIN_LOSS_PCT", "0.005"))
+
+    # ── Composite Signal Quality Gate ─────────────────────────────────────────
+    # Blocks entries where signal × confidence < this floor, preventing borderline
+    # signal + borderline confidence combinations that have no real edge.
+    # Example: signal=0.16 × confidence=0.62 = 0.099 → blocked (below 0.10).
+    MIN_SIGNAL_QUALITY_COMPOSITE: float = float(
+        os.getenv("APEX_MIN_SIGNAL_QUALITY_COMPOSITE", "0.10")
+    )
+
+    # ── Regime-Direction Alignment Gate ──────────────────────────────────────
+    # Blocks LONG entries in bear/strong_bear regimes and SHORT entries in
+    # bull/strong_bull regimes. Prevents fighting the macro trend.
+    REGIME_DIRECTION_GATE_ENABLED: bool = (
+        os.getenv("APEX_REGIME_DIRECTION_GATE_ENABLED", "true").lower() == "true"
+    )
+    # In volatile/crisis regimes, require a higher signal × confidence composite
+    REGIME_VOLATILE_QUALITY_FLOOR: float = float(
+        os.getenv("APEX_REGIME_VOLATILE_QUALITY_FLOOR", "0.15")
+    )
+
+    # ── Re-entry Gap After Exit ───────────────────────────────────────────────
+    # Minimum seconds between a position close and the next entry in the same symbol.
+    # Raised 2026-03-19 audit: SOL re-entered 38 min after loss exit with a WEAKER signal
+    # (0.127 vs 0.233), getting immediately excellence-exited again — pure churn.
+    # 30 min (1800s) was not enough; raising to 60 min (3600s) after a loss.
+    REENTRY_GAP_SECONDS: float = float(os.getenv("APEX_REENTRY_GAP_SECONDS", "600"))       # 10 min after WIN
+    LOSS_REENTRY_GAP_SECONDS: float = float(os.getenv("APEX_LOSS_REENTRY_GAP_SECONDS", "3600"))  # 60 min after LOSS
+
+    # ── Crypto Entry Window (UTC hours) ───────────────────────────────────────
+    # Block NEW crypto entries outside liquid trading hours to avoid midnight
+    # order spam (577 pre-trade attempts on Mar 18, 469 before market open).
+    # Mirrors the exit liquidity window: 13:00–22:00 UTC (9am–6pm ET).
+    CRYPTO_ENTRY_WINDOW_ENABLED: bool = os.getenv("APEX_CRYPTO_ENTRY_WINDOW_ENABLED", "true").lower() == "true"
+    CRYPTO_ENTRY_WINDOW_UTC_START: int = int(os.getenv("APEX_CRYPTO_ENTRY_WINDOW_UTC_START", "13"))
+    CRYPTO_ENTRY_WINDOW_UTC_END: int = int(os.getenv("APEX_CRYPTO_ENTRY_WINDOW_UTC_END", "22"))
+
+    # ── Crypto TWAP (large order slicing via Alpaca) ────────────────────────
+    CRYPTO_TWAP_ENABLED: bool = os.getenv("APEX_CRYPTO_TWAP_ENABLED", "true").lower() == "true"
+    CRYPTO_TWAP_MIN_NOTIONAL: float = float(os.getenv("APEX_CRYPTO_TWAP_MIN_NOTIONAL", "5000.0"))
+    CRYPTO_TWAP_INTERVAL_SEC: float = float(os.getenv("APEX_CRYPTO_TWAP_INTERVAL_SEC", "30.0"))
+    CRYPTO_TWAP_ABANDON_PCT: float = float(os.getenv("APEX_CRYPTO_TWAP_ABANDON_PCT", "0.005"))
+
+    # ── Order Flow Imbalance ──────────────────────────────────────────────────
+    ORDER_FLOW_GATE_ENABLED: bool = os.getenv("APEX_ORDER_FLOW_GATE_ENABLED", "true").lower() == "true"
+    ORDER_FLOW_SIGNAL_WEIGHT: float = float(os.getenv("APEX_ORDER_FLOW_SIGNAL_WEIGHT", "0.08"))
+
+    # ── Pairs Trading (Statistical Arbitrage) ────────────────────────────────
+    PAIRS_TRADING_ENABLED: bool = os.getenv("APEX_PAIRS_TRADING_ENABLED", "true").lower() == "true"
+    PAIRS_LOOKBACK_WINDOW: int = int(os.getenv("APEX_PAIRS_LOOKBACK_WINDOW", "60"))
+    PAIRS_Z_ENTRY: float = float(os.getenv("APEX_PAIRS_Z_ENTRY", "2.0"))
+    PAIRS_Z_EXIT: float = float(os.getenv("APEX_PAIRS_Z_EXIT", "0.5"))
+    PAIRS_MIN_HALF_LIFE: int = int(os.getenv("APEX_PAIRS_MIN_HALF_LIFE", "1"))
+    PAIRS_MAX_HALF_LIFE: int = int(os.getenv("APEX_PAIRS_MAX_HALF_LIFE", "20"))
+    PAIRS_SCAN_INTERVAL_CYCLES: int = int(os.getenv("APEX_PAIRS_SCAN_INTERVAL_CYCLES", "300"))  # ~5 min
+    PAIRS_MAX_OVERLAY: float = float(os.getenv("APEX_PAIRS_MAX_OVERLAY", "0.10"))   # max ±0.10 signal adj
+    PAIRS_SIGNAL_WEIGHT: float = float(os.getenv("APEX_PAIRS_SIGNAL_WEIGHT", "0.15"))  # 15% blend weight
+
+    # ── Per-symbol Consecutive Loss Protection ────────────────────────────────
+    # Tracked dynamically in execution_loop._symbol_loss_streak.
+    # ≥2 losses → require MIN_CONFIDENCE + 0.15 confidence; ≥3 → block for session.
 
     # Per-session risk parameters
     CORE_MAX_POSITIONS: int = int(os.getenv("APEX_CORE_MAX_POSITIONS", "25"))
@@ -1060,8 +1396,8 @@ class ApexConfig:
         'bear': 0.12, 'strong_bear': 0.10, 'volatile': 0.15
     }
     CRYPTO_SIGNAL_THRESHOLDS_BY_REGIME: Dict = {
-        'strong_bull': 0.06, 'bull': 0.08, 'neutral': 0.08,
-        'bear': 0.10, 'strong_bear': 0.08, 'volatile': 0.12
+        'strong_bull': 0.10, 'bull': 0.13, 'neutral': 0.14,
+        'bear': 0.13, 'strong_bear': 0.12, 'volatile': 0.14   # lowered bear/strong_bear for aligned SHORTs
     }
 
     # Per-session state files

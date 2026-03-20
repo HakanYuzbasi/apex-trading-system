@@ -77,6 +77,16 @@ class PerformanceTracker:
         except (ValueError, TypeError) as e:
             logger.error(f"Invalid equity value: {value} ({type(value)}): {e}")
     
+    @staticmethod
+    def _normalize_symbol(symbol: str) -> str:
+        """Normalize symbol for matching: strip CRYPTO:/FX: prefix, upper-case."""
+        s = str(symbol).upper()
+        for prefix in ("CRYPTO:", "FX:"):
+            if s.startswith(prefix):
+                s = s[len(prefix):]
+                break
+        return s
+
     def _daily_close_values(self) -> List[float]:
         """Resample the sub-minute equity curve to one value per calendar day (last observation).
 
@@ -95,66 +105,151 @@ class PerformanceTracker:
                 continue
         return [day_map[d] for d in sorted(day_map)]
 
-    def get_sharpe_ratio(self, risk_free_rate: float = 0.02) -> float:
-        """Calculate annualised Sharpe ratio from daily-close equity samples."""
-        daily = self._daily_close_values()
-        if len(daily) < 2:
-            return 0.0
+    def _hourly_close_values(self) -> List[float]:
+        """Resample equity curve to hourly closes. Used when < 2 daily periods available."""
+        hour_map: dict = {}
+        for ts_str, val in self.equity_curve:
+            try:
+                key = str(ts_str)[:13]  # "YYYY-MM-DDTHH" prefix
+                hour_map[key] = float(val)
+            except Exception:
+                continue
+        return [hour_map[h] for h in sorted(hour_map)]
+
+    def get_trade_sharpe(self, risk_free_rate: float = 0.02) -> float:
+        """Sharpe computed from closed trade returns (not equity curve ticks).
+
+        Used as the intraday fallback (< 2 calendar days of equity data).
+        Annualises assuming 252 trading days / avg_holding_days trades per year.
+        Returns 0.0 when fewer than 3 closed trades are available.
+        """
         try:
-            values = np.array(daily, dtype=float)
-            returns = np.diff(values) / np.maximum(values[:-1], 1e-9)
-            returns = returns[np.isfinite(returns)]
-            if len(returns) == 0 or np.max(np.abs(returns)) < 1e-9:
+            positions: Dict = {}
+            trade_returns: List[float] = []
+            holding_days: List[float] = []
+
+            for trade in self.trades:
+                symbol = self._normalize_symbol(trade['symbol'])
+                side = str(trade.get('side', '')).upper()
+                qty = float(trade['quantity'])
+                price = float(trade['price'])
+                commission = float(trade.get('commission', 0))
+                ts = trade.get('timestamp')
+
+                if side == 'BUY':
+                    positions.setdefault(symbol, []).append({
+                        'qty': qty, 'price': price,
+                        'commission': commission, 'timestamp': ts,
+                    })
+                elif side == 'SELL' and positions.get(symbol):
+                    entry = positions[symbol].pop(0)
+                    gross_pnl = (price - entry['price']) * qty
+                    net_pnl = gross_pnl - entry['commission'] - commission
+                    cost = entry['price'] * qty
+                    if cost > 1e-9:
+                        trade_returns.append(net_pnl / cost)
+                    # Holding period in days
+                    try:
+                        if entry['timestamp'] and ts:
+                            t0 = pd.Timestamp(entry['timestamp'])
+                            t1 = pd.Timestamp(ts)
+                            days = max((t1 - t0).total_seconds() / 86400.0, 1 / 1440.0)
+                            holding_days.append(days)
+                    except Exception:
+                        pass
+
+            if len(trade_returns) < 3:
                 return 0.0
-            excess = returns - (risk_free_rate / 252)
+
+            arr = np.array(trade_returns, dtype=float)
+            arr = arr[np.isfinite(arr)]
+            if len(arr) < 3:
+                return 0.0
+
+            # Annualization: derive trades-per-year from avg holding time
+            if holding_days:
+                avg_days = max(float(np.mean(holding_days)), 1 / 1440.0)
+                trades_per_year = min(252.0 / avg_days, 2520.0)  # cap at 10 trades/day
+            else:
+                trades_per_year = 252.0  # assume ~1 trade/day if no timing info
+
+            excess = arr - (risk_free_rate / trades_per_year)
             vol = float(np.std(excess))
             if vol < 1e-9:
                 return 0.0
-            return float(np.mean(excess) / vol * np.sqrt(252))
+            return float(np.clip(
+                np.mean(excess) / vol * math.sqrt(trades_per_year), -10.0, 10.0
+            ))
         except Exception as e:
-            logger.error("Error calculating Sharpe ratio: %s", e)
+            logger.error("Error calculating trade Sharpe: %s", e)
             return 0.0
+
+    def get_sharpe_ratio(self, risk_free_rate: float = 0.02) -> float:
+        """Calculate annualised Sharpe ratio from equity samples.
+
+        Uses daily closes when 2+ days of data are available.
+        Falls back to trade-level Sharpe for intraday-only sessions (avoids the
+        √(252×24) artefact that makes day-1 Sharpe look like -10 or +99).
+        """
+        daily = self._daily_close_values()
+        if len(daily) >= 2:
+            try:
+                values = np.array(daily, dtype=float)
+                returns = np.diff(values) / np.maximum(values[:-1], 1e-9)
+                returns = returns[np.isfinite(returns)]
+                if len(returns) == 0 or np.max(np.abs(returns)) < 1e-9:
+                    return 0.0
+                excess = returns - (risk_free_rate / 252.0)
+                vol = float(np.std(excess))
+                if vol < 1e-9:
+                    return 0.0
+                return float(np.clip(np.mean(excess) / vol * math.sqrt(252.0), -10.0, 10.0))
+            except Exception as e:
+                logger.error("Error calculating Sharpe ratio: %s", e)
+                return 0.0
+        # Intraday-only: prefer trade-level Sharpe (meaningful) over hourly equity noise
+        return self.get_trade_sharpe(risk_free_rate=risk_free_rate)
     
     def get_win_rate(self) -> float:
-        """Calculate win rate from completed trades."""
+        """Calculate win rate from completed trades.
+
+        Normalizes symbol keys (strips CRYPTO:/FX: prefix) so that an entry
+        recorded as 'ETH/USD' matches an exit recorded as 'CRYPTO:ETH/USD'.
+        """
         if len(self.trades) < 2:
             return 0.0
-        
+
         try:
-            # Match buys and sells
-            positions = {}
+            # Match buys and sells using normalized symbol keys
+            positions: Dict = {}
             completed_trades = []
-            
+
             for trade in self.trades:
-                symbol = trade['symbol']
-                side = trade['side']
+                symbol = self._normalize_symbol(trade['symbol'])
+                side = str(trade.get('side', '')).upper()
                 qty = trade['quantity']
                 price = trade['price']
                 commission = trade.get('commission', 0)
-                
+
                 if side == 'BUY':
-                    if symbol not in positions:
-                        positions[symbol] = []
-                    positions[symbol].append({
+                    positions.setdefault(symbol, []).append({
                         'qty': qty,
                         'price': price,
                         'commission': commission
                     })
-                
+
                 elif side == 'SELL':
-                    if symbol in positions and len(positions[symbol]) > 0:
+                    if positions.get(symbol):
                         entry = positions[symbol].pop(0)
                         pnl = (price - entry['price']) * qty - entry['commission'] - commission
                         completed_trades.append({'pnl': pnl})
-            
+
             if len(completed_trades) == 0:
                 return 0.0
-            
+
             winners = sum(1 for t in completed_trades if t['pnl'] > 0)
-            win_rate = winners / len(completed_trades)
-            
-            return win_rate
-        
+            return winners / len(completed_trades)
+
         except Exception as e:
             logger.error(f"Error calculating win rate: {e}")
             return 0.0
@@ -183,19 +278,19 @@ class PerformanceTracker:
             return 0.0
 
     def get_completed_trade_count(self) -> int:
-        """Count completed BUY->SELL round-trips."""
+        """Count completed BUY->SELL round-trips (symbol-normalized)."""
         if len(self.trades) < 2:
             return 0
         try:
-            positions = {}
+            positions: Dict = {}
             completed = 0
             for trade in self.trades:
-                symbol = trade['symbol']
+                symbol = self._normalize_symbol(trade['symbol'])
                 side = str(trade['side']).upper()
                 qty = trade['quantity']
                 if side == 'BUY':
                     positions.setdefault(symbol, []).append(qty)
-                elif side == 'SELL' and symbol in positions and len(positions[symbol]) > 0:
+                elif side == 'SELL' and positions.get(symbol):
                     positions[symbol].pop(0)
                     completed += 1
             return completed

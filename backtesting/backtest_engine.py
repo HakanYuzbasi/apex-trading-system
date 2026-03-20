@@ -1337,8 +1337,41 @@ class BacktestEngine:
         # Basic Metrics
         total_return = (df['equity'].iloc[-1] / self.initial_capital) - 1
         ann_factor = self._annualization_factor()
-        volatility = df['returns'].std() * np.sqrt(ann_factor)
-        sharpe = (df['returns'].mean() / df['returns'].std()) * np.sqrt(ann_factor) if df['returns'].std() > 0 else 0
+
+        # ── Sharpe / Sortino / Volatility ──────────────────────────────────────
+        # Always resample to daily closes so sub-minute equity ticks don't inflate
+        # the Sharpe ratio (std of per-tick returns ≈ 0 → ratio explodes).
+        # Drawdown stays on the full-resolution series for accuracy.
+        idx = df.index
+        if hasattr(idx, 'freq') or isinstance(idx, pd.DatetimeIndex):
+            df_daily = df['equity'].resample('1D').last().dropna()
+        else:
+            # Non-datetime index — convert if possible, else use as-is
+            try:
+                df_daily = df['equity'].copy()
+                df_daily.index = pd.to_datetime(df_daily.index)
+                df_daily = df_daily.resample('1D').last().dropna()
+            except Exception:
+                df_daily = df['equity']
+
+        if len(df_daily) >= 2:
+            daily_returns = df_daily.pct_change().dropna()
+        else:
+            # Fewer than 2 daily observations — derive Sharpe from closed trades
+            daily_returns = None
+
+        _MIN_DAILY_STD = 1e-5  # Below this std, Sharpe is undefined (monotonic series)
+        if (
+            daily_returns is not None
+            and len(daily_returns) >= 2
+            and daily_returns.std() >= _MIN_DAILY_STD
+        ):
+            volatility = float(daily_returns.std() * np.sqrt(ann_factor))
+            _raw_sharpe = float((daily_returns.mean() / daily_returns.std()) * np.sqrt(ann_factor))
+            sharpe = float(np.clip(_raw_sharpe, -10.0, 10.0))  # Guard against near-zero std
+        else:
+            volatility = 0.0
+            sharpe = 0.0
 
         # Drawdown Stats
         peaks = df['equity'].cummax()
@@ -1347,12 +1380,18 @@ class BacktestEngine:
         max_dd_duration = (drawdown < 0).astype(int).groupby(drawdown.eq(0).cumsum()).cumsum().max()
 
         # Advanced Metrics
-        sortino = 0
-        downside_returns = df['returns'][df['returns'] < 0]
-        if len(downside_returns) > 0 and downside_returns.std() > 0:
-            sortino = (df['returns'].mean() / downside_returns.std()) * np.sqrt(ann_factor)
+        sortino = 0.0
+        if daily_returns is not None and len(daily_returns) >= 2:
+            downside_daily = daily_returns[daily_returns < 0]
+            if len(downside_daily) > 0 and downside_daily.std() > 0:
+                sortino = float((daily_returns.mean() / downside_daily.std()) * np.sqrt(ann_factor))
+        else:
+            downside_returns = df['returns'][df['returns'] < 0]
+            if len(downside_returns) > 0 and downside_returns.std() > 0:
+                sortino = float((df['returns'].mean() / downside_returns.std()) * np.sqrt(ann_factor))
 
-        cagr = ((1 + total_return) ** (ann_factor / len(df))) - 1 if len(df) > 1 else total_return
+        num_days = len(df_daily) if len(df_daily) >= 2 else len(df)
+        cagr = ((1 + total_return) ** (ann_factor / max(num_days, 1))) - 1 if num_days > 1 else total_return
         calmar = 0
         if max_drawdown < 0:
             calmar = cagr / abs(max_drawdown)
@@ -1374,11 +1413,12 @@ class BacktestEngine:
             profit_factor = gross_profit / gross_loss if gross_loss > 0 else float('inf')
             avg_trade = sum(t.pnl for t in closed_trades) / len(closed_trades)
 
-        # Probabilistic Sharpe Ratio (PSR)
+        # Probabilistic Sharpe Ratio (PSR) — computed on daily returns
         psr = 0.0
-        n_obs = len(df)
-        returns_arr = df['returns'].values
-        if n_obs >= 10 and sharpe > 0:
+        _psr_returns = daily_returns if (daily_returns is not None and len(daily_returns) >= 10) else None
+        if _psr_returns is not None and sharpe > 0:
+            n_obs = len(_psr_returns)
+            returns_arr = _psr_returns.values
             skew = float(pd.Series(returns_arr).skew())
             kurt = float(pd.Series(returns_arr).kurtosis()) + 3
             sr_per = sharpe / np.sqrt(ann_factor)

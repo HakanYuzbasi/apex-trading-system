@@ -24,6 +24,7 @@ from joblib import dump, load
 from core.symbols import parse_symbol, AssetClass
 from config import ApexConfig
 from models.regime_common import get_regime
+from models.binary_signal_classifier import BinarySignalClassifier
 
 logger = logging.getLogger(__name__)
 
@@ -113,16 +114,119 @@ class AdvancedSignalGenerator:
         self.signal_ema: Dict[str, float] = {}
         self.signal_ema_alpha = 0.35  # Smoothing to reduce noise for better Sharpe
 
+        # Online learning: last feature vector per symbol (populated at inference,
+        # consumed when the trade closes to do an incremental model update).
+        self._last_features: Dict[str, np.ndarray] = {}
+        # Rolling online training buffer per (asset_class, regime): [(X_row, y_val), ...]
+        self._online_buffer: Dict[str, List[tuple]] = {}
+        self._online_buffer_maxsize: int = 60
+        self._online_update_trigger: int = int(getattr(ApexConfig, "ONLINE_UPDATE_TRIGGER_N", 20))
+
+        # Statistical feature flags
+        self.hurst_feature_enabled: bool = bool(getattr(ApexConfig, "HURST_FEATURE_ENABLED", True))
+        self._hurst_lags: int = int(getattr(ApexConfig, "HURST_LAGS", 20))
+
+        # Binary direction classifier (runs alongside regression ensemble)
+        self._binary_enabled: bool = bool(getattr(ApexConfig, "BINARY_SIGNAL_ENABLED", True))
+        self._binary_weight: float = float(getattr(ApexConfig, "BINARY_SIGNAL_WEIGHT", 0.40))
+        self._binary_label_horizon: int = int(getattr(ApexConfig, "BINARY_LABEL_HORIZON_DAYS", 1))
+        self._binary_clf: Optional[BinarySignalClassifier] = None
+        if self._binary_enabled and ML_AVAILABLE:
+            try:
+                self._binary_clf = BinarySignalClassifier(
+                    model_dir=os.path.join(model_dir, "binary")
+                )
+            except Exception as _e:
+                logger.warning("BinarySignalClassifier init failed (non-fatal): %s", _e)
+
         # Try to load existing models
         self._load_models()
 
         logger.info("✅ GOD LEVEL Advanced Signal Generator initialized")
     
+    def _intraday_momentum_features(
+        self,
+        _daily_df: Union[pd.Series, pd.DataFrame],
+        intraday_df: Optional[pd.DataFrame] = None,
+    ) -> dict:
+        """
+        Compute intraday momentum features from 5-minute bar data.
+
+        Args:
+            daily_df: Daily OHLCV DataFrame (used for fallback close price)
+            intraday_df: Optional DataFrame of intraday bars with
+                         Open/High/Low/Close/Volume columns
+
+        Returns:
+            Dict with keys:
+              intra_vwap_deviation  – (close - VWAP) / VWAP using today's bars
+              intra_trend_5bar      – normalised linear-regression slope of last 5 bars
+              intra_vol_ratio       – current session vol vs prior session vol
+            All values default to 0.0 when intraday data is unavailable.
+        """
+        result = {
+            "intra_vwap_deviation": 0.0,
+            "intra_trend_5bar": 0.0,
+            "intra_vol_ratio": 0.0,
+        }
+
+        if not getattr(ApexConfig, "INTRADAY_FEATURES_ENABLED", True):
+            return result
+
+        if intraday_df is None or intraday_df.empty:
+            return result
+
+        if "Close" not in intraday_df.columns:
+            return result
+
+        try:
+            closes = intraday_df["Close"].dropna()
+            if closes.empty:
+                return result
+
+            current_close = float(closes.iloc[-1])
+
+            # --- VWAP deviation ---
+            if "Volume" in intraday_df.columns:
+                vol = intraday_df["Volume"].reindex(closes.index).fillna(0)
+                total_vol = float(vol.sum())
+                if total_vol > 0:
+                    vwap = float((closes * vol).sum() / total_vol)
+                    if vwap != 0:
+                        result["intra_vwap_deviation"] = float(
+                            np.clip((current_close - vwap) / vwap, -0.10, 0.10)
+                        )
+
+            # --- Trend of last 5 bars (linear regression slope, normalised) ---
+            if len(closes) >= 5:
+                last5 = closes.iloc[-5:].values.astype(float)
+                x = np.arange(len(last5), dtype=float)
+                # Normalise slope by mean price so it is scale-free
+                mean_px = float(np.mean(last5)) if np.mean(last5) != 0 else 1.0
+                slope = float(np.polyfit(x, last5, 1)[0]) / mean_px
+                result["intra_trend_5bar"] = float(np.clip(slope, -0.05, 0.05))
+
+            # --- Vol ratio: current session vs prior session ---
+            if len(closes) >= 20:
+                mid = len(closes) // 2
+                prior_vol = float(closes.iloc[:mid].pct_change().dropna().std())
+                curr_vol = float(closes.iloc[mid:].pct_change().dropna().std())
+                if prior_vol > 0:
+                    result["intra_vol_ratio"] = float(
+                        np.clip(curr_vol / prior_vol, 0.0, 5.0)
+                    )
+
+        except Exception:
+            pass  # Return zeros on any computation error
+
+        return result
+
     def compute_features_vectorized(
-        self, 
+        self,
         data: Union[pd.Series, pd.DataFrame],
         sentiment_score: Optional[float] = None,
-        momentum_rank: Optional[float] = None
+        momentum_rank: Optional[float] = None,
+        intraday_df: Optional[pd.DataFrame] = None,
     ) -> pd.DataFrame:
         """Vectorized 40+ feature extraction with OHLCV and Context."""
         if isinstance(data, pd.Series):
@@ -182,7 +286,73 @@ class AdvancedSignalGenerator:
         # 8. Statistical
         df['skew_20'] = returns.rolling(20).skew()
         df['kurt_20'] = returns.rolling(20).kurt()
-        
+
+        # 8b. Advanced statistical regime features
+        if self.hurst_feature_enabled:
+            _lags = self._hurst_lags
+
+            def _hurst(x: np.ndarray) -> float:
+                """R/S Hurst exponent. Returns H-0.5: >0=trending, <0=mean-reverting."""
+                if len(x) < 10 or np.std(x) == 0:
+                    return 0.0
+                try:
+                    lx = np.log(x / x[0] + 1e-12)
+                    rs_vals = []
+                    for lag in range(2, min(len(x) // 2, _lags) + 1):
+                        sub = np.array([lx[i:i + lag] for i in range(0, len(lx) - lag, lag)])
+                        if len(sub) == 0:
+                            continue
+                        devs = sub - sub.mean(axis=1, keepdims=True)
+                        rs = (devs.cumsum(axis=1).max(axis=1) - devs.cumsum(axis=1).min(axis=1)) / (
+                            sub.std(axis=1) + 1e-12
+                        )
+                        rs_vals.append((np.log(lag), np.log(np.mean(rs) + 1e-12)))
+                    if len(rs_vals) < 3:
+                        return 0.0
+                    lags_arr, rs_arr = zip(*rs_vals)
+                    H = np.polyfit(lags_arr, rs_arr, 1)[0]
+                    return float(np.clip(H - 0.5, -0.5, 0.5))
+                except Exception:
+                    return 0.0
+
+            df['hurst_bias'] = returns.rolling(_lags * 2).apply(
+                lambda x: _hurst(x), raw=True
+            )
+
+            # Lag-1 autocorrelation of returns (20-bar): >0=trend persists, <0=reversal
+            def _autocorr1(x: np.ndarray) -> float:
+                if len(x) < 4:
+                    return 0.0
+                try:
+                    c = np.corrcoef(x[:-1], x[1:])[0, 1]
+                    return float(c) if not np.isnan(c) else 0.0
+                except Exception:
+                    return 0.0
+
+            df['autocorr_lag1'] = returns.rolling(20).apply(_autocorr1, raw=True)
+
+            # OU half-life: Δp = -κ·p + ε → half_life = ln(2)/κ; feature = 1/half_life_days
+            def _ou_speed(x: np.ndarray) -> float:
+                if len(x) < 5:
+                    return 0.0
+                try:
+                    y = np.diff(x)
+                    x_lag = x[:-1]
+                    if np.std(x_lag) < 1e-10:
+                        return 0.0
+                    kappa = -np.polyfit(x_lag, y, 1)[0]
+                    kappa = max(kappa, 1e-6)
+                    half_life = np.log(2) / kappa
+                    return float(np.clip(1.0 / half_life, 0.0, 1.0))
+                except Exception:
+                    return 0.0
+
+            df['ou_reversion_speed'] = p.rolling(20).apply(_ou_speed, raw=True)
+        else:
+            df['hurst_bias'] = 0.0
+            df['autocorr_lag1'] = 0.0
+            df['ou_reversion_speed'] = 0.0
+
         # 9. Z-score
         df['zscore_60'] = (p - p.rolling(60).mean()) / p.rolling(60).std().replace(0, np.nan)
 
@@ -194,7 +364,8 @@ class AdvancedSignalGenerator:
 
         # 11. Quality Factors
         df['range_position'] = (p - p.rolling(20).min()) / (p.rolling(20).max() - p.rolling(20).min()).replace(0, np.nan)
-        df['mean_rev_20'] = -df['zscore_60'].clip(-3, 3) / 3
+        # mean_rev_20 REMOVED: was = -zscore_60/3, which hardwires a SHORT signal whenever
+        # price is above its 60-day mean — always negative in trending/bull markets.
 
         def calc_r2(x):
             if len(x) < 5: return 0
@@ -224,6 +395,28 @@ class AdvancedSignalGenerator:
         df['sentiment_feature'] = sentiment_score if sentiment_score is not None else 0.0
         df['momentum_rank_feature'] = momentum_rank if momentum_rank is not None else 0.5
 
+        # 15. Intraday 5-minute bar features (scalar broadcast onto every row)
+        intra_feats = self._intraday_momentum_features(data, intraday_df)
+        for feat_name, feat_val in intra_feats.items():
+            df[feat_name] = feat_val
+
+        # 16. Order Flow Imbalance proxies (volume-based, works with daily OHLCV)
+        if v is not None and h is not None and low_px is not None:
+            # Close Location Value (CLV): (C - L) / (H - L) → +1 = closes at high (buying), -1 = low (selling)
+            _hl_range = (h - low_px).replace(0, np.nan)
+            _clv = (p - low_px) / _hl_range  # [0, 1]
+            # Money Flow Volume = CLV * Volume; positive = buyer-driven
+            _mfv = (_clv * 2 - 1) * v  # scaled to [-1, 1] × volume
+            df['order_flow_imbalance'] = _mfv.rolling(5).sum() / v.rolling(5).sum().replace(0, np.nan)
+            # Volume-weighted directional pressure (up_bars vs down_bars over 5 bars)
+            _up_vol = v.where(returns > 0, 0).rolling(5).sum()
+            _dn_vol = v.where(returns < 0, 0).rolling(5).sum()
+            _tot_vol = (_up_vol + _dn_vol).replace(0, np.nan)
+            df['vol_imbalance_5d'] = (_up_vol - _dn_vol) / _tot_vol
+        else:
+            df['order_flow_imbalance'] = 0.0
+            df['vol_imbalance_5d'] = 0.0
+
         return df.fillna(0).replace([np.inf, -np.inf], 0)
 
     def _align_features(self, df_feats: pd.DataFrame) -> pd.DataFrame:
@@ -233,16 +426,38 @@ class AdvancedSignalGenerator:
         # Ensure stable column order and fill missing with zeros
         return df_feats.reindex(columns=self.feature_names, fill_value=0.0)
 
+    # Features that carry absolute directional meaning — cross-sectional z-scoring
+    # removes the common market direction signal (e.g. all symbols overbought in bull).
+    # These must NOT be normalized across symbols; only relative/rank features should be.
+    _ABS_DIRECTION_FEATURES = frozenset({
+        'zscore_60', 'bb_pos', 'range_position',
+        'rsi_14', 'rsi_norm',
+        'macd', 'macd_signal', 'macd_hist',
+        'dist_ma_10', 'dist_ma_20', 'dist_ma_50', 'dist_ma_200',
+        'roc_5', 'roc_10', 'mom_accel',
+        'trend_strength',
+        'hurst_bias', 'autocorr_lag1',
+    })
+
     def _cross_sectional_normalize(
         self,
         panel: pd.DataFrame,
         feature_cols: List[str]
     ) -> pd.DataFrame:
-        """Z-score features cross-sectionally per timestamp."""
+        """Z-score features cross-sectionally per timestamp.
+
+        Absolute-direction features (RSI, MACD, z-score, momentum, MA distance)
+        are intentionally skipped — normalizing them across symbols destroys the
+        common bull/bear market signal and causes 0% win rates in trending regimes.
+        Only relative/dispersion features are normalized.
+        """
         if not feature_cols:
             return panel
+        cols_to_norm = [c for c in feature_cols if c not in self._ABS_DIRECTION_FEATURES]
+        if not cols_to_norm:
+            return panel
         grouped = panel.groupby(level=0)
-        for col in feature_cols:
+        for col in cols_to_norm:
             mean = grouped[col].transform("mean")
             std = grouped[col].transform("std")
             # When std is 0 or NaN (≤1 symbol at timestamp), keep demeaned value
@@ -279,15 +494,20 @@ class AdvancedSignalGenerator:
                 ApexConfig.ADV_LABEL_VOL_CLIP
             )
 
-            # Regimes
-            ma_20 = prices.rolling(20).mean()
-            ma_60 = prices.rolling(60).mean()
-            vol_20 = prices.pct_change().rolling(20).std() * np.sqrt(252)
-            trend = (ma_20 - ma_60) / ma_60
-            regimes_series = pd.Series('neutral', index=prices.index)
-            regimes_series.loc[vol_20 > 0.35] = 'volatile'
-            regimes_series.loc[(vol_20 <= 0.35) & (trend > 0.05)] = 'bull'
-            regimes_series.loc[(vol_20 <= 0.35) & (trend < -0.05)] = 'bear'
+            # Regimes — use same AdaptiveRegimeDetector as live inference for label consistency
+            try:
+                from models.adaptive_regime_detector import AdaptiveRegimeDetector as _ARDetector
+                regimes_series = _ARDetector().classify_history(prices)
+            except Exception:
+                # Fallback: fast MA-based approximation
+                _ma20 = prices.rolling(20).mean()
+                _ma60 = prices.rolling(60).mean()
+                _vol20 = prices.pct_change().rolling(20).std() * np.sqrt(252)
+                _trend = (_ma20 - _ma60) / _ma60
+                regimes_series = pd.Series('neutral', index=prices.index)
+                regimes_series.loc[_vol20 > 0.35] = 'volatile'
+                regimes_series.loc[(_vol20 <= 0.35) & (_trend > 0.05)] = 'bull'
+                regimes_series.loc[(_vol20 <= 0.35) & (_trend < -0.05)] = 'bear'
 
             valid = ~df_feats.isnull().any(axis=1) & ~scaled.isnull()
             if valid.sum() == 0:
@@ -392,6 +612,7 @@ class AdvancedSignalGenerator:
         window_size = max(5, int((len(times) - min_train) / max(1, n_splits)))
 
         regime_results = {r: [] for r in ['bull', 'bear', 'neutral', 'volatile']}
+        regime_dir_acc = {r: [] for r in ['bull', 'bear', 'neutral', 'volatile']}
 
         purge_days = getattr(ApexConfig, "ADV_PURGE_DAYS", 5)
         embargo_days = getattr(ApexConfig, "ADV_EMBARGO_DAYS", 2)
@@ -468,23 +689,97 @@ class AdvancedSignalGenerator:
 
                     if 'r2_score' in models:
                         regime_results[regime].append(models['r2_score'])
-        
-        # Finalize
-        self.is_trained = True
-        self.training_date = datetime.now()
-        self.last_retrain_date = datetime.now()
-        
+                    if 'dir_acc' in models:
+                        regime_dir_acc[regime].append(models['dir_acc'])
+
+                    # --- Binary classifier training (same preprocessed data) ---
+                    if self._binary_clf is not None:
+                        try:
+                            # Binary labels derived from regression target sign
+                            # (positive vol-scaled return → price went up)
+                            y_bin_train = (y_r_train > 0).astype(int)
+                            y_bin_test = (y_r_test > 0).astype(int)
+                            self._binary_clf.train(
+                                X_r_train_sc, y_bin_train,
+                                X_r_test_sc, y_bin_test,
+                                regime, asset_class,
+                            )
+                        except Exception as _be:
+                            logger.debug("Binary training error (%s/%s): %s", asset_class, regime, _be)
+
         # Summary
         logger.info("\n" + "="*80)
         logger.info("📊 WALK-FORWARD REGIME RESULTS")
         logger.info("="*80)
+        all_dir_accs = []
         for regime, scores in regime_results.items():
             if scores:
-                logger.info(f"{regime.upper():>10}: R²={np.mean(scores):.4f} ± {np.std(scores):.4f}")
-        
+                dir_scores = regime_dir_acc.get(regime, [])
+                dir_str = f" DirAcc={np.mean(dir_scores):.1%}" if dir_scores else ""
+                logger.info(f"{regime.upper():>10}: R²={np.mean(scores):.4f} ± {np.std(scores):.4f}{dir_str}")
+                all_dir_accs.extend(dir_scores)
+
+        # ── Model Quality Gate ───────────────────────────────────────────────
+        # Block deployment of models that are worse than random on direction.
+        # A model with dir_acc < threshold has no edge and will lose money.
+        _min_dir_acc = float(
+            getattr(ApexConfig, "MODEL_MIN_DIR_ACC", 0.48)
+        )
+        _gate_enabled = getattr(ApexConfig, "MODEL_QUALITY_GATE_ENABLED", True)
+        if _gate_enabled and all_dir_accs:
+            _overall_dir_acc = float(np.mean(all_dir_accs))
+            if _overall_dir_acc < _min_dir_acc:
+                logger.warning(
+                    "⚠️  MODEL QUALITY GATE: overall DirAcc=%.1f%% < %.1f%% threshold — "
+                    "models NOT deployed (is_trained stays False). "
+                    "Signal generator will use previous saved models or return empty signals.",
+                    _overall_dir_acc * 100, _min_dir_acc * 100,
+                )
+                # Do NOT set is_trained = True; save models for debugging artifacts
+                self._save_models()
+                return
+            else:
+                logger.info(
+                    "✅ Model Quality Gate PASSED: DirAcc=%.1f%% >= %.1f%% threshold",
+                    _overall_dir_acc * 100, _min_dir_acc * 100,
+                )
+
+        # ── Feature Importance Summary ───────────────────────────────────────
+        # Aggregate importances across all regimes and log top-10 features.
+        # Low-importance features are flagged for potential future pruning.
+        try:
+            _all_fi: dict[str, list] = {}
+            for _ac_models in self.asset_class_models.values():
+                for _regime_models in _ac_models.values():
+                    for _feat, _imp in _regime_models.get('feature_importances', {}).items():
+                        _all_fi.setdefault(_feat, []).append(_imp)
+            if _all_fi:
+                _mean_fi = {f: float(np.mean(v)) for f, v in _all_fi.items()}
+                _top10 = sorted(_mean_fi.items(), key=lambda x: x[1], reverse=True)[:10]
+                _bot5 = sorted(_mean_fi.items(), key=lambda x: x[1])[:5]
+                self.feature_importances_ = _mean_fi  # expose for external inspection
+                logger.info("📊 Top-10 features: %s",
+                            ', '.join(f"{n}={v:.3f}" for n, v in _top10))
+                logger.info("📊 Bottom-5 features (possible noise): %s",
+                            ', '.join(f"{n}={v:.4f}" for n, v in _bot5))
+        except Exception as _fi_err:
+            logger.debug("Feature importance summary skipped: %s", _fi_err)
+
+        # Finalize
+        self.is_trained = True
+        self.training_date = datetime.now()
+        self.last_retrain_date = datetime.now()
+
+        # Save binary classifier alongside regression models
+        if self._binary_clf is not None and self._binary_clf.is_trained:
+            try:
+                self._binary_clf.save_models()
+            except Exception as _be:
+                logger.debug("Binary classifier save error: %s", _be)
+
         self._save_models()
     
-    def _train_regime_models(self, X_train, y_train, X_test, y_test, regime) -> Dict:
+    def _train_regime_models(self, X_train, y_train, X_test, y_test, _regime) -> Dict:
         """Train regression models for a regime."""
         models = {}
         predictions = []
@@ -527,14 +822,49 @@ class AdvancedSignalGenerator:
             except:
                 pass
         
-        # Calculate ensemble R²
+        # Per-model directional accuracy on test set (used for dynamic weighting at inference)
+        _model_preds: Dict[str, np.ndarray] = {}
+        # Re-predict each model individually to get per-model accuracy
+        for _mn in ('rf', 'gb', 'xgb', 'lgb'):
+            _m = models.get(_mn)
+            if _m is not None:
+                try:
+                    _mp = _m.predict(X_test)
+                    _dacc = float(np.mean(np.sign(_mp) == np.sign(y_test)))
+                    models[f'{_mn}_dir_acc'] = _dacc
+                    _model_preds[_mn] = _mp
+                except Exception:
+                    models[f'{_mn}_dir_acc'] = 0.5
+
+        # Calculate ensemble R² and directional accuracy
         if predictions:
             ensemble_pred = np.mean(predictions, axis=0)
             ss_res = np.sum((y_test - ensemble_pred) ** 2)
             ss_tot = np.sum((y_test - np.mean(y_test)) ** 2)
             r2 = 1 - (ss_res / ss_tot) if ss_tot > 0 else 0
             models['r2_score'] = r2
-        
+            models['dir_acc'] = float(np.mean(np.sign(ensemble_pred) == np.sign(y_test)))
+
+        # Extract feature importances (from tree-based models) for post-training audit.
+        # Aggregated across all available models; stored for logging and dropout decisions.
+        try:
+            _fi_arrays = []
+            _feature_names = list(X_train.columns)
+            for _m_key in ('rf', 'gb', 'xgb', 'lgb'):
+                _m = models.get(_m_key)
+                if _m is not None and hasattr(_m, 'feature_importances_'):
+                    _fi = _m.feature_importances_
+                    if len(_fi) == len(_feature_names):
+                        _fi_arrays.append(_fi)
+            if _fi_arrays:
+                _mean_fi = np.mean(_fi_arrays, axis=0)
+                models['feature_importances'] = {
+                    _feature_names[i]: float(_mean_fi[i])
+                    for i in range(len(_feature_names))
+                }
+        except Exception:
+            pass
+
         return models
     
     def generate_ml_signal(
@@ -612,23 +942,47 @@ class AdvancedSignalGenerator:
             
             current = imputer.transform(current)
             current = scaler.transform(current)
-            
-            # Predict
+
+            # Cache scaled feature vector for potential online update at trade close
+            try:
+                _ol_key = f"{asset_class}:{regime}"
+                self._last_features[symbol] = (current.copy(), _ol_key)
+            except Exception:
+                pass
+
+            # Predict — accuracy-weighted ensemble
+            # Each model's contribution is proportional to its training-set
+            # directional accuracy raised to MODEL_WEIGHT_TEMPERATURE power.
+            # Falls back to equal weight when accuracy data is unavailable.
             predictions = []
+            pred_accs   = []
             for name in ['rf', 'gb', 'xgb', 'lgb']:
                 model = models.get(name)
                 if model:
                     try:
                         pred_return = model.predict(current)[0]
-                        signal = np.tanh(pred_return * 25)
-                        predictions.append(signal)
-                    except:
+                        # scale=25: maps actual model output range [0.002, 0.011] → signal [0.05, 0.27]
+                        # This is the correct scale given the model's regularized prediction magnitude.
+                        predictions.append(float(np.tanh(pred_return * 25)))
+                        # Per-model accuracy stored during training (default 0.5 = equal weight)
+                        _acc = float(models.get(f'{name}_dir_acc', 0.5))
+                        pred_accs.append(max(0.40, _acc))   # floor prevents zero-weighting
+                    except Exception:
                         pass
-            
+
             if not predictions:
                 return self._empty_signal()
-            
-            avg_signal = float(np.mean(predictions))
+
+            # Temperature-scaled softmax weighting (config-driven)
+            _weight_enabled = bool(getattr(ApexConfig, 'MODEL_WEIGHT_ACCURACY_BONUS', True))
+            if _weight_enabled and len(predictions) > 1:
+                _temp = float(getattr(ApexConfig, 'MODEL_WEIGHT_TEMPERATURE', 3.0))
+                _w = np.array(pred_accs) ** _temp
+                _w = _w / _w.sum()
+                avg_signal = float(np.average(predictions, weights=_w))
+            else:
+                avg_signal = float(np.mean(predictions))
+
             std_signal = float(np.std(predictions))
             confidence = max(0, 1.0 - (std_signal * 2))
 
@@ -642,17 +996,42 @@ class AdvancedSignalGenerator:
             smoothed = self.signal_ema_alpha * adjusted_signal + (1 - self.signal_ema_alpha) * prev
             self.signal_ema[symbol] = smoothed
             
+            regression_signal = float(np.clip(smoothed, -1, 1))
+
+            # --- Binary classifier signal ---
+            binary_signal = 0.0
+            binary_confidence = 0.0
+            if self._binary_clf is not None and self._binary_clf.is_trained:
+                try:
+                    binary_signal, binary_confidence = self._binary_clf.predict(
+                        current, regime, asset_class
+                    )
+                except Exception:
+                    pass
+
+            # --- Blend regression + binary ---
+            if self._binary_enabled and binary_signal != 0.0:
+                w_bin = self._binary_weight
+                blended = (1.0 - w_bin) * regression_signal + w_bin * binary_signal
+                blended_conf = (1.0 - w_bin) * confidence + w_bin * binary_confidence
+            else:
+                blended = regression_signal
+                blended_conf = confidence
+
             result = {
-                'signal': float(np.clip(smoothed, -1, 1)),
-                'confidence': float(np.clip(confidence, 0, 1)),
+                'signal': float(np.clip(blended, -1, 1)),
+                'confidence': float(np.clip(blended_conf, 0, 1)),
                 'quality': float(np.clip(quality, 0, 1)),
                 'regime': regime,
+                'regression_signal': regression_signal,
+                'binary_signal': binary_signal,
+                'binary_confidence': binary_confidence,
                 'timestamp': datetime.now().isoformat()
             }
-            
+
             if track:
                 self.prediction_history.append(result)
-            
+
             return result
         
         except Exception as e:
@@ -707,7 +1086,82 @@ class AdvancedSignalGenerator:
     
     def _empty_signal(self):
         return {'signal': 0.0, 'confidence': 0.0, 'regime': 'unknown', 'timestamp': datetime.now().isoformat()}
-    
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # Incremental Online Learning
+    # Called after a trade closes: pairs the cached feature vector with the
+    # realized return and triggers a warm-start micro-update on the GBM model
+    # for that (asset_class, regime) bucket.
+    # ─────────────────────────────────────────────────────────────────────────
+    def online_update(self, symbol: str, actual_return: float) -> bool:
+        """
+        Feed a realized return back into the model after a trade closes.
+
+        Args:
+            symbol:         Trading symbol (e.g. "BTC/USD")
+            actual_return:  Realized P&L% as a fraction (e.g. 0.012 = +1.2%)
+
+        Returns:
+            True if a warm-start model update was performed, False otherwise.
+        """
+        if not getattr(ApexConfig, "ONLINE_LEARNING_ENABLED", True):
+            return False
+
+        cached = self._last_features.pop(symbol, None)
+        if cached is None:
+            return False
+
+        try:
+            X_row, ol_key = cached          # (1, n_features) array, "asset_class:regime"
+            parts = ol_key.split(":", 1)
+            if len(parts) != 2:
+                return False
+            asset_class, regime = parts[0], parts[1]
+
+            # Append to rolling buffer
+            buf = self._online_buffer.setdefault(ol_key, [])
+            buf.append((X_row, float(actual_return)))
+
+            # Trim to max size (drop oldest)
+            if len(buf) > self._online_buffer_maxsize:
+                del buf[: len(buf) - self._online_buffer_maxsize]
+
+            # Only retrain once we have enough new samples
+            if len(buf) < self._online_update_trigger:
+                return False
+
+            # Retrieve GB model for this bucket (most amenable to warm_start)
+            ac_models = self.asset_class_models.get(asset_class, {})
+            regime_models = ac_models.get(regime, {})
+            gb_model = regime_models.get("gb")
+            if gb_model is None or not hasattr(gb_model, "n_estimators_"):
+                return False
+
+            # Build mini training set from buffer
+            X_mini = np.vstack([row for row, _ in buf])   # (N, features)
+            y_mini = np.array([lbl for _, lbl in buf])     # (N,)
+
+            # Warm-start: add a small number of new trees on top of existing ones
+            _n_extra = max(5, int(gb_model.n_estimators_ * 0.05))
+            gb_model.n_estimators = gb_model.n_estimators_ + _n_extra
+            gb_model.warm_start = True
+            gb_model.fit(X_mini, y_mini)
+
+            # Reset buffer after update (keep last quarter for continuity)
+            keep = max(self._online_update_trigger // 4, 2)
+            self._online_buffer[ol_key] = buf[-keep:]
+
+            logger.info(
+                "🔄 OnlineLearning: %s [%s] warm_start +%d trees (%d samples) "
+                "actual_return=%.4f",
+                symbol, ol_key, _n_extra, len(X_mini), actual_return,
+            )
+            return True
+
+        except Exception as exc:
+            logger.debug("online_update failed for %s: %s", symbol, exc)
+            return False
+
     def _save_models(self):
         """Save all models."""
         try:

@@ -156,8 +156,9 @@ class RiskSession:
     Manages risk state for a specific user session.
     """
 
-    def __init__(self, user_id: str, max_daily_loss: float = 0.02, max_drawdown: float = 0.10):
+    def __init__(self, user_id: str, max_daily_loss: float = 0.02, max_drawdown: float = 0.10, session_type: str = "unified"):
         self.user_id = user_id
+        self.session_type = session_type
         self.max_daily_loss = max_daily_loss
         self.max_drawdown = max_drawdown
 
@@ -178,6 +179,9 @@ class RiskSession:
         # NOT persisted to disk: ephemeral intraday state, intentionally resets
         # on engine restart to avoid a cold-start false-trigger.
         self._intraday_pnl_snapshots: collections.deque = collections.deque(maxlen=3600)
+
+        # Rate-limit the heal_baselines implausible-ratio warning (once per hour)
+        self._last_implausible_warn_ts: float = 0.0
 
         # Load state on init
         self.load_state()
@@ -215,11 +219,15 @@ class RiskSession:
             # level (e.g., a paper-startup value of $8k vs real $100k) — reset it.
             ratio = self.day_start_capital / value
             if ratio < 0.40 or ratio > 2.50:
-                logger.warning(
-                    f"[RiskSession/{self.user_id}] day_start_capital {self.day_start_capital:,.0f} "
-                    f"is implausible vs current {value:,.0f} (ratio={ratio:.2f}). "
-                    f"Resetting all baselines to current value to prevent false circuit trip."
-                )
+                import time as _time
+                now = _time.monotonic()
+                if now - self._last_implausible_warn_ts > 3600:  # warn at most once/hour
+                    logger.warning(
+                        f"[RiskSession/{self.user_id}] day_start_capital {self.day_start_capital:,.0f} "
+                        f"is implausible vs current {value:,.0f} (ratio={ratio:.2f}). "
+                        f"Resetting all baselines to current value to prevent false circuit trip."
+                    )
+                    self._last_implausible_warn_ts = now
                 self.day_start_capital = value
                 self.starting_capital = value
                 self.peak_capital = value
@@ -231,10 +239,14 @@ class RiskSession:
         """Get path to the risk state file for this session."""
         if self.user_id == "default":
              return ApexConfig.DATA_DIR / "risk_state.json"
-        
+
         # Ensure user directory exists
         user_dir = ApexConfig.DATA_DIR / "users" / self.user_id
         user_dir.mkdir(parents=True, exist_ok=True)
+        # In dual-session mode, namespace by session_type to prevent core ($1.26M)
+        # and crypto ($80K) sessions from overwriting each other's baseline.
+        if self.session_type not in ("unified", ""):
+            return user_dir / f"risk_state_{self.session_type}.json"
         return user_dir / "risk_state.json"
 
     def save_state(self):

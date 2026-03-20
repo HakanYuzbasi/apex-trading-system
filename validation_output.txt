@@ -1,9 +1,9 @@
-2026-03-17 12:49:52 INFO [core.tracing] OpenTelemetry not available. Install with: pip install opentelemetry-sdk
-2026-03-17 12:49:52 INFO [core.hot_reload] watchdog not available. Install with: pip install watchdog
+2026-03-20 14:39:44 INFO [core.tracing] OpenTelemetry not available. Install with: pip install opentelemetry-sdk
+2026-03-20 14:39:44 INFO [core.hot_reload] watchdog not available. Install with: pip install watchdog
 
 ══════════════════════════════════════════════════════════════════════════
   APEX TRADING SYSTEM — FULL VALIDATION BACKTEST
-  2026-03-17 12:49:51
+  2026-03-20 14:39:43
 ══════════════════════════════════════════════════════════════════════════
 
 [Step 0] Checking dependencies...
@@ -15,6 +15,9 @@
   OK: monitoring/missed_opportunity_tracker.py
 
 [Step 2] Running backtest with real market data...
+2026-03-20 14:43:20 WARN [scripts.god_level_backtest] 
+  *** WARNING: Strategy bleeds in regimes: ['bear']
+2026-03-20 14:43:20 WARN [scripts.god_level_backtest]   *** Consider adding regime filter or disabling trading in these regimes
 
 [Step 3] Running Monte Carlo + Phase 3 stress tests...
 
@@ -25,7 +28,7 @@
 
 ══════════════════════════════════════════════════════════════════════════
   FULL VALIDATION REPORT
-  Completed in 338s
+  Completed in 375s
 ══════════════════════════════════════════════════════════════════════════
 
 ======================================================================
@@ -34,149 +37,147 @@ GOD LEVEL BACKTEST RESULTS
 
 📈 RETURNS
 ----------------------------------------
-  Total Return:             0.97%
-  Annualized Return:        1.94%
-  Benchmark (SPY):         28.68%
-  Alpha:                  -27.70%
+  Total Return:            -1.16%
+  Annualized Return:       -2.30%
+  Benchmark (SPY):          0.00%
+  Alpha:                   -1.16%
 
 ⚖️  RISK METRICS
 ----------------------------------------
-  Sharpe Ratio:            -1.75
-  Sortino Ratio:           -2.94
-  Calmar Ratio:             1.35
-  Max Drawdown:             1.44%
-  Avg Drawdown:             0.55%
-  Max DD Duration:            25 days
-  Ulcer Index:              0.66
+  Sharpe Ratio:            -6.27
+  Sortino Ratio:           -6.32
+  Calmar Ratio:            -1.78
+  Max Drawdown:             1.29%
+  Avg Drawdown:             1.14%
+  Max DD Duration:            10 days
+  Ulcer Index:              1.16
 
 🎯 TRADE METRICS
 ----------------------------------------
-  Total Trades:              101
-  Win Rate:                 63.4%
-  Profit Factor:            1.31
-  Avg Win:            $   640.69
-  Avg Loss:           $  -845.47
-  Avg Trade:          $    96.26
-  Largest Win:        $  2225.00
-  Largest Loss:       $ -2722.15
-  Avg Hold Days:             7.7
+  Total Trades:               33
+  Win Rate:                 24.2%
+  Profit Factor:            0.10
+  Avg Win:            $   167.99
+  Avg Loss:           $  -517.10
+  Avg Trade:          $  -351.02
+  Largest Win:        $   459.63
+  Largest Loss:       $ -1291.11
+  Avg Hold Days:             7.6
 
 🧠 ADVANCED METRICS
 ----------------------------------------
-  Expectancy:         $    96.26
-  SQN:                      1.06
-  Recovery Factor:          0.68
+  Expectancy:         $  -351.02
+  SQN:                     -4.60
+  Recovery Factor:         -0.90
 
 📊 REGIME PERFORMANCE
 ----------------------------------------
-  bull                 | Trades:   1 | Win Rate: 100.0% | P&L: $273
-  neutral              | Trades:   1 | Win Rate:   0.0% | P&L: $-777
-  strong_bull          | Trades:  99 | Win Rate:  63.6% | P&L: $10,225
+  bear                 | Trades:  26 | Win Rate:  23.1% | P&L: $-9,630
+  bull                 | Trades:   6 | Win Rate:  33.3% | P&L: $-729
+  neutral              | Trades:   1 | Win Rate:   0.0% | P&L: $-1,224
 
 🎲 MONTE CARLO SIMULATION
 ----------------------------------------
-  Expected Return:           1.0%
-  Return Range (90%):   -0.5% to 2.4%
-  Expected Max DD:           0.7%
-  Prob of Profit:           85.5%
+  Expected Return:          -1.1%
+  Return Range (90%):   -1.6% to -0.7%
+  Expected Max DD:           1.2%
+  Prob of Profit:            0.0%
 
 🔬 STRESS TESTS (Phase 3)
 ----------------------------------------
-  Deflated Sharpe:    -21.698 (gate: 1.35) [FAIL]
-  Permutation p-val:  0.8340 (gate: <0.05) [FAIL]
+  Deflated Sharpe:    N/A [FAIL] — Sharpe (-6.27) <= 0 — fix R:R/regime before DSR is meaningful
+  Permutation p-val:  0.9840 (gate: <0.05) [FAIL]
   Param Robustness:   0.0% (gate: >=70%) [FAIL]
     Median retention: 0.0% of base Sharpe
-  Crisis Max DD:      21.9% (gate: <30%) [PASS]
-    flash_crash         : dd=10.7%, final=$909,947
-    bear_market         : dd=21.9%, final=$793,812
-    liquidity_crisis    : dd=4.2%, final=$957,937
-    correlation_spike   : dd=3.4%, final=$983,818
+  Crisis Max DD:      16.8% (gate: <30%) [PASS]
+    flash_crash         : dd=11.1%, final=$889,366
+    bear_market         : dd=16.8%, final=$827,864
+    liquidity_crisis    : dd=2.5%, final=$974,817
+    correlation_spike   : dd=1.6%, final=$984,974
 
   STRESS TESTS: 1/4 passed
 
 ======================================================================
 SYSTEM QUALITY ASSESSMENT
 ======================================================================
-  ✓ Excellent win rate (>= 60%)
   ✓ Excellent drawdown control (<= 10%)
-  ✓ Decent profit factor (>= 1.2)
 
-  TOTAL SCORE: 65/100
-  👍 GOOD SYSTEM
+  TOTAL SCORE: 25/100
+  ⚠️  SIGNIFICANT WORK NEEDED
 ======================================================================
 
 ==========================================================================
   GO / NO-GO CARD
 ==========================================================================
-  FAIL | Gate 1: Sharpe >= 1.5          | actual:    -1.75 | threshold: 1.50
-  PASS | Gate 2: Max DD <= 15%          | actual:     1.4% | threshold: 15.0%
-  PASS | Gate 3: Win Rate >= 50%        | actual:    63.4% | threshold: 50.0%
-  PASS | Gate 4: Profit Factor >= 1.3   | actual:     1.31 | threshold: 1.30
-  FAIL | Gate 5: DSR > 1.35             | actual:  -21.698 | threshold: 1.350
-  FAIL | Gate 6: Perm. p < 0.05         | actual:   0.8340 | threshold: 0.0500
+  FAIL | Gate 1: Sharpe >= 1.5          | actual:    -6.27 | threshold: 1.50
+  PASS | Gate 2: Max DD <= 15%          | actual:     1.3% | threshold: 15.0%
+  FAIL | Gate 3: Win Rate >= 50%        | actual:    24.2% | threshold: 50.0%
+  FAIL | Gate 4: Profit Factor >= 1.3   | actual:     0.10 | threshold: 1.30
+  FAIL | Gate 5: DSR > 1.35             | actual:   -6.275 | threshold: 1.350
+  FAIL | Gate 6: Perm. p < 0.05         | actual:   0.9840 | threshold: 0.0500
   FAIL | Gate 7: Robustness >= 70%      | actual:       0% | threshold: 70%
-  PASS | Gate 8: Crisis DD < 30%        | actual:    21.9% | threshold: 30.0%
+  PASS | Gate 8: Crisis DD < 30%        | actual:    16.8% | threshold: 30.0%
 
   ──────────────────────────────────────────────────
-  VERDICT: NO-GO (4/8 gates passed)
+  VERDICT: NO-GO (2/8 gates passed)
   ──────────────────────────────────────────────────
-  Failing: Gate 1: Sharpe >= 1.5, Gate 5: DSR > 1.35, Gate 6: Perm. p < 0.05, Gate 7: Robustness >= 70%
+  Failing: Gate 1: Sharpe >= 1.5, Gate 3: Win Rate >= 50%, Gate 4: Profit Factor >= 1.3, Gate 5: DSR > 1.35, Gate 6: Perm. p < 0.05, Gate 7: Robustness >= 70%
 
 ==========================================================================
   WALK-FORWARD TABLE (per fold)
 ==========================================================================
   Fold |                Train Period |                 Test Period | IS Sharpe | OOS Sharpe |   MaxDD | #Trades
   ---------------------------------------------------------------------------------------------------------
-     1 |     2024-03-18 → 2025-03-19 |     2025-04-10 → 2025-10-09 |      0.36 |       0.60 |    1.3% |     101
+     1 |     2024-03-20 → 2025-03-21 |     2025-04-14 → 2025-10-13 |      0.28 |      -4.61 |    1.2% |      33
 
-  OOS Sharpe — mean: 0.60, median: 0.60, min: 0.60, max: 0.60
+  OOS Sharpe — mean: -4.61, median: -4.61, min: -4.61, max: -4.61
 
 ==========================================================================
   REGIME BREAKDOWN
 ==========================================================================
   Regime               |  Sharpe | Win Rate |  Avg Trade | #Trades
   -----------------------------------------------------------------
-  bull                 |    0.00 |   100.0% | $   273.46 |       1
-  neutral              |    0.00 |     0.0% | $  -776.72 |       1
-  strong_bull          |    2.53 |    63.6% | $   103.28 |      99
+  bear                 |   -3.53 |    23.1% | $  -370.39 |      26
+  bull                 |    0.01 |    33.3% | $  -121.57 |       6
+  neutral              |    0.00 |     0.0% | $ -1223.90 |       1
 
 ==========================================================================
   COST IMPACT ANALYSIS
 ==========================================================================
-  Gross Sharpe (no costs):      0.62
-  Net Sharpe (after costs):     0.60
-  Cost drag:                    0.02 Sharpe points
-  Avg cost per trade:        $2.59
-  Total commissions:         $261.92
-  Gross P&L:                 $9,983.80
-  Net P&L:                   $9,721.88
+  Gross Sharpe (no costs):     -4.59
+  Net Sharpe (after costs):    -4.61
+  Cost drag:                    0.03 Sharpe points
+  Avg cost per trade:        $2.17
+  Total commissions:         $71.46
+  Gross P&L:                 $-11,512.06
+  Net P&L:                   $-11,583.52
 
 ==========================================================================
   TOP 10 SIGNALS BY ICIR
 ==========================================================================
   Signal                    |  IC Mean |   IC Std |     ICIR | Keep/Kill
   --------------------------------------------------------------------
-  momentum                  |  -0.2524 |   0.2133 |  -1.1834 |      KILL
-  trend                     |  -0.2195 |   0.2370 |  -0.9262 |      KILL
-  ml_rf                     |   0.2355 |   0.2562 |   0.9191 |      KEEP
-  mean_reversion            |   0.2017 |   0.2359 |   0.8550 |      KEEP
-  ml_gb                     |   0.2207 |   0.3228 |   0.6837 |      KEEP
-  breakout                  |  -0.1349 |   0.2220 |  -0.6078 |      KILL
-  volatility                |  -0.0235 |   0.2507 |  -0.0936 |      KILL
+  momentum                  |  -0.2256 |   0.1994 |  -1.1315 |      KILL
+  trend                     |  -0.2118 |   0.2289 |  -0.9253 |      KILL
+  mean_reversion            |   0.2086 |   0.2341 |   0.8913 |      KEEP
+  ml_rf                     |   0.2278 |   0.2819 |   0.8080 |      KEEP
+  ml_gb                     |   0.2344 |   0.3286 |   0.7132 |      KEEP
+  breakout                  |  -0.1513 |   0.2276 |  -0.6648 |      KILL
+  volatility                |  -0.0175 |   0.2456 |  -0.0711 |      KILL
 
 ══════════════════════════════════════════════════════════════════════════
   STATUS: NO-GO — Strategy requires further development
 ══════════════════════════════════════════════════════════════════════════
 
-  4/8 gates passed. Strategy is not ready for deployment.
+  2/8 gates passed. Strategy is not ready for deployment.
   Review the regime breakdown and ICIR table above to identify
   which signal components lack edge and which regimes bleed.
 
-  Bleeding regimes: neutral
+  Bleeding regimes: bear, bull, neutral
   Consider adding regime filters to disable trading in these regimes,
   or recalibrate signal weights for these market conditions.
 
 ══════════════════════════════════════════════════════════════════════════
-  Backtest complete. 101 trades analyzed.
+  Backtest complete. 33 trades analyzed.
 ══════════════════════════════════════════════════════════════════════════
 

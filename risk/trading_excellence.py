@@ -590,24 +590,28 @@ def quick_mismatch_check(
     confidence: float,
     pnl_pct: float,
     hold_hours: float = 0.0,
+    is_crypto: bool = False,
 ) -> Tuple[bool, str]:
     """
     Quick check for signal-position mismatch without full object.
 
     hold_hours drives time-decay thresholds:
-      < 1h  → wider grace (-0.80%) — let fresh entries breathe
+      < 1h  → wider grace (-0.80% equity, -2.0% crypto) — let fresh entries breathe
       1-4h  → normal thresholds from calibration
       > 4h  → tighten by 50% — stale positions shouldn't linger in loss
 
     Returns:
         Tuple of (should_exit, reason)
     """
+    from config import ApexConfig as _Cfg
     _wt = _ACTIVE_PARAMS["weak_signal_loss_threshold_pct"]
     _nt = _ACTIVE_PARAMS["no_signal_loss_threshold_pct"]
 
     # Time-decay adjustment
     if hold_hours < 1.0:
-        _wt = min(_wt, -0.80)   # New entry: wider grace
+        # Crypto has wider grace because intraday swings of 1-2% are normal
+        _grace = float(getattr(_Cfg, "QUICK_MISMATCH_GRACE_CRYPTO_PCT", -2.0)) if is_crypto else -0.80
+        _wt = min(_wt, _grace)   # New entry: wider grace
         _nt = min(_nt, -0.05)
     elif hold_hours > 4.0:
         _wt = _wt * 0.50        # Stale: tighten (e.g. -0.50 → -0.25)

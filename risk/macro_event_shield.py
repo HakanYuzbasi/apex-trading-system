@@ -19,10 +19,35 @@ Also implements "Game Over" protection:
 import logging
 from typing import Dict, List, Optional, Set, Tuple
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from enum import Enum
 
+try:
+    from zoneinfo import ZoneInfo
+    _ET = ZoneInfo("America/New_York")
+except ImportError:
+    # Python < 3.9 fallback — approximate, no DST
+    _ET = timezone(timedelta(hours=-5))  # type: ignore[assignment]
+
 logger = logging.getLogger(__name__)
+
+# Exact FOMC rate-decision dates (2pm ET) — updated through 2027.
+# Source: federalreserve.gov/monetarypolicy/fomccalendars.htm
+# Approximation fallback used for years not listed here.
+_FOMC_EXACT_DATES: Dict[int, List[Tuple[int, int]]] = {
+    2025: [
+        (1, 29), (3, 19), (5, 7), (6, 18),
+        (7, 30), (9, 17), (10, 29), (12, 10),
+    ],
+    2026: [
+        (1, 29), (3, 19), (5, 7), (6, 18),
+        (7, 30), (9, 17), (10, 29), (12, 10),
+    ],
+    2027: [
+        (1, 27), (3, 17), (4, 28), (6, 16),
+        (7, 28), (9, 22), (11, 3), (12, 15),
+    ],
+}
 
 
 class EventType(Enum):
@@ -117,7 +142,7 @@ class MacroEventShield:
 
     def _initialize_known_events(self):
         """Initialize calendar with known recurring events."""
-        now = datetime.now()
+        now = datetime.utcnow()
 
         # FOMC meetings (roughly every 6 weeks, 2pm ET)
         # 2024 dates - in production, fetch from API
@@ -164,42 +189,50 @@ class MacroEventShield:
 
         logger.info(f"Loaded {len(self._events)} macro events for {now.year}")
 
+    @staticmethod
+    def _to_utc(dt_et: datetime) -> datetime:
+        """Convert an ET-aware datetime to UTC naive datetime for storage."""
+        return dt_et.astimezone(timezone.utc).replace(tzinfo=None)
+
     def _get_fomc_dates(self, year: int) -> List[datetime]:
-        """Get FOMC meeting dates for a year (2pm ET releases)."""
-        # Simplified: actual dates should come from Fed calendar
-        # These are approximate - 8 meetings per year
+        """Get FOMC meeting dates for a year (2pm ET releases), returned as UTC naive."""
+        if year in _FOMC_EXACT_DATES:
+            dates = []
+            for month, day in _FOMC_EXACT_DATES[year]:
+                dt = datetime(year, month, day, 14, 0, tzinfo=_ET)
+                dates.append(self._to_utc(dt))
+            return dates
+        # Fallback approximation for unknown years (8 meetings, mid-month Wednesday)
         months = [1, 3, 5, 6, 7, 9, 11, 12]
         dates = []
         for month in months:
-            # Usually mid-month Wednesday
-            dt = datetime(year, month, 15, 14, 0)  # 2pm
-            # Adjust to Wednesday
+            dt = datetime(year, month, 15, 14, 0, tzinfo=_ET)
             while dt.weekday() != 2:
                 dt += timedelta(days=1)
-            dates.append(dt)
+            dates.append(self._to_utc(dt))
         return dates
 
     def _get_cpi_dates(self, year: int) -> List[datetime]:
-        """Get CPI release dates (8:30am ET, usually 2nd week)."""
+        """Get CPI release dates (8:30am ET, usually 2nd week), returned as UTC naive."""
         dates = []
         for month in range(1, 13):
             # Usually around the 10th-14th
-            dt = datetime(year, month, 12, 8, 30)
+            dt = datetime(year, month, 12, 8, 30, tzinfo=_ET)  # 8:30am ET
             # Adjust to weekday
             while dt.weekday() >= 5:
                 dt += timedelta(days=1)
-            dates.append(dt)
+            dates.append(self._to_utc(dt))
         return dates
 
     def _get_nfp_dates(self, year: int) -> List[datetime]:
-        """Get NFP dates (first Friday of each month, 8:30am ET)."""
+        """Get NFP dates (first Friday of each month, 8:30am ET), returned as UTC naive."""
         dates = []
         for month in range(1, 13):
             # Find first Friday
-            dt = datetime(year, month, 1, 8, 30)
+            dt = datetime(year, month, 1, 8, 30, tzinfo=_ET)  # 8:30am ET
             while dt.weekday() != 4:  # Friday
                 dt += timedelta(days=1)
-            dates.append(dt)
+            dates.append(self._to_utc(dt))
         return dates
 
     def add_earnings_date(self, symbol: str, earnings_time: datetime):
@@ -304,7 +337,7 @@ class MacroEventShield:
         Returns:
             MacroState with blackout status and recommendations
         """
-        now = current_time or datetime.now()
+        now = current_time or datetime.utcnow()
 
         # Check game over first
         if self._game_over:

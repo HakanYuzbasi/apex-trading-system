@@ -10,6 +10,7 @@ ENV_FILE="$BASE_DIR/.env"
 TRADING_PID_FILE="$PID_DIR/apex_trading.pid"
 API_PID_FILE="$PID_DIR/apex_api.pid"
 FRONTEND_PID_FILE="$PID_DIR/apex_frontend.pid"
+RETRAINING_PID_FILE="$PID_DIR/apex_retraining.pid"
 
 mkdir -p "$LOG_DIR" "$PID_DIR"
 
@@ -218,6 +219,18 @@ start_frontend() {
     return 1
   fi
   echo "Started frontend (PID $(read_pid "$FRONTEND_PID_FILE"))"
+}
+
+start_retraining() {
+  cleanup_stale_pid_file "$RETRAINING_PID_FILE"
+  if is_running "$RETRAINING_PID_FILE"; then
+    echo "Retraining daemon already running (PID $(read_pid "$RETRAINING_PID_FILE"))"
+    return
+  fi
+  cd "$BASE_DIR"
+  nohup bash -c "while true; do \"$BASE_DIR/venv/bin/python\" scripts/train_god_level_models.py; sleep 86400; done" > "$LOG_DIR/retraining_daemon.log" 2>&1 < /dev/null &
+  echo $! > "$RETRAINING_PID_FILE"
+  echo "Started retraining daemon (PID $(read_pid "$RETRAINING_PID_FILE"))"
 }
 
 stop_service() {
@@ -436,14 +449,16 @@ case "${1:-}" in
     start_trading
     start_api
     start_frontend
+    start_retraining
     echo "All services started."
     ;;
   stop)
     stop_service "frontend" "$FRONTEND_PID_FILE"
     stop_service "api" "$API_PID_FILE"
     stop_service "trading engine" "$TRADING_PID_FILE"
+    stop_service "retraining daemon" "$RETRAINING_PID_FILE"
     enforce_single_instance_stack
-    rm -f "$FRONTEND_PID_FILE" "$API_PID_FILE" "$TRADING_PID_FILE"
+    rm -f "$FRONTEND_PID_FILE" "$API_PID_FILE" "$TRADING_PID_FILE" "$RETRAINING_PID_FILE"
     echo "All services stopped."
     ;;
   restart)
@@ -455,9 +470,11 @@ case "${1:-}" in
     status_service "trading engine" "$TRADING_PID_FILE"
     status_service "api" "$API_PID_FILE"
     status_service "frontend" "$FRONTEND_PID_FILE"
+    status_service "retraining daemon" "$RETRAINING_PID_FILE"
     ;;
   logs)
     show_logs
+    echo "Retraining: $LOG_DIR/retraining_daemon.log"
     ;;
   doctor)
     doctor

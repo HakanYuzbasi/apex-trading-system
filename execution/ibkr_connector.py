@@ -35,6 +35,11 @@ from monitoring.prometheus_metrics import PrometheusMetrics
 
 logger = logging.getLogger(__name__)
 
+# Process-wide semaphore: at most 1 IBKRConnector can be executing connectAsync()
+# at the same time.  In dual-session mode two IBKRConnector instances exist; without
+# this guard they both race to fill TWS's ~32 connection limit simultaneously.
+_global_ibkr_connect_semaphore = asyncio.Semaphore(1)
+
 T = TypeVar('T')
 
 
@@ -434,6 +439,12 @@ class IBKRConnector:
 
         await asyncio.sleep(3)  # brief pause for ib_insync cleanup
         for attempt in range(1, max_retries + 1):
+            # Ensure the previous socket is fully closed before each reconnect attempt
+            try:
+                self.ib.disconnect()
+            except Exception:
+                pass
+            await asyncio.sleep(1.0)  # Give TWS a moment to release the slot
             try:
                 await self.connect()
                 self._reconnect_failure_count = 0
@@ -600,6 +611,13 @@ class IBKRConnector:
     async def connect(self):
         """Connect to Interactive Brokers with delayed market data."""
         self._fatal_error = None
+        # Ensure any prior socket is closed before opening a new connection.
+        # Without this, each retry in the @with_retry loop leaves a zombie TCP
+        # socket open at TWS, accumulating until the ~32-connection pool is full.
+        try:
+            self.ib.disconnect()
+        except Exception:
+            pass
         logger.info(f"🔌 Connecting to IBKR at {self.host}:{self.port}...")
         
         try:
@@ -608,7 +626,7 @@ class IBKRConnector:
             # Allocate a guaranteed unique client ID across cluster
             max_id_retries = 5
             current_client_id = self.client_id
-            
+
             for id_attempt in range(max_id_retries):
                 try:
                     # Preferred must be within the lease manager's valid range (min_id..max_id).
@@ -617,21 +635,25 @@ class IBKRConnector:
                     preferred = lease_manager.min_id + id_attempt
                     current_client_id = await lease_manager.allocate(preferred)
                     self._active_client_id = current_client_id
-                    
+
                     logger.info(f"🔑 Lease manager returned client ID {current_client_id} (preferred={preferred})")
-                    await asyncio.wait_for(
-                        # timeout=15: Since TWS paper trading accounts have gigabytes of 
-                        # historical execution data, we cap the initial sync at 15s. 
-                        # ib_insync will cleanly catch these 15s inner timeouts, log 
-                        # "proceeding without full execution history", and return the connection!
-                        self.ib.connectAsync(self.host, self.port, clientId=current_client_id, timeout=15),
-                        timeout=240,
-                    )
-                    
+                    # Serialise connectAsync calls process-wide: only 1 IBKRConnector
+                    # connects at a time.  In dual-session mode both core and crypto
+                    # sessions previously raced here, exhausting TWS's ~32 slot limit.
+                    async with _global_ibkr_connect_semaphore:
+                        await asyncio.wait_for(
+                            # timeout=15: Since TWS paper trading accounts have gigabytes of
+                            # historical execution data, we cap the initial sync at 15s.
+                            # ib_insync will cleanly catch these 15s inner timeouts, log
+                            # "proceeding without full execution history", and return the connection!
+                            self.ib.connectAsync(self.host, self.port, clientId=current_client_id, timeout=15),
+                            timeout=240,
+                        )
+
                     # Give TWS a brief moment to settle session state
                     await asyncio.sleep(1.0)
                     logger.info(f"✅ Connected to IBKR with clientId {current_client_id}")
-                    
+
                     # Start heartbeat task to keep lease alive
                     if getattr(self, "_heartbeat_task", None) is None:
                         async def _heartbeat():
@@ -644,7 +666,7 @@ class IBKRConnector:
                                     break
                                 except Exception as e:
                                     logger.error(f"IBKR heartbeat failed: {e}")
-                        
+
                         self._heartbeat_task = asyncio.create_task(_heartbeat())
                     break
 

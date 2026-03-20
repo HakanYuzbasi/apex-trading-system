@@ -43,6 +43,11 @@ class EntryAttribution:
     governor_size_multiplier: float
     entry_slippage_bps: float
     source: str = "trade_entry"
+    # Signal source components (optional — filled when available)
+    ml_signal: float = 0.0
+    tech_signal: float = 0.0
+    sentiment_signal: float = 0.0
+    cs_momentum_signal: float = 0.0
 
 
 @dataclass
@@ -72,6 +77,11 @@ class ClosedTradeAttribution:
     modeled_execution_drag: float
     pnl_bps_on_entry_notional: float
     source: str = "trade_exit"
+    # Signal source components (propagated from entry)
+    ml_signal: float = 0.0
+    tech_signal: float = 0.0
+    sentiment_signal: float = 0.0
+    cs_momentum_signal: float = 0.0
 
 
 class PerformanceAttributionTracker:
@@ -200,6 +210,10 @@ class PerformanceAttributionTracker:
         entry_slippage_bps: float = 0.0,
         entry_time: Optional[datetime] = None,
         source: str = "trade_entry",
+        ml_signal: float = 0.0,
+        tech_signal: float = 0.0,
+        sentiment_signal: float = 0.0,
+        cs_momentum_signal: float = 0.0,
     ) -> None:
         """Record/refresh open position attribution context."""
         if quantity <= 0 or entry_price <= 0:
@@ -224,6 +238,10 @@ class PerformanceAttributionTracker:
             governor_size_multiplier=float(governor_size_multiplier),
             entry_slippage_bps=float(entry_slippage_bps or 0.0),
             source=source,
+            ml_signal=float(ml_signal or 0.0),
+            tech_signal=float(tech_signal or 0.0),
+            sentiment_signal=float(sentiment_signal or 0.0),
+            cs_momentum_signal=float(cs_momentum_signal or 0.0),
         )
         self.open_positions[canonical_symbol] = self._merge_open_position_rows(
             self.open_positions.get(canonical_symbol),
@@ -332,6 +350,10 @@ class PerformanceAttributionTracker:
             modeled_execution_drag=float(modeled_execution_drag),
             pnl_bps_on_entry_notional=float(pnl_bps),
             source=source,
+            ml_signal=float(entry_ctx.get("ml_signal", 0.0) or 0.0),
+            tech_signal=float(entry_ctx.get("tech_signal", 0.0) or 0.0),
+            sentiment_signal=float(entry_ctx.get("sentiment_signal", 0.0) or 0.0),
+            cs_momentum_signal=float(entry_ctx.get("cs_momentum_signal", 0.0) or 0.0),
         )
         self.closed_trades.append(asdict(closed))
         if len(self.closed_trades) > self.max_closed_trades:
@@ -464,7 +486,77 @@ class PerformanceAttributionTracker:
             social_bucket["avoided_drawdown_estimate"] += avoided
             social_bucket["hedge_cost_drag"] += hedge
 
+        # By regime
+        summary["by_regime"] = {}
+        for row in filtered:
+            _update_bucket(summary["by_regime"], str(row.get("governor_regime", "unknown")).lower(), row)
+        for key, bucket in summary["by_regime"].items():
+            trades = max(1, int(bucket["trades"]))
+            bucket["avg_holding_hours"] = float(bucket["avg_holding_hours"] / trades)
+            bucket["avg_net_pnl"] = float(bucket["net_pnl"] / trades)
+
         return summary
+
+    def get_signal_source_summary(self, lookback_days: int = 30) -> Dict[str, Any]:
+        """
+        P&L attribution broken down by dominant signal source.
+
+        Dominant source = signal component with highest absolute value
+        among ml_signal, tech_signal, sentiment_signal, cs_momentum_signal.
+        Falls back to 'composite' when all components are zero (legacy trades).
+        """
+        cutoff = datetime.now() - timedelta(days=max(1, lookback_days))
+        filtered = []
+        for row in self.closed_trades:
+            try:
+                exit_dt = datetime.fromisoformat(str(row.get("exit_time")))
+            except Exception:
+                continue
+            if exit_dt >= cutoff:
+                filtered.append(row)
+
+        result: Dict[str, Dict[str, Any]] = {}
+
+        def _bucket(key: str) -> Dict[str, Any]:
+            return result.setdefault(key, {
+                "trades": 0, "wins": 0, "total_pnl": 0.0, "total_pnl_bps": 0.0,
+                "avg_holding_hours": 0.0,
+            })
+
+        for row in filtered:
+            ml = abs(float(row.get("ml_signal", 0.0) or 0.0))
+            tech = abs(float(row.get("tech_signal", 0.0) or 0.0))
+            sent = abs(float(row.get("sentiment_signal", 0.0) or 0.0))
+            cs = abs(float(row.get("cs_momentum_signal", 0.0) or 0.0))
+            best = max(ml, tech, sent, cs)
+            if best < 1e-6:
+                dominant = "composite"
+            elif ml >= best:
+                dominant = "ml"
+            elif tech >= best:
+                dominant = "technical"
+            elif sent >= best:
+                dominant = "sentiment"
+            else:
+                dominant = "cs_momentum"
+
+            b = _bucket(dominant)
+            b["trades"] += 1
+            net = float(row.get("net_pnl", 0.0) or 0.0)
+            b["total_pnl"] += net
+            b["total_pnl_bps"] += float(row.get("pnl_bps_on_entry_notional", 0.0) or 0.0)
+            b["avg_holding_hours"] += float(row.get("holding_hours", 0.0) or 0.0)
+            if net > 0:
+                b["wins"] += 1
+
+        for key, b in result.items():
+            t = max(1, b["trades"])
+            b["win_rate"] = round(b["wins"] / t, 4)
+            b["avg_net_pnl"] = round(b["total_pnl"] / t, 4)
+            b["avg_pnl_bps"] = round(b["total_pnl_bps"] / t, 2)
+            b["avg_holding_hours"] = round(b["avg_holding_hours"] / t, 2)
+
+        return {"lookback_days": lookback_days, "by_signal_source": result}
 
     def record_social_governor_impact(
         self,

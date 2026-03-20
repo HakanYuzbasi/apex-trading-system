@@ -1131,7 +1131,7 @@ async def list_sessions(user=Depends(require_user)):
 
 
 @app.get("/api/v1/session/{session_type}/status")
-async def get_session_status(session_type: str, user=Depends(require_user)):
+async def get_session_status(session_type: str):
     """Get status for a specific trading session (core or crypto)."""
     if session_type not in ("core", "crypto", "unified"):
         raise HTTPException(status_code=400, detail="session_type must be 'core', 'crypto', or 'unified'")
@@ -1151,7 +1151,7 @@ async def get_session_status(session_type: str, user=Depends(require_user)):
 
 
 @app.get("/api/v1/session/{session_type}/positions")
-async def get_session_positions(session_type: str, user=Depends(require_user)):
+async def get_session_positions(session_type: str):
     """Get positions for a specific trading session."""
     if session_type not in ("core", "crypto", "unified"):
         raise HTTPException(status_code=400, detail="Invalid session_type")
@@ -1176,7 +1176,7 @@ async def get_session_positions(session_type: str, user=Depends(require_user)):
 
 
 @app.get("/api/v1/session/{session_type}/metrics")
-async def get_session_metrics(session_type: str, user=Depends(require_user)):
+async def get_session_metrics(session_type: str):
     """Get performance metrics for a specific trading session."""
     if session_type not in ("core", "crypto", "unified"):
         raise HTTPException(status_code=400, detail="Invalid session_type")

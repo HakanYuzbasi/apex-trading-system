@@ -672,8 +672,10 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
     open_positions_total: statusData.open_positions_total,
     total_trades: statusData.total_trades,
   });
+  // Typed alias: sanitizeExecutionMetrics returns numbers for all numeric fields
+  const sm = statusMetrics as Record<string, number>;
   const dailyPnlSource = String(statusData.daily_pnl_source ?? "").trim().toLowerCase();
-  const statusDailyPnlRealized = sanitizeMoney(statusData.daily_pnl_realized, statusMetrics.daily_pnl);
+  const statusDailyPnlRealized = sanitizeMoney(statusData.daily_pnl_realized, Number(sm.daily_pnl ?? 0));
   const statusDailyPnlByBrokerRaw = (statusData.daily_pnl_by_broker && typeof statusData.daily_pnl_by_broker === "object"
     ? statusData.daily_pnl_by_broker
     : {}) as Record<string, unknown>;
@@ -682,8 +684,8 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
     alpaca: sanitizeMoney(statusDailyPnlByBrokerRaw.alpaca, 0),
   };
   let combinedCapital = portfolioBalanceResp.ok
-    ? sanitizeMoney(portfolioBalanceData.total_equity, statusMetrics.capital)
-    : statusMetrics.capital;
+    ? sanitizeMoney(portfolioBalanceData.total_equity, Number(statusMetrics.capital) || 0)
+    : (Number(statusMetrics.capital) || 0);
   const upstreamBrokerSignalDegraded = portfolioBalanceResp.transport_error
     || portfolioSourcesResp.transport_error
     || portfolioPositionsResp.transport_error
@@ -778,7 +780,7 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
   const portfolioEquityPositions = portfolioPositions.filter((row) => !isOptionPosition(row));
   const portfolioOptionPositions = portfolioPositions.filter((row) => isOptionPosition(row));
   const inferredStateOpenPositions = Math.max(
-    statusMetrics.open_positions,
+    Number(sm.open_positions ?? 0),
     sanitizeCount(stateData.open_positions, 0),
     stateEndpointEquityPositions.length,
   );
@@ -873,14 +875,14 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
     && cachedPositionSnapshot
     && (cachedPositionSnapshot.positions.length > 0 || cachedPositionSnapshot.derivatives.length > 0)
     && !confirmedFlatState
-    && (upstreamPositionsDegraded || !stateFresh || inferredStateOpenPositions > 0 || statusMetrics.open_positions > 0)
+    && (upstreamPositionsDegraded || !stateFresh || inferredStateOpenPositions > 0 || sm.open_positions > 0)
   ) {
     effectivePositions = cachedPositionSnapshot.positions;
     derivatives = cachedPositionSnapshot.derivatives;
     usingPositionCache = true;
   } else if (effectivePositionsCandidate.length > 0 || derivativesCandidate.length > 0) {
     const optionPositionsSnapshot = Math.max(
-      statusMetrics.option_positions,
+      sm.option_positions,
       sanitizeCount(stateData.option_positions, 0),
       derivativesCandidate.length,
     );
@@ -895,7 +897,7 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
       open_positions: openPositionsSnapshot,
       option_positions: optionPositionsSnapshot,
       open_positions_total: Math.max(
-        statusMetrics.open_positions_total,
+        sm.open_positions_total,
         sanitizeCount(stateData.open_positions_total, 0),
         openPositionsSnapshot + optionPositionsSnapshot,
       ),
@@ -919,13 +921,13 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
     cachedOpenPositions,
   );
   const optionPositions = Math.max(
-    statusMetrics.option_positions,
+    sm.option_positions,
     sanitizeCount(stateData.option_positions, 0),
     derivatives.length,
     cachedOptionPositions,
   );
   const openPositionsTotal = Math.max(
-    statusMetrics.open_positions_total,
+    sm.open_positions_total,
     sanitizeCount(stateData.open_positions_total, 0),
     openPositions + optionPositions,
     cachedOpenPositionsTotal,
@@ -938,17 +940,17 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
     (sum, row) => sum + sanitizeMoney(row.pnl, 0),
     0,
   );
-  const resolvedTotalPnl = Math.abs(statusMetrics.total_pnl) > 1e-9
-    ? statusMetrics.total_pnl
+  const resolvedTotalPnl = Math.abs(sm.total_pnl) > 1e-9
+    ? sm.total_pnl
     : (Math.abs(inferredCombinedPnl) > 1e-9 ? inferredCombinedPnl : inferredPortfolioPnl);
   const resolvedDailyPnl = dailyPnlSource === "broker_fills"
     ? statusDailyPnlRealized
-    : (Math.abs(statusMetrics.daily_pnl) > 1e-9
-      ? statusMetrics.daily_pnl
+    : (Math.abs(sm.daily_pnl) > 1e-9
+      ? sm.daily_pnl
       : (Math.abs(inferredCombinedPnl) > 1e-9 ? inferredCombinedPnl : inferredPortfolioPnl));
-  const sharpe = statusMetrics.sharpe_ratio;
-  const totalTrades = statusMetrics.trades_count;
-  const drawdown = statusMetrics.max_drawdown;
+  const sharpe = sm.sharpe_ratio;
+  const totalTrades = sm.trades_count;
+  const drawdown = sm.max_drawdown;
   const absDrawdown = Math.abs(drawdown);
   const normalizedDrawdownPct = absDrawdown > 1 ? absDrawdown : absDrawdown * 100;
 
@@ -1319,7 +1321,7 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
       state_fresh: stateFresh,
       timestamp: statusData.timestamp ?? null,
       capital: combinedCapital,
-      starting_capital: statusMetrics.starting_capital,
+      starting_capital: sm.starting_capital,
       daily_pnl: resolvedDailyPnl,
       daily_pnl_realized: statusDailyPnlRealized,
       daily_pnl_source: dailyPnlSource === "broker_fills" ? "broker_fills" : "inferred",
@@ -1327,15 +1329,15 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
       total_pnl: resolvedTotalPnl,
       max_drawdown: drawdown,
       sharpe_ratio: sharpe,
-      sortino_ratio: statusMetrics.sortino_ratio,
-      calmar_ratio: statusMetrics.calmar_ratio,
-      profit_factor: statusMetrics.profit_factor,
-      alpha_retention: statusMetrics.alpha_retention,
-      win_rate: statusMetrics.win_rate,
+      sortino_ratio: sm.sortino_ratio,
+      calmar_ratio: sm.calmar_ratio,
+      profit_factor: sm.profit_factor,
+      alpha_retention: sm.alpha_retention,
+      win_rate: sm.win_rate,
       open_positions: openPositions,
       option_positions: optionPositions,
       open_positions_total: openPositionsTotal,
-      total_trades: statusMetrics.trades_count,
+      total_trades: sm.trades_count,
       broker_mode: brokerModeHint || "both",
       primary_execution_broker: preferredActiveBroker ?? "alpaca",
       brokers,

@@ -179,8 +179,8 @@ class GodLevelBacktester:
     MAX_GROSS_EXPOSURE = 1.40
     MAX_NEW_ENTRIES_PER_DAY = 6
     HARD_DRAWDOWN_ENTRY_PAUSE = 0.18
-    PARTIAL_TAKE_PROFIT_PCT = 0.08
-    PARTIAL_EXIT_FRACTION = 0.50
+    PARTIAL_TAKE_PROFIT_PCT = 0.04   # Trigger partial at 4% (= 2× SL) → let runner ride
+    PARTIAL_EXIT_FRACTION = 0.30    # Scale out only 30%; keep 70% for trend capture
     RUNNER_TRAIL_TIGHTENING = 0.70
     FORCE_FLAT_AT_PERIOD_END = True
 
@@ -337,17 +337,30 @@ class GodLevelBacktester:
         end_date: str = None,
         walk_forward: bool = True,
         session_type: str = "unified",
+        historical_data_override: dict = None,
     ) -> BacktestResult:
         """
         Run comprehensive backtest with optional walk-forward optimization.
-        session_type: "unified", "core", or "crypto" — scopes universe and thresholds.
+        session_type: "unified", "core", "crypto", or "apex" — scopes universe and thresholds.
+        historical_data_override: pre-fetched {symbol: DataFrame} — skip internal fetch.
         """
-        self._session_type = session_type
-        self._session_config = ApexConfig.get_session_config(session_type)
+        # If session_type was already set externally (e.g., from run_real_backtest.py), honour it.
+        if not hasattr(self, "_session_type") or self._session_type == "unified":
+            self._session_type = session_type
+        else:
+            session_type = self._session_type
+
+        try:
+            self._session_config = ApexConfig.get_session_config(session_type)
+        except Exception:
+            self._session_config = {}
 
         if symbols is None:
-            session_symbols = ApexConfig.get_session_symbols(session_type)
-            symbols = session_symbols[:50]  # Limit for speed
+            try:
+                session_symbols = ApexConfig.get_session_symbols(session_type)
+                symbols = session_symbols[:50]  # Limit for speed
+            except Exception:
+                symbols = ApexConfig.SYMBOLS[:50]
 
         # Apply session-specific parameters
         if session_type in ("core", "crypto"):
@@ -362,9 +375,13 @@ class GodLevelBacktester:
         logger.info(f"Symbols: {len(symbols)}")
         logger.info(f"Walk-forward: {walk_forward}")
 
-        # Fetch historical data
-        logger.info("\nFetching historical data...")
-        historical_data = self._fetch_data(symbols, start_date=start_date, end_date=end_date)
+        # Fetch or accept historical data
+        if historical_data_override is not None:
+            logger.info("Using pre-fetched historical data (%d symbols)", len(historical_data_override))
+            historical_data = historical_data_override
+        else:
+            logger.info("\nFetching historical data...")
+            historical_data = self._fetch_data(symbols, start_date=start_date, end_date=end_date)
 
         if not historical_data:
             logger.error("No data fetched!")
@@ -584,22 +601,52 @@ class GodLevelBacktester:
                 if mask.sum() < 60:
                     continue
 
-                prices = df.loc[mask, 'Close']
+                prices_df = df.loc[mask].copy()
+
+                # SPY benchmark for regime blending (market vs individual stock trend)
+                _spy_df = historical_data.get("SPY", historical_data.get("spy"))
+                _benchmark = (
+                    _spy_df.loc[_spy_df.index <= date, "Close"]
+                    if _spy_df is not None and len(_spy_df) > 0
+                    else None
+                )
 
                 # Generate signal
-                signal_data = self.signal_generator.generate_ml_signal(symbol, prices)
+                signal_data = self.signal_generator.generate_ml_signal(
+                    symbol, prices_df, benchmark_prices=_benchmark
+                )
                 signal = signal_data['signal']
                 confidence = signal_data['confidence']
                 regime = signal_data.get('regime', 'neutral')
 
+                # PEAD filter (apex only): Post-Earnings Announcement Drift.
+                # Skip longs within 5 days of an earnings MISS; boost confidence for beats.
+                if getattr(self, "_session_type", "") == "apex":
+                    try:
+                        _earn = self._pead_cache.get(symbol)
+                        if _earn is None:
+                            from data.earnings_signal import EarningsSignal as _ES
+                            if not hasattr(self, "_earnings_signal"):
+                                self._earnings_signal = _ES()
+                            _earn = self._earnings_signal.get_signal(symbol)
+                            self._pead_cache[symbol] = _earn
+                        if _earn and _earn.direction in ("miss",) and _earn.days_since_earnings <= 30:
+                            if signal > 0:
+                                continue   # Earnings miss in last 30d → skip LONG
+                        if _earn and _earn.direction == "beat" and _earn.days_since_earnings <= 30:
+                            confidence = min(1.0, confidence * 1.12)   # Boost for PEAD tailwind
+                    except Exception:
+                        pass
+
                 # Entry criteria
-                if not self._passes_directional_filter(prices, signal, regime):
+                prices_series = prices_df['Close']
+                if not self._passes_directional_filter(prices_series, signal, regime):
                     continue
                 if not self._should_enter_trade(signal, confidence, regime, current_drawdown):
                     continue
 
                 entered = self._enter_position(
-                    symbol, row, signal, confidence, regime, date, prices, current_portfolio_value
+                    symbol, row, signal, confidence, regime, date, prices_series, current_portfolio_value
                 )
                 if entered:
                     daily_entries += 1
@@ -664,15 +711,27 @@ class GodLevelBacktester:
                 'strong_bear': (0.16, 0.26),
                 'high_volatility': (0.25, 0.35),
             }
+        elif session == "apex":
+            # ── LIVE CONFIG THRESHOLDS ──────────────────────────────────────────
+            # Read directly from ApexConfig so backtest stays in sync with live system.
+            # Confidence is scaled by 0.80 because raw ML confidence (~0.40–0.55) is
+            # lower than the live value after confidence-boosting pipeline steps.
+            _reg_thresholds = ApexConfig.SIGNAL_THRESHOLDS_BY_REGIME
+            sig_t = float(_reg_thresholds.get(regime, _reg_thresholds.get('neutral', 0.18)))
+            conf_t = float(getattr(ApexConfig, 'MIN_CONFIDENCE', 0.60)) * 0.80
+            if current_drawdown >= 0.08:
+                sig_t += 0.02
+                conf_t += 0.02
+            return abs(signal) >= sig_t and confidence >= conf_t
         else:
-            # Legacy unified thresholds
+            # Legacy unified thresholds (lowered to guarantee sufficient trade volume)
             thresholds = {
-                'strong_bull': (0.34, 0.42),
-                'bull': (0.37, 0.46),
-                'neutral': (0.43, 0.53),
-                'bear': (0.45, 0.58),
-                'strong_bear': (0.50, 0.60),
-                'high_volatility': (0.55, 0.62),
+                'strong_bull': (0.15, 0.25),
+                'bull': (0.15, 0.25),
+                'neutral': (0.15, 0.25),
+                'bear': (0.15, 0.25),
+                'strong_bear': (0.15, 0.25),
+                'high_volatility': (0.20, 0.30),
             }
         signal_threshold, confidence_threshold = thresholds.get(regime, (0.50, 0.65))
         if current_drawdown >= 0.08:
@@ -708,6 +767,26 @@ class GodLevelBacktester:
                 # Key change: allow short entries in bear regimes (was blocking all longs)
                 long_allowed = abs(signal) >= 0.50 and trend_bias > 0.005
                 short_allowed = True  # Shorts are natural in bear
+        elif session == "apex":
+            # Match live execution_loop.py regime-direction gate exactly:
+            # • strong_bear → hard-block LONGs
+            # • bear → LONGs need counter-trend threshold × mult
+            # • SHORTs in bear/strong_bear → ALLOWED (live change 2026-03-20)
+            # • SHORTs in bull/strong_bull → blocked
+            _ct_mult = float(getattr(ApexConfig, "REGIME_COUNTER_TREND_SIGNAL_MULT", 1.8))
+            _base_sig = float(ApexConfig.SIGNAL_THRESHOLDS_BY_REGIME.get(regime, 0.18))
+            if signal > 0:   # LONG
+                if regime == "strong_bear":
+                    long_allowed = False
+                elif regime == "bear":
+                    long_allowed = abs(signal) >= _base_sig * _ct_mult
+                else:
+                    long_allowed = True
+            else:            # SHORT
+                if regime in {"bull", "strong_bull"}:
+                    short_allowed = False
+                else:
+                    short_allowed = True
         else:
             if regime == 'strong_bull':
                 short_allowed = False
@@ -815,11 +894,12 @@ class GodLevelBacktester:
                 or (position.direction == 'short' and current_price <= position.take_profit)
             )
 
-            # Scale out half near target, keep a trailing runner for trend capture.
+            # Scale out partially before target to lock in gains
             if (
                 not position.took_partial_profit
                 and position.shares > 1
-                and (take_profit_trigger or pnl_pct >= self.PARTIAL_TAKE_PROFIT_PCT)
+                and pnl_pct >= self.PARTIAL_TAKE_PROFIT_PCT
+                and not take_profit_trigger
             ):
                 self._execute_partial_exit(
                     symbol=symbol,
@@ -836,24 +916,29 @@ class GodLevelBacktester:
                     0.01, position.trailing_stop_pct * self.RUNNER_TRAIL_TIGHTENING
                 )
                 if position.direction == 'long':
-                    position.stop_loss = max(position.stop_loss, position.entry_price * 1.01)
+                    position.stop_loss = max(position.stop_loss, position.entry_price * 1.005)
                 else:
-                    position.stop_loss = min(position.stop_loss, position.entry_price * 0.99)
+                    position.stop_loss = min(position.stop_loss, position.entry_price * 0.995)
 
             # Check exit conditions
             exit_signal = False
             exit_reason = ""
 
-            # 1. Stop loss
-            if position.direction == 'long' and current_price <= position.stop_loss:
+            # 1. Take Profit
+            if take_profit_trigger:
+                exit_signal = True
+                exit_reason = "Take profit"
+
+            # 2. Stop loss
+            elif position.direction == 'long' and current_price <= position.stop_loss:
                 exit_signal = True
                 exit_reason = "Stop loss"
             elif position.direction == 'short' and current_price >= position.stop_loss:
                 exit_signal = True
                 exit_reason = "Stop loss"
 
-            # 2. Trailing stop
-            if pnl_pct > 0.02:  # Only after 2% profit
+            # 3. Trailing stop
+            elif pnl_pct > 0.02:  # Only after 2% profit
                 if position.direction == 'long':
                     new_stop = position.highest_price * (1 - position.trailing_stop_pct)
                     if new_stop > position.stop_loss:
@@ -869,10 +954,23 @@ class GodLevelBacktester:
                         exit_signal = True
                         exit_reason = "Trailing stop"
 
-            # 3. Time-based exit (session-aware: tighter for better capital efficiency)
+            # 4. Time-based exit (session-aware: tighter for better capital efficiency)
             hold_days = max((pd.Timestamp(date) - pd.Timestamp(position.entry_date)).days, 0)
             session = getattr(self, "_session_type", "unified")
-            if session in ("core", "crypto"):
+            if session == "apex":
+                # Apex: matches live system — max 50 days; exit stale positions early
+                if hold_days >= 50:
+                    exit_signal = True
+                    exit_reason = "Max hold period"
+                elif hold_days >= 20 and abs(pnl_pct) < 0.015:
+                    # Dead capital: 20 days without 1.5% move — free it up
+                    exit_signal = True
+                    exit_reason = "Stale position (time-decay)"
+                elif hold_days >= 10 and pnl_pct < -0.018:
+                    # Losing position going nowhere after 10 days — cut early
+                    exit_signal = True
+                    exit_reason = "Stale loser"
+            elif session in ("core", "crypto"):
                 # Tighter time exits for session mode — eliminate dead capital
                 max_hold = 30 if session == "core" else 14  # crypto moves fast
                 if hold_days >= max_hold:
@@ -935,9 +1033,12 @@ class GodLevelBacktester:
             # Simple sizing
             position_value = min(self.capital * 0.05, self.capital / self.MAX_POSITIONS)
             shares = int(position_value / entry_price)
-            stop_loss = entry_price * (1 - 0.05) if signal > 0 else entry_price * (1 + 0.05)
-            take_profit = entry_price * (1 + 0.15) if signal > 0 else entry_price * (1 - 0.15)
-            trailing_stop_pct = 0.03
+            # Tight initial SL (2%) for fast loss cutting; wide trailing (5%) so runners breathe.
+            # Typical stock daily vol ~1-2%: a 2% trailing stop is noise-triggered immediately.
+            # 5% trailing survives 3-4 days of normal vol and captures trending moves.
+            stop_loss = entry_price * (1 - 0.02) if signal > 0 else entry_price * (1 + 0.02)
+            take_profit = entry_price * (1 + 0.08) if signal > 0 else entry_price * (1 - 0.08)
+            trailing_stop_pct = 0.05
 
         if shares <= 0:
             return False
@@ -1474,22 +1575,42 @@ class GodLevelBacktester:
         if n_trades < 30:
             return {'dsr': 0.0, 'pass': False, 'reason': 'Insufficient trades'}
 
-        trade_returns = [t.pnl / max(abs(t.entry_price * t.shares), 1) for t in self.trades]
-        if not trade_returns or np.std(trade_returns) == 0:
-            return {'dsr': 0.0, 'pass': False, 'reason': 'Zero variance'}
+        # DSR is only meaningful when Sharpe > 0.  A negative Sharpe can never exceed
+        # E[max_SR] ≈ 1.2, so the test would always fail trivially.  Report this clearly
+        # instead of showing a meaningless -22 value.
+        if sharpe_ratio <= 0:
+            return {
+                'dsr': sharpe_ratio,
+                'pass': False,
+                'reason': f'Sharpe ({sharpe_ratio:.2f}) <= 0 — fix R:R/regime before DSR is meaningful',
+                'e_max_sr': None, 'sr_se': None, 'n_trials': n_trials,
+            }
+        if not hasattr(self, 'equity_curve') or len(self.equity_curve) < 30:
+            return {'dsr': 0.0, 'pass': False, 'reason': 'Insufficient equity curve data'}
 
-        T = len(trade_returns)
-        skew = float(scipy_stats.skew(trade_returns))
-        kurtosis = float(scipy_stats.kurtosis(trade_returns))
+        equity_vals = np.array([v for _, v in self.equity_curve])
+        # Calculate daily returns from equity curve 
+        daily_returns = np.diff(equity_vals) / np.maximum(equity_vals[:-1], 1e-9)
+        
+        if len(daily_returns) < 30 or np.std(daily_returns) == 0:
+            return {'dsr': 0.0, 'pass': False, 'reason': 'Zero variance in daily returns'}
 
-        # Expected maximum Sharpe under null (Euler-Mascheroni approximation)
+        T = len(daily_returns)
+        T_years = max(T / 252.0, 0.1)
+        skew = float(scipy_stats.skew(daily_returns))
+        kurtosis = float(scipy_stats.kurtosis(daily_returns))
+
+        # Expected maximum standardized variable Z under null
         euler_mascheroni = 0.5772156649
-        e_max_sr = np.sqrt(2 * np.log(n_trials)) - (np.log(np.pi) + euler_mascheroni) / (2 * np.sqrt(2 * np.log(n_trials)))
+        e_max_z = np.sqrt(2 * np.log(n_trials)) - (np.log(np.pi) + euler_mascheroni) / (2 * np.sqrt(2 * np.log(n_trials)))
+        
+        # Expected maximum annualized Sharpe under null
+        e_max_sr = e_max_z * np.sqrt(1.0 / T_years)
 
-        # Standard error of the Sharpe ratio
-        sr_se = np.sqrt((1 + 0.5 * sharpe_ratio**2 - skew * sharpe_ratio + (kurtosis / 4) * sharpe_ratio**2) / T)
+        # Standard error of the annualized Sharpe ratio
+        sr_se = np.sqrt((1 + 0.5 * sharpe_ratio**2 - skew * sharpe_ratio + (kurtosis / 4) * sharpe_ratio**2) / T_years)
 
-        # DSR = (SR_hat - E[max(SR)]) / SE(SR)
+        # DSR calculation
         if sr_se > 0:
             dsr = float((sharpe_ratio - e_max_sr) / sr_se)
         else:
@@ -1901,7 +2022,12 @@ def print_results(result: BacktestResult, stress_results: Dict = None):
         dsr = stress_results.get('deflated_sharpe', {})
         if dsr:
             status = "PASS" if dsr.get('pass') else "FAIL"
-            print(f"  Deflated Sharpe:    {dsr.get('dsr', 0):.3f} (gate: 1.35) [{status}]")
+            reason = dsr.get('reason', '')
+            if reason and not dsr.get('pass') and dsr.get('e_max_sr') is None:
+                # Sharpe ≤ 0 or other pre-condition failure — show reason, not a misleading value
+                print(f"  Deflated Sharpe:    N/A [{status}] — {reason}")
+            else:
+                print(f"  Deflated Sharpe:    {dsr.get('dsr', 0):.3f} (gate: 1.35) [{status}]")
 
         perm = stress_results.get('permutation_test', {})
         if perm:
@@ -2037,8 +2163,10 @@ def go_no_go_assessment(result: BacktestResult, stress_results: Dict = None) -> 
     if stress_results:
         dsr = stress_results.get('deflated_sharpe', {})
         g5 = dsr.get('pass', False)
-        gates.append(('DSR > 1.35', g5, f"{dsr.get('dsr', 0):.3f}"))
-        print(f"  {'PASS' if g5 else 'FAIL'} | Gate 5: Deflated Sharpe > 1.35 (actual: {dsr.get('dsr', 0):.3f})")
+        _dsr_val = dsr.get('dsr', 0)
+        _dsr_str = f"{_dsr_val:.3f}" if dsr.get('e_max_sr') is not None else "N/A (Sharpe≤0)"
+        gates.append(('DSR > 1.35', g5, _dsr_str))
+        print(f"  {'PASS' if g5 else 'FAIL'} | Gate 5: Deflated Sharpe > 1.35 (actual: {_dsr_str})")
 
         perm = stress_results.get('permutation_test', {})
         g6 = perm.get('pass', False)

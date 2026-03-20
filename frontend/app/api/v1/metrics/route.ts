@@ -70,7 +70,7 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
       capital: combinedCapital,
       starting_capital: sanitized.starting_capital,
       daily_pnl: sanitized.daily_pnl,
-      daily_pnl_realized: sanitizeMoney(data.daily_pnl_realized, sanitized.daily_pnl),
+      daily_pnl_realized: sanitizeMoney(data.daily_pnl_realized, Number(sanitized.daily_pnl ?? 0)),
       daily_pnl_source: String(data.daily_pnl_source || "inferred"),
       total_pnl: sanitized.total_pnl,
       max_drawdown: sanitized.max_drawdown,

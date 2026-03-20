@@ -20,6 +20,13 @@ from execution.ibkr_lease_manager import lease_manager
 
 logger = logging.getLogger(__name__)
 
+# Process-wide semaphore: at most 2 concurrent IBKR TCP connections.
+# TWS paper has a hard ~32 connection limit; allowing unlimited concurrent
+# connect() calls during error/retry storms saturates the pool and causes
+# a self-reinforcing failure cascade.  2 slots = ample headroom while
+# keeping TWS healthy.
+_ibkr_connect_semaphore = asyncio.Semaphore(2)
+
 
 @dataclass
 class BrokerEquitySnapshot:
@@ -485,17 +492,18 @@ class BrokerService:
                     ttl=30,
                 )
                 try:
-                    return await asyncio.wait_for(
-                        asyncio.to_thread(
-                            self._fetch_ibkr_positions_blocking,
-                            source_name=connection.name,
-                            source_id=connection.id,
-                            client_id=allocated_id,
-                            credentials=credentials,
-                            as_of=as_of,
-                        ),
-                        timeout=self._POSITIONS_FETCH_TIMEOUT_SECONDS,
-                    )
+                    async with _ibkr_connect_semaphore:
+                        return await asyncio.wait_for(
+                            asyncio.to_thread(
+                                self._fetch_ibkr_positions_blocking,
+                                source_name=connection.name,
+                                source_id=connection.id,
+                                client_id=allocated_id,
+                                credentials=credentials,
+                                as_of=as_of,
+                            ),
+                            timeout=self._POSITIONS_FETCH_TIMEOUT_SECONDS,
+                        )
                 except Exception as exc:
                     error = exc if isinstance(exc, ApexBrokerError) else self._classify_ibkr_error(
                         host=str(credentials.get("host", "127.0.0.1")),
@@ -702,8 +710,10 @@ class BrokerService:
                 fatal_message=fatal_error.get("message"),
             ) from exc
         finally:
-            if ib.isConnected():
+            try:
                 ib.disconnect()
+            except Exception:
+                pass
             if owned_loop is not None:
                 asyncio.set_event_loop(None)
                 owned_loop.close()
@@ -862,14 +872,15 @@ class BrokerService:
                     ttl=30,
                 )
                 try:
-                    equity = await asyncio.wait_for(
-                        asyncio.to_thread(
-                            self._fetch_ibkr_equity_blocking,
-                            credentials,
-                            allocated_id,
-                        ),
-                        timeout=self._EQUITY_FETCH_TIMEOUT_SECONDS,
-                    )
+                    async with _ibkr_connect_semaphore:
+                        equity = await asyncio.wait_for(
+                            asyncio.to_thread(
+                                self._fetch_ibkr_equity_blocking,
+                                credentials,
+                                allocated_id,
+                            ),
+                            timeout=self._EQUITY_FETCH_TIMEOUT_SECONDS,
+                        )
                     return BrokerEquitySnapshot(
                         value=float(equity),
                         broker="ibkr",
@@ -971,8 +982,10 @@ class BrokerService:
                 fatal_message=fatal_error.get("message"),
             ) from exc
         finally:
-            if ib.isConnected():
+            try:
                 ib.disconnect()
+            except Exception:
+                pass
             if owned_loop is not None:
                 asyncio.set_event_loop(None)
                 owned_loop.close()

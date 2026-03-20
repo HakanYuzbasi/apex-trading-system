@@ -30,7 +30,7 @@ DEFAULTS: Dict = {
 PROBATION_MIN_TRADES   = 5      # Below this: apply light probation regardless
 PROBATION_WIN_RATE_LO  = 0.30   # Win rate < 30% → strong probation
 PROBATION_WIN_RATE_MID = 0.45   # Win rate 30-45% → light probation
-PROBATION_THRESH_NONE_DATA = 0.40  # No history → default light threshold
+PROBATION_THRESH_NONE_DATA = 0.10  # No history → below model output floor (signals max ~0.272); let normal gates handle
 PROBATION_THRESH_STRONG    = 0.45  # Win rate < 30%
 PROBATION_THRESH_LIGHT     = 0.35  # Win rate 30-45%
 
@@ -40,7 +40,7 @@ ATR_FLOOR_PCT      = 0.30   # Min exit threshold (never tighter than -0.30%)
 ATR_CEIL_PCT       = 2.50   # Max exit threshold (never looser than -2.50%)
 SLIPPAGE_BAN_BPS   = 80     # Blacklist symbol if avg slippage > this
 SLIPPAGE_WATCH_BPS = 40     # Watchlist symbol if avg slippage > this
-MIN_TRADES_FOR_CALIBRATION = 5    # Minimum live_entry trades needed (startup_restore excluded)
+MIN_TRADES_FOR_CALIBRATION = 20   # Minimum live_entry trades (raised from 5 — need statistical validity)
 VALIDATION_SPLIT   = 0.80   # 80% train, 20% validation (chronological)
 # Revert if val net_pnl/trade degrades by more than this vs training set
 VALIDATION_DEGRADE_THRESHOLD = 0.30  # 30% degradation triggers revert

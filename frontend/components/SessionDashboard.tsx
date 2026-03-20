@@ -38,7 +38,7 @@ function MetricTile({
   label: string;
   value: string;
   subValue?: string;
-  icon: React.ElementType;
+  icon: React.ComponentType<{ className?: string }>;
   tone?: "positive" | "negative" | "neutral";
 }) {
   const color =

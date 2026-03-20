@@ -32,7 +32,7 @@ class RiskManager:
     to maintain backward compatibility with the existing trading engine.
     """
 
-    def __init__(self, max_daily_loss: float = 0.02, max_drawdown: float = 0.10, user_id: str = "default"):
+    def __init__(self, max_daily_loss: float = 0.02, max_drawdown: float = 0.10, user_id: str = "default", session_type: str = "unified"):
         """
         Initialize risk manager.
 
@@ -40,18 +40,20 @@ class RiskManager:
             max_daily_loss: Max daily loss as fraction of capital (e.g., 0.02 = 2%)
             max_drawdown: Max drawdown from peak as fraction (e.g., 0.10 = 10%)
             user_id: The tenant ID this manager represents by default.
+            session_type: Session type ('unified', 'core', 'crypto') for state file namespacing.
         """
         self.default_user_id = user_id
+        self.default_session_type = session_type
         self.default_max_daily_loss = max_daily_loss
         self.default_max_drawdown = max_drawdown
-        
+
         # Session storage: user_id -> RiskSession
         self.sessions: Dict[str, RiskSession] = {}
-        
+
         # Initialize default session
         self._get_or_create_session(self.default_user_id)
 
-        logger.info(f"🛡️  Risk Manager initialized (Multi-Session Mode, default={self.default_user_id})")
+        logger.info(f"🛡️  Risk Manager initialized (Multi-Session Mode, default={self.default_user_id}, session_type={session_type})")
 
     def _get_or_create_session(self, user_id: str) -> RiskSession:
         """Get existing session or create a new one."""
@@ -59,7 +61,8 @@ class RiskManager:
             session = RiskSession(
                 user_id=user_id,
                 max_daily_loss=self.default_max_daily_loss,
-                max_drawdown=self.default_max_drawdown
+                max_drawdown=self.default_max_drawdown,
+                session_type=self.default_session_type,
             )
             self.sessions[user_id] = session
             logger.info(f"🛡️  Created risk session for user: {user_id}")

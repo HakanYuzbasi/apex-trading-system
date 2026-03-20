@@ -2,20 +2,20 @@
   {
     "asset_class": "GLOBAL",
     "regime": "default",
-    "version": "mandate-mwf-62f0b3",
+    "version": "mandate-mwf-26491f",
     "oos_sharpe": 1.452,
     "oos_drawdown": 0.0,
     "historical_mdd": 0.12,
     "sharpe_floor_63d": 0.2,
     "status": "active",
-    "created_at": "2026-02-28T21:50:14.823721",
+    "created_at": "2026-03-17T20:50:57.153027",
     "metadata": {
       "source": "mandate_workflow_pack",
-      "workflow_id": "mwf-62f0b3860cfc",
-      "request_id": "mdt-3d0c7a76088d",
+      "workflow_id": "mwf-26491f395f00",
+      "request_id": "mdt-b2763f31d749",
       "tenant_id": "admin-1",
       "activated_by": "admin-1",
-      "activated_at": "2026-02-28T21:50:14.823727+00:00",
+      "activated_at": "2026-03-17T20:50:57.153033+00:00",
       "policy_constraints": []
     },
     "tier_controls": {

@@ -6,7 +6,7 @@ With market regime detection, multi-timeframe analysis, and adaptive confidence 
 
 import numpy as np
 import pandas as pd
-from typing import Dict, List, Tuple
+from typing import Dict, List, Tuple, Union
 from datetime import datetime
 from enum import Enum
 import logging
@@ -133,16 +133,25 @@ class GodLevelSignalGenerator:
                 verbose=-1
             )
 
-    def extract_features(self, prices: pd.Series, volume: pd.Series = None) -> np.ndarray:
+    def extract_features(self, prices: Union[pd.Series, pd.DataFrame], volume: pd.Series = None) -> np.ndarray:
         """
         Extract comprehensive feature set.
         50+ features across multiple categories.
         """
-        if len(prices) < self.lookback:
+        # Handle DataFrame vs Series
+        if isinstance(prices, pd.DataFrame):
+            df = prices
+            close_prices = prices['Close']
+        else:
+            df = None
+            close_prices = prices
+
+        if len(close_prices) < self.lookback:
             return np.array([])
 
         features = []
-        returns = prices.pct_change().dropna()
+        returns = close_prices.pct_change().dropna()
+        prices = close_prices  # Standardize for legacy feature math
 
         # === 1. PRICE MOMENTUM FEATURES (10 features) ===
         for period in [5, 10, 20, 40, 60]:
@@ -256,6 +265,50 @@ class GodLevelSignalGenerator:
                           if prices.iloc[-252:].max() != prices.iloc[-252:].min() else 0.5)
         else:
             features.append(0.5)
+
+        # === 11. ADVANCED VOLATILITY AND MICRO-PULLBACK FEATURES (4 features) ===
+        if df is not None and all(c in df.columns for c in ['Open', 'High', 'Low', 'Close', 'Volume']):
+            # 1. Synthetic Order Flow Rank
+            range_hl = np.where(df['High'] == df['Low'], 1e-8, df['High'] - df['Low'])
+            close_loc = (df['Close'] - df['Low']) / range_hl
+            raw_flow = (close_loc - 0.5) * df['Volume']
+            flow_ema = raw_flow.ewm(span=5).mean()
+            if len(flow_ema) >= 100:
+                features.append(float(pd.Series(flow_ema).rolling(100).apply(lambda x: pd.Series(x).rank(pct=True).iloc[-1]).iloc[-1]))
+            else:
+                features.append(0.5)
+                
+            # 2. Parkinson Volatility Ratio Z-Score
+            hl_log_sq = (np.log(df['High'] / df['Low'])) ** 2
+            parkinson_vol = np.sqrt(hl_log_sq.rolling(20).mean() * (1.0 / (4.0 * np.log(2.0))))
+            close_vol = df['Close'].pct_change().rolling(20).std()
+            pv_ratio = parkinson_vol / (close_vol + 1e-8)
+            if len(pv_ratio) >= 60:
+                pv_z = ((pv_ratio - pv_ratio.rolling(60).mean()) / pv_ratio.rolling(60).std()).iloc[-1]
+                features.append(float(np.clip(pv_z, -3, 3)))
+            else:
+                features.append(0.0)
+                
+            # 3. Gap vs Grind Divergence (Overnight vs Intraday Return Correlation)
+            overnight_ret = (df['Open'] / df['Close'].shift(1)) - 1
+            intraday_ret = (df['Close'] / df['Open']) - 1
+            if len(overnight_ret) >= 10:
+                gap_corr = overnight_ret.rolling(10).corr(intraday_ret).iloc[-1]
+                features.append(0.0 if pd.isna(gap_corr) else float(gap_corr))
+            else:
+                features.append(0.0)
+                
+            # 4. Dynamic Micro-Pullback Z-Score (ATR scaled)
+            baseline = df['Close'].ewm(span=5).mean()
+            tr = np.maximum(
+                df['High'] - df['Low'],
+                np.maximum(abs(df['High'] - df['Close'].shift(1)), abs(df['Low'] - df['Close'].shift(1)))
+            )
+            atr = pd.Series(tr).rolling(14).mean()
+            pullback = (df['Close'] - baseline) / (atr + 1e-8)
+            features.append(float(np.clip(pullback.iloc[-1], -3, 3)) if len(pullback) > 0 else 0.0)
+        else:
+            features.extend([0.5, 0.0, 0.0, 0.0])
 
         return np.array(features)
 
@@ -513,36 +566,63 @@ class GodLevelSignalGenerator:
 
     def detect_market_regime(self, prices: pd.Series, benchmark_prices: pd.Series = None) -> MarketRegime:
         """
-        Detect current market regime.
+        Detect current market regime using 50d/200d golden-cross logic.
+
+        Uses longer-term MAs (50d vs 200d) for stable regime classification that
+        correctly captures bear markets. Falls back to 20d/50d when data is short.
+        When SPY benchmark is provided, blends market + individual stock trend so
+        individual stocks in a bull market don't override a bear-market SPY signal.
         """
         if len(prices) < 60:
             return MarketRegime.NEUTRAL
 
-        # Calculate key metrics
         returns = prices.pct_change().dropna()
+        vol_20 = returns.iloc[-20:].std() * np.sqrt(252)
 
-        # Trend: 20-day vs 50-day MA
-        ma_20 = prices.rolling(20).mean().iloc[-1]
-        ma_50 = prices.rolling(50).mean().iloc[-1]
-        trend = (ma_20 - ma_50) / ma_50 if ma_50 > 0 else 0
-
-        # Volatility
-        vol_20 = returns.iloc[-20:].std() * np.sqrt(252)  # Annualized
-
-        # Momentum
-        momentum = prices.iloc[-1] / prices.iloc[-20] - 1
-
-        # Classify regime
-        # Note: 50% threshold for individual stocks (35% was too low - typical stock vol is 25-45%)
-        if vol_20 > 0.50:  # High volatility (>50% annualized for individual stocks)
+        # High volatility check (precedes trend — e.g. crash days)
+        if vol_20 > 0.50:
             return MarketRegime.HIGH_VOLATILITY
-        elif trend > 0.05 and momentum > 0.05:
+
+        # Trend: prefer 50d vs 200d (golden/death cross) for multi-month perspective.
+        # Falls back to 20d/50d when insufficient history.
+        if len(prices) >= 200:
+            ma_fast = float(prices.rolling(50).mean().iloc[-1])
+            ma_slow = float(prices.rolling(200).mean().iloc[-1])
+            momentum_window = 60  # 3-month momentum
+        else:
+            ma_fast = float(prices.rolling(20).mean().iloc[-1])
+            ma_slow = float(prices.rolling(50).mean().iloc[-1])
+            momentum_window = 20
+
+        stock_trend = (ma_fast - ma_slow) / ma_slow if ma_slow > 0 else 0.0
+        look = min(momentum_window, len(prices) - 1)
+        momentum = float(prices.iloc[-1] / prices.iloc[-look] - 1) if look > 0 else 0.0
+
+        # When SPY benchmark is available, let market trend dominate (60/40 blend).
+        # This prevents individual stocks from masking a broad bear market.
+        if benchmark_prices is not None and len(benchmark_prices) >= 200:
+            try:
+                b_fast = float(benchmark_prices.rolling(50).mean().iloc[-1])
+                b_slow = float(benchmark_prices.rolling(200).mean().iloc[-1])
+                spx_trend = (b_fast - b_slow) / b_slow if b_slow > 0 else 0.0
+                b_look = min(60, len(benchmark_prices) - 1)
+                spx_mom = float(benchmark_prices.iloc[-1] / benchmark_prices.iloc[-b_look] - 1)
+                # 60% market-level, 40% individual — market regime is the dominant signal
+                trend = 0.40 * stock_trend + 0.60 * spx_trend
+                momentum = 0.40 * momentum + 0.60 * spx_mom
+            except Exception:
+                trend = stock_trend
+        else:
+            trend = stock_trend
+
+        # Classify using golden/death cross thresholds
+        if trend > 0.15 and momentum > 0.08:
             return MarketRegime.STRONG_BULL
-        elif trend > 0.02 and momentum > 0:
+        elif trend > 0.03 and momentum > 0:
             return MarketRegime.BULL
-        elif trend < -0.05 and momentum < -0.05:
+        elif trend < -0.15 and momentum < -0.08:
             return MarketRegime.STRONG_BEAR
-        elif trend < -0.02 and momentum < 0:
+        elif trend < -0.03 and momentum < 0:
             return MarketRegime.BEAR
         else:
             return MarketRegime.NEUTRAL
@@ -566,7 +646,7 @@ class GodLevelSignalGenerator:
 
             # Create training samples
             for i in range(self.lookback, len(prices) - 5):
-                features = self.extract_features(prices.iloc[:i])
+                features = self.extract_features(data.iloc[:i])
                 if len(features) == 0:
                     continue
 
@@ -678,9 +758,15 @@ class GodLevelSignalGenerator:
         if count > 0:
             self.feature_importance = importance_sum / count
 
-    def generate_ml_signal(self, symbol: str, prices: pd.Series) -> Dict:
+    def generate_ml_signal(self, symbol: str, prices: Union[pd.Series, pd.DataFrame],
+                           benchmark_prices: pd.Series = None) -> Dict:
         """
         Generate god-level ML signal with ensemble prediction and adaptive confidence.
+
+        Args:
+            symbol: Ticker symbol (for logging).
+            prices: Close price series OR OHLCV dataframe for the symbol.
+            benchmark_prices: Optional SPY/index close series for regime blending.
         """
         if len(prices) < self.lookback:
             return self._empty_signal()
@@ -693,18 +779,21 @@ class GodLevelSignalGenerator:
         # Handle NaN/Inf
         features = np.nan_to_num(features, nan=0, posinf=0, neginf=0)
 
-        # Detect market regime
-        regime = self.detect_market_regime(prices)
+        # Standardize strictly to Close price Series for legacy logic
+        close_prices = prices['Close'] if isinstance(prices, pd.DataFrame) else prices
+
+        # Detect market regime (pass SPY for market-level blending when available)
+        regime = self.detect_market_regime(close_prices, benchmark_prices=benchmark_prices)
 
         # Component signals
         components = {}
 
         # 1. Technical Analysis Signals
-        components['momentum'] = self._momentum_signal(prices)
-        components['mean_reversion'] = self._mean_reversion_signal(prices)
-        components['trend'] = self._trend_signal(prices)
-        components['volatility'] = self._volatility_signal(prices)
-        components['breakout'] = self._breakout_signal(prices)
+        components['momentum'] = self._momentum_signal(close_prices)
+        components['mean_reversion'] = self._mean_reversion_signal(close_prices)
+        components['trend'] = self._trend_signal(close_prices)
+        components['volatility'] = self._volatility_signal(close_prices)
+        components['breakout'] = self._breakout_signal(close_prices)
 
         # 2. ML Model Predictions
         ml_predictions = []
@@ -785,32 +874,34 @@ class GodLevelSignalGenerator:
         }
 
     def _get_regime_weights(self, regime: MarketRegime) -> Dict[str, float]:
-        """Get component weights based on market regime."""
+        """Get component weights based on market regime and ICIR analysis."""
+        # Baseline optimized weights: Invert the highly negative ICIR signals!
         base_weights = {
-            'momentum': 0.05,
+            'momentum': -0.40,
             'mean_reversion': 0.20,
-            'trend': 0.05,
+            'trend': -0.40,
             'volatility': 0.05,
             'breakout': 0.05,
-            'ml_rf': 0.20,
-            'ml_gb': 0.20,
-            'ml_xgb': 0.10,
-            'ml_lgb': 0.10
+            'ml_rf': 0.30,
+            'ml_gb': 0.30,
+            'ml_xgb': 0.00,
+            'ml_lgb': 0.00
         }
 
+        # Normalize weights so they sum to ~1.0 absolute value
         # Adjust weights based on regime
         if regime == MarketRegime.STRONG_BULL:
-            base_weights['momentum'] = 0.25
-            base_weights['trend'] = 0.25
-            base_weights['mean_reversion'] = 0.05
+            base_weights['momentum'] = -0.50
+            base_weights['trend'] = -0.50
+            base_weights['mean_reversion'] = 0.20
+            base_weights['ml_rf'] = 0.30
+            base_weights['ml_gb'] = 0.30
         elif regime == MarketRegime.STRONG_BEAR:
-            base_weights['momentum'] = 0.02
-            base_weights['trend'] = 0.02
-            base_weights['mean_reversion'] = 0.28
-            base_weights['breakout'] = 0.02
-            base_weights['volatility'] = 0.02
-            base_weights['ml_rf'] = 0.24
-            base_weights['ml_gb'] = 0.24
+            base_weights['momentum'] = -0.50
+            base_weights['trend'] = -0.50
+            base_weights['mean_reversion'] = 0.20
+            base_weights['ml_rf'] = 0.30
+            base_weights['ml_gb'] = 0.30
             base_weights['ml_xgb'] = 0.08
             base_weights['ml_lgb'] = 0.08
         elif regime == MarketRegime.NEUTRAL:

@@ -66,7 +66,9 @@ class PreTradeRiskGateway:
         if not self.config.enabled:
             return PreTradeDecision(True, "disabled", "Pre-trade gateway disabled")
 
-        qty = int(abs(quantity))
+        # Use float to support fractional crypto shares (e.g. 0.1218 BTC).
+        # int() would truncate fractional positions to 0 → incorrectly blocked.
+        qty = float(abs(quantity))
         px = float(price)
         eval_price = px if px > 0 else float(reference_price or 0.0)
 

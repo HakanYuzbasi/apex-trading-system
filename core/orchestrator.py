@@ -98,13 +98,19 @@ class ExecutionManager:
                 
                 # 2. Check for missing tenants (Spawn)
                 for tenant_id in active_tenant_ids:
-                    if tenant_id not in self.tenants:
+                    # In dual mode tenants dict uses "admin_core"/"admin_crypto" keys,
+                    # not plain "admin".  Check whether ANY session for this tenant exists.
+                    tenant_has_session = any(
+                        k == tenant_id or k.startswith(f"{tenant_id}_")
+                        for k in self.tenants
+                    )
+                    if not tenant_has_session:
                         # Check exponential backoff
                         if tenant_id in self._crash_backoff:
                             _, next_allowed = self._crash_backoff[tenant_id]
                             if now < next_allowed:
                                 continue  # Still in backoff penalty box
-                                
+
                         self._spawn_tenant_loop(tenant_id)
                         
                 # 3. Check for stale tenants (Kill)
@@ -170,6 +176,10 @@ class ExecutionManager:
     def _spawn_session(self, tenant_id: str, session_type: str):
         """Spawn a single execution session for a tenant."""
         session_key = f"{tenant_id}_{session_type}" if session_type != "unified" else tenant_id
+        # Guard: never overwrite a session that is still running
+        if session_key in self.tenants and not self.tenants[session_key].task.done():
+            logger.debug(f"🪐 Session {session_key} already running — skip duplicate spawn")
+            return
         logger.info(f"🪐 Spawning {session_type} execution loop for tenant {tenant_id}...")
         try:
             system = ApexTradingSystem(

@@ -38,6 +38,7 @@ import PositionsTable from "@/components/dashboard/PositionsTable";
 import ExplainableAIChart from "@/components/dashboard/ExplainableAIChart";
 import MandateCopilotPanel from "@/components/dashboard/MandateCopilotPanel";
 import SocialGovernorPanel from "@/components/dashboard/SocialGovernorPanel";
+import SignalHeatmap from "@/components/SignalHeatmap";
 import { Skeleton } from "@/components/ui/skeleton";
 import { useWebSocket } from "@/hooks/useWebSocket";
 import {
@@ -126,14 +127,18 @@ function positionRowKey(position: CockpitPosition): string {
     || "state";
   const sideRaw = String(position.side ?? (position.qty < 0 ? "SHORT" : "LONG")).trim().toUpperCase();
   const side = sideRaw === "SHORT" ? "SHORT" : "LONG";
-  const qty = Number.isFinite(Number(position.qty)) ? Math.trunc(Number(position.qty)) : 0;
+  // Preserve fractional qty for crypto in the hash key (Math.trunc(0.1234) = 0 → wrong dedup key)
+  const rawQtyNum = Number.isFinite(Number(position.qty)) ? Number(position.qty) : 0;
+  const qtyForHash = String(symbol).includes("/") || String(symbol).toUpperCase().startsWith("CRYPTO:")
+    ? rawQtyNum.toFixed(6)
+    : String(Math.trunc(rawQtyNum));
   const securityType = String((position as unknown as Record<string, unknown>).security_type ?? "").trim().toUpperCase();
   const expiry = String((position as unknown as Record<string, unknown>).expiry ?? "").trim().toUpperCase();
   const strike = Number.isFinite(Number((position as unknown as Record<string, unknown>).strike))
     ? Number((position as unknown as Record<string, unknown>).strike).toFixed(4)
     : "0.0000";
   const right = String((position as unknown as Record<string, unknown>).right ?? "").trim().toUpperCase();
-  return `${symbol}|${source}|${side}|${securityType}|${expiry}|${strike}|${right}|${qty}`;
+  return `${symbol}|${source}|${side}|${securityType}|${expiry}|${strike}|${right}|${qtyForHash}`;
 }
 
 
@@ -331,17 +336,17 @@ export default function Dashboard({ isPublic = false }: { isPublic?: boolean }) 
   }, []);
 
   const showLoading = (metricsLoading || cockpitLoading) && !mergedMetrics;
-  const apiReachable = wsConnected || (cockpit?.status.api_reachable ?? (!cockpitError || !metricsError));
-  const stateFresh = wsConnected || (cockpit?.status.state_fresh ?? Boolean(mergedMetrics?.status));
+  const apiReachable = wsConnected || (cockpit?.status?.api_reachable ?? (!cockpitError || !metricsError));
+  const stateFresh = wsConnected || (cockpit?.status?.state_fresh ?? Boolean(mergedMetrics?.status));
   const isDisconnected = !showLoading && !apiReachable;
   const isStale = apiReachable && !stateFresh;
   const mergedMetricRecord = (mergedMetrics ?? {}) as Record<string, unknown>;
-  const mergedOpenPositions = sanitizeCount(wsData?.open_positions ?? cockpit?.status.open_positions ?? cockpit?.positions?.length, 0);
+  const mergedOpenPositions = sanitizeCount(wsData?.open_positions ?? cockpit?.status?.open_positions ?? cockpit?.positions?.length, 0);
 
   // Clean, non-duplicate calculation for options
   const _finalRawDerivs = cockpit?.derivatives || [];
   const _finalUniqueKeys = new Set(_finalRawDerivs.map((l: any) => `${l.symbol}_${String(l.expiry).replace(/-/g, "")}_${Number(l.strike).toFixed(2)}_${l.right}`));
-  const mergedOptionPositions = _finalUniqueKeys.size > 0 ? _finalUniqueKeys.size : sanitizeCount(wsData?.option_positions ?? cockpit?.status.option_positions, 0);
+  const mergedOptionPositions = _finalUniqueKeys.size > 0 ? _finalUniqueKeys.size : sanitizeCount(wsData?.option_positions ?? cockpit?.status?.option_positions, 0);
 
   const mergedOpenPositionsTotal = mergedOpenPositions + mergedOptionPositions;
 
@@ -352,12 +357,16 @@ export default function Dashboard({ isPublic = false }: { isPublic?: boolean }) 
         open_positions: mergedOpenPositions,
         option_positions: mergedOptionPositions,
         open_positions_total: mergedOpenPositionsTotal,
-      }),
+      }) as Record<string, number>,
     [mergedMetrics, mergedOpenPositions, mergedOptionPositions, mergedOpenPositionsTotal],
   );
   const wsAggregatedEquity = sanitizeMoney(wsData?.aggregated_equity ?? wsData?.total_equity, Number.NaN);
   const capital = aggregatedEquity !== null ? aggregatedEquity : (Number.isFinite(wsAggregatedEquity) ? wsAggregatedEquity : sanitizedMetrics.capital);
   const dailyPnl = sanitizedMetrics.daily_pnl;
+  const dailyPnlByBroker = (cockpit?.status as any)?.daily_pnl_by_broker ?? { ibkr: 0, alpaca: 0 };
+  const ibkrDailyPnl = sanitizeMoney(dailyPnlByBroker?.ibkr, 0);
+  const alpacaDailyPnl = sanitizeMoney(dailyPnlByBroker?.alpaca, 0);
+  // ibkrUnrealizedPnl and alpacaUnrealizedPnl computed from live positions via useMemo below
   const totalPnl = sanitizedMetrics.total_pnl;
   const sharpe = sanitizedMetrics.sharpe_ratio;
   const sortino = sanitizedMetrics.sortino_ratio ?? 0;
@@ -395,7 +404,10 @@ export default function Dashboard({ isPublic = false }: { isPublic?: boolean }) 
     if (!wsData?.positions) return null;
     return Object.entries(wsData.positions).map(([symbol, raw]) => {
       const data = (raw && typeof raw === "object") ? (raw as Record<string, unknown>) : {};
-      const qty = Math.trunc(sanitizeMoney(data.qty, 0));
+      const rawQty = sanitizeMoney(data.qty, 0);
+      // Use trunc for equities (whole shares), but preserve fractional qty for crypto (e.g. 0.1234 BTC)
+      const isCrypto = String(symbol).includes("/") || String(symbol).toUpperCase().startsWith("CRYPTO:");
+      const qty = isCrypto ? rawQty : Math.trunc(rawQty);
       if (qty === 0) return null;
       const symbolUpper = String(symbol).trim().toUpperCase();
       const side = qty < 0 ? "SHORT" : "LONG";
@@ -454,8 +466,21 @@ export default function Dashboard({ isPublic = false }: { isPublic?: boolean }) 
     return positionsSnapshot;
   }, [positionsCandidate, confirmedFlatPositions, positionsSnapshot]);
 
+  const { ibkrUnrealizedPnl, alpacaUnrealizedPnl } = useMemo(() => {
+    let ibkr = 0, alpaca = 0;
+    for (const p of positions) {
+      const isCrypto = p.symbol.startsWith("CRYPTO:") || p.broker_type === "alpaca" || (p.source_id ?? "").toLowerCase().includes("alpaca");
+      if (isCrypto) {
+        alpaca += p.pnl;
+      } else {
+        ibkr += p.pnl;
+      }
+    }
+    return { ibkrUnrealizedPnl: ibkr, alpacaUnrealizedPnl: alpaca };
+  }, [positions]);
+
   const cockpitDerivatives = useMemo(() => cockpit?.derivatives ?? [], [cockpit?.derivatives]);
-  const optionPositionsFromStatus = sanitizeCount(cockpit?.status.option_positions, sanitizedMetrics.option_positions);
+  const optionPositionsFromStatus = sanitizeCount(cockpit?.status?.option_positions, sanitizedMetrics.option_positions);
   const confirmedFlatDerivatives = !positionsFeedDegraded
     && optionPositionsFromStatus === 0
     && cockpitDerivatives.length === 0;
@@ -526,9 +551,10 @@ export default function Dashboard({ isPublic = false }: { isPublic?: boolean }) 
     return sleevesSnapshot;
   }, [cockpitSleeves, confirmedFlatSleeves, sleevesSnapshot]);
 
-  const usp = cockpit?.usp;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const usp = cockpit?.usp as any;
   const brokerRuntime = useMemo(() => {
-    const rows = cockpit?.status?.brokers ?? [];
+    const rows = (Array.isArray(cockpit?.status?.brokers) ? cockpit!.status!.brokers : []) as any[];
     const byType = new Map(rows.map((row) => [row.broker, row]));
 
     const checkStatus = (b: any) => {
@@ -587,7 +613,7 @@ export default function Dashboard({ isPublic = false }: { isPublic?: boolean }) 
   const optionPositions = optionPositionsFromStatus;
   const totalLines = openPositions + optionPositions;
 
-  const cockpitStarting = cockpit?.status?.starting_capital ?? 0;
+  const cockpitStarting = Number(cockpit?.status?.starting_capital ?? 0);
   const startingCapital = sanitizedMetrics.starting_capital > 100
     ? sanitizedMetrics.starting_capital
     : (cockpitStarting > 100 ? cockpitStarting : Math.max(1, capital - totalPnl));
@@ -632,8 +658,20 @@ export default function Dashboard({ isPublic = false }: { isPublic?: boolean }) 
           {
             label: "Daily PnL",
             value: formatCurrency(dailyPnl),
-            hint: "Intraday marked performance",
+            hint: "Combined intraday performance",
             tone: dailyPnl >= 0 ? "positive" : "negative",
+          },
+          {
+            label: "IBKR PnL",
+            value: formatCurrency(ibkrDailyPnl),
+            hint: "Equities & FX (Interactive Brokers)",
+            tone: ibkrDailyPnl >= 0 ? "positive" : "negative",
+          },
+          {
+            label: "Crypto PnL",
+            value: formatCurrency(alpacaDailyPnl),
+            hint: "Crypto positions (Alpaca)",
+            tone: alpacaDailyPnl >= 0 ? "positive" : "negative",
           },
           {
             label: "Net PnL",
@@ -789,7 +827,7 @@ export default function Dashboard({ isPublic = false }: { isPublic?: boolean }) 
         ],
       },
     };
-  }, [capital, dailyPnl, drawdownPct, openPositions, pnlPerTrade, returnPct, sharpe, totalPnl, tradesCount, avgPositionSize, winRate]);
+  }, [capital, dailyPnl, ibkrDailyPnl, alpacaDailyPnl, drawdownPct, openPositions, pnlPerTrade, returnPct, sharpe, totalPnl, tradesCount, avgPositionSize, winRate]);
 
   const handleLogout = () => {
     logout();
@@ -1078,7 +1116,23 @@ export default function Dashboard({ isPublic = false }: { isPublic?: boolean }) 
             <p className={`apex-kpi-value mt-2 text-lg font-semibold ${dailyPnl >= 0 ? "text-positive" : "text-negative"}`}>
               {showLoading ? <Skeleton className="h-5 w-20" /> : formatCompactCurrency(dailyPnl)}
             </p>
-            <p className="mt-1 text-xs text-muted-foreground">Session contribution</p>
+            <div className="mt-1.5 flex items-center gap-3 text-[11px]">
+              <span className={`font-medium ${ibkrDailyPnl >= 0 ? "text-positive" : "text-negative"}`}
+                title={`IBKR unrealized: ${formatCompactCurrency(ibkrUnrealizedPnl)}`}>
+                IBKR {formatCompactCurrency(ibkrDailyPnl)}
+                {ibkrUnrealizedPnl !== 0 && (
+                  <span className="ml-1 opacity-60 text-[10px]">({formatCompactCurrency(ibkrUnrealizedPnl)} unrlzd)</span>
+                )}
+              </span>
+              <span className="text-border">|</span>
+              <span className={`font-medium ${alpacaDailyPnl >= 0 ? "text-positive" : "text-negative"}`}
+                title={`Crypto unrealized: ${formatCompactCurrency(alpacaUnrealizedPnl)}`}>
+                Crypto {formatCompactCurrency(alpacaDailyPnl)}
+                {alpacaUnrealizedPnl !== 0 && (
+                  <span className="ml-1 opacity-60 text-[10px]">({formatCompactCurrency(alpacaUnrealizedPnl)} unrlzd)</span>
+                )}
+              </span>
+            </div>
           </button>
 
           <button type="button" className="apex-panel apex-interactive rounded-2xl p-4 text-left" onClick={() => setActiveLens("performance")}>
@@ -1237,6 +1291,18 @@ export default function Dashboard({ isPublic = false }: { isPublic?: boolean }) 
                 </dd>
               </div>
               <div className="flex items-center justify-between rounded-lg border border-border/70 bg-background/60 px-3 py-2">
+                <dt className="text-muted-foreground">Unrealized IBKR</dt>
+                <dd className={`apex-kpi-value font-medium ${ibkrUnrealizedPnl >= 0 ? "text-positive" : "text-negative"}`}>
+                  {showLoading ? <Skeleton className="h-4 w-16" /> : formatCompactCurrency(ibkrUnrealizedPnl)}
+                </dd>
+              </div>
+              <div className="flex items-center justify-between rounded-lg border border-border/70 bg-background/60 px-3 py-2">
+                <dt className="text-muted-foreground">Unrealized Crypto</dt>
+                <dd className={`apex-kpi-value font-medium ${alpacaUnrealizedPnl >= 0 ? "text-positive" : "text-negative"}`}>
+                  {showLoading ? <Skeleton className="h-4 w-16" /> : formatCompactCurrency(alpacaUnrealizedPnl)}
+                </dd>
+              </div>
+              <div className="flex items-center justify-between rounded-lg border border-border/70 bg-background/60 px-3 py-2">
                 <dt className="text-muted-foreground">Book utilization</dt>
                 <dd className="apex-kpi-value font-medium text-foreground">{showLoading ? <Skeleton className="h-4 w-14" /> : formatPct(openPositions / MAX_POSITIONS)}</dd>
               </div>
@@ -1283,7 +1349,7 @@ export default function Dashboard({ isPublic = false }: { isPublic?: boolean }) 
         {activeTab === "mandate" ? (
           <MandateCopilotPanel onSessionExpired={handleSessionExpired} />
         ) : activeTab === "social" ? (
-          <SocialGovernorPanel socialAudit={cockpit?.social_audit} />
+          <SocialGovernorPanel socialAudit={cockpit?.social_audit as any} />
         ) : null}
 
 
@@ -1473,6 +1539,9 @@ export default function Dashboard({ isPublic = false }: { isPublic?: boolean }) 
                 </div>
               </PositionsTable>
             </section>
+
+            {/* ── Signal Heatmap ── */}
+            <SignalHeatmap positions={(wsData?.positions ?? null) as Record<string, unknown> | null} />
           </>
         ) : null}
       </div>

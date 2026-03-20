@@ -497,7 +497,15 @@ class AlpacaConnector:
                 await self._client.aclose()
                 self._client = None
                 
-            self._client = httpx.AsyncClient()
+            self._client = httpx.AsyncClient(
+                limits=httpx.Limits(max_keepalive_connections=20, max_connections=50),
+                timeout=httpx.Timeout(
+                    connect=10.0,   # TCP + TLS handshake
+                    read=getattr(ApexConfig, "ALPACA_HTTP_TIMEOUT_SECONDS", 20.0),
+                    write=10.0,
+                    pool=30.0,      # max wait for a connection from pool
+                ),
+            )
             account = await self._request("GET", "/v2/account")
 
             if not account or "id" not in account:
@@ -878,11 +886,14 @@ class AlpacaConnector:
             if side == "BUY":
                 try:
                     account = await self._request("GET", "/v2/account")
-                    # Alpaca crypto purchases cap at the minimum of cash available or non-marginable bp
+                    # Crypto purchases are cash-funded only (no margin). Use cash balance
+                    # directly. non_marginable_buying_power is unreliable in Alpaca paper
+                    # trading (often reports ~$10 for crypto-heavy accounts regardless of
+                    # actual cash balance).
                     cash_cap = float(account.get("cash", 0) or 0)
-                    non_margin = float(account.get("non_marginable_buying_power", 0) or 0)
                     bp = float(account.get("buying_power", 0) or 0)
-                    raw_avail = min(cash_cap, non_margin, bp) if min(cash_cap, non_margin, bp) > 0 else 0
+                    # buying_power = 2×cash for margin accounts; cap at cash to avoid over-spend
+                    raw_avail = min(cash_cap, bp / 2.0) if min(cash_cap, bp / 2.0) > 0 else cash_cap if cash_cap > 0 else 0
                     
                     # Prevent concurrent overspend: track outgoing nominally over the last 10 seconds
                     now_ts = time.time()
@@ -1266,8 +1277,8 @@ class AlpacaConnector:
         return normalized in self._pending_orders
 
     def get_open_orders(self) -> list:
-        """Get list of open order IDs."""
-        return list(self._pending_orders.values())
+        """Get list of symbols with open (pending) orders."""
+        return list(self._pending_orders.keys())
 
     async def cancel_all_orders(self) -> None:
         """Cancel all open orders."""
