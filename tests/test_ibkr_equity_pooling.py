@@ -12,6 +12,11 @@ from models.broker import BrokerConnection, BrokerType
 from services.broker.service import BrokerService
 
 
+async def _async_val(v):
+    """Return v as a coroutine (used to stub async methods in monkeypatch)."""
+    return v
+
+
 def _ibkr_connection() -> BrokerConnection:
     return BrokerConnection(
         id="ibkr-1",
@@ -34,6 +39,9 @@ async def test_ibkr_equity_happy_path(monkeypatch: pytest.MonkeyPatch) -> None:
 
     monkeypatch.setattr(service, "_decrypt_credentials", lambda _: {"host": "127.0.0.1", "port": 7497, "client_id": 12})
     monkeypatch.setattr(service, "_fetch_ibkr_equity_blocking", lambda creds, client_id: 250000.5)
+    # Bypass lease_manager to avoid stale Redis connections from previous test event loops
+    monkeypatch.setattr("services.broker.service.lease_manager.allocate", lambda preferred_id=None, ttl=None: _async_val(12))
+    monkeypatch.setattr("services.broker.service.lease_manager.release", lambda client_id: _async_val(None))
 
     snapshot = await service._fetch_equity_with_fallback(connection)
 
@@ -49,6 +57,8 @@ async def test_ibkr_equity_failure_uses_stale_cache(monkeypatch: pytest.MonkeyPa
 
     monkeypatch.setattr(service, "_decrypt_credentials", lambda _: {"host": "127.0.0.1", "port": 7497, "client_id": 12})
     monkeypatch.setattr(service, "_fetch_ibkr_equity_blocking", lambda creds, client_id: 111.25)
+    monkeypatch.setattr("services.broker.service.lease_manager.allocate", lambda preferred_id=None, ttl=None: _async_val(12))
+    monkeypatch.setattr("services.broker.service.lease_manager.release", lambda client_id: _async_val(None))
     first = await service._fetch_equity_with_fallback(connection)
     assert first.stale is False
 
@@ -69,6 +79,8 @@ async def test_ibkr_equity_failure_without_cache_raises(monkeypatch: pytest.Monk
     connection = _ibkr_connection()
 
     monkeypatch.setattr(service, "_decrypt_credentials", lambda _: {"host": "127.0.0.1", "port": 7497, "client_id": 12})
+    monkeypatch.setattr("services.broker.service.lease_manager.allocate", lambda preferred_id=None, ttl=None: _async_val(12))
+    monkeypatch.setattr("services.broker.service.lease_manager.release", lambda client_id: _async_val(None))
 
     def raise_fetch(creds, client_id):
         raise RuntimeError("ibkr unavailable")

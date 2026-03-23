@@ -149,6 +149,14 @@ class ApexConfig:
     PRICE_FALLBACK_WHEN_MARKET_CLOSED: bool = os.getenv("APEX_PRICE_FALLBACK_WHEN_MARKET_CLOSED", "true").lower() == "true"
     # ✅ NEW (Paper-safe): Toggle Data Watchdog (disable when running offline)
     DATA_WATCHDOG_ENABLED: bool = os.getenv("APEX_DATA_WATCHDOG_ENABLED", "true").lower() == "true"
+    # Offline-session escape hatch: synthesize historical bars from cached prices
+    # when external data providers are unavailable.
+    MARKET_DATA_ALLOW_SYNTHETIC_HISTORY: bool = (
+        os.getenv("APEX_MARKET_DATA_ALLOW_SYNTHETIC_HISTORY", "false").lower() == "true"
+    )
+    MARKET_DATA_SYNTHETIC_BASE_PRICE: float = float(
+        os.getenv("APEX_MARKET_DATA_SYNTHETIC_BASE_PRICE", "100.0")
+    )
 
     # ═══════════════════════════════════════════════════════════════
     # ALPACA CONNECTION (Crypto Paper Trading)
@@ -213,8 +221,8 @@ class ApexConfig:
             # RENDER, ONDO, PAXG: observed in Alpaca discovery despite not being whitelisted.
             "CRYPTO:GRT/USD,CRYPTO:PEPE/USD,CRYPTO:POL/USD,GRT/USD,PEPE/USD,POL/USD,"
             "CRYPTO:CRV/USD,CRV/USD,CRYPTO:FIL/USD,FIL/USD,"
-            "CRYPTO:BCH/USD,BCH/USD,CRYPTO:XLM/USD,XLM/USD,"
-            "CRYPTO:ETC/USD,ETC/USD,CRYPTO:AAVE/USD,AAVE/USD,"
+            "CRYPTO:BCH/USD,BCH/USD,CRYPTO:AVAX/USD,AVAX/USD,"
+            "CRYPTO:DOGE/USD,DOGE/USD,CRYPTO:AAVE/USD,AAVE/USD,"
             "CRYPTO:DOT/USD,DOT/USD,CRYPTO:LTC/USD,LTC/USD,"
             "CRYPTO:RENDER/USD,RENDER/USD,CRYPTO:ONDO/USD,ONDO/USD,"
             "CRYPTO:PAXG/USD,PAXG/USD"
@@ -283,6 +291,48 @@ class ApexConfig:
     PAPER_STARTUP_PERFORMANCE_REBASE_RATIO: float = float(
         os.getenv("APEX_PAPER_STARTUP_PERFORMANCE_REBASE_RATIO", "0.30")
     )
+    MODEL_MANIFEST_VERIFICATION_ENABLED: bool = os.getenv(
+        "APEX_MODEL_MANIFEST_VERIFICATION_ENABLED", "true"
+    ).lower() == "true"
+    MODEL_MANIFEST_PATH: str = os.getenv(
+        "APEX_MODEL_MANIFEST_PATH", "models/model_manifest.json"
+    )
+    MODEL_MANIFEST_FAIL_CLOSED: bool = os.getenv(
+        "APEX_MODEL_MANIFEST_FAIL_CLOSED", "true"
+    ).lower() == "true"
+    MODEL_MANIFEST_MAX_AGE_DAYS: int = int(
+        os.getenv("APEX_MODEL_MANIFEST_MAX_AGE_DAYS", "0")
+    )
+    STARTUP_TRUST_AUDIT_ENABLED: bool = os.getenv(
+        "APEX_STARTUP_TRUST_AUDIT_ENABLED", "true"
+    ).lower() == "true"
+    SHADOW_DEPLOYMENT_ENABLED: bool = os.getenv(
+        "APEX_SHADOW_DEPLOYMENT_ENABLED", "true"
+    ).lower() == "true"
+    SHADOW_DEPLOYMENT_EVALUATION_INTERVAL_CYCLES: int = int(
+        os.getenv("APEX_SHADOW_DEPLOYMENT_EVALUATION_INTERVAL_CYCLES", "20")
+    )
+    SHADOW_DEPLOYMENT_MIN_DAYS: float = float(
+        os.getenv("APEX_SHADOW_DEPLOYMENT_MIN_DAYS", "1.0")
+    )
+    SHADOW_DEPLOYMENT_MIN_SIGNALS: int = int(
+        os.getenv("APEX_SHADOW_DEPLOYMENT_MIN_SIGNALS", "25")
+    )
+    SHADOW_DEPLOYMENT_MIN_DECISION_AGREEMENT_RATE: float = float(
+        os.getenv("APEX_SHADOW_DEPLOYMENT_MIN_DECISION_AGREEMENT_RATE", "0.60")
+    )
+    SHADOW_DEPLOYMENT_MIN_OFFLINE_SHARPE_DELTA: float = float(
+        os.getenv("APEX_SHADOW_DEPLOYMENT_MIN_OFFLINE_SHARPE_DELTA", "0.10")
+    )
+    SHADOW_DEPLOYMENT_MAX_DRAWDOWN_INCREASE: float = float(
+        os.getenv("APEX_SHADOW_DEPLOYMENT_MAX_DRAWDOWN_INCREASE", "0.02")
+    )
+    SHADOW_DEPLOYMENT_MAX_EXCESS_BLOCK_RATE: float = float(
+        os.getenv("APEX_SHADOW_DEPLOYMENT_MAX_EXCESS_BLOCK_RATE", "0.35")
+    )
+    SHADOW_DEPLOYMENT_AUTO_PROMOTE_NON_PROD: bool = os.getenv(
+        "APEX_SHADOW_DEPLOYMENT_AUTO_PROMOTE_NON_PROD", "true"
+    ).lower() == "true"
     UNIFIED_LATCH_RESET_REBASE_RISK_BASELINES: bool = os.getenv(
         "APEX_UNIFIED_LATCH_RESET_REBASE_RISK_BASELINES", "true"
     ).lower() == "true"
@@ -312,6 +362,58 @@ class ApexConfig:
     MAX_SECTOR_EXPOSURE = 1.0  # Relaxed to 100% for initial trades as requested
     SECTOR_CONCENTRATION_ENABLED: bool = os.getenv("APEX_SECTOR_CONCENTRATION_ENABLED", "true").lower() == "true"
     SECTOR_CONCENTRATION_MAX_PCT: float = float(os.getenv("APEX_SECTOR_CONCENTRATION_MAX_PCT", "0.25"))
+
+    # Phase 14: Delta / Market-Neutral Hedger
+    DELTA_HEDGE_ENABLED: bool = os.getenv("APEX_DELTA_HEDGE_ENABLED", "true").lower() == "true"
+    MIN_HEDGE_DOLLAR_IMBALANCE: float = float(os.getenv("APEX_MIN_HEDGE_DOLLAR_IMBALANCE", "5000"))
+    DELTA_HEDGE_REBALANCE_CYCLES: int = int(os.getenv("APEX_DELTA_HEDGE_REBALANCE_CYCLES", "20"))
+    DELTA_HEDGE_MAX_SPY_NOTIONAL: float = float(os.getenv("APEX_DELTA_HEDGE_MAX_SPY_NOTIONAL", "200000"))
+    DELTA_HEDGE_SYMBOL: str = os.getenv("APEX_DELTA_HEDGE_SYMBOL", "SPY")
+
+    # Options Flow Smart Money Gate
+    OPTIONS_FLOW_GATE_ENABLED: bool = os.getenv("APEX_OPTIONS_FLOW_GATE_ENABLED", "true").lower() == "true"
+    OPTIONS_FLOW_CONTRA_THRESHOLD: float = float(os.getenv("APEX_OPTIONS_FLOW_CONTRA_THRESHOLD", "0.40"))
+    OPTIONS_FLOW_BLOCK_MIN_CONF: float = float(os.getenv("APEX_OPTIONS_FLOW_BLOCK_MIN_CONF", "0.75"))
+    OPTIONS_FLOW_CONF_PENALTY: float = float(os.getenv("APEX_OPTIONS_FLOW_CONF_PENALTY", "0.93"))
+
+    # Capital Allocator
+    ALLOC_LOOKBACK_DAYS: int = int(os.getenv("APEX_ALLOC_LOOKBACK_DAYS", "20"))
+
+    # Multi-Timeframe Signal Fusion
+    MTF_FUSION_ENABLED: bool = os.getenv("APEX_MTF_FUSION_ENABLED", "true").lower() == "true"
+
+    # Earnings Event Gate
+    EARNINGS_GATE_ENABLED: bool = os.getenv("APEX_EARNINGS_GATE_ENABLED", "true").lower() == "true"
+
+    # HRP Correlation Sizer
+    HRP_SIZING_ENABLED: bool = os.getenv("APEX_HRP_SIZING_ENABLED", "true").lower() == "true"
+
+    # Adaptive ATR stop manager — regime + VIX + profit-ratchet stop updates
+    ADAPTIVE_ATR_STOPS_ENABLED: bool = os.getenv("APEX_ADAPTIVE_ATR_STOPS_ENABLED", "true").lower() == "true"
+    ADAPTIVE_ATR_UPDATE_INTERVAL: int = int(os.getenv("APEX_ADAPTIVE_ATR_UPDATE_INTERVAL", "5"))
+
+    # Model drift monitor — IC/hit-rate/confidence decay → auto-retrain trigger
+    MODEL_DRIFT_MONITOR_ENABLED: bool = os.getenv("APEX_MODEL_DRIFT_MONITOR_ENABLED", "true").lower() == "true"
+    MODEL_DRIFT_WINDOW_SIZE: int = int(os.getenv("APEX_MODEL_DRIFT_WINDOW_SIZE", "30"))
+    MODEL_DRIFT_IC_RETRAIN_THRESHOLD: float = float(os.getenv("APEX_MODEL_DRIFT_IC_RETRAIN_THRESHOLD", "0.01"))
+    MODEL_DRIFT_RETRAIN_COOLDOWN_HOURS: float = float(os.getenv("APEX_MODEL_DRIFT_RETRAIN_COOLDOWN_HOURS", "24"))
+
+    # Alpha decay calibrator — signal IC by hold-time horizon
+    ALPHA_DECAY_CALIBRATOR_ENABLED: bool = os.getenv("APEX_ALPHA_DECAY_ENABLED", "true").lower() == "true"
+
+    # Intraday mean-reversion signal (VWAP + RSI extreme)
+    INTRADAY_MR_ENABLED: bool = os.getenv("APEX_INTRADAY_MR_ENABLED", "true").lower() == "true"
+    INTRADAY_MR_BLEND_WEIGHT: float = float(os.getenv("APEX_INTRADAY_MR_BLEND_WEIGHT", "0.12"))
+
+    # Live Regime Transition Alerter — structured severity-escalation alerts
+    REGIME_ALERT_ENABLED: bool = os.getenv("APEX_REGIME_ALERT_ENABLED", "true").lower() == "true"
+    REGIME_ALERT_COOLDOWN_SECONDS: float = float(os.getenv("APEX_REGIME_ALERT_COOLDOWN_SECONDS", "900"))
+
+    # Execution Timing Optimizer — slippage-bps tracking per (hour, dow, regime)
+    EXECUTION_TIMING_ENABLED: bool = os.getenv("APEX_EXECUTION_TIMING_ENABLED", "true").lower() == "true"
+    EXECUTION_TIMING_MIN_OBS: int = int(os.getenv("APEX_EXECUTION_TIMING_MIN_OBS", "5"))
+    EXECUTION_TIMING_SCORE_FLOOR: float = float(os.getenv("APEX_EXECUTION_TIMING_SCORE_FLOOR", "0.55"))
+    EXECUTION_TIMING_CONF_PENALTY: float = float(os.getenv("APEX_EXECUTION_TIMING_CONF_PENALTY", "0.10"))
 
     # Factor hedger — portfolio beta / factor exposure monitor
     FACTOR_HEDGER_ENABLED: bool = os.getenv("APEX_FACTOR_HEDGER_ENABLED", "true").lower() == "true"
@@ -486,6 +588,55 @@ class ApexConfig:
     )
     PRETRADE_MAX_GROSS_EXPOSURE_RATIO: float = float(
         os.getenv("APEX_PRETRADE_MAX_GROSS_EXPOSURE_RATIO", "2.0")
+    )
+
+    # Intraday portfolio stress control loop
+    INTRADAY_STRESS_ENGINE_ENABLED: bool = os.getenv(
+        "APEX_INTRADAY_STRESS_ENGINE_ENABLED", "true"
+    ).lower() == "true"
+    INTRADAY_STRESS_INTERVAL_CYCLES: int = int(
+        os.getenv("APEX_INTRADAY_STRESS_INTERVAL_CYCLES", "15")
+    )
+    INTRADAY_STRESS_SCENARIOS: list[str] = [
+        item.strip()
+        for item in os.getenv(
+            "APEX_INTRADAY_STRESS_SCENARIOS",
+            "2020_covid_crash,vix_spike,correlation_breakdown,rate_shock",
+        ).split(",")
+        if item.strip()
+    ]
+    INTRADAY_STRESS_WARNING_RETURN_THRESHOLD: float = float(
+        os.getenv("APEX_INTRADAY_STRESS_WARNING_RETURN_THRESHOLD", "-0.04")
+    )
+    INTRADAY_STRESS_HALT_RETURN_THRESHOLD: float = float(
+        os.getenv("APEX_INTRADAY_STRESS_HALT_RETURN_THRESHOLD", "-0.08")
+    )
+    INTRADAY_STRESS_WARNING_DRAWDOWN_THRESHOLD: float = float(
+        os.getenv("APEX_INTRADAY_STRESS_WARNING_DRAWDOWN_THRESHOLD", "0.06")
+    )
+    INTRADAY_STRESS_HALT_DRAWDOWN_THRESHOLD: float = float(
+        os.getenv("APEX_INTRADAY_STRESS_HALT_DRAWDOWN_THRESHOLD", "0.10")
+    )
+    INTRADAY_STRESS_WARNING_SIZE_MULTIPLIER: float = float(
+        os.getenv("APEX_INTRADAY_STRESS_WARNING_SIZE_MULTIPLIER", "0.60")
+    )
+    INTRADAY_STRESS_HALT_SIZE_MULTIPLIER: float = float(
+        os.getenv("APEX_INTRADAY_STRESS_HALT_SIZE_MULTIPLIER", "0.25")
+    )
+    STRESS_UNWIND_ENABLED: bool = os.getenv(
+        "APEX_STRESS_UNWIND_ENABLED", "true"
+    ).lower() == "true"
+    STRESS_UNWIND_MAX_POSITIONS_PER_CYCLE: int = int(
+        os.getenv("APEX_STRESS_UNWIND_MAX_POSITIONS_PER_CYCLE", "2")
+    )
+    STRESS_UNWIND_MAX_PARTICIPATION_RATE: float = float(
+        os.getenv("APEX_STRESS_UNWIND_MAX_PARTICIPATION_RATE", "0.05")
+    )
+    STRESS_UNWIND_MIN_REDUCTION_PCT: float = float(
+        os.getenv("APEX_STRESS_UNWIND_MIN_REDUCTION_PCT", "0.10")
+    )
+    STRESS_UNWIND_FALLBACK_REDUCTION_PCT: float = float(
+        os.getenv("APEX_STRESS_UNWIND_FALLBACK_REDUCTION_PCT", "0.25")
     )
 
     # Trading-loop Prometheus metrics exporter
@@ -719,6 +870,11 @@ class ApexConfig:
     # Portfolio heat gate: block new entries when total unrealised portfolio loss > threshold.
     PORTFOLIO_HEAT_GATE_ENABLED: bool = os.getenv("APEX_PORTFOLIO_HEAT_GATE", "true").lower() != "false"
     PORTFOLIO_HEAT_MAX_LOSS_PCT: float = float(os.getenv("APEX_PORTFOLIO_HEAT_MAX_LOSS_PCT", "0.03"))
+
+    # Option B: GodLevel signal blend — merges options flow, RL weights, VADER news,
+    # and on-chain crypto whale data into the primary institutional signal at WEIGHT %.
+    GOD_LEVEL_BLEND_ENABLED: bool = os.getenv("APEX_GOD_LEVEL_BLEND", "true").lower() != "false"
+    GOD_LEVEL_BLEND_WEIGHT: float = float(os.getenv("APEX_GOD_LEVEL_BLEND_WEIGHT", "0.12"))
 
     # Live Kelly position sizing: scale position size based on rolling win/loss stats.
     LIVE_KELLY_SIZING_ENABLED: bool = os.getenv("APEX_LIVE_KELLY_SIZING", "true").lower() != "false"
@@ -1355,6 +1511,13 @@ class ApexConfig:
     CRYPTO_TWAP_INTERVAL_SEC: float = float(os.getenv("APEX_CRYPTO_TWAP_INTERVAL_SEC", "30.0"))
     CRYPTO_TWAP_ABANDON_PCT: float = float(os.getenv("APEX_CRYPTO_TWAP_ABANDON_PCT", "0.005"))
 
+    # ── Equity TWAP ───────────────────────────────────────────────────────────
+    EQUITY_TWAP_ENABLED: bool = os.getenv("APEX_EQUITY_TWAP_ENABLED", "true").lower() == "true"
+    EQUITY_TWAP_MIN_NOTIONAL: float = float(os.getenv("APEX_EQUITY_TWAP_MIN_NOTIONAL", "10000.0"))
+    EQUITY_TWAP_SLICES: int = int(os.getenv("APEX_EQUITY_TWAP_SLICES", "5"))
+    EQUITY_TWAP_INTERVAL_SEC: float = float(os.getenv("APEX_EQUITY_TWAP_INTERVAL_SEC", "60.0"))
+    EQUITY_TWAP_ADVERSE_BPS: float = float(os.getenv("APEX_EQUITY_TWAP_ADVERSE_BPS", "50.0"))
+
     # ── Order Flow Imbalance ──────────────────────────────────────────────────
     ORDER_FLOW_GATE_ENABLED: bool = os.getenv("APEX_ORDER_FLOW_GATE_ENABLED", "true").lower() == "true"
     ORDER_FLOW_SIGNAL_WEIGHT: float = float(os.getenv("APEX_ORDER_FLOW_SIGNAL_WEIGHT", "0.08"))
@@ -1497,15 +1660,13 @@ class ApexConfig:
         "ETH/USD",
         "SOL/USD",
         "LINK/USD",
-        # "DOGE/USD",   # ❌ Chronic slippage 19-26bps > 15bps edge threshold
-        # "AVAX/USD",   # ❌ Chronic slippage 22-35bps > 15bps edge threshold
+        "DOGE/USD",   #  Re-enabled
+        "AVAX/USD",   #  Re-enabled
         # "ADA/USD",    # ❌ Chronic slippage 17-28bps > 15bps edge threshold
         # "XRP/USD",    # ❌ Chronic slippage 12-25bps > 15bps edge threshold
         # "DOT/USD",    # ❌ Slippage too high
         # "LTC/USD",    # ❌ Slippage too high
         # "BCH/USD",    # ❌ Removed: illiquid
-        # "XLM/USD",    # ❌ Removed: illiquid
-        # "ETC/USD",    # ❌ Removed: illiquid
         # "AAVE/USD",   # ❌ Removed: illiquid
         # "UNI/USD",    # ❌ Delisted from yfinance
         # "MATIC/USD",  # ❌ Delisted from yfinance

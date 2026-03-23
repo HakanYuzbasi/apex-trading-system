@@ -89,11 +89,19 @@ class AdvancedOrderExecutor:
         
         for attempt in range(max_retries):
             try:
-                success = await self.broker_dispatch.submit_order(symbol, side, qty, limit_price, venue=venue)
-                if success:
+                # Route through BrokerDispatch which wraps Alpaca/IBKR natively
+                _broker = "ibkr" if "CRYPTO" not in symbol else "alpaca"
+                result = await self.broker_dispatch.place_order(
+                    broker=_broker,
+                    symbol=symbol,
+                    side=side,
+                    quantity=qty,
+                    limit_price=limit_price
+                )
+                if result and result.success:
                     return True
-            except Exception:
-                pass # Unfilled or rejected
+            except Exception as e:
+                logger.debug(f"Iceberg child execution attempt '{attempt}' failed: {e}")
             
             # Dynamic Queue Positioning Logic
             seconds_unfilled = int(time.time() - start_time)

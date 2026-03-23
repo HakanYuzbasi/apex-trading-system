@@ -81,7 +81,7 @@ def is_market_open(
         assume_daily: If True, ignores time of day (useful for daily execution checks)
     """
     # Global overrides
-    if getattr(ApexConfig, "MARKET_ALWAYS_OPEN", False):
+    if getattr(ApexConfig, "MARKET_ALWAYS_OPEN", False) or getattr(ApexConfig, "MARKET_DATA_ALLOW_SYNTHETIC_HISTORY", False):
         return True
 
     parsed = raw_or_parsed if isinstance(raw_or_parsed, ParsedSymbol) else parse_symbol(raw_or_parsed)

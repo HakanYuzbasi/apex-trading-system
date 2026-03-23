@@ -795,6 +795,42 @@ class GodLevelSignalGenerator:
         components['volatility'] = self._volatility_signal(close_prices)
         components['breakout'] = self._breakout_signal(close_prices)
 
+        # ADDED: US Senate Trades component (Congressional insider activity)
+        try:
+            from data.social.senate_trades import get_senate_sentiment
+            components['senate_sentiment'] = get_senate_sentiment(symbol)
+        except Exception as e:
+            logger.debug(f"Failed to fetch senate sentiment for {symbol}: {e}")
+            components['senate_sentiment'] = 0.0
+
+        # ADDED: Institutional Options Flow & Crypto On-Chain Whales
+        try:
+            if "CRYPTO:" in str(symbol).upper():
+                from data.crypto.on_chain_flow import get_on_chain_sentiment
+                components['smart_money_flow'] = get_on_chain_sentiment() # Map whale metrics to the generic 'smart_money' RL weight
+            else:
+                from data.social.options_flow import get_smart_money_sentiment
+                components['smart_money_flow'] = get_smart_money_sentiment(symbol)
+        except Exception as e:
+            logger.debug(f"Failed to fetch smart money flow for {symbol}: {e}")
+            components['smart_money_flow'] = 0.0
+
+        # ADDED: Real-Time NLP News Scoring Engine (VADER Sentiment)
+        try:
+            from data.social.news_sentiment_llm import get_news_sentiment
+            components['news_sentiment'] = get_news_sentiment(symbol)
+        except Exception as e:
+            logger.debug(f"Failed to fetch news sentiment for {symbol}: {e}")
+            components['news_sentiment'] = 0.0
+
+        # ADDED: Post-Earnings Announcement Drift (PEAD) catalyst signal
+        try:
+            from data.earnings_catalyst import get_earnings_signal
+            components['earnings_catalyst'] = get_earnings_signal(symbol)
+        except Exception as e:
+            logger.debug(f"Failed to fetch earnings catalyst for {symbol}: {e}")
+            components['earnings_catalyst'] = 0.0
+
         # 2. ML Model Predictions
         ml_predictions = []
         if self.models_trained and ML_LIBS['sklearn']:
@@ -815,6 +851,11 @@ class GodLevelSignalGenerator:
 
         # 3. Regime-adjusted weights
         weights = self._get_regime_weights(regime)
+        
+        # Track RL Governor's chosen action to evaluate later
+        rl_action = int(weights.pop('__action__', -1))
+        if rl_action != -1:
+            components['__rl_action__'] = float(rl_action)
 
         # 4. Calculate ensemble signal
         signal = 0.0
@@ -822,7 +863,7 @@ class GodLevelSignalGenerator:
         for component, value in components.items():
             weight = weights.get(component, 0.1)
             signal += value * weight
-            total_weight += weight
+            total_weight += abs(weight)  # Normalization denominator must use absolute weights
 
         if total_weight > 0:
             signal = signal / total_weight
@@ -853,6 +894,39 @@ class GodLevelSignalGenerator:
         # 5. Calculate adaptive confidence
         confidence = self._calculate_adaptive_confidence(components, ml_predictions, regime)
 
+        # 6. Deep Microstructure (LOB) Penalty [Phase 10]
+        # Protect the institutional matrix from catastrophic slippage mathematically
+        try:
+            from models.microstructure import MicrostructureFeatures
+            micro = MicrostructureFeatures()
+            
+            # Roll's Effective Spread (Transaction Cost Proxy)
+            eff_spread = micro.roll_effective_spread(close_prices)
+            components['micro_spread'] = float(eff_spread)
+            
+            last_price = close_prices.iloc[-1]
+            if last_price > 0 and (eff_spread / last_price) > 0.01:
+                # Spread is wider than 1% of the asset price — incredibly illiquid
+                signal *= 0.5
+                confidence *= 0.5
+            
+            # Amihud Illiquidity (Price Impact Proxy)
+            if isinstance(prices, pd.DataFrame) and 'Volume' in prices.columns:
+                returns = close_prices.pct_change()
+                amihud = micro.amihud_illiquidity(returns, prices['Volume'], close_prices)
+                components['micro_illiquidity'] = float(amihud)
+                
+                if amihud > 2.0: # Highly toxic / thin books (1e6 scaled)
+                    signal *= 0.5
+                    confidence *= 0.5
+            else:
+                components['micro_illiquidity'] = 0.0
+                
+        except Exception as e:
+            logger.debug(f"Failed microstructure feature extraction for {symbol}: {e}")
+            components['micro_spread'] = 0.0
+            components['micro_illiquidity'] = 0.0
+
         return {
             'signal': signal,
             'confidence': confidence,
@@ -874,48 +948,21 @@ class GodLevelSignalGenerator:
         }
 
     def _get_regime_weights(self, regime: MarketRegime) -> Dict[str, float]:
-        """Get component weights based on market regime and ICIR analysis."""
-        # Baseline optimized weights: Invert the highly negative ICIR signals!
-        base_weights = {
-            'momentum': -0.40,
-            'mean_reversion': 0.20,
-            'trend': -0.40,
-            'volatility': 0.05,
-            'breakout': 0.05,
-            'ml_rf': 0.30,
-            'ml_gb': 0.30,
-            'ml_xgb': 0.00,
-            'ml_lgb': 0.00
-        }
-
-        # Normalize weights so they sum to ~1.0 absolute value
-        # Adjust weights based on regime
-        if regime == MarketRegime.STRONG_BULL:
-            base_weights['momentum'] = -0.50
-            base_weights['trend'] = -0.50
-            base_weights['mean_reversion'] = 0.20
-            base_weights['ml_rf'] = 0.30
-            base_weights['ml_gb'] = 0.30
-        elif regime == MarketRegime.STRONG_BEAR:
-            base_weights['momentum'] = -0.50
-            base_weights['trend'] = -0.50
-            base_weights['mean_reversion'] = 0.20
-            base_weights['ml_rf'] = 0.30
-            base_weights['ml_gb'] = 0.30
-            base_weights['ml_xgb'] = 0.08
-            base_weights['ml_lgb'] = 0.08
-        elif regime == MarketRegime.NEUTRAL:
-            base_weights['mean_reversion'] = 0.20
-            base_weights['momentum'] = 0.10
-        elif regime == MarketRegime.HIGH_VOLATILITY:
-            base_weights['volatility'] = 0.05
-            base_weights['breakout'] = 0.03
-            base_weights['momentum'] = 0.03
-            base_weights['mean_reversion'] = 0.25
-            base_weights['ml_rf'] = 0.22
-            base_weights['ml_gb'] = 0.22
-
-        return base_weights
+        """Get optimal component weights dynamically from the RL Governor."""
+        try:
+            from models.rl_weight_governor import get_rl_weights
+            is_high_vol = (regime == MarketRegime.HIGH_VOLATILITY)
+            # The RL Governor explores/exploits actions and returns the actively chosen weight matrix
+            return get_rl_weights(regime.value, is_high_volatility=is_high_vol)
+        except Exception as e:
+            logger.warning(f"RL Governor unavailable, falling back to static balanced baseline: {e}")
+            return {
+                'momentum': -0.40, 'mean_reversion': 0.20, 'trend': -0.40,
+                'volatility': 0.05, 'breakout': 0.05, 'senate_sentiment': 0.25,
+                'smart_money_flow': 0.15, 'news_sentiment': 0.15,
+                'earnings_catalyst': 0.10,
+                'ml_rf': 0.30, 'ml_gb': 0.30, 'ml_xgb': 0.00, 'ml_lgb': 0.00
+            }
 
     def _calculate_adaptive_confidence(self, components: Dict, ml_predictions: List, regime: MarketRegime) -> float:
         """Calculate confidence based on component agreement and regime."""

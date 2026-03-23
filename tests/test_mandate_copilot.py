@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from types import SimpleNamespace
 
+import pytest
 from fastapi import FastAPI, Request
 from fastapi.testclient import TestClient
 
@@ -10,6 +11,26 @@ from services.mandate_copilot import service as mandate_service_module
 from services.mandate_copilot.router import router as mandate_router
 from services.mandate_copilot.schemas import MandateEvaluationRequest, RecommendationMode
 from services.mandate_copilot.service import MandateCopilotService
+
+
+# ---------------------------------------------------------------------------
+# Helpers for bypassing the Redis-backed rate limiter in all router tests.
+# Without this, tests get HTTP 429 once the daily counter is exhausted.
+# ---------------------------------------------------------------------------
+
+async def _rate_check_always_ok(*args, **kwargs) -> bool:
+    return True
+
+
+async def _rate_remaining_max(*args, **kwargs) -> int:
+    return 999
+
+
+@pytest.fixture(autouse=True)
+def bypass_rate_limit(monkeypatch):
+    """Globally bypass subscription rate-check for every test in this module."""
+    monkeypatch.setattr("services.common.subscription.rate_check", _rate_check_always_ok)
+    monkeypatch.setattr("services.common.subscription.rate_get_remaining", _rate_remaining_max)
 
 
 def _build_test_app(

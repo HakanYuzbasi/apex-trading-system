@@ -5,6 +5,8 @@ Fetches real market data using Yahoo Finance (yfinance)
 
 import logging
 from datetime import datetime
+import json
+from pathlib import Path
 from typing import Dict, List
 import pandas as pd
 import threading
@@ -101,6 +103,91 @@ class MarketDataFetcher:
         except Exception as e:
             logger.debug("Data map stablecoin fallback failed: %s", e)
         return parsed
+
+    def _load_disk_price_cache(self) -> Dict[str, float]:
+        cache_file = Path(ApexConfig.DATA_DIR) / "price_cache.json"
+        if not cache_file.exists():
+            return {}
+        try:
+            payload = json.loads(cache_file.read_text(encoding="utf-8"))
+        except Exception:
+            return {}
+        if not isinstance(payload, dict):
+            return {}
+        prices: Dict[str, float] = {}
+        for key, value in payload.items():
+            try:
+                prices[str(key)] = float(value)
+            except (TypeError, ValueError):
+                continue
+        return prices
+
+    def _resolve_synthetic_price(self, symbol: str, parsed) -> float:
+        candidates = [
+            str(symbol),
+            parsed.raw,
+            parsed.normalized,
+            parsed.normalized.replace("CRYPTO:", "").replace("FX:", ""),
+        ]
+
+        with self._lock:
+            for key in candidates:
+                cached = self._price_cache.get(key)
+                if not cached:
+                    continue
+                try:
+                    return float(cached[0])
+                except (TypeError, ValueError, IndexError):
+                    continue
+
+        disk_prices = self._load_disk_price_cache()
+        for key in candidates:
+            if key in disk_prices:
+                return float(disk_prices[key])
+
+        return max(0.01, float(getattr(ApexConfig, "MARKET_DATA_SYNTHETIC_BASE_PRICE", 100.0)))
+
+    def _build_synthetic_history(self, symbol: str, parsed, days: int) -> pd.DataFrame:
+        periods = max(30, min(max(int(days), 1), 730))
+        freq = "D" if parsed.asset_class == AssetClass.CRYPTO else "B"
+        index = pd.date_range(end=datetime.now(), periods=periods, freq=freq)
+        base_price = self._resolve_synthetic_price(symbol, parsed)
+        # Deterministic low-volatility path: enough structure for indicator pipelines
+        # without pretending to be a real market series.
+        seed = sum(ord(ch) for ch in parsed.normalized) % 23
+        drift = (seed - 11) / 700.0
+        amplitude = 0.0025 + ((seed % 5) * 0.0005)
+
+        close = []
+        for i in range(periods):
+            progress = (i / (periods - 1)) if periods > 1 else 0.0
+            seasonal = ((i % 7) - 3) * amplitude
+            trend = drift * (progress - 0.5)
+            price = max(0.01, base_price * (1.0 + trend + seasonal))
+            close.append(price)
+
+        rows = []
+        previous_close = close[0]
+        for i, current_close in enumerate(close):
+            gap = ((i % 3) - 1) * amplitude * 0.6
+            open_price = max(0.01, previous_close * (1.0 + gap))
+            high = max(open_price, current_close) * (1.0 + amplitude)
+            low = min(open_price, current_close) * (1.0 - amplitude)
+            volume = float(100000 + ((seed + i) % 17) * 5000)
+            rows.append(
+                {
+                    "Open": open_price,
+                    "High": high,
+                    "Low": low,
+                    "Close": current_close,
+                    "Volume": volume,
+                }
+            )
+            previous_close = current_close
+
+        df = pd.DataFrame(rows, index=index)
+        df._cache_time = datetime.now()
+        return df
 
     def get_current_price(self, symbol: str) -> float:
         """
@@ -281,9 +368,6 @@ class MarketDataFetcher:
         Returns:
             DataFrame with columns: Open, High, Low, Close, Volume
         """
-        if not YFINANCE_AVAILABLE:
-            return pd.DataFrame()
-
         try:
             parsed = parse_symbol(symbol)
         except ValueError:
@@ -291,6 +375,12 @@ class MarketDataFetcher:
             return pd.DataFrame()
 
         parsed = self._map_for_data(parsed)
+        allow_synthetic = bool(getattr(ApexConfig, "MARKET_DATA_ALLOW_SYNTHETIC_HISTORY", False))
+
+        if not YFINANCE_AVAILABLE:
+            if allow_synthetic:
+                return self._build_synthetic_history(symbol, parsed, days)
+            return pd.DataFrame()
 
         cache_key = f"{parsed.normalized}_{days}"
 
@@ -333,6 +423,14 @@ class MarketDataFetcher:
 
             if df.empty:
                 logger.warning(f"No historical data for {parsed.normalized}")
+                if allow_synthetic:
+                    synthetic = self._build_synthetic_history(symbol, parsed, days)
+                    self._historical_cache[cache_key] = synthetic.copy()
+                    logger.warning(
+                        "Using synthetic historical data for %s because provider returned no rows",
+                        parsed.normalized,
+                    )
+                    return synthetic
                 return pd.DataFrame()
 
             # Standardize column names
@@ -360,6 +458,14 @@ class MarketDataFetcher:
 
         except Exception as e:
             logger.error(f"Error fetching historical data for {parsed.normalized}: {e}")
+            if allow_synthetic:
+                synthetic = self._build_synthetic_history(symbol, parsed, days)
+                self._historical_cache[cache_key] = synthetic.copy()
+                logger.warning(
+                    "Using synthetic historical data for %s due to fetch failure",
+                    parsed.normalized,
+                )
+                return synthetic
             return pd.DataFrame()
 
     def fetch_intraday_data(

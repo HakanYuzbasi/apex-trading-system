@@ -25,6 +25,7 @@ import {
   type CockpitAlert,
   type CockpitDerivative,
   type CockpitPosition,
+  type ReplayInspectionResponse,
   type SleeveAttribution,
 } from "@/lib/api";
 import { useTheme } from "@/components/theme/ThemeProvider";
@@ -35,9 +36,12 @@ import AlertsFeed from "@/components/dashboard/AlertsFeed";
 import ControlsPanel from "@/components/dashboard/ControlsPanel";
 import EquityPanel from "@/components/dashboard/EquityPanel";
 import PositionsTable from "@/components/dashboard/PositionsTable";
+import ReplayInspectorPanel from "@/components/dashboard/ReplayInspectorPanel";
 import ExplainableAIChart from "@/components/dashboard/ExplainableAIChart";
 import MandateCopilotPanel from "@/components/dashboard/MandateCopilotPanel";
 import SocialGovernorPanel from "@/components/dashboard/SocialGovernorPanel";
+import WalkForwardPanel from "@/components/dashboard/WalkForwardPanel";
+import PortfolioHeatPanel from "@/components/dashboard/PortfolioHeatPanel";
 import SignalHeatmap from "@/components/SignalHeatmap";
 import { Skeleton } from "@/components/ui/skeleton";
 import { useWebSocket } from "@/hooks/useWebSocket";
@@ -66,7 +70,7 @@ import {
   sortIndicator,
 } from "@/lib/formatters";
 
-type DashboardTab = "trading" | "mandate" | "social";
+type DashboardTab = "trading" | "mandate" | "social" | "walkforward" | "heat";
 type LensKey = "performance" | "risk" | "execution";
 type SortDirection = "asc" | "desc";
 type PositionSortKey = "symbol" | "qty" | "entry" | "current" | "pnl" | "pnl_pct" | "signal_direction";
@@ -91,6 +95,14 @@ type LensModel = {
   subtitle: string;
   rows: LensRow[];
   bars: LensBar[];
+};
+
+type ReplayTarget = {
+  kind: "symbol" | "plan";
+  label: string;
+  requestUrl: string;
+  symbol?: string | null;
+  planId?: string | null;
 };
 
 
@@ -180,6 +192,10 @@ export default function Dashboard({ isPublic = false }: { isPublic?: boolean }) 
   const [positionsSnapshot, setPositionsSnapshot] = useState<CockpitPosition[]>([]);
   const [derivativesSnapshot, setDerivativesSnapshot] = useState<CockpitDerivative[]>([]);
   const [sleevesSnapshot, setSleevesSnapshot] = useState<SleeveAttribution[]>([]);
+  const [replayTarget, setReplayTarget] = useState<ReplayTarget | null>(null);
+  const [replayData, setReplayData] = useState<ReplayInspectionResponse | null>(null);
+  const [replayLoading, setReplayLoading] = useState(false);
+  const [replayError, setReplayError] = useState("");
 
   // Tab navigation
   const [activeTab, setActiveTab] = useState<DashboardTab>("trading");
@@ -199,6 +215,59 @@ export default function Dashboard({ isPublic = false }: { isPublic?: boolean }) 
 
   // Parse WebSocket message
   const wsData = wsMessage?.type === "state_update" ? wsMessage : null;
+
+  useEffect(() => {
+    if (!replayTarget?.requestUrl) {
+      setReplayData(null);
+      setReplayLoading(false);
+      setReplayError("");
+      return;
+    }
+
+    let cancelled = false;
+    const controller = new AbortController();
+
+    setReplayLoading(true);
+    setReplayError("");
+
+    fetch(replayTarget.requestUrl, {
+      method: "GET",
+      cache: "no-store",
+      signal: controller.signal,
+    })
+      .then(async (response) => {
+        const payload = await response.json().catch(() => null);
+        if (!response.ok) {
+          const detail = payload && typeof payload === "object" && "detail" in payload
+            ? String((payload as Record<string, unknown>).detail)
+            : `Replay inspector failed (${response.status})`;
+          throw new Error(detail);
+        }
+        return payload as ReplayInspectionResponse;
+      })
+      .then((payload) => {
+        if (!cancelled) {
+          setReplayData(payload);
+        }
+      })
+      .catch((error: unknown) => {
+        if (cancelled || (error instanceof DOMException && error.name === "AbortError")) {
+          return;
+        }
+        setReplayData(null);
+        setReplayError(error instanceof Error ? error.message : "Failed to load replay chain.");
+      })
+      .finally(() => {
+        if (!cancelled) {
+          setReplayLoading(false);
+        }
+      });
+
+    return () => {
+      cancelled = true;
+      controller.abort();
+    };
+  }, [replayTarget]);
 
   // Extract SHAP values from WS or fall back to mock data for demonstration
   const activeShapData = ((wsData as unknown as Record<string, unknown>)?.shap_values as Record<string, number>) ?? {
@@ -364,6 +433,8 @@ export default function Dashboard({ isPublic = false }: { isPublic?: boolean }) 
   const capital = aggregatedEquity !== null ? aggregatedEquity : (Number.isFinite(wsAggregatedEquity) ? wsAggregatedEquity : sanitizedMetrics.capital);
   const dailyPnl = sanitizedMetrics.daily_pnl;
   const dailyPnlByBroker = (cockpit?.status as any)?.daily_pnl_by_broker ?? { ibkr: 0, alpaca: 0 };
+  const stressLiquidation = (cockpit?.status as any)?.stress_liquidation ?? null;
+  const shadowDeployment = (cockpit?.status as any)?.shadow_deployment ?? null;
   const ibkrDailyPnl = sanitizeMoney(dailyPnlByBroker?.ibkr, 0);
   const alpacaDailyPnl = sanitizeMoney(dailyPnlByBroker?.alpaca, 0);
   // ibkrUnrealizedPnl and alpacaUnrealizedPnl computed from live positions via useMemo below
@@ -1331,6 +1402,8 @@ export default function Dashboard({ isPublic = false }: { isPublic?: boolean }) 
             ["trading", "Trading"],
             ["mandate", "Mandate Copilot"],
             ["social", "Social Audit"],
+            ["walkforward", "Walk-Forward"],
+            ["heat", "Portfolio Heat"],
           ] as [DashboardTab, string][]).map(([tab, label]) => (
             <button
               key={tab}
@@ -1350,6 +1423,10 @@ export default function Dashboard({ isPublic = false }: { isPublic?: boolean }) 
           <MandateCopilotPanel onSessionExpired={handleSessionExpired} />
         ) : activeTab === "social" ? (
           <SocialGovernorPanel socialAudit={cockpit?.social_audit as any} />
+        ) : activeTab === "walkforward" ? (
+          <WalkForwardPanel />
+        ) : activeTab === "heat" ? (
+          <PortfolioHeatPanel />
         ) : null}
 
 
@@ -1435,6 +1512,119 @@ export default function Dashboard({ isPublic = false }: { isPublic?: boolean }) 
                   ) : null;
                 })()}
 
+                {stressLiquidation?.active ? (
+                  <div className="mb-3 rounded-xl border border-warning/30 bg-warning/10 p-3">
+                    <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+                      <div>
+                        <p className="text-sm font-semibold text-foreground">Stress Liquidation In Progress</p>
+                        <p className="text-xs text-muted-foreground">
+                          {stressLiquidation.completed_count ?? 0} completed · {stressLiquidation.in_progress_count ?? 0} in progress · {stressLiquidation.candidate_count ?? 0} planned
+                        </p>
+                        {stressLiquidation.plan_id ? (
+                          <p className="mt-1 text-xs text-muted-foreground">
+                            Plan {String(stressLiquidation.plan_id)}
+                            {Number(stressLiquidation.plan_epoch ?? 0) > 0 ? ` · epoch ${Number(stressLiquidation.plan_epoch)}` : ""}
+                          </p>
+                        ) : null}
+                      </div>
+                      <div className="flex items-center gap-2">
+                        <p className="text-xs text-muted-foreground">
+                          Active de-risking is being routed through the audited exit path.
+                        </p>
+                        {stressLiquidation.plan_id && stressLiquidation.plan_audit_url ? (
+                          <Button
+                            type="button"
+                            size="xs"
+                            variant={replayTarget?.kind === "plan" && replayTarget?.planId === stressLiquidation.plan_id ? "secondary" : "outline"}
+                            onClick={() =>
+                              setReplayTarget({
+                                kind: "plan",
+                                label: `Plan ${String(stressLiquidation.plan_id)}`,
+                                requestUrl: String(stressLiquidation.plan_audit_url),
+                                planId: String(stressLiquidation.plan_id),
+                              })
+                            }
+                          >
+                            Audit Plan
+                          </Button>
+                        ) : null}
+                      </div>
+                    </div>
+                    {Array.isArray(stressLiquidation.candidates) && stressLiquidation.candidates.length > 0 ? (
+                      <div className="mt-3 grid gap-2 md:grid-cols-2 xl:grid-cols-3">
+                        {stressLiquidation.candidates.map((candidate: any) => (
+                          <div key={String(candidate.symbol)} className="rounded-lg border border-border/60 bg-background/60 px-3 py-2 text-xs">
+                            <div className="flex items-center justify-between gap-2">
+                              <span className="font-semibold text-foreground">{String(candidate.symbol)}</span>
+                              <span className="uppercase text-muted-foreground">{String(candidate.status || "pending").replaceAll("_", " ")}</span>
+                            </div>
+                            <p className="mt-1 text-muted-foreground">
+                              {String(candidate.action || "partial_reduce") === "full_exit"
+                                ? "100% exit"
+                                : `${(Number(candidate.target_reduction_pct || 0) * 100).toFixed(0)}% cut`}
+                              {" · "}
+                              {(Number(candidate.progress_pct || 0) * 100).toFixed(0)}% complete
+                            </p>
+                            <p className="mt-1 text-muted-foreground">
+                              {Number(candidate.executed_reduction_qty || 0).toFixed(2)} / {Number(candidate.planned_reduction_qty || 0).toFixed(2)} reduced
+                              {" · "}
+                              live qty {Number(candidate.live_qty || 0).toFixed(2)}
+                            </p>
+                          </div>
+                        ))}
+                      </div>
+                    ) : null}
+                  </div>
+                ) : null}
+
+                {shadowDeployment?.candidate_id ? (
+                  <div className={`mb-3 rounded-xl border p-3 ${
+                    shadowDeployment.status === "blocked"
+                      ? "border-negative/30 bg-negative/10"
+                      : shadowDeployment.status === "staged"
+                        ? "border-primary/30 bg-primary/10"
+                        : "border-positive/30 bg-positive/10"
+                  }`}>
+                    <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+                      <div>
+                        <p className="text-sm font-semibold text-foreground">Shadow Deployment Gate</p>
+                        <p className="text-xs text-muted-foreground">
+                          {String(shadowDeployment.candidate_id)}
+                          {shadowDeployment.model_version ? ` · model ${String(shadowDeployment.model_version)}` : ""}
+                          {shadowDeployment.governor_policy_version ? ` · policy ${String(shadowDeployment.governor_policy_version)}` : ""}
+                        </p>
+                      </div>
+                      <div className="text-right">
+                        <p className="text-xs uppercase tracking-wide text-muted-foreground">Status</p>
+                        <p className="text-sm font-semibold text-foreground">{String(shadowDeployment.status || "inactive").replaceAll("_", " ")}</p>
+                      </div>
+                    </div>
+                    <div className="mt-3 grid gap-2 md:grid-cols-4">
+                      <div className="rounded-lg border border-border/60 bg-background/60 px-3 py-2 text-xs">
+                        <p className="text-muted-foreground">Observed signals</p>
+                        <p className="font-medium text-foreground">{Number(shadowDeployment.observed_signals || 0)}</p>
+                      </div>
+                      <div className="rounded-lg border border-border/60 bg-background/60 px-3 py-2 text-xs">
+                        <p className="text-muted-foreground">Agreement</p>
+                        <p className="font-medium text-foreground">{(Number(shadowDeployment.decision_agreement_rate || 0) * 100).toFixed(0)}%</p>
+                      </div>
+                      <div className="rounded-lg border border-border/60 bg-background/60 px-3 py-2 text-xs">
+                        <p className="text-muted-foreground">Offline Sharpe</p>
+                        <p className="font-medium text-foreground">{Number(shadowDeployment.offline_sharpe || 0).toFixed(2)}</p>
+                      </div>
+                      <div className="rounded-lg border border-border/60 bg-background/60 px-3 py-2 text-xs">
+                        <p className="text-muted-foreground">Live Sharpe</p>
+                        <p className="font-medium text-foreground">{Number(shadowDeployment.live_sharpe || 0).toFixed(2)}</p>
+                      </div>
+                    </div>
+                    {Array.isArray(shadowDeployment.reasons) && shadowDeployment.reasons.length > 0 ? (
+                      <p className="mt-2 text-xs text-muted-foreground">
+                        {shadowDeployment.reasons.slice(0, 3).map((row: unknown) => String(row)).join(" · ")}
+                      </p>
+                    ) : null}
+                  </div>
+                ) : null}
+
                 <div className="max-h-[50vh] overflow-auto rounded-xl border border-border/80">
                   <table className="min-w-full text-xs">
                     <thead className="sticky top-0 z-10 bg-background/95 backdrop-blur">
@@ -1460,12 +1650,13 @@ export default function Dashboard({ isPublic = false }: { isPublic?: boolean }) 
                             </button>
                           </th>
                         ))}
+                        <th className="px-3 py-2 font-semibold">Inspect</th>
                       </tr>
                     </thead>
                     <tbody>
                       {sortedPositions.length === 0 ? (
                         <tr>
-                          <td colSpan={8} className="px-3 py-6 text-center text-muted-foreground">
+                          <td colSpan={9} className="px-3 py-6 text-center text-muted-foreground">
                             {showLoading ? "Loading positions..." : "No positions in API state."}
                           </td>
                         </tr>
@@ -1488,12 +1679,55 @@ export default function Dashboard({ isPublic = false }: { isPublic?: boolean }) 
                               {position.pnl_pct.toFixed(2)}%
                             </td>
                             <td className="px-3 py-2 uppercase text-muted-foreground">{position.signal_direction || "unknown"}</td>
+                            <td className="px-3 py-2">
+                              <Button
+                                type="button"
+                                variant={replayTarget?.kind === "symbol" && replayTarget?.symbol === position.symbol ? "secondary" : "outline"}
+                                size="xs"
+                                onClick={() =>
+                                  setReplayTarget({
+                                    kind: "symbol",
+                                    label: position.symbol,
+                                    requestUrl: position.replay_url ?? `/api/v1/replay-inspector?symbol=${encodeURIComponent(position.symbol)}`,
+                                    symbol: position.symbol,
+                                  })
+                                }
+                              >
+                                Inspect
+                              </Button>
+                            </td>
                           </tr>
                         ))
                       )}
                     </tbody>
                   </table>
                 </div>
+
+                <ReplayInspectorPanel
+                  symbol={replayTarget?.symbol ?? null}
+                  planId={replayTarget?.planId ?? null}
+                  targetLabel={replayTarget?.label ?? null}
+                  loading={replayLoading}
+                  error={replayError}
+                  data={replayData}
+                  onOpenPlan={(planId) =>
+                    setReplayTarget({
+                      kind: "plan",
+                      label: `Plan ${planId}`,
+                      requestUrl: `/api/v1/replay-inspector?plan_id=${encodeURIComponent(planId)}`,
+                      planId,
+                    })
+                  }
+                  onOpenSymbol={(symbol) =>
+                    setReplayTarget({
+                      kind: "symbol",
+                      label: symbol,
+                      requestUrl: `/api/v1/replay-inspector?symbol=${encodeURIComponent(symbol)}`,
+                      symbol,
+                    })
+                  }
+                  onClose={() => setReplayTarget(null)}
+                />
 
                 <div className="mt-4">
                   <div className="mb-2 flex items-center justify-between">

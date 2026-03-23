@@ -330,7 +330,20 @@ class ThresholdCalibrator:
                     f"→ min_signal={PROBATION_THRESH_NONE_DATA}"
                 )
             else:
-                win_rate = sum(1 for p in pnls if p > 0) / n
+                wins = sum(1 for p in pnls if p > 0)
+                win_rate = wins / n
+                # Significance gate: only probate if win-rate deviation is statistically real
+                try:
+                    from monitoring.stat_significance import is_significant as _is_sig
+                    _sig = _is_sig(wins=wins, n=n, alpha=0.10)  # 90% CI for probation (less strict)
+                except ImportError:
+                    _sig = True  # no gate available → allow as before
+                if not _sig:
+                    logger.debug(
+                        "ThresholdCalibrator: %s WR=%.0f%% (n=%d) not significant — skipping probation",
+                        sym, win_rate * 100, n,
+                    )
+                    continue
                 if win_rate < PROBATION_WIN_RATE_LO:
                     probation[sym] = PROBATION_THRESH_STRONG
                     logger.info(

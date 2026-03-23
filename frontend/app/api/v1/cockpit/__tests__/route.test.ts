@@ -218,6 +218,110 @@ describe("cockpit route — sharpe alert", () => {
   });
 });
 
+describe("cockpit route — intraday stress alerts", () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+  });
+
+  it("fires a critical alert when stress control halts new entries", async () => {
+    mockAllEndpoints(makeStatusData(), {
+      statePayload: {
+        positions: {},
+        stress_control: {
+          halt_new_entries: true,
+          reason: "worst_return=-12.00% <= -8.00%",
+          worst_scenario_id: "2020_covid_crash",
+          worst_scenario_name: "2020 COVID Crash",
+          worst_portfolio_return: -0.12,
+        },
+      },
+    });
+
+    const response = await GET(makeRequest());
+    const body = await response.json();
+
+    const alert = body.alerts.find((a: { id: string }) => a.id === "intraday-stress-halt");
+    expect(alert).toBeDefined();
+    expect(alert.severity).toBe("critical");
+    expect(alert.detail).toContain("2020 COVID Crash");
+  });
+
+  it("fires a critical alert when a stress unwind plan is active", async () => {
+    mockAllEndpoints(makeStatusData(), {
+      portfolioPositions: [
+        { symbol: "AAPL", qty: 80, avg_entry_price: 100, current_price: 101, market_value: 8080, unrealized_pl: 80, broker_type: "ibkr" },
+      ],
+      statePayload: {
+        positions: {},
+        stress_unwind_plan: {
+          active: true,
+          plan_id: "stress-unwind-7-20991231T120001000000",
+          plan_epoch: 7,
+          worst_scenario_id: "2020_covid_crash",
+          worst_scenario_name: "2020 COVID Crash",
+          candidates: [
+            { symbol: "AAPL", current_qty: 100, target_qty: 40, target_reduction_pct: 0.4, action: "partial_reduce" },
+            { symbol: "MSFT", current_qty: 50, target_qty: 50, target_reduction_pct: 1.0, action: "full_exit" },
+          ],
+        },
+      },
+    });
+
+    const response = await GET(makeRequest());
+    const body = await response.json();
+
+    const alert = body.alerts.find((a: { id: string }) => a.id === "stress-unwind-plan");
+    expect(alert).toBeDefined();
+    expect(alert.severity).toBe("critical");
+    expect(alert.detail).toContain("AAPL");
+    expect(alert.detail).toContain("50%");
+    expect(alert.detail).toContain("stress-unwind-7-20991231T120001000000");
+    expect(body.status.stress_liquidation.plan_id).toBe("stress-unwind-7-20991231T120001000000");
+    expect(body.status.stress_liquidation.plan_epoch).toBe(7);
+    expect(body.status.stress_liquidation.plan_audit_url).toBe(
+      "/api/v1/replay-inspector?plan_id=stress-unwind-7-20991231T120001000000",
+    );
+    expect(body.status.stress_liquidation.candidates[0].status).toBe("in_progress");
+    expect(body.status.stress_liquidation.candidates[0].executed_reduction_qty).toBe(20);
+  });
+});
+
+describe("cockpit route — shadow deployment gate", () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+  });
+
+  it("surfaces blocked shadow deployment status and alert", async () => {
+    mockAllEndpoints(makeStatusData(), {
+      statePayload: {
+        positions: {},
+        shadow_deployment: {
+          status: "blocked",
+          candidate_id: "shadow-eq-v2",
+          model_version: "eq-model-v2",
+          governor_policy_version: "trust-v2",
+          observed_signals: 18,
+          decision_agreement_rate: 0.42,
+          reasons: [
+            "decision_agreement_below_gate: rate=0.42 required=0.60",
+            "offline_sharpe_below_gate: candidate=0.95 required=1.10",
+          ],
+        },
+      },
+    });
+
+    const response = await GET(makeRequest());
+    const body = await response.json();
+
+    expect(body.status.shadow_deployment.status).toBe("blocked");
+    expect(body.status.shadow_deployment.candidate_id).toBe("shadow-eq-v2");
+    const alert = body.alerts.find((a: { id: string }) => a.id === "shadow-deployment-blocked");
+    expect(alert).toBeDefined();
+    expect(alert.detail).toContain("shadow-eq-v2");
+    expect(alert.detail).toContain("decision_agreement_below_gate");
+  });
+});
+
 describe("cockpit route — /portfolio/positions fallback", () => {
   beforeEach(() => {
     jest.clearAllMocks();

@@ -127,9 +127,10 @@ class OvernightRiskGuard:
         try:
             eastern = pytz.timezone("America/New_York")
             if now.tzinfo is None:
-                # Assume local if no tz, then convert to UTC, then to Eastern
-                # Simpler: just localize and convert
-                now = now.astimezone(eastern)
+                # Naive datetimes are market-local (US/Eastern) — localize directly.
+                # Do NOT use astimezone() which would first assume the system timezone
+                # (often UTC on servers) and produce wrong market-phase results.
+                now = eastern.localize(now)
             else:
                 now = now.astimezone(eastern)
         except Exception as e:

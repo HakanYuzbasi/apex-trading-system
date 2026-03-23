@@ -234,6 +234,18 @@ class OutcomeFeedbackLoop:
                 except Exception as e:
                     logger.debug(f"Failed to feed outcome to consensus_engine: {e}")
 
+            # Feed to RL Governor (Dynamic Alpha Weighting Agent)
+            rl_action = int(sig.generator_signals.get('__rl_action__', -1))
+            if rl_action != -1:
+                try:
+                    from models.rl_weight_governor import feedback_rl_reward
+                    is_high_vol = "HIGH_VOLATILITY" in str(sig.regime).upper()
+                    # Positive reward if prediction magnitude aligned with return magnitude directionally
+                    trade_reward = float(actual_return * np.sign(sig.signal_value))
+                    feedback_rl_reward(str(sig.regime), is_high_vol, rl_action, trade_reward)
+                except Exception as e:
+                    logger.debug(f"Failed to feed outcome to RL Governor: {e}")
+
             # Track for internal metrics
             correct = np.sign(sig.signal_value) == np.sign(actual_return) and abs(actual_return) > 0.001
             self._accuracy_history.append(1.0 if correct else 0.0)

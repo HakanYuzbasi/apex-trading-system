@@ -18,6 +18,7 @@ except ImportError:  # pragma: no cover
     fcntl = None  # type: ignore[assignment]
 
 from config import ApexConfig, assert_live_trading_confirmation
+from core.startup_trust import enforce_startup_trust
 from scripts.check_secrets import validate_secrets
 
 logger = logging.getLogger(__name__)
@@ -48,6 +49,7 @@ def run_startup_guards() -> None:
     """Run hard startup guards before any trading runtime initialization."""
     validate_secrets()
     assert_live_trading_confirmation()
+    enforce_startup_trust(ApexConfig)
 
 
 async def main() -> None:

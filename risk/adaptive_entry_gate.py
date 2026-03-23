@@ -406,13 +406,23 @@ class AdaptiveEntryGate:
 
         sorted_keys = sorted(self.buckets.keys())
 
+        # Significance gate: only use buckets whose win-rate is statistically real
+        try:
+            from monitoring.stat_significance import is_significant as _is_sig
+            _stat_gate = True
+        except ImportError:
+            _stat_gate = False
+
         # Pass 1: find lowest positive-expectancy bucket
         for key in sorted_keys:
             bucket = self.buckets[key]
+            wins = round(bucket.win_rate * bucket.count)
+            _sig = (not _stat_gate) or _is_sig(wins=wins, n=bucket.count, alpha=0.10)
             if (
                 bucket.count >= self.MIN_BUCKET_TRADES
                 and bucket.win_rate >= self.MIN_BUCKET_WIN_RATE
                 and bucket.avg_pnl > 0
+                and _sig
             ):
                 return float(key)
 

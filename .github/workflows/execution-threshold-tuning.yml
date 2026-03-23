@@ -21,7 +21,9 @@ jobs:
       - name: Install tuner dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install numpy
+          # numpy: core computation; pandas: required by core/contracts.py (transitive via core/__init__);
+          # psutil: required by core/health_checker.py (transitive via core/__init__)
+          pip install "numpy>=1.24" "pandas>=2.0" "psutil>=5.9"
 
       - name: Run daily execution tuner
         run: |

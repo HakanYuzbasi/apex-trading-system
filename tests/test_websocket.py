@@ -97,6 +97,8 @@ class TestRESTEndpoints:
     def test_status_endpoint_sanitizes_outlier_metrics(self):
         """GET /status should clamp malformed KPI outliers for all consumers."""
         client = TestClient(app)
+        # Also mock the audit override so real on-disk trade files don't
+        # overwrite the test's win_rate / total_trades expectations.
         with patch("api.server.read_trading_state", return_value={
             "timestamp": "2026-02-22T12:00:00",
             "capital": 1_000_000,
@@ -110,7 +112,7 @@ class TestRESTEndpoints:
             "option_positions": "2",
             "open_positions_total": 1,
             "total_trades": 9_000_000,
-        }):
+        }), patch("api.dependencies._win_rate_from_audit", return_value=(None, 0)):
             resp = client.get("/status")
         assert resp.status_code == 200
         body = resp.json()

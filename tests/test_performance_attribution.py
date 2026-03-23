@@ -96,6 +96,44 @@ def test_exit_without_entry_uses_fallback_context(tmp_path):
     assert closed["source"] == "unit_test_fallback_exit"
 
 
+def test_partial_exit_retains_remaining_open_quantity(tmp_path):
+    tracker = PerformanceAttributionTracker(data_dir=tmp_path, max_closed_trades=100)
+    entry_time = datetime(2026, 1, 2, 9, 30, 0)
+    exit_time = datetime(2026, 1, 2, 12, 30, 0)
+
+    tracker.record_entry(
+        symbol="AAPL",
+        asset_class="EQUITY",
+        sleeve="equities_sleeve",
+        side="LONG",
+        quantity=10,
+        entry_price=100.0,
+        entry_signal=0.5,
+        entry_confidence=0.8,
+        governor_tier="green",
+        governor_regime="risk_on",
+        entry_time=entry_time,
+    )
+    tracker.record_exit(
+        symbol="AAPL",
+        quantity=4,
+        exit_price=105.0,
+        gross_pnl=20.0,
+        net_pnl=19.0,
+        commissions=1.0,
+        exit_reason="stress_trim",
+        exit_time=exit_time,
+        source="unit_test_partial_exit",
+    )
+
+    assert tracker.open_positions["AAPL"]["quantity"] == pytest.approx(6.0)
+    assert len(tracker.closed_trades) == 1
+    assert tracker.closed_trades[0]["quantity"] == pytest.approx(4.0)
+
+    restored = PerformanceAttributionTracker(data_dir=tmp_path, max_closed_trades=100)
+    assert restored.open_positions["AAPL"]["quantity"] == pytest.approx(6.0)
+
+
 def test_summary_aggregates_by_sleeve_and_asset_class(tmp_path):
     tracker = PerformanceAttributionTracker(data_dir=tmp_path, max_closed_trades=100)
     entry_time = datetime(2026, 1, 3, 10, 0, 0)

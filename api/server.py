@@ -383,6 +383,12 @@ try:
 except Exception as e:
     alert_agg.add("router_load_failed", "TCA router not loaded", data={"service": "tca", "error": str(e)})
 
+try:
+    from services.replay_inspector.router import router as replay_inspector_router
+    app.include_router(replay_inspector_router)
+except Exception as e:
+    alert_agg.add("router_load_failed", "Replay inspector router not loaded", data={"service": "replay_inspector", "error": str(e)})
+
 # Broker Service Routers
 try:
     from services.broker.router import router as broker_router, portfolio_router
@@ -807,6 +813,32 @@ async def get_tca_report(_user=Depends(require_user)):
         return report
     except Exception as e:
         logger.error(f"TCA report failed: {e}")
+
+
+@app.get("/ops/walk-forward")
+async def get_walkforward_report(_user=Depends(require_user)):
+    """Walk-forward validation — rolling Sharpe, regime win-rate trend, component alpha."""
+    try:
+        from monitoring.walkforward_validator import build_walkforward_report
+        import asyncio
+        report = await asyncio.to_thread(build_walkforward_report)
+        return report
+    except Exception as e:
+        logger.error(f"Walk-forward report failed: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/ops/oos-report")
+async def get_oos_report(_user=Depends(require_user)):
+    """Out-of-sample validator — per-cell (regime×hour×signal) win rate and Sharpe."""
+    try:
+        import asyncio
+        from monitoring.oos_validator import OOSValidator
+        validator = OOSValidator()
+        report = await asyncio.to_thread(validator.build_report)
+        return report.to_dict()
+    except Exception as e:
+        logger.error(f"OOS report failed: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 
@@ -815,7 +847,7 @@ async def get_kill_switch_control(_user=Depends(require_user)):
     """Read operational kill-switch control command state."""
     control_state = read_control_state(CONTROL_COMMAND_FILE)
     state = read_trading_state()
-    kill_switch = state.get("kill_switch", {})
+    kill_switch = state.get("kill_switch") or {}
     return {
         "command": control_state,
         "runtime": {
@@ -1195,6 +1227,100 @@ async def get_session_metrics(session_type: str):
         "confidence_threshold": session_cfg.get("min_confidence", 0),
         **safe_metrics,
     }
+
+
+@app.get("/ops/portfolio-heat")
+async def get_portfolio_heat(_user=Depends(require_user)):
+    """
+    Portfolio heat map: exposure by asset class, regime, correlation cluster,
+    and factor risk. Combines FactorHedger + HRPSizer + CorrelationEarlyWarning data.
+    """
+    try:
+        state = read_trading_state()
+        positions = state.get("positions", {})
+        last_prices = state.get("last_prices", {})
+        regime = state.get("regime", "neutral")
+        vix = state.get("vix", 20.0)
+
+        # Build per-symbol heat metrics
+        symbols = [s for s, q in positions.items() if q and q != 0]
+        rows = []
+        for sym in symbols:
+            qty = positions.get(sym, 0)
+            price = last_prices.get(sym) or last_prices.get(sym.replace("CRYPTO:", "")) or 0.0
+            notional = abs(float(qty)) * float(price)
+            is_crypto = sym.startswith("CRYPTO:") or "/" in sym
+            asset_class = "crypto" if is_crypto else "equity"
+            rows.append({
+                "symbol": sym,
+                "qty": qty,
+                "notional": round(notional, 2),
+                "asset_class": asset_class,
+            })
+
+        total_notional = sum(r["notional"] for r in rows) or 1.0
+        for r in rows:
+            r["weight_pct"] = round(r["notional"] / total_notional * 100, 2)
+
+        # Asset class breakdown
+        by_class: dict = {}
+        for r in rows:
+            ac = r["asset_class"]
+            by_class.setdefault(ac, {"count": 0, "notional": 0.0})
+            by_class[ac]["count"] += 1
+            by_class[ac]["notional"] += r["notional"]
+        for ac in by_class:
+            by_class[ac]["weight_pct"] = round(by_class[ac]["notional"] / total_notional * 100, 2)
+
+        # HHI concentration (lower = more diversified; 1.0 = single position)
+        weights = [r["notional"] / total_notional for r in rows] if rows else []
+        hhi = round(sum(w ** 2 for w in weights), 4)
+
+        # Alpha decay calibrator — optimal hold hours per regime
+        alpha_decay_hint = None
+        try:
+            from monitoring.alpha_decay_calibrator import AlphaDecayCalibrator
+            _adc_path = getattr(ApexConfig, "DATA_DIR", None)
+            if _adc_path:
+                _adc = AlphaDecayCalibrator(data_dir=_adc_path)
+                alpha_decay_hint = {
+                    "optimal_hold_hours": _adc.get_optimal_hold_hours(str(regime)),
+                    "alpha_half_life": _adc.get_alpha_half_life(str(regime)),
+                }
+        except Exception:
+            pass
+
+        # Model drift status
+        drift_status = None
+        try:
+            from monitoring.model_drift_monitor import ModelDriftMonitor
+            _mdm_path = getattr(ApexConfig, "DATA_DIR", None)
+            if _mdm_path:
+                _mdm = ModelDriftMonitor(data_dir=_mdm_path)
+                _s = _mdm.get_status()
+                drift_status = {
+                    "health": _s.health,
+                    "should_retrain": _s.should_retrain,
+                    "ic_current": _s.ic_current,
+                    "hit_rate_current": _s.hit_rate_current,
+                }
+        except Exception:
+            pass
+
+        return {
+            "positions": rows,
+            "by_asset_class": by_class,
+            "total_notional": round(total_notional, 2),
+            "position_count": len(rows),
+            "hhi_concentration": hhi,
+            "regime": regime,
+            "vix": vix,
+            "alpha_decay": alpha_decay_hint,
+            "model_drift": drift_status,
+        }
+    except Exception as e:
+        logger.error(f"Portfolio heat endpoint failed: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 @app.post("/api/v1/session/crypto/toggle")

@@ -289,6 +289,13 @@ class PerformanceAttributionTracker:
             _alt = symbol[len("CRYPTO:"):] if symbol.startswith("CRYPTO:") else f"CRYPTO:{symbol}"
             entry_ctx = self.open_positions.pop(_alt, None)
         entry_ctx = entry_ctx or {}
+        remaining_qty = 0.0
+        try:
+            tracked_qty = float(entry_ctx.get("quantity", 0.0) or 0.0)
+            if tracked_qty > 0.0:
+                remaining_qty = max(0.0, tracked_qty - float(quantity))
+        except Exception:
+            remaining_qty = 0.0
 
         entry_price = float(entry_ctx.get("entry_price", entry_price_fallback) or 0.0)
         if entry_price <= 0:
@@ -358,6 +365,11 @@ class PerformanceAttributionTracker:
         self.closed_trades.append(asdict(closed))
         if len(self.closed_trades) > self.max_closed_trades:
             self.closed_trades = self.closed_trades[-self.max_closed_trades :]
+        if remaining_qty > 1e-9:
+            retained = dict(entry_ctx)
+            retained["symbol"] = canonical_symbol
+            retained["quantity"] = float(remaining_qty)
+            self.open_positions[canonical_symbol] = retained
         self._save_state()
 
     def get_summary(self, lookback_days: int = 30) -> Dict[str, Any]:

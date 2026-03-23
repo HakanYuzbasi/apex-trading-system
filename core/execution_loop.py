@@ -34,7 +34,7 @@ from core.symbols import normalize_symbol, is_market_open, parse_symbol, AssetCl
 from core.broker_dispatch import BrokerDispatch
 from core.risk_orchestration import RiskOrchestration
 from core.state_sync import StateSync
-from data.event_store import EventStore
+from data.event_store import EventStore, EventType as JournalEventType
 from core.trading_control import (
     read_control_state,
     mark_kill_switch_reset_processed,
@@ -133,6 +133,9 @@ from risk.governor_policy import (
     default_policy_for,
 )
 from risk.kill_switch import KillSwitchConfig, RiskKillSwitch
+from risk.intraday_stress_engine import IntradayStressEngine, StressControlState
+from risk.stress_unwind_planner import StressUnwindPlan, StressUnwindPlanner
+from risk.shadow_deployment import ShadowDeploymentGate
 from risk.pretrade_risk_gateway import PreTradeLimitConfig, PreTradeRiskGateway
 from risk.hedge_manager import HedgeManager
 from risk.adaptive_entry_gate import AdaptiveEntryGate
@@ -398,8 +401,7 @@ class ApexTradingSystem:
                             client_id=conn.client_id or ApexConfig.IBKR_CLIENT_ID
                         )
                         if ApexConfig.USE_ADVANCED_EXECUTION:
-                            self.advanced_executor = AdvancedOrderExecutor(self.ibkr)
-                            logger.info(f"[{self.tenant_id}] Advanced execution (TWAP/VWAP) enabled")
+                            logger.info(f"[{self.tenant_id}] Advanced execution (TWAP/VWAP) flag detected")
 
                     elif conn.broker_type == BrokerType.ALPACA:
                         # In dual mode, only the "crypto" session uses Alpaca.
@@ -427,8 +429,7 @@ class ApexTradingSystem:
                         client_id=ApexConfig.IBKR_CLIENT_ID
                     )
                     if ApexConfig.USE_ADVANCED_EXECUTION:
-                        self.advanced_executor = AdvancedOrderExecutor(self.ibkr)
-                        logger.info("Advanced execution (TWAP/VWAP) enabled")
+                        logger.info("Advanced execution (TWAP/VWAP) flag detected")
     
                 if broker_mode in ("alpaca", "both"):
                     from execution.alpaca_connector import AlpacaConnector
@@ -441,6 +442,17 @@ class ApexTradingSystem:
         else:
             logger.info("Mode: SIMULATION")
             
+        # Initialize Phase 12 WebSockets Daemon
+        try:
+            from data.websocket_streamer import WebsocketStreamer
+            self.websocket_streamer = WebsocketStreamer(
+                alpaca_api_key=getattr(ApexConfig, "ALPACA_API_KEY", ""),
+                alpaca_secret_key=getattr(ApexConfig, "ALPACA_SECRET_KEY", "")
+            )
+        except Exception as e:
+            logger.warning(f"WebSockets initialization failed: {e}")
+            self.websocket_streamer = None
+
         self.broker_dispatch = BrokerDispatch(self.ibkr, self.alpaca)
         # Session-scoped state file: core_trading_state.json / crypto_trading_state.json / trading_state.json
         _state_prefix = f"{self.session_type}_" if self.session_type != "unified" else ""
@@ -456,7 +468,49 @@ class ApexTradingSystem:
             session_type=self.session_type,
         )
         self.portfolio_optimizer = PortfolioOptimizer()
+        
+        # Phase 15: Iceberg Execution Router (TWAP/VWAP)
+        self.advanced_executor = None
+        if getattr(ApexConfig, "USE_ADVANCED_EXECUTION", True):
+            try:
+                from execution.advanced_order_executor import AdvancedOrderExecutor
+                self.advanced_executor = AdvancedOrderExecutor(
+                    risk_gateway=self.risk_manager, 
+                    broker_dispatch=self.broker_dispatch
+                )
+                logger.info("🧊 Phase 15 Iceberg Router initialized successfully")
+            except Exception as e:
+                logger.error(f"Failed to initialize AdvancedOrderExecutor: {e}")
+
+        # Phase 11: Statistical Arbitrage (Pairs Mean-Reversion)
+        try:
+            from models.pairs_trader import PairsTrader
+            self.pairs_trader = PairsTrader(lookback_window=60, z_entry=2.0)
+            self._macro_pairs = {
+                "CRYPTO:BTC/USD": "CRYPTO:ETH/USD",
+                "CRYPTO:ETH/USD": "CRYPTO:BTC/USD",
+                "QQQ": "SPY",
+                "SPY": "QQQ",
+                "XOM": "CVX",
+                "CVX": "XOM"
+            }
+        except Exception as e:
+            logger.error(f"Failed to initialize PairsTrader: {e}")
+            self.pairs_trader = None
+            self._macro_pairs = {}
+
         self.market_data = MarketDataFetcher()
+        
+        # Phase 14: Portfolio Delta Hedger
+        try:
+            from risk.market_neutral_hedge import DeltaHedger
+            self.delta_hedger = DeltaHedger(market_data_fetcher=self.market_data)
+        except Exception as e:
+            logger.warning(f"Delta Hedger failed to initialize: {e}")
+            self.delta_hedger = None
+        self._delta_hedge_qty: dict = {}        # hedge_symbol → net hedged qty
+        self._delta_hedge_last_cycle: int = 0  # last cycle hedge was evaluated
+            
         self.performance_tracker = PerformanceTracker()
         self.live_monitor = LiveMonitor()
         self.performance_governor: Optional[PerformanceGovernor] = None
@@ -481,6 +535,9 @@ class ApexTradingSystem:
                 recovery_points=ApexConfig.PERFORMANCE_GOV_RECOVERY_POINTS,
                 points_per_year=ApexConfig.PERFORMANCE_GOV_POINTS_PER_YEAR,
             )
+            # Restore persisted tier/samples so warmup is skipped after restarts
+            _gov_state_path = ApexConfig.DATA_DIR / "performance_governor_state.json"
+            self.performance_governor.load_state(_gov_state_path)
             self._performance_snapshot = self.performance_governor.get_snapshot()
             logger.info(
                 "🧭 PerformanceGovernor enabled "
@@ -513,6 +570,22 @@ class ApexTradingSystem:
         self._governor_tune_state_file = self.user_data_dir / "governor_policies" / "tuning_state.json"
         self._governor_last_tune_at: Dict[str, datetime] = {}
         self._load_governor_tuning_state()
+        self.shadow_deployment = ShadowDeploymentGate(
+            directory=self.user_data_dir / "shadow_deployments",
+            production_manifest_path=Path(ApexConfig.MODEL_MANIFEST_PATH),
+            governor_repo=self.governor_policy_repo,
+            environment=ApexConfig.ENVIRONMENT,
+            live_trading=ApexConfig.LIVE_TRADING,
+            enabled=ApexConfig.SHADOW_DEPLOYMENT_ENABLED,
+            evaluation_interval_cycles=ApexConfig.SHADOW_DEPLOYMENT_EVALUATION_INTERVAL_CYCLES,
+            min_shadow_days=ApexConfig.SHADOW_DEPLOYMENT_MIN_DAYS,
+            min_observed_signals=ApexConfig.SHADOW_DEPLOYMENT_MIN_SIGNALS,
+            min_decision_agreement_rate=ApexConfig.SHADOW_DEPLOYMENT_MIN_DECISION_AGREEMENT_RATE,
+            min_offline_sharpe_delta=ApexConfig.SHADOW_DEPLOYMENT_MIN_OFFLINE_SHARPE_DELTA,
+            max_drawdown_increase=ApexConfig.SHADOW_DEPLOYMENT_MAX_DRAWDOWN_INCREASE,
+            max_excess_block_rate=ApexConfig.SHADOW_DEPLOYMENT_MAX_EXCESS_BLOCK_RATE,
+            auto_promote_non_prod=ApexConfig.SHADOW_DEPLOYMENT_AUTO_PROMOTE_NON_PROD,
+        )
         self._control_commands_file = self.user_data_dir / "trading_control_commands.json"
 
         # Hard kill-switch (DD + Sharpe decay)
@@ -1081,6 +1154,229 @@ class ApexTradingSystem:
             logger.warning("CryptoTwapExecutor init failed: %s", _cte)
             self._crypto_twap = None
 
+        # Equity TWAP Executor: slices large equity orders into limit tranches
+        try:
+            if getattr(ApexConfig, "EQUITY_TWAP_ENABLED", True):
+                from execution.equity_twap import EquityTwapExecutor as _ET
+                self._equity_twap = _ET(
+                    min_notional=float(getattr(ApexConfig, "EQUITY_TWAP_MIN_NOTIONAL", 10_000.0)),
+                    num_slices=int(getattr(ApexConfig, "EQUITY_TWAP_SLICES", 5)),
+                    interval_sec=float(getattr(ApexConfig, "EQUITY_TWAP_INTERVAL_SEC", 60.0)),
+                    adverse_bps=float(getattr(ApexConfig, "EQUITY_TWAP_ADVERSE_BPS", 50.0)),
+                )
+                logger.info("EquityTwapExecutor initialised (min_notional=$%.0f, slices=%d)",
+                            float(getattr(ApexConfig, "EQUITY_TWAP_MIN_NOTIONAL", 10_000.0)),
+                            int(getattr(ApexConfig, "EQUITY_TWAP_SLICES", 5)))
+            else:
+                self._equity_twap = None
+        except Exception as _ete:
+            logger.warning("EquityTwapExecutor init failed: %s", _ete)
+            self._equity_twap = None
+
+        # EOD Digest Generator: daily performance report at market close
+        try:
+            from monitoring.eod_digest import EODDigestGenerator as _EDG
+            self._eod_digest = _EDG(data_dir=ApexConfig.DATA_DIR)
+            self._last_eod_digest_date: Optional[str] = None
+            logger.info("EODDigestGenerator initialised")
+        except Exception as _edg_e:
+            logger.warning("EODDigestGenerator init failed: %s", _edg_e)
+            self._eod_digest = None
+            self._last_eod_digest_date = None
+
+        # Correlation Early Warning: proactive corr regime shift detection
+        try:
+            from risk.correlation_early_warning import CorrelationEarlyWarning as _CEW
+            self._corr_early_warning = _CEW(short_window=12, long_window=96)
+            logger.info("CorrelationEarlyWarning initialised")
+        except Exception as _cew_e:
+            logger.warning("CorrelationEarlyWarning init failed: %s", _cew_e)
+            self._corr_early_warning = None
+
+        try:
+            from monitoring.regime_forecaster import RegimeTransitionForecaster as _RTF
+            self._regime_forecaster = _RTF(data_dir=ApexConfig.DATA_DIR)
+            self._regime_forecast_mult: float = 1.0
+            logger.info("RegimeTransitionForecaster initialised")
+        except Exception as _rtf_e:
+            logger.warning("RegimeTransitionForecaster init failed: %s", _rtf_e)
+            self._regime_forecaster = None
+            self._regime_forecast_mult = 1.0
+
+        # Live Regime Transition Alerter: fires structured alerts on severity escalations
+        try:
+            from monitoring.regime_alert import RegimeTransitionAlerter as _RTA
+            _cooldown = float(getattr(ApexConfig, "REGIME_ALERT_COOLDOWN_SECONDS", 900))
+            self._regime_alerter = _RTA(
+                cooldown_seconds=_cooldown,
+                data_dir=ApexConfig.DATA_DIR,
+            )
+            logger.info("RegimeTransitionAlerter initialised")
+        except Exception as _rta_e:
+            logger.warning("RegimeTransitionAlerter init failed: %s", _rta_e)
+            self._regime_alerter = None
+
+        try:
+            from models.mtf_signal_fusion import MTFSignalFuser as _MTFF
+            self._mtf_fuser = _MTFF()
+            logger.info("MTFSignalFuser initialised")
+        except Exception as _mtf_e:
+            logger.warning("MTFSignalFuser init failed: %s", _mtf_e)
+            self._mtf_fuser = None
+
+        try:
+            from risk.earnings_gate import EarningsEventGate as _EEG
+            self._earnings_gate = _EEG()
+            self._earnings_gate_last_refresh: int = 0
+            logger.info("EarningsEventGate initialised")
+        except Exception as _eeg_e:
+            logger.warning("EarningsEventGate init failed: %s", _eeg_e)
+            self._earnings_gate = None
+
+        try:
+            from risk.hrp_sizer import HRPSizer as _HRPS
+            self._hrp_sizer = _HRPS()
+            logger.info("HRPSizer initialised")
+        except Exception as _hrp_e:
+            logger.warning("HRPSizer init failed: %s", _hrp_e)
+            self._hrp_sizer = None
+
+        # Adaptive ATR Stop Manager: regime+VIX+profit-ratchet stop updates
+        try:
+            from risk.adaptive_atr_stops import AdaptiveATRStops as _AATRS
+            self._adaptive_atr_stops = _AATRS()
+            logger.info("AdaptiveATRStops initialised")
+        except Exception as _aatrs_e:
+            logger.warning("AdaptiveATRStops init failed: %s", _aatrs_e)
+            self._adaptive_atr_stops = None
+
+        # Intraday Mean-Reversion Signal: VWAP deviation + RSI extreme counter-trend
+        try:
+            from models.intraday_mr import IntradayMRSignal as _IMRS
+            self._intraday_mr = _IMRS()
+            logger.info("IntradayMRSignal initialised")
+        except Exception as _imrs_e:
+            logger.warning("IntradayMRSignal init failed: %s", _imrs_e)
+            self._intraday_mr = None
+
+        # Model Drift Monitor: IC / hit-rate / confidence decay → retrain trigger
+        try:
+            from monitoring.model_drift_monitor import ModelDriftMonitor as _MDM
+            self._model_drift_monitor = _MDM(
+                window_size=int(getattr(ApexConfig, "MODEL_DRIFT_WINDOW_SIZE", 30)),
+                ic_retrain_threshold=float(getattr(ApexConfig, "MODEL_DRIFT_IC_RETRAIN_THRESHOLD", 0.01)),
+                data_dir=ApexConfig.DATA_DIR,
+            )
+            logger.info("ModelDriftMonitor initialised")
+        except Exception as _mdm_e:
+            logger.warning("ModelDriftMonitor init failed: %s", _mdm_e)
+            self._model_drift_monitor = None
+
+        # Alpha Decay Calibrator: signal IC vs hold-time horizon
+        try:
+            from monitoring.alpha_decay_calibrator import AlphaDecayCalibrator as _ADC
+            self._alpha_decay_cal = _ADC(data_dir=ApexConfig.DATA_DIR)
+            logger.info("AlphaDecayCalibrator initialised")
+        except Exception as _adc_e:
+            logger.warning("AlphaDecayCalibrator init failed: %s", _adc_e)
+            self._alpha_decay_cal = None
+
+        # Execution Timing Optimizer: slippage bps by (hour, dow, regime)
+        try:
+            from monitoring.execution_timing import ExecutionTimingOptimizer as _ETO
+            self._exec_timing = _ETO(
+                data_dir=ApexConfig.DATA_DIR,
+                min_obs=int(getattr(ApexConfig, "EXECUTION_TIMING_MIN_OBS", 5)),
+                score_floor=float(getattr(ApexConfig, "EXECUTION_TIMING_SCORE_FLOOR", 0.55)),
+            )
+            logger.info("ExecutionTimingOptimizer initialised")
+        except Exception as _eto_e:
+            logger.warning("ExecutionTimingOptimizer init failed: %s", _eto_e)
+            self._exec_timing = None
+
+        # Earnings Catalyst Signal: PEAD post-earnings drift alpha
+        try:
+            from data.earnings_catalyst import EarningsCatalystSignal as _ECS
+            self._earnings_catalyst = _ECS()
+            logger.info("EarningsCatalystSignal initialised")
+        except Exception as _ecs_e:
+            logger.warning("EarningsCatalystSignal init failed: %s", _ecs_e)
+            self._earnings_catalyst = None
+
+        # Signal Auto-Tuner: self-improving threshold calibration from EOD feedback
+        try:
+            from monitoring.signal_auto_tuner import SignalAutoTuner as _SAT
+            self._signal_auto_tuner = _SAT(data_dir=ApexConfig.DATA_DIR)
+            _auto_thresholds = self._signal_auto_tuner.load_thresholds_from_disk()
+            if _auto_thresholds:
+                self._auto_tuned_thresholds: dict = _auto_thresholds
+                logger.info("SignalAutoTuner: loaded %d auto-tuned thresholds from disk", len(_auto_thresholds))
+            else:
+                self._auto_tuned_thresholds: dict = {}
+        except Exception as _sat_e:
+            logger.warning("SignalAutoTuner init failed: %s", _sat_e)
+            self._signal_auto_tuner = None
+            self._auto_tuned_thresholds: dict = {}
+
+        # Alert Manager: real-time Telegram / webhook notifications
+        try:
+            from core.alert_manager import AlertManager as _AM
+            self._alert_manager = _AM()
+            logger.info("AlertManager initialised (channel: %s)", self._alert_manager.channel)
+        except Exception as _am_e:
+            logger.warning("AlertManager init failed: %s", _am_e)
+            self._alert_manager = None
+
+        # Capital Allocator: Kelly-optimal equity/crypto split
+        try:
+            from risk.capital_allocator import CapitalAllocator as _CA
+            self._capital_allocator = _CA(
+                data_dir=ApexConfig.DATA_DIR,
+                lookback_days=int(getattr(ApexConfig, "ALLOC_LOOKBACK_DAYS", 20)),
+            )
+            logger.info(
+                "CapitalAllocator initialised (eq=%.0f%% cr=%.0f%%)",
+                self._capital_allocator.current_equity_frac * 100,
+                self._capital_allocator.current_crypto_frac * 100,
+            )
+        except Exception as _ca_e:
+            logger.warning("CapitalAllocator init failed: %s", _ca_e)
+            self._capital_allocator = None
+
+        # Execution Quality Tracker: slippage measurement + sizing penalty feedback
+        try:
+            from monitoring.execution_quality import ExecutionQualityTracker as _EQT
+            self._exec_quality = _EQT(
+                data_dir=ApexConfig.DATA_DIR / "audit" / "execution_quality",
+                max_fills=2000,
+                penalty_p95_bps=float(getattr(ApexConfig, "EQ_PENALTY_P95_BPS", 30.0)),
+                penalty_floor=float(getattr(ApexConfig, "EQ_PENALTY_FLOOR", 0.70)),
+            )
+            logger.info("ExecutionQualityTracker initialised")
+        except Exception as _eq_e:
+            logger.warning("ExecutionQualityTracker init failed: %s", _eq_e)
+            self._exec_quality = None
+
+        # Shadow Deployment Gate: A/B candidate model testing
+        try:
+            from risk.shadow_deployment import ShadowDeploymentGate as _SDG
+            from risk.governor_policy import GovernorPolicyRepository as _GPR
+            _shadow_dir = ApexConfig.DATA_DIR / "shadow_deployments"
+            _shadow_dir.mkdir(parents=True, exist_ok=True)
+            _gov_repo = _GPR(repo_dir=ApexConfig.DATA_DIR / "governor_policies")
+            self._shadow_gate = _SDG(
+                directory=_shadow_dir,
+                production_manifest_path=ApexConfig.MODELS_DIR / "model_manifest.json",
+                governor_repo=_gov_repo,
+                environment=getattr(ApexConfig, "ENVIRONMENT", "prod"),
+                live_trading=getattr(ApexConfig, "LIVE_TRADING", False),
+                enabled=getattr(ApexConfig, "SHADOW_DEPLOYMENT_ENABLED", True),
+            )
+            logger.info("ShadowDeploymentGate initialised (status: %s)", self._shadow_gate.snapshot.status)
+        except Exception as _sdg_e:
+            logger.warning("ShadowDeploymentGate init failed: %s", _sdg_e)
+            self._shadow_gate = None
+
         # Pairs Trading: statistical arbitrage on cointegrated pairs
         try:
             if getattr(ApexConfig, "PAIRS_TRADING_ENABLED", True):
@@ -1177,6 +1473,29 @@ class ApexTradingSystem:
             "selected": [],
             "top_scores": [],
         }
+        self.intraday_stress_engine = IntradayStressEngine(
+            enabled=getattr(ApexConfig, "INTRADAY_STRESS_ENGINE_ENABLED", True),
+            scenario_ids=getattr(ApexConfig, "INTRADAY_STRESS_SCENARIOS", None),
+            warning_return_threshold=getattr(ApexConfig, "INTRADAY_STRESS_WARNING_RETURN_THRESHOLD", -0.04),
+            halt_return_threshold=getattr(ApexConfig, "INTRADAY_STRESS_HALT_RETURN_THRESHOLD", -0.08),
+            warning_drawdown_threshold=getattr(ApexConfig, "INTRADAY_STRESS_WARNING_DRAWDOWN_THRESHOLD", 0.06),
+            halt_drawdown_threshold=getattr(ApexConfig, "INTRADAY_STRESS_HALT_DRAWDOWN_THRESHOLD", 0.10),
+            warning_size_multiplier=getattr(ApexConfig, "INTRADAY_STRESS_WARNING_SIZE_MULTIPLIER", 0.60),
+            halt_size_multiplier=getattr(ApexConfig, "INTRADAY_STRESS_HALT_SIZE_MULTIPLIER", 0.25),
+        )
+        self._stress_control_state: StressControlState = self.intraday_stress_engine.idle_state()
+        self._stress_last_action_signature: Optional[Tuple[Any, ...]] = None
+        self.stress_unwind_planner = StressUnwindPlanner(
+            enabled=getattr(ApexConfig, "STRESS_UNWIND_ENABLED", True),
+            max_positions_per_cycle=getattr(ApexConfig, "STRESS_UNWIND_MAX_POSITIONS_PER_CYCLE", 2),
+            max_participation_rate=getattr(ApexConfig, "STRESS_UNWIND_MAX_PARTICIPATION_RATE", 0.05),
+            min_reduction_pct=getattr(ApexConfig, "STRESS_UNWIND_MIN_REDUCTION_PCT", 0.10),
+            fallback_reduction_pct=getattr(ApexConfig, "STRESS_UNWIND_FALLBACK_REDUCTION_PCT", 0.25),
+        )
+        self._stress_unwind_plan: StressUnwindPlan = self.stress_unwind_planner.idle_plan()
+        self._stress_unwind_plan_signature: Optional[Tuple[Any, ...]] = None
+        self._stress_unwind_plan_epoch: int = 0
+        self._stress_unwind_plan_id: str = ""
         self._dynamic_crypto_symbols: List[str] = []
         # ── Threshold calibration ─────────────────────────────────────────────
         from risk.threshold_calibrator import ThresholdCalibrator as _TC
@@ -1198,6 +1517,20 @@ class ApexTradingSystem:
         except Exception as _e:
             logger.warning("SignalEnhancer init failed, running without ML overlay: %s", _e)
             self._signal_enhancer = None
+
+        # Strategy Rotation Meta-Controller
+        try:
+            from monitoring.strategy_rotation import StrategyRotationController as _SRC
+            self._strategy_rotation = _SRC(
+                data_dir=ApexConfig.DATA_DIR,
+                min_records=int(getattr(ApexConfig, "STRATEGY_ROTATION_MIN_RECORDS", 10)),
+                temperature=float(getattr(ApexConfig, "STRATEGY_ROTATION_TEMPERATURE", 2.0)),
+            )
+            logger.info("StrategyRotationController initialised")
+        except Exception as _src_e:
+            logger.warning("StrategyRotationController init failed: %s", _src_e)
+            self._strategy_rotation = None
+
         # ── Macro Indicators ───────────────────────────────────────────────────
         try:
             from data.macro_indicators import MacroIndicators as _MI
@@ -1746,10 +2079,1008 @@ class ApexTradingSystem:
     def _now_iso_utc() -> str:
         return datetime.utcnow().isoformat() + "Z"
 
+    @staticmethod
+    def _sanitize_event_payload(value):
+        """Convert payload values into JSON-safe primitives for the event journal."""
+        if isinstance(value, dict):
+            return {
+                str(k): ApexTradingSystem._sanitize_event_payload(v)
+                for k, v in value.items()
+                if v is not None
+            }
+        if isinstance(value, (list, tuple, set)):
+            return [ApexTradingSystem._sanitize_event_payload(v) for v in value]
+        if isinstance(value, Path):
+            return value.as_posix()
+        if isinstance(value, datetime):
+            return value.isoformat() + ("Z" if value.tzinfo is None else "")
+        if hasattr(value, "value") and not isinstance(value, (str, bytes)):
+            try:
+                return ApexTradingSystem._sanitize_event_payload(value.value)
+            except Exception:
+                pass
+        if isinstance(value, np.generic):
+            return value.item()
+        if isinstance(value, float):
+            return value if math.isfinite(value) else None
+        return value
+
+    def _journal_event(self, event_type: str, payload: Dict[str, Any]) -> None:
+        """Safely append an event to the deterministic journal."""
+        try:
+            if not getattr(self, "event_store", None):
+                return
+            sanitized = self._sanitize_event_payload(payload)
+            self.event_store.dispatch(event_type, sanitized)
+        except Exception as exc:
+            logger.debug("Event journal dispatch failed for %s: %s", event_type, exc)
+
+    def _journal_signal_snapshot(
+        self,
+        *,
+        symbol: str,
+        asset_class: str,
+        signal: float,
+        confidence: float,
+        price: float,
+        current_position: float,
+        raw_ml_signal: float,
+        components: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        self._journal_event(
+            JournalEventType.SIGNAL_GENERATION,
+            {
+                "symbol": symbol,
+                "asset_class": asset_class,
+                "signal": float(signal),
+                "confidence": float(confidence),
+                "price": float(price),
+                "current_position": float(current_position),
+                "raw_ml_signal": float(raw_ml_signal),
+                "regime": str(getattr(self, "_current_regime", "unknown")),
+                "components": components or {},
+            },
+        )
+        self._observe_shadow_signal(
+            symbol=symbol,
+            signal=signal,
+            confidence=confidence,
+            current_position=current_position,
+        )
+
+    def _journal_risk_decision(
+        self,
+        *,
+        symbol: str,
+        asset_class: str,
+        decision: str,
+        stage: str,
+        reason: str,
+        signal: float = 0.0,
+        confidence: float = 0.0,
+        price: float = 0.0,
+        current_position: float = 0.0,
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        self._journal_event(
+            JournalEventType.RISK_DECISION,
+            {
+                "symbol": symbol,
+                "asset_class": asset_class,
+                "decision": decision,
+                "stage": stage,
+                "reason": reason,
+                "signal": float(signal),
+                "confidence": float(confidence),
+                "price": float(price),
+                "current_position": float(current_position),
+                "regime": str(getattr(self, "_current_regime", "unknown")),
+                "metadata": metadata or {},
+            },
+        )
+        self._observe_shadow_production_decision(symbol=symbol, decision=decision)
+
+    def _journal_order_event(
+        self,
+        *,
+        symbol: str,
+        asset_class: str,
+        side: str,
+        quantity: float,
+        broker: str,
+        lifecycle: str,
+        order_role: str,
+        signal: float = 0.0,
+        confidence: float = 0.0,
+        expected_price: float = 0.0,
+        fill_price: float = 0.0,
+        status: str = "",
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        self._journal_event(
+            JournalEventType.ORDER_EXECUTION,
+            {
+                "symbol": symbol,
+                "asset_class": asset_class,
+                "side": side,
+                "quantity": float(quantity),
+                "broker": broker,
+                "lifecycle": lifecycle,
+                "order_role": order_role,
+                "signal": float(signal),
+                "confidence": float(confidence),
+                "expected_price": float(expected_price),
+                "fill_price": float(fill_price),
+                "status": status,
+                "regime": str(getattr(self, "_current_regime", "unknown")),
+                "metadata": metadata or {},
+            },
+        )
+
+    def _journal_position_update(
+        self,
+        *,
+        symbol: str,
+        asset_class: str,
+        quantity: float,
+        price: float,
+        reason: str,
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        self._journal_event(
+            JournalEventType.POSITION_UPDATE,
+            {
+                "symbol": symbol,
+                "asset_class": asset_class,
+                "quantity": float(quantity),
+                "price": float(price),
+                "reason": reason,
+                "regime": str(getattr(self, "_current_regime", "unknown")),
+                "metadata": metadata or {},
+            },
+        )
+
+    def _journal_stress_evaluation(self, state: StressControlState) -> None:
+        self._journal_event(
+            JournalEventType.STRESS_EVALUATION,
+            {
+                "symbol": "PORTFOLIO",
+                "asset_class": "PORTFOLIO",
+                "action": state.action,
+                "halt_new_entries": bool(state.halt_new_entries),
+                "size_multiplier": float(state.size_multiplier),
+                "reason": state.reason,
+                "worst_scenario_id": state.worst_scenario_id,
+                "worst_scenario_name": state.worst_scenario_name,
+                "worst_portfolio_return": float(state.worst_portfolio_return),
+                "worst_portfolio_pnl": float(state.worst_portfolio_pnl),
+                "worst_drawdown": float(state.worst_drawdown),
+                "scenario_count": int(state.scenario_count),
+                "scenarios": [scenario.to_dict() for scenario in state.scenarios],
+            },
+        )
+
+    def _journal_stress_action(
+        self,
+        state: StressControlState,
+        previous_state: Optional[StressControlState] = None,
+    ) -> None:
+        self._journal_event(
+            JournalEventType.STRESS_ACTION,
+            {
+                "symbol": "PORTFOLIO",
+                "asset_class": "PORTFOLIO",
+                "action": state.action,
+                "halt_new_entries": bool(state.halt_new_entries),
+                "size_multiplier": float(state.size_multiplier),
+                "reason": state.reason,
+                "worst_scenario_id": state.worst_scenario_id,
+                "worst_scenario_name": state.worst_scenario_name,
+                "worst_portfolio_return": float(state.worst_portfolio_return),
+                "worst_drawdown": float(state.worst_drawdown),
+                "previous_action": previous_state.action if previous_state is not None else "",
+                "previous_size_multiplier": (
+                    float(previous_state.size_multiplier) if previous_state is not None else 1.0
+                ),
+                "previous_halt_new_entries": (
+                    bool(previous_state.halt_new_entries) if previous_state is not None else False
+                ),
+            },
+        )
+
+    def _observe_shadow_signal(
+        self,
+        *,
+        symbol: str,
+        signal: float,
+        confidence: float,
+        current_position: float,
+    ) -> None:
+        gate = getattr(self, "shadow_deployment", None)
+        if gate is None:
+            return
+        try:
+            gate.observe_signal(
+                symbol=symbol,
+                signal=float(signal),
+                confidence=float(confidence),
+                current_position=float(current_position),
+                stress_halt_active=bool(getattr(self, "_stress_control_state", None) and self._stress_control_state.halt_new_entries),
+            )
+        except Exception as exc:
+            logger.debug("Shadow deployment signal observation skipped: %s", exc)
+
+    def _observe_shadow_production_decision(
+        self,
+        *,
+        symbol: str,
+        decision: str,
+    ) -> None:
+        gate = getattr(self, "shadow_deployment", None)
+        if gate is None:
+            return
+        if str(decision).lower() not in {"allowed", "blocked"}:
+            return
+        try:
+            gate.observe_production_decision(symbol=symbol, decision=decision)
+        except Exception as exc:
+            logger.debug("Shadow deployment decision observation skipped: %s", exc)
+
+    def _run_shadow_deployment_gate(self, cycle: int) -> None:
+        gate = getattr(self, "shadow_deployment", None)
+        if gate is None or not gate.should_evaluate(cycle):
+            return
+
+        try:
+            update = gate.evaluate(
+                now=datetime.utcnow(),
+                live_sharpe=float(self.performance_tracker.get_sharpe_ratio()) if math.isfinite(self.performance_tracker.get_sharpe_ratio()) else 0.0,
+                live_drawdown=float(self.performance_tracker.get_max_drawdown()) if math.isfinite(self.performance_tracker.get_max_drawdown()) else 0.0,
+                live_win_rate=float(self.performance_tracker.get_win_rate()) if math.isfinite(self.performance_tracker.get_win_rate()) else 0.0,
+                live_total_pnl=float((self.capital or 0.0) - getattr(self.risk_manager, "starting_capital", self.capital or 0.0)),
+                live_total_trades=len(getattr(self.performance_tracker, "trades", [])),
+                stress_halt_active=bool(getattr(self, "_stress_control_state", None) and self._stress_control_state.halt_new_entries),
+            )
+        except Exception as exc:
+            logger.debug("Shadow deployment gate evaluation skipped due to error: %s", exc)
+            return
+
+        runtime_state = gate.runtime_state()
+        candidate = runtime_state.get("candidate") if isinstance(runtime_state.get("candidate"), dict) else {}
+        self._journal_event(
+            JournalEventType.SHADOW_EVALUATION,
+            {
+                "symbol": "PORTFOLIO",
+                "asset_class": "PORTFOLIO",
+                "candidate_id": str(runtime_state.get("candidate_id", "")),
+                "status": str(runtime_state.get("status", "")),
+                "manual_approval_required": bool(runtime_state.get("manual_approval_required", False)),
+                "observed_signals": int(runtime_state.get("observed_signals", 0) or 0),
+                "decision_agreement_rate": float(runtime_state.get("decision_agreement_rate", 0.0) or 0.0),
+                "candidate_manifest_verified": bool(runtime_state.get("candidate_manifest_verified", False)),
+                "governor_policy_verified": bool(runtime_state.get("governor_policy_verified", False)),
+                "live_sharpe": float(runtime_state.get("live_sharpe", 0.0) or 0.0),
+                "live_drawdown": float(runtime_state.get("live_drawdown", 0.0) or 0.0),
+                "offline_sharpe": float(runtime_state.get("offline_sharpe", 0.0) or 0.0),
+                "offline_max_drawdown": float(runtime_state.get("offline_max_drawdown", 0.0) or 0.0),
+                "reasons": list(runtime_state.get("reasons", []) or []),
+                "candidate": {
+                    "candidate_id": str(candidate.get("candidate_id", "")),
+                    "model_version": str(candidate.get("model_version", "")),
+                    "feature_set_version": str(candidate.get("feature_set_version", "")),
+                    "governor_policy_key": str(candidate.get("governor_policy_key", "")),
+                    "governor_policy_version": str(candidate.get("governor_policy_version", "")),
+                },
+            },
+        )
+
+        if update.status_changed:
+            self._journal_event(
+                JournalEventType.PROMOTION_DECISION,
+                {
+                    "symbol": "PORTFOLIO",
+                    "asset_class": "PORTFOLIO",
+                    "candidate_id": str(runtime_state.get("candidate_id", "")),
+                    "previous_status": str(update.previous_status),
+                    "current_status": str(update.current_status),
+                    "manual_approval_required": bool(runtime_state.get("manual_approval_required", False)),
+                    "activation_applied": bool(update.activation_applied),
+                    "candidate_changed": bool(update.candidate_changed),
+                    "reasons": list(runtime_state.get("reasons", []) or []),
+                },
+            )
+            if update.current_status == "blocked":
+                fire_alert(
+                    "shadow_deployment_blocked",
+                    f"Shadow promotion blocked for {runtime_state.get('candidate_id')}: "
+                    + ", ".join(list(runtime_state.get("reasons", []) or [])[:2]),
+                    AlertSev.WARNING,
+                )
+            elif update.current_status == "staged":
+                fire_alert(
+                    "shadow_deployment_staged",
+                    f"Shadow candidate {runtime_state.get('candidate_id')} staged for manual approval.",
+                    AlertSev.INFO,
+                )
+            elif update.current_status in {"ready", "active"}:
+                fire_alert(
+                    "shadow_deployment_ready",
+                    f"Shadow candidate {runtime_state.get('candidate_id')} passed promotion gate.",
+                    AlertSev.INFO,
+                )
+
+        if update.activation_applied:
+            self._journal_event(
+                JournalEventType.MODEL_POLICY_CHANGE,
+                {
+                    "symbol": "PORTFOLIO",
+                    "asset_class": "PORTFOLIO",
+                    "action": "shadow_candidate_activated",
+                    "candidate_id": str(runtime_state.get("candidate_id", "")),
+                    "model_version": str(runtime_state.get("model_version", "")),
+                    "feature_set_version": str(runtime_state.get("feature_set_version", "")),
+                    "governor_policy_key": str(runtime_state.get("governor_policy_key", "")),
+                    "governor_policy_version": str(runtime_state.get("governor_policy_version", "")),
+                },
+            )
+
+    @staticmethod
+    def _stress_action_signature(state: StressControlState) -> Tuple[Any, ...]:
+        return (
+            str(state.action),
+            bool(state.halt_new_entries),
+            round(float(state.size_multiplier), 4),
+            str(state.reason),
+            str(state.worst_scenario_id),
+        )
+
+    def _run_intraday_stress_check(self, cycle: int) -> None:
+        engine = getattr(self, "intraday_stress_engine", None)
+        if engine is None or not engine.enabled:
+            return
+        interval = max(1, int(getattr(ApexConfig, "INTRADAY_STRESS_INTERVAL_CYCLES", 15)))
+        if cycle != 1 and cycle % interval != 0:
+            return
+
+        live_positions = {symbol: qty for symbol, qty in self.positions.items() if qty != 0}
+        price_snapshot: Dict[str, float] = {}
+        last_prices = getattr(self, "last_prices", {}) or {}
+        for symbol in live_positions:
+            raw_price = self.price_cache.get(symbol, 0.0) or last_prices.get(symbol, 0.0)
+            if not raw_price:
+                raw_price = self.position_entry_prices.get(symbol, 0.0)
+            try:
+                price_value = float(raw_price)
+            except Exception:
+                continue
+            if price_value > 0:
+                price_snapshot[symbol] = price_value
+
+        previous_state = getattr(self, "_stress_control_state", None)
+        next_state = engine.evaluate(
+            positions=live_positions,
+            prices=price_snapshot,
+            historical_data=self.historical_data,
+            capital=float(self.capital or 0.0),
+        )
+        self._stress_control_state = next_state
+        self._journal_stress_evaluation(next_state)
+
+        action_signature = self._stress_action_signature(next_state)
+        if action_signature != self._stress_last_action_signature:
+            self._journal_stress_action(next_state, previous_state)
+            self._stress_last_action_signature = action_signature
+            if next_state.action == "halt_entries":
+                logger.warning(
+                    "🧯 IntradayStress: HALT new entries — %s (%s %.2f%%)",
+                    next_state.reason,
+                    next_state.worst_scenario_name or next_state.worst_scenario_id,
+                    next_state.worst_portfolio_return * 100.0,
+                )
+                fire_alert(
+                    "intraday_stress_halt",
+                    f"Intraday stress halt active: {next_state.reason}",
+                    AlertSev.CRITICAL,
+                )
+            elif next_state.action == "size_down":
+                logger.warning(
+                    "🧯 IntradayStress: size scaled to %.0f%% — %s (%s %.2f%%)",
+                    next_state.size_multiplier * 100.0,
+                    next_state.reason,
+                    next_state.worst_scenario_name or next_state.worst_scenario_id,
+                    next_state.worst_portfolio_return * 100.0,
+                )
+                fire_alert(
+                    "intraday_stress_warning",
+                    f"Intraday stress sizing active: {next_state.reason}",
+                    AlertSev.WARNING,
+                )
+            elif previous_state is not None and previous_state.action != "normal":
+                logger.info("🧯 IntradayStress: controls cleared (%s)", next_state.reason)
+
+    def _stress_unwind_signature(self, plan: StressUnwindPlan) -> Tuple[Any, ...]:
+        return (
+            bool(plan.active),
+            str(plan.reason),
+            str(plan.worst_scenario_id),
+            tuple(
+                (
+                    candidate.symbol,
+                    str(candidate.action),
+                    round(float(candidate.target_qty), 6),
+                    round(float(candidate.target_reduction_pct), 6),
+                )
+                for candidate in plan.candidates
+            ),
+        )
+
+    @staticmethod
+    def _stress_unwind_identity_payload(plan: Optional[StressUnwindPlan]) -> Dict[str, Any]:
+        if plan is None or not getattr(plan, "active", False):
+            return {}
+        return {
+            "liquidation_plan_id": str(getattr(plan, "plan_id", "") or ""),
+            "liquidation_plan_epoch": int(getattr(plan, "plan_epoch", 0) or 0),
+            "liquidation_plan_action": str(getattr(plan, "action", "") or ""),
+            "liquidation_plan_reason": str(getattr(plan, "reason", "") or ""),
+            "liquidation_worst_scenario_id": str(getattr(plan, "worst_scenario_id", "") or ""),
+            "liquidation_worst_scenario_name": str(getattr(plan, "worst_scenario_name", "") or ""),
+        }
+
+    def _stress_unwind_liquidity_snapshot(
+        self,
+        positions: Dict[str, float],
+        prices: Dict[str, float],
+    ) -> Dict[str, Dict[str, Any]]:
+        snapshot: Dict[str, Dict[str, Any]] = {}
+        liquidity_guard = getattr(self, "liquidity_guard", None)
+        historical_data = getattr(self, "historical_data", {}) or {}
+        for symbol in positions:
+            price = float(prices.get(symbol, 0.0) or 0.0)
+            if price <= 0.0:
+                continue
+            metrics = None
+            if liquidity_guard is not None and hasattr(liquidity_guard, "get_metrics"):
+                try:
+                    metrics = liquidity_guard.get_metrics(symbol)
+                except Exception:
+                    metrics = None
+
+            volume_values: List[float] = []
+            history = historical_data.get(symbol)
+            if history is not None and hasattr(history, "columns"):
+                for volume_col in ("Volume", "volume"):
+                    if volume_col in history.columns:
+                        try:
+                            series = history[volume_col].dropna().tail(20)
+                            volume_values = [float(v) for v in series.tolist() if float(v) > 0.0]
+                        except Exception:
+                            volume_values = []
+                        if volume_values:
+                            break
+            elif isinstance(history, dict):
+                raw_volume = history.get("Volume")
+                if raw_volume is None:
+                    raw_volume = history.get("volume")
+                if raw_volume is not None:
+                    try:
+                        if hasattr(raw_volume, "dropna"):
+                            series = raw_volume.dropna().tail(20)
+                            volume_values = [float(v) for v in series.tolist() if float(v) > 0.0]
+                        elif isinstance(raw_volume, (list, tuple)):
+                            volume_values = [float(v) for v in raw_volume[-20:] if float(v) > 0.0]
+                    except Exception:
+                        volume_values = []
+
+            avg_daily_volume = float(np.median(volume_values)) if volume_values else 0.0
+            latest_volume = float(volume_values[-1]) if volume_values else 0.0
+            volume_ratio = (
+                float(latest_volume / avg_daily_volume)
+                if avg_daily_volume > 0.0 and latest_volume > 0.0
+                else 1.0
+            )
+            avg_daily_dollar_volume = avg_daily_volume * price if avg_daily_volume > 0.0 else 0.0
+
+            if metrics is not None:
+                volume_ratio = float(getattr(metrics, "volume_ratio", volume_ratio) or volume_ratio)
+                liquidity_regime = getattr(getattr(metrics, "regime", None), "name", "NORMAL")
+                spread_pct = float(getattr(metrics, "bid_ask_spread_pct", 0.0) or 0.0)
+                size_multiplier = float(getattr(metrics, "position_size_multiplier", 1.0) or 1.0)
+            else:
+                liquidity_regime = "NORMAL"
+                spread_pct = 0.0
+                size_multiplier = 1.0
+
+            snapshot[symbol] = {
+                "avg_daily_volume": float(avg_daily_volume),
+                "avg_daily_dollar_volume": float(avg_daily_dollar_volume),
+                "volume_ratio": float(volume_ratio),
+                "bid_ask_spread_pct": float(spread_pct),
+                "liquidity_regime": str(liquidity_regime),
+                "position_size_multiplier": float(size_multiplier),
+            }
+        return snapshot
+
+    def _refresh_stress_unwind_plan(self) -> None:
+        planner = getattr(self, "stress_unwind_planner", None)
+        if planner is None or not planner.enabled:
+            return
+        live_positions = {symbol: qty for symbol, qty in self.positions.items() if qty != 0}
+        last_prices = getattr(self, "last_prices", {}) or {}
+        price_snapshot: Dict[str, float] = {}
+        for symbol in live_positions:
+            raw_price = self.price_cache.get(symbol, 0.0) or last_prices.get(symbol, 0.0)
+            if not raw_price:
+                raw_price = self.position_entry_prices.get(symbol, 0.0)
+            try:
+                price_value = float(raw_price)
+            except Exception:
+                continue
+            if price_value > 0:
+                price_snapshot[symbol] = price_value
+        next_plan = planner.build_plan(
+            stress_state=self._stress_control_state,
+            positions=live_positions,
+            prices=price_snapshot,
+            portfolio_value=float(self.capital or 0.0),
+            liquidity_snapshot=self._stress_unwind_liquidity_snapshot(live_positions, price_snapshot),
+        )
+        signature = self._stress_unwind_signature(next_plan)
+        if next_plan.active:
+            if signature != self._stress_unwind_plan_signature or not self._stress_unwind_plan_id:
+                self._stress_unwind_plan_epoch += 1
+                self._stress_unwind_plan_id = (
+                    f"stress-unwind-{self._stress_unwind_plan_epoch}-"
+                    f"{datetime.utcnow().strftime('%Y%m%dT%H%M%S%f')}"
+                )
+            next_plan = StressUnwindPlan(
+                active=next_plan.active,
+                created_at=next_plan.created_at,
+                action=next_plan.action,
+                reason=next_plan.reason,
+                plan_id=self._stress_unwind_plan_id,
+                plan_epoch=self._stress_unwind_plan_epoch,
+                worst_scenario_id=next_plan.worst_scenario_id,
+                worst_scenario_name=next_plan.worst_scenario_name,
+                candidates=next_plan.candidates,
+            )
+        else:
+            self._stress_unwind_plan_id = ""
+        self._stress_unwind_plan = next_plan
+        if signature == self._stress_unwind_plan_signature:
+            return
+        self._stress_unwind_plan_signature = signature
+        self._journal_event(
+            JournalEventType.STRESS_ACTION,
+            {
+                "symbol": "PORTFOLIO",
+                "asset_class": "PORTFOLIO",
+                "action": next_plan.action,
+                "reason": next_plan.reason,
+                "liquidation_plan_id": next_plan.plan_id,
+                "liquidation_plan_epoch": int(next_plan.plan_epoch),
+                "worst_scenario_id": next_plan.worst_scenario_id,
+                "worst_scenario_name": next_plan.worst_scenario_name,
+                "candidates": [candidate.to_dict() for candidate in next_plan.candidates],
+            },
+        )
+        if next_plan.active:
+            logger.warning(
+                "🧯 StressUnwind plan active: %s (%s) → %s",
+                next_plan.reason,
+                next_plan.worst_scenario_name or next_plan.worst_scenario_id,
+                ", ".join(candidate.symbol for candidate in next_plan.candidates),
+            )
+            fire_alert(
+                "stress_unwind_plan",
+                "Stress unwind plan active for "
+                + ", ".join(candidate.symbol for candidate in next_plan.candidates),
+                AlertSev.CRITICAL,
+            )
+        else:
+            logger.info("🧯 StressUnwind plan cleared (%s)", next_plan.reason)
+
+    def _stress_unwind_candidate_for(self, symbol: str) -> Optional[Dict[str, Any]]:
+        plan = getattr(self, "_stress_unwind_plan", None)
+        if plan is None or not plan.active:
+            return None
+        for candidate in plan.candidates:
+            if candidate.symbol == symbol:
+                return candidate.to_dict()
+        return None
+
+    async def _execute_partial_position_reduction(
+        self,
+        *,
+        symbol: str,
+        asset_class: str,
+        current_pos: float,
+        reduction_qty: float,
+        price: float,
+        signal: float,
+        confidence: float,
+        entry_price: float,
+        entry_time: datetime,
+        entry_signal: float,
+        holding_days: int,
+        pnl: float,
+        pnl_pct: float,
+        exit_reason: str,
+        active_policy: Any,
+        governor_regime_key: str,
+        perf_snapshot: Any,
+    ) -> None:
+        reduction_qty = min(abs(float(current_pos)), max(0.0, float(reduction_qty)))
+        if reduction_qty <= 0.0:
+            return
+
+        order_side = "SELL" if current_pos > 0 else "BUY"
+        side_label = "LONG" if current_pos > 0 else "SHORT"
+        reduction_ratio = reduction_qty / max(abs(float(current_pos)), 1e-9)
+        reduction_pnl = float(pnl) * reduction_ratio
+        exit_connector = self._get_connector_for(symbol)
+
+        logger.warning(
+            "🧯 PARTIAL EXIT %s (%s): %s",
+            symbol,
+            side_label,
+            exit_reason,
+        )
+        logger.info(
+            "   Stress reduction: %.6f / %.6f (%.0f%%)",
+            reduction_qty,
+            abs(float(current_pos)),
+            reduction_ratio * 100.0,
+        )
+
+        if exit_connector:
+            self.pending_orders.add(symbol)
+            exit_broker = "alpaca" if exit_connector is self.alpaca else "ibkr"
+            self._journal_order_event(
+                symbol=symbol,
+                asset_class=asset_class,
+                side=order_side,
+                quantity=float(reduction_qty),
+                broker=exit_broker,
+                lifecycle="submitted",
+                order_role="exit",
+                signal=float(signal),
+                confidence=float(confidence),
+                expected_price=float(price),
+                metadata={
+                    "exit_reason": exit_reason,
+                    "exit_type": "partial_reduce",
+                    "planned_reduction_qty": float(reduction_qty),
+                    "planned_reduction_pct": float(reduction_ratio),
+                    **self._stress_unwind_identity_payload(getattr(self, "_stress_unwind_plan", None)),
+                    **self._governor_policy_metadata(
+                        active_policy,
+                        governor_regime_key,
+                        perf_snapshot.tier.value,
+                    ),
+                },
+            )
+
+            trade = await exit_connector.execute_order(
+                symbol=symbol,
+                side=order_side,
+                quantity=reduction_qty,
+                confidence=abs(signal) if signal != 0 else 0.8,
+            )
+
+            if trade:
+                exit_fill_price = float(price)
+                exit_expected_price = float(price)
+                exit_trade_status = "FILLED"
+                if isinstance(trade, dict):
+                    exit_fill_price = float(trade.get("price", exit_fill_price) or exit_fill_price)
+                    exit_expected_price = float(
+                        trade.get("expected_price", exit_expected_price) or exit_expected_price
+                    )
+                    exit_trade_status = str(trade.get("status", "FILLED")).upper()
+                else:
+                    try:
+                        exit_fill_price = float(trade.orderStatus.avgFillPrice or exit_fill_price)
+                    except Exception:
+                        pass
+
+                self._journal_order_event(
+                    symbol=symbol,
+                    asset_class=asset_class,
+                    side=order_side,
+                    quantity=float(reduction_qty),
+                    broker=exit_broker,
+                    lifecycle="filled" if exit_trade_status == "FILLED" else "result",
+                    order_role="exit",
+                    signal=float(signal),
+                    confidence=float(confidence),
+                    expected_price=float(exit_expected_price),
+                    fill_price=float(exit_fill_price),
+                    status=exit_trade_status,
+                    metadata={
+                        "exit_reason": exit_reason,
+                        "exit_type": "partial_reduce",
+                        "planned_reduction_qty": float(reduction_qty),
+                        "planned_reduction_pct": float(reduction_ratio),
+                        **self._stress_unwind_identity_payload(getattr(self, "_stress_unwind_plan", None)),
+                        **self._governor_policy_metadata(
+                            active_policy,
+                            governor_regime_key,
+                            perf_snapshot.tier.value,
+                        ),
+                    },
+                )
+
+                await self._sync_positions()
+
+                commission = ApexConfig.COMMISSION_PER_TRADE
+                self.total_commissions += commission
+                realized_net = 0.0
+                if exit_trade_status == "FILLED":
+                    realized_net = self._record_fill_realized_pnl(
+                        broker_name=exit_broker,
+                        symbol=symbol,
+                        side=order_side,
+                        quantity=float(reduction_qty),
+                        fill_price=float(exit_fill_price),
+                        commission=float(commission),
+                        filled_at=datetime.now(),
+                    )
+
+                exit_slippage_bps = self._compute_slippage_bps(
+                    exit_expected_price,
+                    exit_fill_price,
+                )
+                self._record_exit_attribution(
+                    symbol=symbol,
+                    asset_class=asset_class,
+                    side=side_label,
+                    quantity=float(reduction_qty),
+                    entry_price=float(entry_price),
+                    exit_price=float(exit_fill_price),
+                    commissions=float(commission),
+                    exit_reason=exit_reason,
+                    entry_signal=float(entry_signal),
+                    entry_confidence=min(1.0, max(0.0, abs(entry_signal))),
+                    governor_tier=perf_snapshot.tier.value,
+                    governor_regime=self._map_governor_regime(asset_class, self._current_regime),
+                    entry_time=entry_time,
+                    exit_time=datetime.now(),
+                    exit_slippage_bps=float(exit_slippage_bps),
+                    source="live_partial_exit",
+                )
+                self.trade_audit.log(
+                    event="STRESS_TRIM",
+                    symbol=symbol,
+                    side=order_side,
+                    qty=float(reduction_qty),
+                    fill_price=float(exit_fill_price),
+                    expected_price=float(exit_expected_price),
+                    slippage_bps=float(exit_slippage_bps),
+                    signal=float(signal),
+                    confidence=float(confidence),
+                    entry_signal=float(entry_signal),
+                    regime=str(self._current_regime),
+                    pnl_pct=float(pnl_pct),
+                    pnl_usd=float(reduction_pnl),
+                    exit_reason=exit_reason,
+                    holding_days=int(holding_days),
+                    broker=exit_broker,
+                    pretrade="PASS",
+                )
+                self._journal_position_update(
+                    symbol=symbol,
+                    asset_class=asset_class,
+                    quantity=float(self.positions.get(symbol, 0.0)),
+                    price=float(exit_fill_price),
+                    reason="partial_exit_fill",
+                    metadata={
+                        "broker": exit_broker,
+                        "status": exit_trade_status,
+                        "exit_reason": exit_reason,
+                        "reduction_qty": float(reduction_qty),
+                        "reduction_pct": float(reduction_ratio),
+                        **self._stress_unwind_identity_payload(getattr(self, "_stress_unwind_plan", None)),
+                        **self._governor_policy_metadata(
+                            active_policy,
+                            governor_regime_key,
+                            perf_snapshot.tier.value,
+                        ),
+                    },
+                )
+
+                net_result = (
+                    float(realized_net)
+                    if not math.isclose(realized_net, 0.0, abs_tol=1e-9)
+                    else float(reduction_pnl - commission)
+                )
+                self.live_monitor.log_trade(
+                    symbol,
+                    order_side,
+                    float(reduction_qty),
+                    float(exit_fill_price),
+                    net_result,
+                )
+                await self.performance_tracker.record_trade(
+                    symbol,
+                    order_side,
+                    float(reduction_qty),
+                    float(exit_fill_price),
+                    commission,
+                )
+                self.risk_manager.record_trade_result(net_result)
+                self.last_trade_time[symbol] = datetime.now()
+                self.pending_orders.discard(symbol)
+                if symbol in self.failed_exits:
+                    del self.failed_exits[symbol]
+                logger.info(
+                    "   ✅ Stress trim completed: %.6f reduced, remaining %.6f",
+                    reduction_qty,
+                    float(self.positions.get(symbol, 0.0)),
+                )
+            else:
+                self.pending_orders.discard(symbol)
+                attempts = self.failed_exits.get(symbol, {}).get("attempts", 0) + 1
+                self.failed_exits[symbol] = {
+                    "reason": exit_reason,
+                    "attempts": attempts,
+                    "last_attempt": datetime.now(),
+                    "quantity": float(reduction_qty),
+                    "side": order_side,
+                }
+                logger.warning(
+                    "   ⚠️ Stress trim order failed for %s (attempt %d)",
+                    symbol,
+                    attempts,
+                )
+        else:
+            if self.ibkr or self.alpaca:
+                logger.warning(
+                    "⚠️ %s: No eligible connector for stress trim in broker mode '%s'; keeping position open",
+                    symbol,
+                    str(getattr(ApexConfig, "BROKER_MODE", "ibkr")).lower(),
+                )
+                self.last_trade_time[symbol] = datetime.now() - timedelta(
+                    seconds=max(30, int(ApexConfig.TRADE_COOLDOWN_SECONDS) - 30)
+                )
+                return
+
+            exit_fill_price = float(price)
+            new_qty = current_pos - reduction_qty if current_pos > 0 else current_pos + reduction_qty
+            if math.isclose(new_qty, 0.0, abs_tol=1e-9):
+                self.positions.pop(symbol, None)
+            else:
+                self.positions[symbol] = new_qty
+
+            self._journal_order_event(
+                symbol=symbol,
+                asset_class=asset_class,
+                side=order_side,
+                quantity=float(reduction_qty),
+                broker="simulation",
+                lifecycle="filled",
+                order_role="exit",
+                signal=float(signal),
+                confidence=float(confidence),
+                expected_price=float(exit_fill_price),
+                fill_price=float(exit_fill_price),
+                status="SIMULATED",
+                metadata={
+                    "exit_reason": exit_reason,
+                    "exit_type": "partial_reduce",
+                    "planned_reduction_qty": float(reduction_qty),
+                    "planned_reduction_pct": float(reduction_ratio),
+                    **self._stress_unwind_identity_payload(getattr(self, "_stress_unwind_plan", None)),
+                    **self._governor_policy_metadata(
+                        active_policy,
+                        governor_regime_key,
+                        perf_snapshot.tier.value,
+                    ),
+                },
+            )
+            self._record_exit_attribution(
+                symbol=symbol,
+                asset_class=asset_class,
+                side=side_label,
+                quantity=float(reduction_qty),
+                entry_price=float(entry_price),
+                exit_price=float(exit_fill_price),
+                commissions=0.0,
+                exit_reason=exit_reason,
+                entry_signal=float(entry_signal),
+                entry_confidence=min(1.0, max(0.0, abs(entry_signal))),
+                governor_tier=perf_snapshot.tier.value,
+                governor_regime=self._map_governor_regime(asset_class, self._current_regime),
+                entry_time=entry_time,
+                exit_time=datetime.now(),
+                exit_slippage_bps=0.0,
+                source="sim_partial_exit",
+            )
+            self.trade_audit.log(
+                event="STRESS_TRIM",
+                symbol=symbol,
+                side=order_side,
+                qty=float(reduction_qty),
+                fill_price=float(exit_fill_price),
+                expected_price=float(exit_fill_price),
+                slippage_bps=0.0,
+                signal=float(signal),
+                confidence=float(confidence),
+                entry_signal=float(entry_signal),
+                regime=str(self._current_regime),
+                pnl_pct=float(pnl_pct),
+                pnl_usd=float(reduction_pnl),
+                exit_reason=exit_reason,
+                holding_days=int(holding_days),
+                broker="simulation",
+                pretrade="PASS",
+            )
+            self._journal_position_update(
+                symbol=symbol,
+                asset_class=asset_class,
+                quantity=float(self.positions.get(symbol, 0.0)),
+                price=float(exit_fill_price),
+                reason="sim_partial_exit_fill",
+                metadata={
+                    "status": "SIMULATED",
+                    "exit_reason": exit_reason,
+                    "reduction_qty": float(reduction_qty),
+                    "reduction_pct": float(reduction_ratio),
+                    **self._stress_unwind_identity_payload(getattr(self, "_stress_unwind_plan", None)),
+                    **self._governor_policy_metadata(
+                        active_policy,
+                        governor_regime_key,
+                        perf_snapshot.tier.value,
+                    ),
+                },
+            )
+            self.live_monitor.log_trade(symbol, order_side, float(reduction_qty), price, float(reduction_pnl))
+            await self.performance_tracker.record_trade(
+                symbol,
+                order_side,
+                float(reduction_qty),
+                price,
+                0.0,
+            )
+            self.risk_manager.record_trade_result(float(reduction_pnl))
+            self.last_trade_time[symbol] = datetime.now()
+
+    @staticmethod
+    def _governor_policy_metadata(policy: Any, regime_key: str, tier: Optional[str] = None) -> Dict[str, Any]:
+        if policy is None:
+            return {"governor_regime": regime_key, **({"governor_tier": tier} if tier else {})}
+        metadata: Dict[str, Any] = {
+            "governor_regime": regime_key,
+            "governor_policy_key": policy.key().as_id() if hasattr(policy, "key") else "",
+            "governor_policy_version": str(getattr(policy, "version", "")),
+            "governor_policy_id": (
+                policy.policy_id() if hasattr(policy, "policy_id") else ""
+            ),
+        }
+        if tier:
+            metadata["governor_tier"] = tier
+        return metadata
+
     def _write_trade_rejection(self, symbol: str, reason: str, signal: float = 0.0,
                                confidence: float = 0.0, price: float = 0.0,
                                extra: dict = None) -> None:
         """Append rejected signal to audit JSONL (Upgrade H)."""
+        try:
+            asset_class = parse_symbol(symbol).asset_class.value
+        except Exception:
+            asset_class = "EQUITY"
+        self._journal_risk_decision(
+            symbol=symbol,
+            asset_class=asset_class,
+            decision="blocked",
+            stage="trade_rejection",
+            reason=reason,
+            signal=signal,
+            confidence=confidence,
+            price=price,
+            current_position=float(self.positions.get(symbol, 0)),
+            metadata=extra,
+        )
         if not getattr(ApexConfig, "TRADE_REJECTION_AUDIT_ENABLED", True):
             return
         import json
@@ -1793,6 +3124,21 @@ class ApexTradingSystem:
             slippage_bps: Optional[float] = None
             if fill_price > 0 and expected_price > 0:
                 slippage_bps = round(abs(fill_price - expected_price) / expected_price * 10000.0, 2)
+
+            # Record fill into ExecutionTimingOptimizer bucket
+            if slippage_bps is not None and getattr(self, "_exec_timing", None) is not None:
+                try:
+                    import datetime as _dt
+                    _now_utc = _dt.datetime.utcnow()
+                    if getattr(ApexConfig, "EXECUTION_TIMING_ENABLED", True):
+                        self._exec_timing.record_fill(
+                            slippage_bps=float(slippage_bps),
+                            hour=_now_utc.hour,
+                            day_of_week=_now_utc.weekday(),
+                            regime=str(self._current_regime),
+                        )
+                except Exception:
+                    pass
 
             audit_path = self.user_data_dir / "audit" / "execution_latency.jsonl"
             audit_path.parent.mkdir(parents=True, exist_ok=True)
@@ -2357,6 +3703,10 @@ class ApexTradingSystem:
                 earnings_dt = await asyncio.to_thread(_fetch_earnings_date_yf, clean)
                 if earnings_dt is not None and earnings_dt > datetime.utcnow():
                     self.macro_event_shield.add_earnings_date(symbol, earnings_dt)
+                    # Mirror into EarningsEventGate for pre-earnings sizing dampener
+                    _eg = getattr(self, '_earnings_gate', None)
+                    if _eg is not None:
+                        _eg.update_earnings(symbol.split(":")[-1], earnings_dt)
                     fetched += 1
             except Exception as e:
                 logger.debug("EarningsCalendar: failed for %s: %s", symbol, e)
@@ -3056,6 +4406,24 @@ class ApexTradingSystem:
             except Exception as e:
                 logger.warning(f"⚠️  ML training failed: {e}")
                 logger.warning("   Falling back to technical analysis only")
+
+        # GodLevel cold-start: if no saved models, train in background (non-blocking)
+        if (getattr(ApexConfig, "GOD_LEVEL_BLEND_ENABLED", True)
+                and getattr(self, "god_signal_generator", None) is not None
+                and not self.god_signal_generator.models_trained):
+            logger.info("🧠 GodLevel ensemble: no saved models found — launching background training...")
+
+            async def _godlevel_train_and_regen_manifest():
+                await asyncio.to_thread(self.god_signal_generator.train_models, self.historical_data)
+                try:
+                    from models.model_manifest import build_manifest, write_manifest
+                    from pathlib import Path as _Path
+                    write_manifest(build_manifest(), _Path("models/model_manifest.json"))
+                    logger.info("✅ Model manifest regenerated after cold-start GodLevel training")
+                except Exception as _mf_err:
+                    logger.warning("Manifest regen after cold-start training failed: %s", _mf_err)
+
+            asyncio.create_task(_godlevel_train_and_regen_manifest())
 
         # Train institutional signal generator
         if self.use_institutional:
@@ -5167,6 +6535,12 @@ class ApexTradingSystem:
     
     async def process_symbol(self, symbol: str):
         """Process symbol with all protections including circuit breaker."""
+        # Skip pure delta-hedge positions — managed exclusively by DeltaHedger, not signals
+        _hedge_sym = str(getattr(ApexConfig, "DELTA_HEDGE_SYMBOL", "SPY"))
+        if symbol == _hedge_sym and getattr(self, '_delta_hedge_qty', {}).get(_hedge_sym, 0) != 0:
+            logger.debug("process_symbol: skipping %s (delta hedge position)", symbol)
+            return
+
         try:
             parsed_symbol = parse_symbol(symbol)
             asset_class = parsed_symbol.asset_class.value
@@ -5192,6 +6566,14 @@ class ApexTradingSystem:
         # Portfolio-level hard kill-switch: block only new entries, never exits.
         if self.kill_switch and self.kill_switch.active:
             if current_qty == 0:
+                self._journal_risk_decision(
+                    symbol=symbol,
+                    asset_class=asset_class,
+                    decision="blocked",
+                    stage="startup_guard",
+                    reason="kill_switch",
+                    current_position=float(current_qty),
+                )
                 if self.prometheus_metrics:
                     self.prometheus_metrics.record_governor_blocked_entry(
                         asset_class=asset_class,
@@ -5205,6 +6587,21 @@ class ApexTradingSystem:
         # Crypto trades on Alpaca and is unaffected by IBKR equity reconciliation.
         if self._equity_reconciliation_block_entries and not _symbol_is_crypto(symbol):
             if current_qty == 0:
+                self._journal_risk_decision(
+                    symbol=symbol,
+                    asset_class=asset_class,
+                    decision="blocked",
+                    stage="startup_guard",
+                    reason="equity_reconciliation",
+                    current_position=float(current_qty),
+                    metadata={
+                        "snapshot_reason": (
+                            self._equity_reconciliation_snapshot.reason
+                            if self._equity_reconciliation_snapshot
+                            else "unknown"
+                        )
+                    },
+                )
                 if self.prometheus_metrics:
                     self.prometheus_metrics.record_governor_blocked_entry(
                         asset_class=asset_class,
@@ -5272,26 +6669,14 @@ class ApexTradingSystem:
                     )
                     return
 
-        # Check 1.5: Crypto entry window — block new entries outside liquid hours
-        # 577 pre-trade attempts were made on Mar 18, 469 before 9:30 ET. Orders
-        # at midnight hit thin books, most don't fill, and they create noise/retries.
-        if (current_qty == 0 and self._is_crypto_symbol(symbol)
-                and getattr(ApexConfig, "CRYPTO_ENTRY_WINDOW_ENABLED", True)):
-            _utc_h = datetime.utcnow().hour
-            _w_start = int(getattr(ApexConfig, "CRYPTO_ENTRY_WINDOW_UTC_START", 13))
-            _w_end = int(getattr(ApexConfig, "CRYPTO_ENTRY_WINDOW_UTC_END", 22))
-            if not (_w_start <= _utc_h < _w_end):
-                logger.debug(
-                    "⏸️ %s: Crypto entry blocked outside trading window (%02d:00 UTC, window=%02d–%02d UTC)",
-                    symbol, _utc_h, _w_start, _w_end,
-                )
-                return
+        # Check 1.5: Crypto entry window — natively disabled for 24/7 continuous evaluations
+        # (Removed historical block that previously restricted crypto to US Equity hours)
 
         # Check 1.6: Session-aware equity entry window — avoid opening/closing turbulence
         # First N minutes after NYSE open (9:30 ET) and last N minutes before close (16:00 ET)
         # have the widest spreads, highest slippage, and most signal noise.
         if (current_qty == 0
-                and not self._is_crypto_symbol(symbol)
+                and not _symbol_is_crypto(symbol)
                 and str(asset_class).upper() not in ("FX", "FOREX")
                 and getattr(ApexConfig, "SESSION_AWARE_ENTRY_ENABLED", True)):
             try:
@@ -5499,6 +6884,44 @@ class ApexTradingSystem:
             except Exception:
                 pass
 
+        # Check 2.16b: Options Flow (Smart Money) Gate — equity only, cached 1hr
+        # PCR > 1 = heavy puts = bearish institutional positioning.
+        # Block BUY entries when options flow strongly contradicts signal direction.
+        # Block SELL (short) entries when options flow strongly contradicts.
+        if (
+            current_qty == 0
+            and not is_initial_build
+            and str(asset_class).upper() not in ("CRYPTO", "FOREX")
+            and getattr(ApexConfig, "OPTIONS_FLOW_GATE_ENABLED", True)
+        ):
+            try:
+                _of_contradict_thresh = float(getattr(ApexConfig, "OPTIONS_FLOW_CONTRA_THRESHOLD", 0.40))
+                _of_sentiment = await asyncio.to_thread(
+                    getattr(__import__('data.social.options_flow', fromlist=['get_smart_money_sentiment']),
+                            'get_smart_money_sentiment'), symbol
+                )
+                # Positive signal = long intent; negative options flow = bearish smart money
+                _pos_dir = 1 if signal > 0 else -1
+                _contra = float(_of_sentiment) * (-_pos_dir)   # >0 means options contradict direction
+                if _contra > _of_contradict_thresh:
+                    _of_block_min_conf = float(getattr(ApexConfig, "OPTIONS_FLOW_BLOCK_MIN_CONF", 0.75))
+                    if confidence < _of_block_min_conf:
+                        logger.info(
+                            "🎯 %s: Options flow contra=%.2f blocks entry (conf=%.3f < %.2f, flow=%.2f)",
+                            symbol, _contra, confidence, _of_block_min_conf, _of_sentiment,
+                        )
+                        return
+                    else:
+                        # High conf but contra flow: penalise confidence slightly
+                        _of_pen = float(getattr(ApexConfig, "OPTIONS_FLOW_CONF_PENALTY", 0.93))
+                        confidence = confidence * _of_pen
+                        logger.debug(
+                            "🎯 %s: Options flow contra=%.2f, high conf — penalty ×%.2f → %.3f",
+                            symbol, _contra, _of_pen, confidence,
+                        )
+            except Exception as _of_err:
+                logger.debug("OptionsFlow gate error for %s: %s", symbol, _of_err)
+
         # Check 2.17: External Signal Aggregator (Funding Rate + Candlestick Patterns)
         # Completely independent from ML models: different input types, no shared state.
         # Adjusts confidence up/down; blocks only when ALL votes contradict AND conf is low.
@@ -5509,7 +6932,7 @@ class ApexTradingSystem:
             _frs = getattr(self, '_funding_rate_signal', None)
             if (
                 _frs is not None
-                and self._is_crypto_symbol(symbol)
+                and _symbol_is_crypto(symbol)
                 and getattr(ApexConfig, "FUNDING_RATE_SIGNAL_ENABLED", True)
             ):
                 try:
@@ -5631,7 +7054,7 @@ class ApexTradingSystem:
             _pead is not None
             and current_qty == 0
             and not is_initial_build
-            and not self._is_crypto_symbol(symbol)
+            and not _symbol_is_crypto(symbol)
             and str(asset_class).upper() not in ("FX", "FOREX")
             and getattr(ApexConfig, "EARNINGS_PEAD_ENABLED", True)
         ):
@@ -5685,7 +7108,7 @@ class ApexTradingSystem:
             _pcr_ctx is not None
             and current_qty == 0
             and not is_initial_build
-            and not self._is_crypto_symbol(symbol)
+            and not _symbol_is_crypto(symbol)
             and str(asset_class).upper() not in ("FX", "FOREX")
             and getattr(ApexConfig, "PCR_GATE_ENABLED", True)
         ):
@@ -5720,7 +7143,7 @@ class ApexTradingSystem:
             _orb is not None
             and current_qty == 0
             and not is_initial_build
-            and not self._is_crypto_symbol(symbol)
+            and not _symbol_is_crypto(symbol)
             and str(asset_class).upper() not in ("FX", "FOREX")
             and getattr(ApexConfig, "ORB_GATE_ENABLED", True)
             and _orb.has_range(symbol)
@@ -5840,9 +7263,16 @@ class ApexTradingSystem:
                     if current_pos == 0 and not symbol.startswith("CRYPTO:"):
                         current_pos = self.positions.get(f"CRYPTO:{symbol}", 0)
 
-                # Get current price
-                price = await connector.get_market_price(symbol)
-                if not price or price == 0:
+                # Get current price (PHASE 12: WSS Intercept)
+                price = 0.0
+                if getattr(self, 'websocket_streamer', None):
+                    price = self.websocket_streamer.get_current_price(symbol)
+                
+                # Fallback to legacy REST API if WSS missed the tick
+                if not price or price == 0.0:
+                    price = await connector.get_market_price(symbol)
+                    
+                if not price or price == 0.0:
                     logger.info(f"⚠️ {symbol}: No price from broker – skipping")
                     return
 
@@ -5997,6 +7427,40 @@ class ApexTradingSystem:
                     logger.info(f"📊 {symbol}: {strength} {direction} signal={signal:+.3f} conf={confidence:.2f}")
                     logger.debug(f"   Breakdown: ML={signal_data['signal']:.2f} Mom={cs_signal:.2f} Sent={sent_signal:.2f}")
 
+            # ══ Option B: GodLevel Alpha Layer ════════════════════════════════════
+            # Blends options flow (PCR), RL-weighted ensemble, VADER news NLP, and
+            # on-chain crypto whale data (Fear & Greed) into the primary signal at
+            # a conservative 12% weight so the institutional path dominates (88%).
+            # Also tracks the RL action per-symbol for direct reward on trade close.
+            if getattr(ApexConfig, "GOD_LEVEL_BLEND_ENABLED", True):
+                try:
+                    _god_result = self.god_signal_generator.generate_ml_signal(
+                        symbol, data
+                    )
+                    _god_sig = float(_god_result.get('signal', 0.0))
+                    _god_conf = float(_god_result.get('confidence', 0.0))
+                    _god_weight = float(getattr(ApexConfig, "GOD_LEVEL_BLEND_WEIGHT", 0.12))
+                    if abs(_god_sig) > 0.02:  # ignore near-zero god-level noise
+                        _pre_blend = signal
+                        signal = (1.0 - _god_weight) * signal + _god_weight * _god_sig
+                        if _god_conf > 0.10:
+                            confidence = (confidence + _god_conf) / 2.0
+                        logger.debug(
+                            "🎯 GodLevel blend %s: inst=%.3f god=%.3f → %.3f (w=%.0f%%)",
+                            symbol, _pre_blend, _god_sig, signal, _god_weight * 100,
+                        )
+                    # Track RL action per-symbol for direct reward feedback on close (Option A)
+                    _god_action = int(_god_result.get('components', {}).get('__rl_action__', -1))
+                    if _god_action != -1:
+                        if not hasattr(self, '_last_rl_action'):
+                            self._last_rl_action: Dict[str, int] = {}
+                            self._last_rl_regime: Dict[str, str] = {}
+                        self._last_rl_action[symbol] = _god_action
+                        self._last_rl_regime[symbol] = str(_god_result.get('regime', self._current_regime))
+                except Exception as _gle:
+                    logger.debug("GodLevel blend skipped for %s: %s", symbol, _gle)
+            # ══════════════════════════════════════════════════════════════════════
+
             # Apply composite decay (sentiment + features freshness) via shield
             if self.signal_decay_shield:
                 _freshness = self.signal_decay_shield.check_freshness(symbol)
@@ -6049,6 +7513,16 @@ class ApexTradingSystem:
             # momentarily bullish. For EXIT decisions on open positions we must
             # consult the raw ML signal — not the entry-optimized blend.
             _raw_ml_signal = float(signal)
+            self._journal_signal_snapshot(
+                symbol=symbol,
+                asset_class=asset_class,
+                signal=float(signal),
+                confidence=float(confidence),
+                price=float(price),
+                current_position=float(current_pos),
+                raw_ml_signal=float(_raw_ml_signal),
+                components=self._last_signal_components.get(symbol, {}),
+            )
 
             # ═══════════════════════════════════════════════════════════════
             # A/B/C/D: CRYPTO SIGNAL ENHANCEMENT LAYER
@@ -6084,8 +7558,35 @@ class ApexTradingSystem:
                     _ml_w = float(getattr(ApexConfig, "CRYPTO_ML_BLEND_WEIGHT", 0.0)) \
                             or _ml_w_by_regime.get(_blend_regime, 0.55)
                     _tech_w = 1.0 - _ml_w
+
+                    # Strategy Rotation: override ml/tech weights if controller has evidence
+                    _src = getattr(self, '_strategy_rotation', None)
+                    if _src is not None:
+                        _rot_weights = _src.get_blend_weights(_blend_regime)
+                        _ml_total = _rot_weights.get("ml", _DEFAULT_WEIGHT if False else _ml_w)
+                        _tech_total = _rot_weights.get("tech", _DEFAULT_WEIGHT if False else _tech_w)
+                        _mt_sum = _ml_total + _tech_total
+                        if _mt_sum > 0 and abs(_ml_total / _mt_sum - _ml_w) > 0.05:
+                            _ml_w = _ml_total / _mt_sum
+                            _tech_w = 1.0 - _ml_w
+                            logger.debug(
+                                "StrategyRotation [%s]: ml=%.2f tech=%.2f (from rotation ctrl)",
+                                _blend_regime, _ml_w, _tech_w,
+                            )
+
                     blended_signal = _ml_w * signal + _tech_w * tech_sig
                     blended_conf = _ml_w * confidence + _tech_w * tech_conf
+
+                    # RL Governor confidence overlay: Q-table certainty → conf multiplier
+                    try:
+                        from models.rl_weight_governor import get_rl_confidence_mult
+                        _is_hv_blend = self._vix_risk_multiplier < 0.80
+                        _rl_conf_mult = get_rl_confidence_mult(_blend_regime, _is_hv_blend)
+                        if _rl_conf_mult != 1.0:
+                            blended_conf = min(1.0, blended_conf * _rl_conf_mult)
+                    except Exception:
+                        pass
+
                     logger.debug(
                         "A: %s blend ML=%.3f(%.0f%%) tech=%.3f(%.0f%%) → %.3f "
                         "(regime=%s, conf→%.2f)",
@@ -6094,6 +7595,61 @@ class ApexTradingSystem:
                     )
                     signal = blended_signal
                     confidence = blended_conf
+
+                # Multi-Timeframe Signal Fusion
+                _mtf = getattr(self, '_mtf_fuser', None)
+                if _mtf is not None and getattr(ApexConfig, "MTF_FUSION_ENABLED", True):
+                    try:
+                        _h_df = None
+                        _f_df = None
+                        _mdata = self.market_data_fetcher
+                        if _mdata is not None:
+                            _h_df = _mdata.fetch_intraday_data(symbol, interval="1h", period="5d")
+                            if _h_df is not None and len(_h_df) < 5:
+                                _h_df = None
+                            _f_df = _mdata.fetch_intraday_data(symbol, interval="5m", period="1d")
+                            if _f_df is not None and len(_f_df) < 6:
+                                _f_df = None
+                        _mtf_result = _mtf.fuse(
+                            daily_signal=signal,
+                            hourly_df=_h_df,
+                            fivemin_df=_f_df,
+                            regime=str(self._current_regime),
+                        )
+                        signal = _mtf_result.signal
+                        confidence = min(1.0, confidence * _mtf_result.confidence_adj)
+                        if not _mtf_result.aligned:
+                            logger.debug(
+                                "MTF [%s]: TF disagreement (5m=%.3f 1h=%.3f d=%.3f) → conf×%.2f",
+                                symbol,
+                                _mtf_result.tf_signals.get("5m") or 0,
+                                _mtf_result.tf_signals.get("1h") or 0,
+                                _mtf_result.tf_signals.get("daily") or 0,
+                                _mtf_result.confidence_adj,
+                            )
+                    except Exception as _mtf_err:
+                        logger.debug("MTF fusion error for %s: %s", symbol, _mtf_err)
+
+                # ── Intraday Mean-Reversion blend (neutral regime only) ──
+                _imr = getattr(self, '_intraday_mr', None)
+                if _imr is not None and getattr(ApexConfig, "INTRADAY_MR_ENABLED", True):
+                    try:
+                        _mdata2 = self.market_data_fetcher
+                        _intra_df = None
+                        if _mdata2 is not None:
+                            _intra_df = _mdata2.fetch_intraday_data(symbol, interval="5m", period="1d")
+                        _mr_result = _imr.compute(_intra_df, regime=str(self._current_regime))
+                        if _mr_result.regime_eligible and abs(_mr_result.signal) > 0.05:
+                            _mr_w = float(getattr(ApexConfig, "INTRADAY_MR_BLEND_WEIGHT", 0.12))
+                            signal = signal * (1.0 - _mr_w) + _mr_result.signal * _mr_w
+                            confidence = min(1.0, confidence * _mr_result.confidence_adj)
+                            logger.debug(
+                                "IntradayMR [%s]: sig=%.3f rsi=%.1f devZ=%.2f → blend %.2f",
+                                symbol, _mr_result.signal, _mr_result.rsi,
+                                _mr_result.deviation_z, signal,
+                            )
+                    except Exception as _imr_err:
+                        logger.debug("IntradayMR error for %s: %s", symbol, _imr_err)
 
                 signal = max(-1.0, min(1.0, signal))
                 confidence = max(0.0, min(1.0, confidence))
@@ -6468,7 +8024,7 @@ class ApexTradingSystem:
 
             # Pairs trading overlay: blend cointegration z-score signal (equity only)
             _pairs_adj = float(self._pairs_overlay.get(symbol, 0.0))
-            if _pairs_adj != 0.0 and not self._is_crypto_symbol(symbol):
+            if _pairs_adj != 0.0 and not _symbol_is_crypto(symbol):
                 _pw = float(getattr(ApexConfig, "PAIRS_SIGNAL_WEIGHT", 0.15))
                 signal = float(np.clip(signal + _pairs_adj * _pw, -1.0, 1.0))
                 logger.debug("🔗 %s: Pairs overlay adj=%.3f → signal=%.3f", symbol, _pairs_adj, signal)
@@ -6522,6 +8078,24 @@ class ApexTradingSystem:
                     pnl_pct = (entry_price / price - 1) * 100
 
                 holding_days = (datetime.now() - entry_time).days
+                should_exit = False
+                exit_reason = ""
+                stress_partial_reduction_qty = 0.0
+                stress_unwind_candidate = self._stress_unwind_candidate_for(symbol)
+                if stress_unwind_candidate is not None:
+                    stress_partial_reduction_qty = min(
+                        abs(float(current_pos)),
+                        max(0.0, float(stress_unwind_candidate.get("target_qty", 0.0) or 0.0)),
+                    )
+                    should_exit = True
+                    exit_reason = (
+                        "🧯 StressUnwind: "
+                        f"{self._stress_unwind_plan.reason} "
+                        f"({self._stress_unwind_plan.worst_scenario_name or self._stress_unwind_plan.worst_scenario_id}, "
+                        f"expected_stress_pnl=${float(stress_unwind_candidate.get('expected_stress_pnl', 0.0)):,.0f}, "
+                        f"cut={float(stress_unwind_candidate.get('target_reduction_pct', 0.0) or 0.0):.0%}, "
+                        f"liquidity={str(stress_unwind_candidate.get('liquidity_regime', 'NORMAL'))})"
+                    )
 
                 # Get ATR from position stops if available
                 pos_stops = self.position_stops.get(_meta_key, {})
@@ -6711,7 +8285,7 @@ class ApexTradingSystem:
                         confidence=confidence,
                         pnl_pct=pnl_pct,
                         hold_hours=_hold_hours,
-                        is_crypto=self._is_crypto_symbol(symbol),
+                        is_crypto=_symbol_is_crypto(symbol),
                     )
                     # ── Excellence persistence gate ─────────────────────────────
                     # Require N consecutive weak-signal evaluations before exiting.
@@ -6891,6 +8465,31 @@ class ApexTradingSystem:
                         return  # resume full evaluation next cycle with updated qty
 
                 if should_exit:
+                    if (
+                        stress_unwind_candidate is not None
+                        and 0.0 < stress_partial_reduction_qty < abs(float(current_pos))
+                    ):
+                        await self._execute_partial_position_reduction(
+                            symbol=symbol,
+                            asset_class=asset_class,
+                            current_pos=float(current_pos),
+                            reduction_qty=float(stress_partial_reduction_qty),
+                            price=float(price),
+                            signal=float(signal),
+                            confidence=float(confidence),
+                            entry_price=float(entry_price),
+                            entry_time=entry_time,
+                            entry_signal=float(entry_signal),
+                            holding_days=int(holding_days),
+                            pnl=float(pnl),
+                            pnl_pct=float(pnl_pct),
+                            exit_reason=exit_reason,
+                            active_policy=active_policy,
+                            governor_regime_key=governor_regime_key,
+                            perf_snapshot=perf_snapshot,
+                        )
+                        return
+
                     # ── Liquidity window: defer non-urgent crypto exits to US active hours
                     # Exit slippage is 18x higher overnight; 13-22 UTC = peak US/EU session.
                     if (
@@ -6949,6 +8548,32 @@ class ApexTradingSystem:
 
                         # Determine order side
                         order_side = 'SELL' if current_pos > 0 else 'BUY'
+                        exit_broker = "alpaca" if exit_connector is self.alpaca else "ibkr"
+                        self._journal_order_event(
+                            symbol=symbol,
+                            asset_class=asset_class,
+                            side=order_side,
+                            quantity=float(abs(current_pos)),
+                            broker=exit_broker,
+                            lifecycle="submitted",
+                            order_role="exit",
+                            signal=float(signal),
+                            confidence=float(confidence),
+                            expected_price=float(price),
+                            metadata={
+                                "exit_reason": exit_reason,
+                                **(
+                                    self._stress_unwind_identity_payload(getattr(self, "_stress_unwind_plan", None))
+                                    if stress_unwind_candidate is not None
+                                    else {}
+                                ),
+                                **self._governor_policy_metadata(
+                                    active_policy,
+                                    governor_regime_key,
+                                    perf_snapshot.tier.value,
+                                ),
+                            },
+                        )
 
                         trade = await exit_connector.execute_order(
                             symbol=symbol,
@@ -6976,6 +8601,33 @@ class ApexTradingSystem:
                                     )
                                 except Exception:
                                     pass
+                            self._journal_order_event(
+                                symbol=symbol,
+                                asset_class=asset_class,
+                                side=order_side,
+                                quantity=float(abs(current_pos)),
+                                broker=exit_broker,
+                                lifecycle="filled" if exit_trade_status == "FILLED" else "result",
+                                order_role="exit",
+                                signal=float(signal),
+                                confidence=float(confidence),
+                                expected_price=float(exit_expected_price),
+                                fill_price=float(exit_fill_price),
+                                status=exit_trade_status,
+                                metadata={
+                                    "exit_reason": exit_reason,
+                                    **(
+                                        self._stress_unwind_identity_payload(getattr(self, "_stress_unwind_plan", None))
+                                        if stress_unwind_candidate is not None
+                                        else {}
+                                    ),
+                                    **self._governor_policy_metadata(
+                                        active_policy,
+                                        governor_regime_key,
+                                        perf_snapshot.tier.value,
+                                    ),
+                                },
+                            )
 
                             # ✅ CRITICAL: Force sync after trade
                             await self._sync_positions()
@@ -6983,7 +8635,6 @@ class ApexTradingSystem:
                             # Track commission
                             commission = ApexConfig.COMMISSION_PER_TRADE
                             self.total_commissions += commission
-                            exit_broker = "alpaca" if exit_connector is self.alpaca else "ibkr"
                             realized_net = 0.0
                             if exit_trade_status == "FILLED":
                                 realized_net = self._record_fill_realized_pnl(
@@ -7023,6 +8674,19 @@ class ApexTradingSystem:
                                 source="live_exit",
                             )
 
+                            # Execution quality: record exit fill slippage
+                            if getattr(self, '_exec_quality', None) is not None:
+                                self._exec_quality.record_fill(
+                                    symbol=symbol,
+                                    side=order_side,
+                                    expected_price=float(exit_expected_price),
+                                    fill_price=float(exit_fill_price),
+                                    qty=float(abs(current_pos)),
+                                    regime=str(self._current_regime),
+                                    broker=str(exit_broker),
+                                    order_type="market",
+                                )
+
                             # Audit log — full exit
                             self.trade_audit.log(
                                 event="EXIT",
@@ -7042,6 +8706,28 @@ class ApexTradingSystem:
                                 holding_days=int(holding_days),
                                 broker=exit_broker,
                                 pretrade="PASS",
+                            )
+                            self._journal_position_update(
+                                symbol=symbol,
+                                asset_class=asset_class,
+                                quantity=float(self.positions.get(symbol, 0.0)),
+                                price=float(exit_fill_price),
+                                reason="exit_fill",
+                                metadata={
+                                    "broker": exit_broker,
+                                    "status": exit_trade_status,
+                                    "exit_reason": exit_reason,
+                                    **(
+                                        self._stress_unwind_identity_payload(getattr(self, "_stress_unwind_plan", None))
+                                        if stress_unwind_candidate is not None
+                                        else {}
+                                    ),
+                                    **self._governor_policy_metadata(
+                                        active_policy,
+                                        governor_regime_key,
+                                        perf_snapshot.tier.value,
+                                    ),
+                                },
                             )
 
                             # Feed outcome to adaptive exit multiplier learner
@@ -7065,6 +8751,26 @@ class ApexTradingSystem:
                             except Exception:
                                 pass  # non-fatal
 
+                            # ── Option A: Direct RL Governor reward on trade close ─────────────
+                            # Feeds actual realized PnL immediately to the Q-learning agent so
+                            # it adapts regime weight matrices within the same trading session
+                            # rather than waiting for the async outcome loop (every 20 cycles).
+                            try:
+                                _rl_act = getattr(self, '_last_rl_action', {}).get(symbol, -1)
+                                _rl_reg = getattr(self, '_last_rl_regime', {}).get(symbol, self._current_regime)
+                                if _rl_act != -1 and realized_net != 0.0:
+                                    from models.rl_weight_governor import feedback_rl_reward
+                                    _is_hv = "HIGH_VOLATILITY" in str(_rl_reg).upper() or "VOLATILE" in str(_rl_reg).upper()
+                                    _entry_val = abs(float(entry_price)) * abs(float(current_pos))
+                                    _pnl_reward = float(realized_net) / max(_entry_val, 1.0)
+                                    feedback_rl_reward(_rl_reg, _is_hv, _rl_act, _pnl_reward)
+                                    logger.debug(
+                                        "🤖 RL reward: %s action=%d reward=%.4f (regime=%s pnl=$%.2f)",
+                                        symbol, _rl_act, _pnl_reward, _rl_reg, realized_net,
+                                    )
+                            except Exception as _rle:
+                                logger.debug("RL reward feedback failed for %s: %s", symbol, _rle)
+
                             # Meta-controller learning: pair entry context with realized return
                             try:
                                 _ec = self._entry_contexts.pop(symbol, None)
@@ -7075,6 +8781,19 @@ class ApexTradingSystem:
                                     )
                             except Exception:
                                 pass  # non-fatal
+
+                            # Strategy Rotation: record outcome with signal component breakdown
+                            _src = getattr(self, '_strategy_rotation', None)
+                            if _src is not None:
+                                try:
+                                    _src_comps = getattr(self, '_last_signal_components', {}).get(symbol, {})
+                                    _src.record_outcome(
+                                        regime=str(getattr(self, '_current_regime', 'neutral')),
+                                        pnl_pct=float(pnl_pct) / 100.0,
+                                        components=_src_comps,
+                                    )
+                                except Exception:
+                                    pass
 
                             # IC Tracker: record realized return for this symbol's entry snapshot
                             # Entry date is used to match the feature snapshot recorded at signal time
@@ -7174,6 +8893,38 @@ class ApexTradingSystem:
                                 except Exception:
                                     pass
 
+                            # Record outcome for ModelDriftMonitor (IC / hit-rate tracking)
+                            _mdm = getattr(self, '_model_drift_monitor', None)
+                            if _mdm is not None and getattr(ApexConfig, "MODEL_DRIFT_MONITOR_ENABLED", True):
+                                try:
+                                    _mdm.record_outcome(
+                                        symbol=symbol,
+                                        signal_value=float(_entry_sig),
+                                        actual_return=float(_pnl_pct),
+                                    )
+                                except Exception:
+                                    pass
+
+                            # Record trade for AlphaDecayCalibrator (IC by hold-time horizon)
+                            _adc = getattr(self, '_alpha_decay_cal', None)
+                            if _adc is not None and getattr(ApexConfig, "ALPHA_DECAY_CALIBRATOR_ENABLED", True):
+                                try:
+                                    _entry_time_adc = self.position_entry_times.get(
+                                        _meta_key, self.position_entry_times.get(symbol)
+                                    )
+                                    _hold_h = (
+                                        (datetime.now() - _entry_time_adc).total_seconds() / 3600.0
+                                        if _entry_time_adc else 4.0
+                                    )
+                                    _adc.record_trade(
+                                        signal=float(_entry_sig),
+                                        actual_return=float(_pnl_pct),
+                                        hold_hours=_hold_h,
+                                        regime=_outcome_regime,
+                                    )
+                                except Exception:
+                                    pass
+
                             # Update per-symbol consecutive loss streak + re-entry gap
                             _net_closed = float(realized_net) if not math.isclose(realized_net, 0.0, abs_tol=1e-9) else float(pnl - commission)
                             _is_losing_close = _net_closed < 0
@@ -7185,7 +8936,7 @@ class ApexTradingSystem:
                                         "Loss streak gate: %s has %d consecutive losses", symbol, _streak
                                     )
                                 # Crypto-wide consecutive loss tracker
-                                if self._is_crypto_symbol(symbol):
+                                if _symbol_is_crypto(symbol):
                                     self._crypto_consec_losses += 1
                                     _crypto_pause_n = int(getattr(ApexConfig, "CRYPTO_CONSEC_LOSS_PAUSE_COUNT", 3))
                                     _crypto_pause_h = float(getattr(ApexConfig, "CRYPTO_CONSEC_LOSS_PAUSE_HOURS", 4.0))
@@ -7200,11 +8951,21 @@ class ApexTradingSystem:
                             else:
                                 self._symbol_loss_streak.pop(symbol, None)
                                 # Reset crypto-wide counter on any profitable close
-                                if self._is_crypto_symbol(symbol):
+                                if _symbol_is_crypto(symbol):
                                     self._crypto_consec_losses = 0
                             # Track exit time for re-entry gap check
                             self._last_exit_time[symbol] = datetime.now()
                             self._last_exit_was_loss[symbol] = _is_losing_close
+
+                            # Alert on exceptional trade wins / losses
+                            if getattr(self, '_alert_manager', None) is not None:
+                                asyncio.create_task(self._alert_manager.send_trade_alert(
+                                    symbol=symbol,
+                                    side=str(pos_type),
+                                    pnl_usd=float(pnl),
+                                    pnl_pct=float(pnl_pct),
+                                    exit_reason=str(exit_reason),
+                                ))
 
                             # Update cooldown
                             self.last_trade_time[symbol] = datetime.now()
@@ -7330,6 +9091,22 @@ class ApexTradingSystem:
             # ═══════════════════════════════════════════════════════════════
             # ENTRY LOGIC - Only if no position
             # ═══════════════════════════════════════════════════════════════
+            
+            # ✅ Phase 11: Statistical Arbitrage / Pairs Mean-Reversion Overrides
+            # If God Level Engine evaluates the asset as fundamentally neutral, check pairs!
+            if hasattr(self, 'pairs_trader') and self.pairs_trader and abs(signal) < 0.20:
+                pair_target = self._macro_pairs.get(symbol)
+                if pair_target and pair_target in self.data_cache:
+                    try:
+                        analysis = self.pairs_trader.analyze_pair(symbol, pair_target, self.data_cache)
+                        if analysis and analysis.is_cointegrated and abs(analysis.z_score) > self.pairs_trader.z_entry:
+                            signal_override = -0.75 if analysis.z_score > 0 else 0.75
+                            logger.info(f"🔄 PairsTrader OVERRIDE: {symbol} deviating from {pair_target} (Z={analysis.z_score:.2f}) -> signal={signal_override}")
+                            signal = signal_override
+                            confidence = 0.85
+                    except Exception as e:
+                        logger.debug(f"PairsTrader evaluation failed for {symbol}: {e}")
+            
             logger.debug(f"🔍 {symbol}: Entry evaluation - signal={signal:+.3f} conf={confidence:.3f}")
             if str(asset_class).upper() == "CRYPTO" and not self._last_in_equity_hours:
                 self._overnight_signals_evaluated += 1
@@ -7371,6 +9148,27 @@ class ApexTradingSystem:
             )
             social_decision = self._social_decision_for(asset_class, governor_regime_key)
             if current_pos == 0 and social_decision and social_decision.block_new_entries:
+                self._journal_risk_decision(
+                    symbol=symbol,
+                    asset_class=asset_class,
+                    decision="blocked",
+                    stage="governor",
+                    reason="social_shock",
+                    signal=float(signal),
+                    confidence=float(confidence),
+                    price=float(price),
+                    current_position=float(current_pos),
+                    metadata={
+                        "policy_version": social_decision.policy_version,
+                        "reasons": social_decision.reasons[:5],
+                        "combined_risk_score": float(social_decision.combined_risk_score),
+                        **self._governor_policy_metadata(
+                            active_policy,
+                            governor_regime_key,
+                            perf_snapshot.tier.value,
+                        ),
+                    },
+                )
                 social_block_reason = (
                     "verified_event_risk"
                     if social_decision.verified_event_probability > 0
@@ -7421,6 +9219,36 @@ class ApexTradingSystem:
                 )
                 return
 
+            # Stress engine halt gate: block new entries when scenario stress is critical
+            _stress_cs = getattr(self, '_stress_control_state', None)
+            _stress_halt_now = _stress_cs is not None and _stress_cs.halt_new_entries
+            if current_pos == 0 and _stress_halt_now:
+                logger.warning(
+                    "🚨 %s: Entry blocked by StressEngine (%s / %s)",
+                    symbol, _stress_cs.action, _stress_cs.worst_scenario_name,
+                )
+                # Shadow gate: record production blocked the signal
+                if getattr(self, '_shadow_gate', None) is not None:
+                    try:
+                        self._shadow_gate.observe_signal(
+                            symbol=symbol, signal=float(signal), confidence=float(confidence),
+                            current_position=float(current_pos), stress_halt_active=True,
+                        )
+                        self._shadow_gate.observe_production_decision(symbol=symbol, decision="blocked")
+                    except Exception:
+                        pass
+                return
+
+            # Shadow gate: observe this entry signal candidate (no position held)
+            if current_pos == 0 and getattr(self, '_shadow_gate', None) is not None:
+                try:
+                    self._shadow_gate.observe_signal(
+                        symbol=symbol, signal=float(signal), confidence=float(confidence),
+                        current_position=float(current_pos), stress_halt_active=bool(_stress_halt_now),
+                    )
+                except Exception:
+                    pass
+
             if current_pos == 0 and governor_controls.halt_new_entries:
                 # 🚀 Alpha Bypass Override: Let exceptional signals pierce the RED tier shield.
                 # STRONG signals (abs(signal) >= 0.50) or extremely confident MODERATEs.
@@ -7435,6 +9263,25 @@ class ApexTradingSystem:
                         perf_snapshot.tier.value,
                     )
                 else:
+                    self._journal_risk_decision(
+                        symbol=symbol,
+                        asset_class=asset_class,
+                        decision="blocked",
+                        stage="governor",
+                        reason="tier_halt",
+                        signal=float(signal),
+                        confidence=float(confidence),
+                        price=float(price),
+                        current_position=float(current_pos),
+                        metadata={
+                            "governor_tier": perf_snapshot.tier.value,
+                            **self._governor_policy_metadata(
+                                active_policy,
+                                governor_regime_key,
+                                perf_snapshot.tier.value,
+                            ),
+                        },
+                    )
                     if self.prometheus_metrics:
                         self.prometheus_metrics.record_governor_blocked_entry(
                             asset_class=asset_class,
@@ -7474,12 +9321,14 @@ class ApexTradingSystem:
                     _regime_str, ApexConfig.CRYPTO_MIN_SIGNAL_THRESHOLD
                 )
             elif not _is_fx_asset:
-                # Use IBKR/equity-tuned thresholds: calibrated for equity market structure
-                signal_threshold = ApexConfig.CORE_SIGNAL_THRESHOLDS_BY_REGIME.get(
+                # Use IBKR/equity-tuned thresholds, overridden by auto-tuner when available
+                _auto_t = getattr(self, '_auto_tuned_thresholds', {}).get(_regime_str)
+                signal_threshold = _auto_t if _auto_t is not None else ApexConfig.CORE_SIGNAL_THRESHOLDS_BY_REGIME.get(
                     _regime_str, ApexConfig.CORE_MIN_SIGNAL_THRESHOLD
                 )
             else:
-                signal_threshold = ApexConfig.SIGNAL_THRESHOLDS_BY_REGIME.get(
+                _auto_t = getattr(self, '_auto_tuned_thresholds', {}).get(_regime_str)
+                signal_threshold = _auto_t if _auto_t is not None else ApexConfig.SIGNAL_THRESHOLDS_BY_REGIME.get(
                     _regime_str, ApexConfig.MIN_SIGNAL_THRESHOLD
                 )
             # When hedge dampener is active, lower the floor proportionally.
@@ -7549,6 +9398,25 @@ class ApexTradingSystem:
                 )
             
             if abs(signal) < effective_signal_threshold:
+                self._journal_risk_decision(
+                    symbol=symbol,
+                    asset_class=asset_class,
+                    decision="blocked",
+                    stage="entry_gate",
+                    reason="signal_threshold",
+                    signal=float(signal),
+                    confidence=float(confidence),
+                    price=float(price),
+                    current_position=float(current_pos),
+                    metadata={
+                        "threshold": float(effective_signal_threshold),
+                        **self._governor_policy_metadata(
+                            active_policy,
+                            governor_regime_key,
+                            perf_snapshot.tier.value,
+                        ),
+                    },
+                )
                 if self.prometheus_metrics:
                     self.prometheus_metrics.record_governor_blocked_entry(
                         asset_class=asset_class,
@@ -7577,6 +9445,17 @@ class ApexTradingSystem:
             # by design but allowed negative-signal LONG entries (root cause audit finding:
             # ETH/USD signal=-0.121 entered as BUY). Fix: new positions require signal > 0.
             if current_pos == 0 and signal <= 0.0:
+                self._journal_risk_decision(
+                    symbol=symbol,
+                    asset_class=asset_class,
+                    decision="blocked",
+                    stage="entry_gate",
+                    reason="directional_guard",
+                    signal=float(signal),
+                    confidence=float(confidence),
+                    price=float(price),
+                    current_position=float(current_pos),
+                )
                 logger.info(
                     "⏭️ %s: Directional guard — signal=%.3f blocked for new entry (must be >0)",
                     symbol, signal,
@@ -7584,6 +9463,25 @@ class ApexTradingSystem:
                 return
 
             if confidence < effective_confidence_threshold:
+                self._journal_risk_decision(
+                    symbol=symbol,
+                    asset_class=asset_class,
+                    decision="blocked",
+                    stage="entry_gate",
+                    reason="confidence_threshold",
+                    signal=float(signal),
+                    confidence=float(confidence),
+                    price=float(price),
+                    current_position=float(current_pos),
+                    metadata={
+                        "threshold": float(effective_confidence_threshold),
+                        **self._governor_policy_metadata(
+                            active_policy,
+                            governor_regime_key,
+                            perf_snapshot.tier.value,
+                        ),
+                    },
+                )
                 if self.prometheus_metrics:
                     self.prometheus_metrics.record_governor_blocked_entry(
                         asset_class=asset_class,
@@ -7617,6 +9515,29 @@ class ApexTradingSystem:
                         symbol, signal, confidence, _quality, _min_quality,
                     )
                     return
+
+            # ── Execution Timing Score: penalise entry in poor-slippage windows ──
+            if current_pos == 0 and getattr(ApexConfig, "EXECUTION_TIMING_ENABLED", True):
+                _eto = getattr(self, "_exec_timing", None)
+                if _eto is not None:
+                    try:
+                        import datetime as _dt2
+                        _now_utc2 = _dt2.datetime.utcnow()
+                        _ts = _eto.get_timing_score(
+                            hour=_now_utc2.hour,
+                            day_of_week=_now_utc2.weekday(),
+                            regime=str(self._current_regime),
+                        )
+                        if _ts.has_data and _ts.score < 1.0:
+                            _penalty = float(getattr(ApexConfig, "EXECUTION_TIMING_CONF_PENALTY", 0.10))
+                            _conf_penalty = 1.0 - (1.0 - _ts.score) * _penalty / (1.0 - 0.55)
+                            confidence = max(0.0, confidence * _conf_penalty)
+                            logger.debug(
+                                "⏱ %s: timing score=%.2f → conf×%.3f → %.3f",
+                                symbol, _ts.score, _conf_penalty, confidence,
+                            )
+                    except Exception:
+                        pass
 
             # ── Tiered confidence gate: adaptive threshold via AdaptiveEntryGate ──
             # Replaces static 0.68 hard cutoff with smooth Bayesian-calibrated curve.
@@ -8255,6 +10176,46 @@ class ApexTradingSystem:
                     )
                     return
 
+            stress_state = getattr(self, "_stress_control_state", None)
+            if (
+                current_pos == 0
+                and stress_state is not None
+                and bool(getattr(stress_state, "halt_new_entries", False))
+            ):
+                logger.warning(
+                    "⛔ %s: Intraday stress gate blocks new entry (%s, %s %.2f%%)",
+                    symbol,
+                    stress_state.reason,
+                    stress_state.worst_scenario_name or stress_state.worst_scenario_id,
+                    float(stress_state.worst_portfolio_return) * 100.0,
+                )
+                self._journal_risk_decision(
+                    symbol=symbol,
+                    asset_class=asset_class,
+                    decision="blocked",
+                    stage="intraday_stress",
+                    reason="halt_new_entries",
+                    signal=float(signal),
+                    confidence=float(confidence),
+                    price=float(price),
+                    current_position=float(current_pos),
+                    metadata={
+                        "action": stress_state.action,
+                        "stress_reason": stress_state.reason,
+                        "stress_size_multiplier": float(stress_state.size_multiplier),
+                        "worst_scenario_id": stress_state.worst_scenario_id,
+                        "worst_scenario_name": stress_state.worst_scenario_name,
+                        "worst_portfolio_return": float(stress_state.worst_portfolio_return),
+                        "worst_drawdown": float(stress_state.worst_drawdown),
+                        **self._governor_policy_metadata(
+                            active_policy,
+                            governor_regime_key,
+                            perf_snapshot.tier.value,
+                        ),
+                    },
+                )
+                return
+
             # ✅ CRITICAL: Use lock to check position count atomically
             # This prevents race condition where multiple parallel tasks pass the check
             async with self._position_lock:
@@ -8335,6 +10296,80 @@ class ApexTradingSystem:
                         # NOTE: All sizing multipliers are applied in float to avoid
                         # cascading int() truncation errors. Final int() at the end.
                         shares = shares * self._vix_risk_multiplier
+
+                        # Correlation early warning: proactive position reduction when
+                        # equity-crypto correlation is rising fast (velocity signal)
+                        _cew_mult = 1.0
+                        if getattr(self, '_corr_early_warning', None) is not None:
+                            _cew_mult = self._corr_early_warning.get_position_multiplier()
+                            if _cew_mult < 1.0:
+                                shares = shares * _cew_mult
+                                _cew_tier = self._corr_early_warning.get_stats()
+                                logger.info(
+                                    "   📡 CorrEarlyWarning %s: %.2fx → %.1f shares",
+                                    _cew_tier.tier if _cew_tier else "?",
+                                    _cew_mult, shares,
+                                )
+
+                        # Intraday stress size multiplier: scale down when scenarios breach limits
+                        _stress_mult = 1.0
+                        _stress_state = getattr(self, '_stress_control_state', None)
+                        if _stress_state is not None and _stress_state.active:
+                            _stress_mult = _stress_state.size_multiplier
+                            if _stress_mult < 1.0:
+                                shares = shares * _stress_mult
+                                logger.info(
+                                    "   🚨 StressEngine %s: %.2fx → %.1f shares (%s)",
+                                    _stress_state.action, _stress_mult, shares, _stress_state.worst_scenario_name,
+                                )
+
+                        # Execution quality slippage penalty: reduce size for chronic high-slip symbols
+                        if getattr(self, '_exec_quality', None) is not None:
+                            _slip_penalty = self._exec_quality.get_sizing_penalty(symbol)
+                            if _slip_penalty < 1.0:
+                                shares = shares * _slip_penalty
+                                logger.info(
+                                    "   📉 ExecQuality slip penalty %.2fx → %.1f shares (%s)",
+                                    _slip_penalty, shares, symbol,
+                                )
+
+                        # Pre-earnings sizing gate: dampen size as earnings approach
+                        _eg = getattr(self, '_earnings_gate', None)
+                        if _eg is not None and getattr(ApexConfig, "EARNINGS_GATE_ENABLED", True):
+                            _earn_mult = _eg.get_sizing_mult(symbol.split(":")[-1])
+                            if _earn_mult < 1.0:
+                                shares = shares * _earn_mult
+                                logger.info(
+                                    "   📅 EarningsGate: %.0fh to earnings → size×%.2f → %.1f shares (%s)",
+                                    _eg.hours_until_earnings(symbol.split(":")[-1]) or 0,
+                                    _earn_mult, shares, symbol,
+                                )
+
+                        # HRP correlation dampener: reduce size when symbol is highly
+                        # correlated with existing portfolio positions
+                        _hrp = getattr(self, '_hrp_sizer', None)
+                        if _hrp is not None and getattr(ApexConfig, "HRP_SIZING_ENABLED", True):
+                            try:
+                                # Build lightweight returns cache from historical_data
+                                _hrp_rets: dict = {}
+                                for _ps, _pq in self.positions.items():
+                                    if _pq != 0:
+                                        _phist = self.historical_data.get(_ps)
+                                        if _phist is not None and len(_phist) >= 10 and "Close" in _phist.columns:
+                                            _hrp_rets[_ps] = list(_phist["Close"].pct_change().dropna().tail(20))
+                                # Also add target symbol
+                                _thist = self.historical_data.get(symbol)
+                                if _thist is not None and len(_thist) >= 10 and "Close" in _thist.columns:
+                                    _hrp_rets[symbol] = list(_thist["Close"].pct_change().dropna().tail(20))
+                                _hrp_mult = _hrp.get_size_multiplier(symbol, self.positions, _hrp_rets)
+                                if _hrp_mult < 1.0:
+                                    shares = shares * _hrp_mult
+                                    logger.debug(
+                                        "   🔗 HRP: %s corr-adjusted → size×%.2f → %.1f shares",
+                                        symbol, _hrp_mult, shares,
+                                    )
+                            except Exception as _hrp_err:
+                                logger.debug("HRP sizing error for %s: %s", symbol, _hrp_err)
 
                         # Vol targeting: scale to hit annualised portfolio vol target
                         _vt_mult = float(getattr(self, '_vol_targeting_mult', 1.0))
@@ -8421,15 +10456,37 @@ class ApexTradingSystem:
                                 f"   🧭 PerformanceGovernor: {governor_controls.size_multiplier:.0%} "
                                 f"size ({perf_snapshot.tier.value}, {governor_regime_key}) → {shares} shares"
                             )
+                        if (
+                            stress_state is not None
+                            and current_pos == 0
+                            and float(getattr(stress_state, "size_multiplier", 1.0)) < 1.0
+                        ):
+                            shares = shares * float(stress_state.size_multiplier)
+                            logger.info(
+                                "   🧯 IntradayStress: %.0f%% size (%s) → %.1f shares",
+                                float(stress_state.size_multiplier) * 100.0,
+                                stress_state.worst_scenario_name or stress_state.worst_scenario_id,
+                                shares,
+                            )
 
                         # ── Live Kelly position sizing ────────────────────────────
                         if getattr(ApexConfig, "LIVE_KELLY_SIZING_ENABLED", True):
-                            _kelly_m = getattr(self, "_live_kelly_mult", 1.0)
-                            if _kelly_m != 1.0:
-                                shares = shares * _kelly_m
-                                logger.info(
-                                    "   📊 Kelly sizing: %.2fx → %d shares", _kelly_m, shares
+                            try:
+                                from models.portfolio_optimizer import get_kelly_multiplier
+                                _win_rate = float(self.outcome_loop.get_diagnostics().get("rolling_accuracy", 0.5))
+                                _kelly_m = get_kelly_multiplier(
+                                    ml_confidence=float(confidence),
+                                    historical_win_rate=_win_rate,
+                                    is_high_vix=self._vix_risk_multiplier < 1.0
                                 )
+                                if _kelly_m != 1.0:
+                                    shares = shares * _kelly_m
+                                    logger.info(
+                                        "   📊 Kelly Criteria Optimizer (WinRate: %.0f%%, Conf: %.0f%%): %.2fx multiplier → %.4f shares",
+                                        _win_rate * 100, float(confidence) * 100, _kelly_m, shares
+                                    )
+                            except Exception as e:
+                                logger.warning(f"Failed Kelly Optimizer execution: {e}")
 
                         # ── Regime transition caution window ─────────────────────
                         # Duration scales inversely with transition confidence:
@@ -8619,9 +10676,18 @@ class ApexTradingSystem:
                         else:
                             # Crypto: institutional sizer returns integer-equivalent shares
                             # (e.g., target_shares=1 for BTC = $74K — catastrophic for a $79K account).
-                            # ALWAYS cap at CRYPTO_POSITION_SIZE_USD to enforce fractional sizing.
+                            # ALWAYS cap at CRYPTO_POSITION_SIZE_USD (scaled by allocator) to enforce fractional sizing.
                             if price > 0:
                                 _max_notional = float(getattr(ApexConfig, "CRYPTO_POSITION_SIZE_USD", 5000))
+                                # Capital allocator: scale crypto notional by recommended crypto fraction
+                                _ca = getattr(self, '_capital_allocator', None)
+                                if _ca is not None:
+                                    _cr_frac = _ca.current_crypto_frac
+                                    _cap_pv = float(getattr(self, '_current_portfolio_value', 0) or 0)
+                                    if _cap_pv > 0:
+                                        _ca_notional = _cap_pv * _cr_frac / max(1, getattr(ApexConfig, "MAX_POSITIONS", 40) // 4)
+                                        _max_notional = min(_max_notional * (_cr_frac / 0.50), _ca_notional)
+                                        _max_notional = max(_max_notional, 500.0)  # floor
                                 _max_by_notional = round(_max_notional / price, 6)
                                 if shares > _max_by_notional:
                                     logger.info(
@@ -8679,12 +10745,46 @@ class ApexTradingSystem:
                                 f"   🧭 PerformanceGovernor: {governor_controls.size_multiplier:.0%} "
                                 f"size ({perf_snapshot.tier.value}, {governor_regime_key}) → {shares} shares"
                             )
+                        if (
+                            stress_state is not None
+                            and current_pos == 0
+                            and float(getattr(stress_state, "size_multiplier", 1.0)) < 1.0
+                        ):
+                            if str(asset_class).upper() == "CRYPTO":
+                                shares = round(shares * float(stress_state.size_multiplier), 6)
+                            else:
+                                shares = max(1, int(shares * float(stress_state.size_multiplier)))
+                            logger.info(
+                                "   🧯 IntradayStress: %.0f%% size (%s) → %s shares",
+                                float(stress_state.size_multiplier) * 100.0,
+                                stress_state.worst_scenario_name or stress_state.worst_scenario_id,
+                                shares,
+                            )
                         shares = self._apply_social_size_multiplier(
                             symbol=symbol,
                             shares=shares,
                             decision=social_decision,
                             price=price,
                         )
+
+                        # ── Live Kelly position sizing (Fallback Engine) ────────────────────────────
+                        if getattr(ApexConfig, "LIVE_KELLY_SIZING_ENABLED", True):
+                            try:
+                                from models.portfolio_optimizer import get_kelly_multiplier
+                                _win_rate = float(self.outcome_loop.get_diagnostics().get("rolling_accuracy", 0.5))
+                                _kelly_m = get_kelly_multiplier(
+                                    ml_confidence=float(confidence),
+                                    historical_win_rate=_win_rate,
+                                    is_high_vix=self._vix_risk_multiplier < 1.0
+                                )
+                                if _kelly_m != 1.0:
+                                    shares = shares * _kelly_m
+                                    logger.info(
+                                        "   📊 Kelly Criteria Optimizer (WinRate: %.0f%%, Conf: %.0f%%): %.2fx multiplier → %.4f shares",
+                                        _win_rate * 100, float(confidence) * 100, _kelly_m, shares
+                                    )
+                            except Exception as e:
+                                logger.warning(f"Failed Kelly Optimizer execution: {e}")
 
                         # Macro overlay (fallback path)
                         _macro_ctx_fb = getattr(self, '_macro_context', None)
@@ -8757,6 +10857,27 @@ class ApexTradingSystem:
                             decision=pretrade_decision,
                             actor="apex-trader",
                         )
+                        self._journal_risk_decision(
+                            symbol=symbol,
+                            asset_class=asset_class,
+                            decision="allowed" if pretrade_decision.allowed else "blocked",
+                            stage="pretrade_gateway",
+                            reason=str(pretrade_decision.reason_code),
+                            signal=float(signal),
+                            confidence=float(confidence),
+                            price=float(price),
+                            current_position=float(current_pos),
+                            metadata={
+                                "side": side,
+                                "quantity": float(shares),
+                                "message": str(pretrade_decision.message),
+                                **self._governor_policy_metadata(
+                                    active_policy,
+                                    governor_regime_key,
+                                    perf_snapshot.tier.value,
+                                ),
+                            },
+                        )
                         if self.prometheus_metrics:
                             self.prometheus_metrics.record_pretrade_gate_decision(
                                 asset_class=asset_class,
@@ -8782,6 +10903,25 @@ class ApexTradingSystem:
                             return
                     except Exception as pretrade_exc:
                         logger.error("Pre-trade gateway error for %s: %s", symbol, pretrade_exc)
+                        self._journal_risk_decision(
+                            symbol=symbol,
+                            asset_class=asset_class,
+                            decision="blocked" if self.pretrade_gateway.config.fail_closed else "degraded",
+                            stage="pretrade_gateway",
+                            reason="gateway_error",
+                            signal=float(signal),
+                            confidence=float(confidence),
+                            price=float(price),
+                            current_position=float(current_pos),
+                            metadata={
+                                "error": str(pretrade_exc),
+                                **self._governor_policy_metadata(
+                                    active_policy,
+                                    governor_regime_key,
+                                    perf_snapshot.tier.value,
+                                ),
+                            },
+                        )
                         if self.pretrade_gateway.config.fail_closed:
                             async with self._position_lock:
                                 if symbol in self.positions:
@@ -8900,6 +11040,8 @@ class ApexTradingSystem:
                                 return
 
                         self.pending_orders.add(symbol)
+                        entry_broker_name = "alpaca" if entry_connector is self.alpaca else "ibkr"
+                        entry_order_mode = "market"
 
                         # SOTA: Record arrival price
                         arrival_price = price
@@ -8921,8 +11063,46 @@ class ApexTradingSystem:
                             not use_advanced and
                             getattr(self, '_crypto_twap', None) is not None and
                             getattr(ApexConfig, "CRYPTO_TWAP_ENABLED", True) and
-                            self._is_crypto_symbol(symbol) and
+                            _symbol_is_crypto(symbol) and
                             order_value >= _crypto_twap_min
+                        )
+                        _equity_twap_min = float(getattr(ApexConfig, "EQUITY_TWAP_MIN_NOTIONAL", 10_000.0))
+                        use_equity_twap = (
+                            not use_advanced and
+                            not use_crypto_twap and
+                            getattr(self, '_equity_twap', None) is not None and
+                            getattr(ApexConfig, "EQUITY_TWAP_ENABLED", True) and
+                            not _symbol_is_crypto(symbol) and
+                            order_value >= _equity_twap_min
+                        )
+                        if use_advanced:
+                            entry_order_mode = "advanced_twap"
+                        elif use_crypto_twap:
+                            entry_order_mode = "crypto_twap"
+                        elif use_equity_twap:
+                            entry_order_mode = "equity_twap"
+                        else:
+                            entry_order_mode = "market"
+
+                        self._journal_order_event(
+                            symbol=symbol,
+                            asset_class=asset_class,
+                            side=side,
+                            quantity=float(shares),
+                            broker=entry_broker_name,
+                            lifecycle="submitted",
+                            order_role="entry",
+                            signal=float(signal),
+                            confidence=float(confidence),
+                            expected_price=float(arrival_price),
+                            metadata={
+                                "mode": entry_order_mode,
+                                **self._governor_policy_metadata(
+                                    active_policy,
+                                    governor_regime_key,
+                                    perf_snapshot.tier.value,
+                                ),
+                            },
                         )
 
                         if use_advanced:
@@ -8931,9 +11111,8 @@ class ApexTradingSystem:
                             trade = await self.advanced_executor.execute_twap_order(
                                 symbol=symbol,
                                 side=side,
-                                total_quantity=shares,
-                                time_horizon_minutes=30,  # Execute over 30 minutes
-                                slice_interval_seconds=60  # Execute every minute
+                                qty=shares,
+                                current_price=float(price),
                             )
                         elif use_crypto_twap:
                             # TWAP for large crypto/Alpaca orders: slice into N child orders
@@ -8949,6 +11128,23 @@ class ApexTradingSystem:
                                 confidence=float(confidence),
                             )
                             trade = _twap_result.to_dict() if _twap_result else None
+                        elif use_equity_twap:
+                            # TWAP for large IBKR equity orders: slice into N limit tranches
+                            logger.info(
+                                "   📊 Using Equity TWAP (value=$%.0f, slices=%d × %ds)",
+                                order_value,
+                                int(getattr(ApexConfig, "EQUITY_TWAP_SLICES", 5)),
+                                int(getattr(ApexConfig, "EQUITY_TWAP_INTERVAL_SEC", 60)),
+                            )
+                            _eq_twap_result = await self._equity_twap.execute(
+                                connector=entry_connector,
+                                symbol=symbol,
+                                side=side,
+                                quantity=shares,
+                                notional=order_value,
+                                confidence=float(confidence),
+                            )
+                            trade = _eq_twap_result.to_dict() if _eq_twap_result else None
                         else:
                             _order_sent_ts = time.time()   # P: latency — order submitted
                             trade = await entry_connector.execute_order(
@@ -8994,6 +11190,50 @@ class ApexTradingSystem:
                                     signal_strength=float(signal),
                                     expected_price=float(arrival_price) if arrival_price else 0.0,
                                 )
+                            self._journal_order_event(
+                                symbol=symbol,
+                                asset_class=asset_class,
+                                side=side,
+                                quantity=float(shares),
+                                broker=entry_broker_name,
+                                lifecycle="filled" if trade_status == "FILLED" else "result",
+                                order_role="entry",
+                                signal=float(signal),
+                                confidence=float(confidence),
+                                expected_price=float(arrival_price),
+                                fill_price=float(fill_price),
+                                status=trade_status,
+                                metadata={
+                                    "mode": entry_order_mode,
+                                    **self._governor_policy_metadata(
+                                        active_policy,
+                                        governor_regime_key,
+                                        perf_snapshot.tier.value,
+                                    ),
+                                },
+                            )
+                        else:
+                            self._journal_order_event(
+                                symbol=symbol,
+                                asset_class=asset_class,
+                                side=side,
+                                quantity=float(shares),
+                                broker=entry_broker_name,
+                                lifecycle="result",
+                                order_role="entry",
+                                signal=float(signal),
+                                confidence=float(confidence),
+                                expected_price=float(arrival_price),
+                                status="NO_TRADE",
+                                metadata={
+                                    "mode": entry_order_mode,
+                                    **self._governor_policy_metadata(
+                                        active_policy,
+                                        governor_regime_key,
+                                        perf_snapshot.tier.value,
+                                    ),
+                                },
+                            )
 
                         if trade:
                             trade_success = True
@@ -9040,12 +11280,52 @@ class ApexTradingSystem:
                             self.position_entry_signals[symbol] = signal  # Track entry signal for dynamic exits
                             self._position_bar_count[symbol] = 0          # Reset hold-bar counter
                             self._save_position_metadata()
+                            self._journal_position_update(
+                                symbol=symbol,
+                                asset_class=asset_class,
+                                quantity=float(self.positions.get(symbol, shares)),
+                                price=float(entry_execution_price),
+                                reason="entry_fill",
+                                metadata={
+                                    "broker": entry_broker,
+                                    "status": trade_status,
+                                    **self._governor_policy_metadata(
+                                        active_policy,
+                                        governor_regime_key,
+                                        perf_snapshot.tier.value,
+                                    ),
+                                },
+                            )
 
                             attribution_entry_price = entry_execution_price
                             entry_slippage_bps = self._compute_slippage_bps(
                                 arrival_price,
                                 attribution_entry_price,
                             )
+                            # Execution quality: record entry fill slippage
+                            if getattr(self, '_exec_quality', None) is not None:
+                                self._exec_quality.record_fill(
+                                    symbol=symbol,
+                                    side=str(side),
+                                    expected_price=float(arrival_price) if arrival_price else float(attribution_entry_price),
+                                    fill_price=float(attribution_entry_price),
+                                    qty=float(abs(shares)),
+                                    regime=str(self._current_regime),
+                                    broker=str(broker_used) if 'broker_used' in dir() else "unknown",
+                                    order_type="market",
+                                )
+                            # Record signal for ModelDriftMonitor (awaiting outcome at exit)
+                            _mdm_entry = getattr(self, '_model_drift_monitor', None)
+                            if _mdm_entry is not None and getattr(ApexConfig, "MODEL_DRIFT_MONITOR_ENABLED", True):
+                                try:
+                                    _mdm_entry.record_signal(
+                                        symbol=symbol,
+                                        signal_value=float(signal),
+                                        confidence=float(confidence),
+                                    )
+                                except Exception:
+                                    pass
+
                             self._record_entry_attribution(
                                 symbol=symbol,
                                 asset_class=asset_class,
@@ -9076,6 +11356,15 @@ class ApexTradingSystem:
                                         binary_signal=_bin_sig,
                                         entry_price=float(attribution_entry_price),
                                         regime=str(getattr(self, '_current_regime', 'neutral')),
+                                    )
+                                except Exception:
+                                    pass
+
+                            # Shadow gate: record production allowed this entry
+                            if getattr(self, '_shadow_gate', None) is not None:
+                                try:
+                                    self._shadow_gate.observe_production_decision(
+                                        symbol=symbol, decision="allowed"
                                     )
                                 except Exception:
                                     pass
@@ -9168,6 +11457,40 @@ class ApexTradingSystem:
                         self.position_peak_prices[symbol] = price
                         self.position_entry_signals[symbol] = signal  # Track entry signal for dynamic exits
                         self._save_position_metadata()
+                        self._journal_order_event(
+                            symbol=symbol,
+                            asset_class=asset_class,
+                            side=side,
+                            quantity=float(abs(qty)),
+                            broker="simulation",
+                            lifecycle="filled",
+                            order_role="entry",
+                            signal=float(signal),
+                            confidence=float(confidence),
+                            expected_price=float(price),
+                            fill_price=float(price),
+                            status="SIMULATED",
+                            metadata=self._governor_policy_metadata(
+                                active_policy,
+                                governor_regime_key,
+                                perf_snapshot.tier.value,
+                            ),
+                        )
+                        self._journal_position_update(
+                            symbol=symbol,
+                            asset_class=asset_class,
+                            quantity=float(qty),
+                            price=float(price),
+                            reason="sim_entry_fill",
+                            metadata={
+                                "status": "SIMULATED",
+                                **self._governor_policy_metadata(
+                                    active_policy,
+                                    governor_regime_key,
+                                    perf_snapshot.tier.value,
+                                ),
+                            },
+                        )
                         self._record_entry_attribution(
                             symbol=symbol,
                             asset_class=asset_class,
@@ -9410,6 +11733,14 @@ class ApexTradingSystem:
 
 
         # Process IBKR symbols with batching (100 market data line limit)
+        # Phase 13: Distributed Concurrency via Semaphore Worker Pool
+        _max_concurrency = int(getattr(ApexConfig, "MAX_CONCURRENT_TASKS", 50))
+        semaphore = asyncio.Semaphore(_max_concurrency)
+
+        async def _protected_process(sym, timeout):
+            async with semaphore:
+                return await asyncio.wait_for(self.process_symbol(sym), timeout=timeout)
+
         if ibkr_symbols:
             BATCH_SIZE = 100  # Max symbols per batch (IBKR limit is 100)
             total_ibkr = len(ibkr_symbols)
@@ -9428,7 +11759,7 @@ class ApexTradingSystem:
                 # Process batch in parallel (60s timeout per symbol prevents hangs)
                 _SYMBOL_TIMEOUT = float(getattr(ApexConfig, "PROCESS_SYMBOL_TIMEOUT_SECONDS", 60.0))
                 tasks = [
-                    asyncio.wait_for(self.process_symbol(symbol), timeout=_SYMBOL_TIMEOUT)
+                    _protected_process(symbol, _SYMBOL_TIMEOUT)
                     for symbol in batch_symbols
                 ]
                 results = await asyncio.gather(*tasks, return_exceptions=True)
@@ -9442,12 +11773,12 @@ class ApexTradingSystem:
                 if batch_num < num_batches - 1:
                     await asyncio.sleep(0.5)
 
-        # Process ALL Alpaca crypto symbols in one batch (no limit)
+        # Process ALL Alpaca crypto symbols in one batch (no batch limit, strictly bounded by Semaphore)
         if alpaca_symbols:
-            logger.info(f"📊 Processing {len(alpaca_symbols)} Alpaca crypto symbols (no batch limit)")
+            logger.info(f"📊 Processing {len(alpaca_symbols)} Alpaca crypto symbols (bounded by Semaphore={_max_concurrency})")
             _SYMBOL_TIMEOUT = float(getattr(ApexConfig, "PROCESS_SYMBOL_TIMEOUT_SECONDS", 60.0))
             tasks = [
-                asyncio.wait_for(self.process_symbol(symbol), timeout=_SYMBOL_TIMEOUT)
+                _protected_process(symbol, _SYMBOL_TIMEOUT)
                 for symbol in alpaca_symbols
             ]
             results = await asyncio.gather(*tasks, return_exceptions=True)
@@ -10079,6 +12410,16 @@ class ApexTradingSystem:
                 
             if spy_price:
                 await self.performance_tracker.record_benchmark(float(spy_price), current_time)
+                # Feed SPY + BTC prices into correlation early warning detector
+                if getattr(self, '_corr_early_warning', None) is not None:
+                    try:
+                        _btc_pc = self.price_cache.get("CRYPTO:BTC/USD") or self.price_cache.get("BTC/USD")
+                        if isinstance(_btc_pc, dict):
+                            _btc_pc = _btc_pc.get("close") or _btc_pc.get("price")
+                        if _btc_pc and float(_btc_pc) > 0:
+                            self._corr_early_warning.record_prices(float(spy_price), float(_btc_pc))
+                    except Exception:
+                        pass
             perf_snapshot = self._performance_snapshot
             if self.performance_governor:
                 self.performance_governor.set_regime_targets(
@@ -10091,6 +12432,15 @@ class ApexTradingSystem:
                 )
                 perf_snapshot = self.performance_governor.update(current_value, datetime.now())
                 self._performance_snapshot = perf_snapshot
+                # Persist governor state every 10 risk-checks so restarts skip warmup
+                self._risk_check_count = getattr(self, "_risk_check_count", 0) + 1
+                if self._risk_check_count % 10 == 0:
+                    try:
+                        self.performance_governor.save_state(
+                            ApexConfig.DATA_DIR / "performance_governor_state.json"
+                        )
+                    except Exception as _pg_save_err:
+                        logger.debug("Governor state save failed: %s", _pg_save_err)
 
             # Update institutional components
             if self.use_institutional:
@@ -10341,6 +12691,12 @@ class ApexTradingSystem:
             if kill_state and kill_state.active and not self._kill_switch_last_active:
                 logger.critical("🛑 HARD KILL-SWITCH TRIGGERED: %s", kill_state.reason)
                 fire_alert("kill_switch", f"HARD KILL-SWITCH TRIGGERED: {kill_state.reason}", AlertSev.CRITICAL)
+                if getattr(self, '_alert_manager', None) is not None:
+                    _ks_pnl = float(loss_check.get('daily_pnl', 0.0))
+                    asyncio.create_task(self._alert_manager.send_kill_switch_alert(
+                        reason=str(kill_state.reason or "dd_sharpe_breach"),
+                        session_pnl=_ks_pnl,
+                    ))
                 if self.prometheus_metrics:
                     self.prometheus_metrics.update_kill_switch(active=True, reason="dd_sharpe_breach")
 
@@ -10370,7 +12726,15 @@ class ApexTradingSystem:
 
             if loss_check.get('breached', False):
                 logger.error("🚨 DAILY LOSS LIMIT BREACHED!")
-            
+                if getattr(self, '_alert_manager', None) is not None:
+                    _dl_pct = abs(float(loss_check.get('daily_return', 0.0))) * 100.0
+                    _dl_usd = float(loss_check.get('daily_pnl', 0.0))
+                    if _dl_pct >= self._alert_manager.drawdown_alert_pct:
+                        asyncio.create_task(self._alert_manager.send_drawdown_alert(
+                            daily_loss_pct=_dl_pct,
+                            daily_loss_usd=_dl_usd,
+                        ))
+
             if dd_check.get('breached', False):
                 logger.error("🚨 MAX DRAWDOWN BREACHED!")
                 await self.close_all_positions()
@@ -10437,7 +12801,7 @@ class ApexTradingSystem:
             if self._pairs_scan_cycle % _scan_interval == 1:
                 _eq_syms = [
                     s for s in self.historical_data
-                    if not self._is_crypto_symbol(s)
+                    if not _symbol_is_crypto(s)
                     and not s.startswith('FX:')
                     and len(self.historical_data[s]) >= self._pairs_trader.lookback
                 ][:30]  # cap at 30 for performance (C(30,2)=435 pairs)
@@ -10794,6 +13158,21 @@ class ApexTradingSystem:
                 'broker_heartbeats': self._broker_heartbeat_payload(),
                 'crypto_rotation': dict(self._crypto_rotation_snapshot or {}),
                 'performance_governor': self._performance_snapshot.to_dict() if self._performance_snapshot else None,
+                'stress_control': (
+                    self._stress_control_state.to_dict()
+                    if getattr(self, "_stress_control_state", None) is not None
+                    else None
+                ),
+                'stress_unwind_plan': (
+                    self._stress_unwind_plan.to_dict()
+                    if getattr(self, "_stress_unwind_plan", None) is not None
+                    else None
+                ),
+                'shadow_deployment': (
+                    self.shadow_deployment.runtime_state()
+                    if getattr(self, "shadow_deployment", None) is not None
+                    else None
+                ),
                 'kill_switch': self.kill_switch.state().__dict__ if self.kill_switch else None,
                 'equity_reconciliation': (
                     self._equity_reconciliation_snapshot.to_dict()
@@ -11512,6 +13891,20 @@ class ApexTradingSystem:
             last_data_refresh = datetime.now()
             self._startup_time = datetime.now()
             
+            # Phase 12: Ignite High-Frequency WebSockets!
+            if getattr(self, 'websocket_streamer', None):
+                self.websocket_streamer.load_universe(self._session_symbols)
+                await self.websocket_streamer.start()
+                # Option D: Wait for WSS handshake to complete before entering the main loop.
+                # This eliminates the race condition where the first N price fetches always
+                # fell back to REST because the WSS connection wasn't yet subscribed.
+                # Timeout of 8s → if WSS takes longer, we proceed anyway (REST fallback active).
+                _wss_ready = await self.websocket_streamer.wait_until_ready(timeout=8.0)
+                if _wss_ready:
+                    logger.info("✅ WebSocket streams ready — entering main loop with live price feed")
+                else:
+                    logger.warning("⚠️ WebSocket streams not ready within 8s — proceeding with REST fallback")
+
             while self.is_running:
                 try:
                     cycle_start_time = datetime.now()
@@ -11598,6 +13991,75 @@ class ApexTradingSystem:
                                 )
                         except Exception as _fhe:
                             logger.debug("FactorHedger check failed (non-fatal): %s", _fhe)
+
+                    # ── Adaptive ATR stops: regime+VIX+profit-ratchet update ──────
+                    _aatrs_interval = int(getattr(ApexConfig, "ADAPTIVE_ATR_UPDATE_INTERVAL", 5))
+                    if (
+                        cycle % _aatrs_interval == 0
+                        and getattr(self, '_adaptive_atr_stops', None) is not None
+                        and getattr(ApexConfig, "ADAPTIVE_ATR_STOPS_ENABLED", True)
+                        and self.positions
+                    ):
+                        try:
+                            _updated = self._adaptive_atr_stops.update_all(
+                                positions=dict(self.positions),
+                                position_stops=dict(self.position_stops),
+                                entry_prices=dict(self.position_entry_prices),
+                                historical_data=self.historical_data,
+                                regime=self._current_regime or "neutral",
+                                vix=float(self._current_vix or 20.0),
+                            )
+                            self.position_stops.update(_updated)
+                            if _updated:
+                                logger.debug(
+                                    "AdaptiveATRStops updated %d stops (regime=%s vix=%.1f)",
+                                    len(_updated), self._current_regime, self._current_vix or 20.0,
+                                )
+                        except Exception as _aatrs_err:
+                            logger.debug("AdaptiveATRStops update failed (non-fatal): %s", _aatrs_err)
+
+                    # ── ModelDriftMonitor: periodic health check (every 60 cycles) ──
+                    if (
+                        cycle % 60 == 0
+                        and getattr(self, '_model_drift_monitor', None) is not None
+                        and getattr(ApexConfig, "MODEL_DRIFT_MONITOR_ENABLED", True)
+                    ):
+                        try:
+                            _mdm_status = self._model_drift_monitor.get_status()
+                            if _mdm_status.should_retrain:
+                                logger.warning(
+                                    "⚠️ ModelDriftMonitor: RETRAIN RECOMMENDED — "
+                                    "IC=%.3f hr=%.1f%% conf=%.2f degraded_windows=%d",
+                                    _mdm_status.ic_current,
+                                    _mdm_status.hit_rate_current * 100,
+                                    _mdm_status.med_confidence,
+                                    _mdm_status.consecutive_degraded,
+                                )
+                                # Auto-trigger retraining with 24h cooldown
+                                import time as _time_mod2
+                                _mdm_last = getattr(self, "_mdm_last_retrain_ts", 0.0)
+                                _mdm_cooldown = float(getattr(ApexConfig, "MODEL_DRIFT_RETRAIN_COOLDOWN_HOURS", 24)) * 3600
+                                if (
+                                    self.outcome_loop is not None
+                                    and getattr(ApexConfig, "AUTO_RETRAIN_ENABLED", True)
+                                    and (_time_mod2.time() - _mdm_last) > _mdm_cooldown
+                                ):
+                                    self._mdm_last_retrain_ts = _time_mod2.time()
+                                    logger.warning("🔄 ModelDriftMonitor: auto-triggering retraining (24h cooldown ok)")
+                                    try:
+                                        self.outcome_loop.trigger_retrain(self.historical_data)
+                                    except Exception as _rt_err:
+                                        logger.debug("ModelDriftMonitor retrain trigger error: %s", _rt_err)
+                            elif _mdm_status.health != "healthy" and _mdm_status.total_windows > 0:
+                                logger.info(
+                                    "ModelDriftMonitor: %s — IC=%.3f hr=%.1f%% conf=%.2f",
+                                    _mdm_status.health,
+                                    _mdm_status.ic_current,
+                                    _mdm_status.hit_rate_current * 100,
+                                    _mdm_status.med_confidence,
+                                )
+                        except Exception as _mdm_err:
+                            logger.debug("ModelDriftMonitor check error (non-fatal): %s", _mdm_err)
 
                     # ── AdaptiveEntryGate periodic calibration/persist ─────────
                     _aeg = getattr(self, '_adaptive_entry_gate', None)
@@ -11899,7 +14361,7 @@ class ApexTradingSystem:
                             # Feed intraday data to ORB updater during first 30 min of session
                             if _now_et_orb.hour == 9 and _now_et_orb.minute >= 30:
                                 for _orb_sym in list(self.historical_data.keys()):
-                                    if self._is_crypto_symbol(_orb_sym):
+                                    if _symbol_is_crypto(_orb_sym):
                                         continue
                                     _orb_df = self.historical_data.get(_orb_sym)
                                     if _orb_df is not None and len(_orb_df) >= 3:
@@ -11911,6 +14373,46 @@ class ApexTradingSystem:
                     vix_state = self.vix_manager.get_current_state()
                     self._vix_risk_multiplier = vix_state.risk_multiplier
                     self._current_vix = vix_state.current_vix  # For signal filtering
+
+                    # Regime Transition Forecaster: proactive pre-emptive dampener
+                    if getattr(self, '_regime_forecaster', None) is not None:
+                        try:
+                            _vix3m = float(getattr(vix_state, 'vix3m', 0.0) or 0.0)
+                            _pcr_val = float(getattr(self, '_last_pcr_value', 1.0) or 1.0)
+                            _hyg_val = float(self.price_cache.get('HYG', 80.0) or 80.0)
+                            _spy_val = float(self.price_cache.get('SPY', 500.0) or 500.0)
+                            self._regime_forecaster.update(
+                                vix=self._current_vix,
+                                pcr=_pcr_val,
+                                hyg_price=_hyg_val,
+                                spy_price=_spy_val,
+                                vix3m=_vix3m,
+                            )
+                            _fc = self._regime_forecaster.get_forecast()
+                            self._regime_forecast_mult = _fc.size_multiplier
+                            if _fc.signal != "clear":
+                                logger.info(
+                                    "🔮 RegimeForecaster: %s (prob=%.2f, mult=%.2f)",
+                                    _fc.signal.upper(), _fc.transition_prob, _fc.size_multiplier,
+                                )
+                            # Apply: only ever tightens (take the min of VIX + forecast mults)
+                            self._vix_risk_multiplier = min(
+                                self._vix_risk_multiplier, self._regime_forecast_mult
+                            )
+                            # Live Regime Transition Alert
+                            _ra = getattr(self, "_regime_alerter", None)
+                            if _ra is not None and getattr(ApexConfig, "REGIME_ALERT_ENABLED", True):
+                                try:
+                                    _alert = _ra.check(_fc)
+                                    if _alert is not None:
+                                        logger.warning(
+                                            "🚨 RegimeAlert [%s]: %s",
+                                            _alert.severity.upper(), _alert.message,
+                                        )
+                                except Exception:
+                                    pass
+                        except Exception as _rtf_err:
+                            logger.debug("RegimeForecaster update error: %s", _rtf_err)
 
                     # Drawdown-adaptive leverage: cut size when session is losing.
                     # After -2% session loss → 50%; after -4% → 25%; recovery restores gradually.
@@ -11970,6 +14472,10 @@ class ApexTradingSystem:
                     if health_status != HealthStatus.HEALTHY and cycle % 5 == 0:
                         logger.warning(f"🏥 System Health: {health_status.value.upper()}")
 
+                    self._run_intraday_stress_check(cycle)
+                    self._refresh_stress_unwind_plan()
+                    self._run_shadow_deployment_gate(cycle)
+
                     # ═══════════════════════════════════════════════════════
 
                     # ✅ Retry any failed exits first (critical for risk management)
@@ -11978,6 +14484,56 @@ class ApexTradingSystem:
                     # ✅ Enforce sector concentration limits — trim breaching sectors before new entries
                     if in_equity_hours and len(self.positions) > 0:
                         await self.enforce_sector_limits()
+                        
+                        # Phase 14: Enforce Absolute Beta Neutrality (rate-limited)
+                        _dh_interval = int(getattr(ApexConfig, "DELTA_HEDGE_REBALANCE_CYCLES", 20))
+                        _dh_last = getattr(self, '_delta_hedge_last_cycle', 0)
+                        if (
+                            getattr(self, 'delta_hedger', None)
+                            and getattr(ApexConfig, "DELTA_HEDGE_ENABLED", True)
+                            and (cycle - _dh_last) >= _dh_interval
+                        ):
+                            try:
+                                _hedge_sym = str(getattr(ApexConfig, "DELTA_HEDGE_SYMBOL", "SPY"))
+                                # Exclude the hedge symbol itself from position dict fed to hedger
+                                _non_hedge_pos = {
+                                    s: q for s, q in self.positions.items()
+                                    if s != _hedge_sym and q != 0
+                                }
+                                _spy_hedge_qty = await self.delta_hedger.calculate_hedge_order(
+                                    _non_hedge_pos, self.price_cache, hedge_symbol=_hedge_sym
+                                )
+                                if _spy_hedge_qty != 0:
+                                    _spy_side = "BUY" if _spy_hedge_qty > 0 else "SELL"
+                                    _spy_qty = abs(int(_spy_hedge_qty))
+                                    # Notional cap: never put >MAX_SPY_NOTIONAL into hedge
+                                    _spy_price = self.price_cache.get(_hedge_sym, 500.0)
+                                    _max_qty = int(
+                                        getattr(ApexConfig, "DELTA_HEDGE_MAX_SPY_NOTIONAL", 200_000)
+                                        / max(_spy_price, 1.0)
+                                    )
+                                    _spy_qty = min(_spy_qty, _max_qty)
+                                    if _spy_qty > 0:
+                                        logger.warning(
+                                            "🛡️ Delta Hedge: %s %d %s (portfolio Δ sterilised)",
+                                            _spy_side, _spy_qty, _hedge_sym,
+                                        )
+                                        await self.broker_dispatch.place_order(
+                                            broker="ibkr",
+                                            symbol=_hedge_sym,
+                                            quantity=float(_spy_qty),
+                                            side=_spy_side,
+                                            confidence=1.0,
+                                            force_market=True,
+                                        )
+                                        # Track hedge position so process_symbol skips signal exit
+                                        _cur_hedge = getattr(self, '_delta_hedge_qty', {})
+                                        _prev = _cur_hedge.get(_hedge_sym, 0)
+                                        _cur_hedge[_hedge_sym] = _prev + (_spy_qty if _spy_side == "BUY" else -_spy_qty)
+                                        self._delta_hedge_qty = _cur_hedge
+                                self._delta_hedge_last_cycle = cycle
+                            except Exception as _dhe:
+                                logger.warning("Delta Hedger execution failed: %s", _dhe)
 
                     # Check circuit breaker status
                     can_trade, cb_reason = self.risk_manager.can_trade()
@@ -12053,6 +14609,17 @@ class ApexTradingSystem:
                         # SIGNAL FORTRESS - Periodic monitoring & feedback
                         # ═══════════════════════════════════════════════════════
 
+                        # Option D: WSS hit rate instrumentation — log every 100 cycles
+                        if cycle % 100 == 0 and getattr(self, 'websocket_streamer', None):
+                            _hr = self.websocket_streamer.hit_rate
+                            _hits = self.websocket_streamer._wss_hits
+                            _misses = self.websocket_streamer._wss_misses
+                            logger.info(
+                                "📡 WSS hit rate: %.1f%% (%d WSS / %d REST fallbacks) — "
+                                "target >80%% for latency gains",
+                                _hr * 100, _hits, _misses,
+                            )
+
                         # Outcome feedback loop: update forward returns & feed to generators
                         if self.outcome_loop and cycle % 20 == 0:
                             try:
@@ -12098,6 +14665,26 @@ class ApexTradingSystem:
                                     self._last_weekly_retrain_ts = _time_mod.time()
                                     logger.warning("🗓️ Weekly model retraining triggered (7-day interval)")
                                     self.outcome_loop.trigger_retrain(self.historical_data)
+                                    # Also retrain GodLevel ensemble so ML predictions stay current
+                                    if (getattr(ApexConfig, "GOD_LEVEL_BLEND_ENABLED", True)
+                                            and getattr(self, "god_signal_generator", None) is not None):
+                                        try:
+                                            logger.info("🧠 Weekly GodLevel ensemble retraining...")
+                                            await asyncio.to_thread(
+                                                self.god_signal_generator.train_models,
+                                                self.historical_data,
+                                            )
+                                            logger.info("✅ GodLevel ensemble retrained and saved")
+                                            # Regenerate manifest so startup trust checks pass on next restart
+                                            try:
+                                                from models.model_manifest import build_manifest, write_manifest
+                                                from pathlib import Path as _Path
+                                                write_manifest(build_manifest(), _Path("models/model_manifest.json"))
+                                                logger.info("✅ Model manifest regenerated after retrain")
+                                            except Exception as _mf_err:
+                                                logger.warning("Manifest regen after retrain failed: %s", _mf_err)
+                                        except Exception as _gl_train_err:
+                                            logger.warning("GodLevel weekly retrain failed: %s", _gl_train_err)
                             except Exception as _wre:
                                 logger.debug("Weekly retrain check error: %s", _wre)
 
@@ -12136,6 +14723,183 @@ class ApexTradingSystem:
                                             logger.info(f"🏰 Optimized thresholds for {len(results)} symbols")
                             except Exception as e:
                                 logger.debug(f"Threshold optimization error: {e}")
+
+                        # ── Intraday Stress Engine — evaluate every 50 periodic checks ──
+                        if getattr(self, 'intraday_stress_engine', None) is not None:
+                            try:
+                                _se_counter = getattr(self, '_stress_eval_counter', 0) + 1
+                                self._stress_eval_counter = _se_counter
+                                if _se_counter % 50 == 1:   # first call + every 50 thereafter
+                                    _pos_qty = {
+                                        s: float(d.get("qty", 0) if isinstance(d, dict) else d)
+                                        for s, d in self.positions.items()
+                                        if (d.get("qty", 0) if isinstance(d, dict) else d) != 0
+                                    }
+                                    _new_stress = self.intraday_stress_engine.evaluate(
+                                        positions=_pos_qty,
+                                        prices=self.price_cache,
+                                        historical_data=self.historical_data,
+                                        capital=float(getattr(self, '_current_portfolio_value', 0) or 1),
+                                    )
+                                    _prev_stress = self._stress_control_state
+                                    self._stress_control_state = _new_stress
+                                    if _new_stress.active:
+                                        logger.warning(
+                                            "🚨 StressEngine %s: worst=%s ret=%.1f%% mult=%.2f halt=%s",
+                                            _new_stress.action,
+                                            _new_stress.worst_scenario_name,
+                                            _new_stress.worst_portfolio_return * 100,
+                                            _new_stress.size_multiplier,
+                                            _new_stress.halt_new_entries,
+                                        )
+                                        self._journal_stress_evaluation(_new_stress)
+                                        # Build/refresh the unwind plan when halting
+                                        if _new_stress.halt_new_entries and getattr(self, 'stress_unwind_planner', None):
+                                            _unwind = self.stress_unwind_planner.build_plan(
+                                                stress_state=_new_stress,
+                                                positions=_pos_qty,
+                                                prices=self.price_cache,
+                                                portfolio_value=float(getattr(self, '_current_portfolio_value', 0) or 1),
+                                            )
+                                            self._stress_unwind_plan = _unwind
+                                            if _unwind.active:
+                                                logger.warning(
+                                                    "📋 StressUnwindPlan: %d candidates to reduce (%s)",
+                                                    len(_unwind.candidates),
+                                                    _new_stress.worst_scenario_name,
+                                                )
+                                                # Alert on stress halt
+                                                if getattr(self, '_alert_manager', None):
+                                                    import asyncio as _asyncio
+                                                    _asyncio.create_task(self._alert_manager.send_stress_alert(
+                                                        scenario=_new_stress.worst_scenario_name,
+                                                        action=_new_stress.action,
+                                                        portfolio_return=_new_stress.worst_portfolio_return,
+                                                        candidates=[c.symbol for c in _unwind.candidates],
+                                                    ))
+                                    elif _prev_stress is not None and _prev_stress.active and not _new_stress.active:
+                                        logger.info("✅ StressEngine: returned to normal")
+                            except Exception as _se_err:
+                                logger.debug("StressEngine evaluation error: %s", _se_err)
+
+                        # EOD Performance Digest — runs once per day at market close
+                        if getattr(self, '_eod_digest', None) is not None:
+                            try:
+                                import time as _t_mod
+                                from datetime import date as _date_cls
+                                _today_str = _date_cls.today().isoformat()
+                                _last_digest = getattr(self, '_last_eod_digest_date', None)
+                                _market_hour = datetime.now().hour
+                                # Trigger between 16:00-17:00 ET, once per calendar day
+                                if _today_str != _last_digest and 16 <= _market_hour < 17:
+                                    self._last_eod_digest_date = _today_str
+                                    _gov_snap = getattr(self, '_performance_snapshot', None)
+                                    _report = self._eod_digest.generate(
+                                        positions=self.positions,
+                                        price_cache=self.price_cache,
+                                        governor_snapshot=_gov_snap,
+                                    )
+                                    self._eod_digest.save(_report)
+                                    self._eod_digest.log_summary(_report)
+                                    # Run signal auto-tuner right after digest is saved
+                                    if getattr(self, '_signal_auto_tuner', None) is not None:
+                                        try:
+                                            _tune_result = self._signal_auto_tuner.run()
+                                            if _tune_result.changes:
+                                                _new_thresh = self._signal_auto_tuner.get_thresholds()
+                                                self._auto_tuned_thresholds = _new_thresh
+                                                logger.info(
+                                                    "SignalAutoTuner: %d threshold(s) updated",
+                                                    len(_tune_result.changes),
+                                                )
+                                        except Exception as _sat_err:
+                                            logger.debug("SignalAutoTuner run failed: %s", _sat_err)
+                                    # Alert: send EOD digest summary
+                                    if getattr(self, '_alert_manager', None) is not None:
+                                        try:
+                                            import asyncio as _asyncio
+                                            _asyncio.create_task(self._alert_manager.send_eod_summary(
+                                                report_date=_today_str,
+                                                total_trades=_report.total_trades,
+                                                realized_pnl=_report.total_realized_pnl,
+                                                win_rate=_report.overall_win_rate,
+                                                recommendations=_report.recommendations[:3],
+                                            ))
+                                        except Exception:
+                                            pass
+                            except Exception as _eod_err:
+                                logger.debug("EOD digest generation failed: %s", _eod_err)
+
+                        # Capital Allocator: feed today's broker-split P&L and recompute
+                        if getattr(self, '_capital_allocator', None) is not None:
+                            try:
+                                _broker_pnl = self._compute_daily_pnl_by_broker()
+                                _cap_pv = float(getattr(self, '_current_portfolio_value', 1) or 1)
+                                _eq_pct = _broker_pnl.get("ibkr_realized", 0.0) / max(_cap_pv, 1.0)
+                                _cr_pct = _broker_pnl.get("alpaca_realized", 0.0) / max(_cap_pv, 1.0)
+                                self._capital_allocator.update_leg_pnl(
+                                    equity_pnl_pct=float(_eq_pct),
+                                    crypto_pnl_pct=float(_cr_pct),
+                                )
+                                _alloc = self._capital_allocator.compute_allocation()
+                                if _alloc.rebalance_recommended:
+                                    logger.info(
+                                        "📊 CapitalAllocator: eq=%.0f%% cr=%.0f%% "
+                                        "(eq_sharpe=%.2f cr_sharpe=%.2f corr=%.2f)",
+                                        _alloc.equity_frac * 100, _alloc.crypto_frac * 100,
+                                        _alloc.equity_sharpe, _alloc.crypto_sharpe,
+                                        _alloc.correlation,
+                                    )
+                            except Exception as _ca_err:
+                                logger.debug("CapitalAllocator EOD error: %s", _ca_err)
+
+                        # Execution Quality: EOD flush
+                        if getattr(self, '_exec_quality', None) is not None:
+                            try:
+                                self._exec_quality.flush()
+                                _eq_report = self._exec_quality.get_report()
+                                _global = _eq_report.get("global", {})
+                                if _global.get("total_fills", 0) > 0:
+                                    logger.info(
+                                        "📊 ExecQuality EOD: fills=%d mean_slip=%.1fbps p95=%.1fbps adverse=%.0f%%",
+                                        _global["total_fills"], _global["mean_bps"],
+                                        _global["p95_bps"], _global["adverse_pct"],
+                                    )
+                                    _worst = _eq_report.get("worst_symbols", [])
+                                    if _worst:
+                                        logger.info("   Worst symbols: %s", ", ".join(
+                                            f"{w['symbol']}({w['p95_bps']:.0f}bps)" for w in _worst[:5]
+                                        ))
+                            except Exception as _eq_err:
+                                logger.debug("ExecQuality flush error: %s", _eq_err)
+
+                        # Shadow Deployment Gate: periodic evaluation for promotion
+                        if getattr(self, '_shadow_gate', None) is not None:
+                            try:
+                                _sdg_counter = getattr(self, '_shadow_eval_counter', 0) + 1
+                                self._shadow_eval_counter = _sdg_counter
+                                if _sdg_counter % self._shadow_gate.evaluation_interval_cycles == 0:
+                                    _perf = getattr(self, '_performance_snapshot', None)
+                                    _sdg_update = self._shadow_gate.evaluate(
+                                        live_sharpe=float(getattr(_perf, 'sharpe', 0.0) or 0.0),
+                                        live_drawdown=float(getattr(_perf, 'max_drawdown', 0.0) or 0.0),
+                                        live_win_rate=float(self.performance_tracker.get_win_rate() or 0.0),
+                                        live_total_pnl=float(getattr(self, '_total_realized_pnl', 0.0) or 0.0),
+                                        live_total_trades=int(self.performance_tracker.get_completed_trade_count()),
+                                        stress_halt_active=bool(
+                                            getattr(self, '_stress_control_state', None) is not None
+                                            and self._stress_control_state.halt_new_entries
+                                        ),
+                                    )
+                                    if _sdg_update.status_changed:
+                                        logger.info(
+                                            "ShadowGate: %s → %s (activated=%s)",
+                                            _sdg_update.previous_status,
+                                            _sdg_update.current_status,
+                                            _sdg_update.activation_applied,
+                                        )
+                            except Exception as _sdg_err:
+                                logger.debug("ShadowGate evaluation error: %s", _sdg_err)
 
                         # ═══════════════════════════════════════════════════════
                         # SIGNAL FORTRESS V2 - Indestructible Shield Updates
@@ -12305,6 +15069,10 @@ class ApexTradingSystem:
                     self.alpaca.save_pending_orders(_orders_path)
                 except Exception as _save_err:
                     logger.debug("Could not save pending orders: %s", _save_err)
+
+            # Phase 12: Drain the WebSockets daemon gracefully
+            if getattr(self, 'websocket_streamer', None):
+                await self.websocket_streamer.stop()
 
             if self.ibkr:
                 self.ibkr.disconnect()

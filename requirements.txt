@@ -37,6 +37,7 @@ pytest==7.4.3
 pytest-asyncio==0.21.1
 
 # Utils
+psutil==5.9.8
 pyyaml==6.0.1
 requests==2.31.0
 pytz==2024.1

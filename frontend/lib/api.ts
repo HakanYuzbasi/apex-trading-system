@@ -72,6 +72,103 @@ export type CockpitPosition = {
   right?: string;
   stale?: boolean;
   source_status?: string;
+  replay_url?: string;
+};
+
+export type ReplayTimelineEvent = {
+  timestamp: string;
+  event_type: string;
+  symbol: string;
+  asset_class: string;
+  hash?: string;
+  payload: Record<string, unknown>;
+};
+
+export type ReplayGovernorPolicySnapshot = {
+  policy_key: string;
+  policy_id: string;
+  version: string;
+  asset_class: string;
+  regime: string;
+  created_at?: string;
+  observed_tier?: string;
+  tier_controls: Record<string, Record<string, unknown>>;
+  metadata: Record<string, unknown>;
+  source: string;
+};
+
+export type ReplayLiquidationProgress = {
+  symbol: string;
+  status: string;
+  plan_id: string;
+  plan_epoch: number;
+  planned_reduction_qty: number;
+  executed_reduction_qty: number;
+  remaining_qty: number;
+  progress_pct: number;
+  target_reduction_pct: number;
+  initial_position_qty: number;
+  expected_stress_pnl: number;
+  remaining_stress_pnl?: number | null;
+  remaining_stress_return?: number | null;
+  worst_scenario_id?: string;
+  worst_scenario_name?: string;
+  breach_event?: ReplayTimelineEvent | null;
+  plan_event?: ReplayTimelineEvent | null;
+};
+
+export type ReplayPlanAudit = {
+  plan_id: string;
+  plan_epoch: number;
+  started_at?: string | null;
+  worst_scenario_id?: string;
+  worst_scenario_name?: string;
+  candidate_symbols: string[];
+  completed_symbols: number;
+  in_progress_symbols: number;
+  planned_symbols: number;
+  breach_event?: ReplayTimelineEvent | null;
+  plan_event?: ReplayTimelineEvent | null;
+};
+
+export type ReplayChain = {
+  chain_id: string;
+  symbol: string;
+  asset_class: string;
+  chain_kind: string;
+  started_at: string;
+  completed_at?: string | null;
+  final_status: string;
+  terminal_reason: string;
+  signal_event?: ReplayTimelineEvent | null;
+  risk_events: ReplayTimelineEvent[];
+  order_events: ReplayTimelineEvent[];
+  position_events: ReplayTimelineEvent[];
+  stress_events: ReplayTimelineEvent[];
+  liquidation_progress?: ReplayLiquidationProgress | null;
+  governor_policy?: ReplayGovernorPolicySnapshot | null;
+};
+
+export type ReplayInspectionResponse = {
+  mode: string;
+  symbol: string;
+  days: number;
+  limit: number;
+  summary: {
+    symbol: string;
+    asset_class?: string | null;
+    total_events: number;
+    total_chains: number;
+    blocked_chains: number;
+    filled_chains: number;
+    open_chains: number;
+    stress_liquidation_chains: number;
+    latest_event_at?: string | null;
+  };
+  latest_chain?: ReplayChain | null;
+  chains: ReplayChain[];
+  raw_events: ReplayTimelineEvent[];
+  plan_audit?: ReplayPlanAudit | null;
 };
 
 export type CockpitDerivative = {

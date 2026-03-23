@@ -8,10 +8,13 @@ and reduce risk when Sharpe/Sortino degrade or drawdown rises.
 
 from __future__ import annotations
 
+import json
 import logging
+import os
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from enum import Enum
+from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
 import numpy as np
@@ -288,3 +291,73 @@ class PerformanceGovernor:
             halt_new_entries=halt_entries,
             reasons=reasons,
         )
+
+    # ── Persistence ───────────────────────────────────────────────────────────
+
+    def save_state(self, path: "str | Path") -> None:
+        """Persist rolling samples and tier state to disk."""
+        try:
+            state = {
+                "tier": self._tier.value,
+                "recovery_streak": self._recovery_streak,
+                "last_sample_time": (
+                    self._last_sample_time.isoformat()
+                    if self._last_sample_time is not None
+                    else None
+                ),
+                "samples": [
+                    [ts.isoformat(), float(val)]
+                    for ts, val in self._samples
+                ],
+            }
+            tmp = str(path) + ".tmp"
+            with open(tmp, "w", encoding="utf-8") as fh:
+                json.dump(state, fh)
+            os.replace(tmp, str(path))
+        except Exception as exc:
+            logger.warning("PerformanceGovernor: failed to save state: %s", exc)
+
+    def load_state(self, path: "str | Path") -> bool:
+        """
+        Restore samples and tier from disk.  Returns True on success.
+        Silently ignores missing or corrupt files.
+        """
+        try:
+            p = Path(path)
+            if not p.exists():
+                return False
+            with open(p, "r", encoding="utf-8") as fh:
+                state = json.load(fh)
+
+            tier_val = state.get("tier", "green")
+            self._tier = GovernorTier(tier_val) if tier_val in GovernorTier._value2member_map_ else GovernorTier.GREEN
+            self._recovery_streak = int(state.get("recovery_streak", 0))
+            last_ts = state.get("last_sample_time")
+            if last_ts:
+                parsed = datetime.fromisoformat(last_ts)
+                # Always store as naive UTC to match datetime.now() used in update()
+                self._last_sample_time = parsed.replace(tzinfo=None) if parsed.tzinfo else parsed
+            samples_raw = state.get("samples", [])
+            self._samples = []
+            for row in samples_raw[-self.lookback_points:]:
+                ts_str, val = row
+                parsed = datetime.fromisoformat(ts_str)
+                ts = parsed.replace(tzinfo=None) if parsed.tzinfo else parsed
+                self._samples.append((ts, float(val)))
+
+            # Re-compute snapshot from restored samples
+            if len(self._samples) >= self.min_samples:
+                sharpe, sortino, drawdown = self._compute_metrics()
+                _, reasons = self._determine_tier(sharpe, sortino, drawdown)
+                self._snapshot = self._build_snapshot(
+                    tier=self._tier, sharpe=sharpe, sortino=sortino,
+                    drawdown=drawdown, sample_count=len(self._samples), reasons=reasons,
+                )
+            logger.info(
+                "PerformanceGovernor: restored %d samples, tier=%s from %s",
+                len(self._samples), self._tier.value, path,
+            )
+            return True
+        except Exception as exc:
+            logger.warning("PerformanceGovernor: failed to load state (%s), starting fresh", exc)
+            return False

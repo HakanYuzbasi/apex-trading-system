@@ -48,6 +48,7 @@ type PositionRow = {
   right?: string;
   stale?: boolean;
   source_status?: string;
+  replay_url?: string;
 };
 
 type UspScorecard = {
@@ -367,6 +368,7 @@ function normalizePositionRow(row: unknown): PositionRow | null {
     right: right || undefined,
     stale: Boolean(rec.stale),
     source_status: rec.source_status ? String(rec.source_status) : undefined,
+    replay_url: `/api/v1/replay-inspector?symbol=${encodeURIComponent(symbol)}`,
   };
 }
 
@@ -960,6 +962,67 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
   const reconciliation = (stateData.equity_reconciliation && typeof stateData.equity_reconciliation === "object"
     ? stateData.equity_reconciliation
     : {}) as Record<string, unknown>;
+  const stressControl = (stateData.stress_control && typeof stateData.stress_control === "object"
+    ? stateData.stress_control
+    : {}) as Record<string, unknown>;
+  const stressUnwindPlan = (stateData.stress_unwind_plan && typeof stateData.stress_unwind_plan === "object"
+    ? stateData.stress_unwind_plan
+    : {}) as Record<string, unknown>;
+  const shadowDeployment = (stateData.shadow_deployment && typeof stateData.shadow_deployment === "object"
+    ? stateData.shadow_deployment
+    : {}) as Record<string, unknown>;
+  const livePositionQtyBySymbol = new Map<string, number>(
+    effectivePositions.map((row) => [String(row.symbol || "").trim(), Math.abs(asNumber(row.qty, 0))]),
+  );
+  const stressLiquidationCandidates = Array.isArray(stressUnwindPlan.candidates)
+    ? stressUnwindPlan.candidates
+        .map((row) => {
+          const rec = (row && typeof row === "object" ? row : {}) as Record<string, unknown>;
+          const symbol = String(rec.symbol || "").trim();
+          if (!symbol) {
+            return null;
+          }
+          const initialQty = Math.abs(asNumber(rec.current_qty, 0));
+          const plannedReductionQty = Math.abs(asNumber(rec.target_qty, 0));
+          const liveQty = livePositionQtyBySymbol.get(symbol) ?? 0;
+          const executedReductionQty = Math.max(0, Math.min(plannedReductionQty, initialQty - liveQty));
+          const progressPct = plannedReductionQty > 0 ? executedReductionQty / plannedReductionQty : 0;
+          let status = "pending";
+          if (plannedReductionQty > 0 && progressPct >= 0.999) {
+            status = "completed";
+          } else if (executedReductionQty > 0) {
+            status = "in_progress";
+          }
+          return {
+            symbol,
+            action: String(rec.action || "partial_reduce"),
+            initial_qty: initialQty,
+            live_qty: liveQty,
+            planned_reduction_qty: plannedReductionQty,
+            executed_reduction_qty: executedReductionQty,
+            progress_pct: progressPct,
+            target_reduction_pct: asNumber(rec.target_reduction_pct, 0),
+            expected_stress_pnl: asNumber(rec.expected_stress_pnl, 0),
+            liquidity_regime: String(rec.liquidity_regime || ""),
+            status,
+          };
+        })
+        .filter((row): row is NonNullable<typeof row> => row !== null)
+    : [];
+  const stressLiquidationProgress = {
+    active: Boolean(stressUnwindPlan.active),
+    plan_id: String(stressUnwindPlan.plan_id || ""),
+    plan_epoch: asNumber(stressUnwindPlan.plan_epoch, 0),
+    plan_audit_url: stressUnwindPlan.plan_id
+      ? `/api/v1/replay-inspector?plan_id=${encodeURIComponent(String(stressUnwindPlan.plan_id))}`
+      : "",
+    worst_scenario_id: String(stressUnwindPlan.worst_scenario_id || ""),
+    worst_scenario_name: String(stressUnwindPlan.worst_scenario_name || ""),
+    candidate_count: stressLiquidationCandidates.length,
+    completed_count: stressLiquidationCandidates.filter((row) => row.status === "completed").length,
+    in_progress_count: stressLiquidationCandidates.filter((row) => row.status === "in_progress").length,
+    candidates: stressLiquidationCandidates,
+  };
 
   const attributionRaw = (stateData.performance_attribution && typeof stateData.performance_attribution === "object"
     ? stateData.performance_attribution
@@ -1175,6 +1238,67 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
       detail: String(reconciliation.reason || "Equity reconciliation gap is above allowed threshold."),
     });
   }
+  if (Boolean(stressControl.halt_new_entries)) {
+    alerts.push({
+      id: "intraday-stress-halt",
+      severity: "critical",
+      source: "stress_control",
+      title: "Intraday stress halt active",
+      detail: `${String(stressControl.reason || "Portfolio stress breach")} (${String(stressControl.worst_scenario_name || stressControl.worst_scenario_id || "scenario")} ${((asNumber(stressControl.worst_portfolio_return, 0)) * 100).toFixed(2)}%).`,
+    });
+  } else if (asNumber(stressControl.size_multiplier, 1) < 1) {
+    alerts.push({
+      id: "intraday-stress-size-down",
+      severity: "warning",
+      source: "stress_control",
+      title: "Intraday stress sizing active",
+      detail: `New entries are scaled to ${(asNumber(stressControl.size_multiplier, 1) * 100).toFixed(0)}% under ${String(stressControl.worst_scenario_name || stressControl.worst_scenario_id || "stress scenario")}.`,
+    });
+  }
+  if (Boolean(stressUnwindPlan.active)) {
+    const candidates = stressLiquidationCandidates.map((row) => {
+      if (row.target_reduction_pct > 0) {
+        return `${row.symbol} ${row.action === "full_exit" ? "100% exit" : `${(row.target_reduction_pct * 100).toFixed(0)}% cut`} (${(row.progress_pct * 100).toFixed(0)}%)`;
+      }
+      return row.symbol;
+    });
+    const planId = String(stressUnwindPlan.plan_id || "").trim();
+    alerts.push({
+      id: "stress-unwind-plan",
+      severity: "critical",
+      source: "stress_control",
+      title: "Stress unwind plan active",
+      detail: `De-risking queue: ${candidates.join(", ") || "positions pending"} under ${String(stressUnwindPlan.worst_scenario_name || stressUnwindPlan.worst_scenario_id || "stress scenario")}${planId ? ` · plan ${planId}` : ""}.`,
+    });
+  }
+  const shadowStatus = String(shadowDeployment.status || "").trim().toLowerCase();
+  const shadowCandidateId = String(shadowDeployment.candidate_id || "").trim();
+  if (shadowStatus === "blocked") {
+    const reasons = Array.isArray(shadowDeployment.reasons) ? shadowDeployment.reasons.map((row) => String(row)).filter(Boolean) : [];
+    alerts.push({
+      id: "shadow-deployment-blocked",
+      severity: "warning",
+      source: "shadow_deployment",
+      title: "Shadow promotion blocked",
+      detail: `${shadowCandidateId || "Candidate"} failed gate checks${reasons.length > 0 ? ` · ${reasons.slice(0, 2).join("; ")}` : ""}.`,
+    });
+  } else if (shadowStatus === "staged") {
+    alerts.push({
+      id: "shadow-deployment-staged",
+      severity: "info",
+      source: "shadow_deployment",
+      title: "Shadow candidate staged",
+      detail: `${shadowCandidateId || "Candidate"} passed automatic checks and is awaiting approval.`,
+    });
+  } else if (shadowStatus === "active" || shadowStatus === "ready") {
+    alerts.push({
+      id: "shadow-deployment-ready",
+      severity: "info",
+      source: "shadow_deployment",
+      title: shadowStatus === "active" ? "Shadow candidate active" : "Shadow candidate ready",
+      detail: `${shadowCandidateId || "Candidate"} cleared the promotion gate.`,
+    });
+  }
   if (statusResp.ok && normalizedDrawdownPct >= 8) {
     alerts.push({
       id: "drawdown-warning",
@@ -1344,6 +1468,9 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
       active_broker: activeBroker,
       live_broker_count: liveBrokerCount,
       configured_broker_count: configuredBrokerCount,
+      intraday_stress: stressControl,
+      stress_liquidation: stressLiquidationProgress,
+      shadow_deployment: shadowDeployment,
     },
     positions: effectivePositions,
     derivatives,
