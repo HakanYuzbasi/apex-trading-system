@@ -71,6 +71,7 @@ class Trade:
     hold_days: int
     max_favorable: float = 0.0
     max_adverse: float = 0.0
+    confidence: float = 0.0   # signal confidence at entry
 
 
 @dataclass
@@ -89,6 +90,7 @@ class Position:
     lowest_price: float
     regime: str
     took_partial_profit: bool = False
+    entry_confidence: float = 0.0   # confidence at entry
 
 
 @dataclass
@@ -1123,6 +1125,7 @@ class GodLevelBacktester:
             lowest_price=entry_price,
             regime=regime,
             took_partial_profit=False,
+            entry_confidence=confidence,
         )
 
         self.positions[symbol] = position
@@ -1210,7 +1213,8 @@ class GodLevelBacktester:
             regime=position.regime,
             hold_days=hold_days,
             max_favorable=max_favorable,
-            max_adverse=max_adverse
+            max_adverse=max_adverse,
+            confidence=position.entry_confidence,
         )
         self.trades.append(trade)
 

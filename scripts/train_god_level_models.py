@@ -4,7 +4,8 @@ God Level Model Continuous Retraining Script
 =============================================
 Fetches daily OHLCV data and retrains the advanced ML ensemble,
 including the Synthetic Order Flow and Parkinson features.
-Designed to be run as an automated daily background daemon.
+Designed to be run as an automated scheduled background daemon.
+The daemon cadence is controlled externally via APEX_RETRAIN_INTERVAL_SECONDS.
 """
 
 import sys

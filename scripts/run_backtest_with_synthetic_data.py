@@ -144,13 +144,19 @@ if __name__ == "__main__":
 
     backtester = GodLevelBacktester(initial_capital=100000)
 
-    # Use "core" session to activate the relaxed thresholds designed for the
-    # split-strategy architecture.  The "unified" mode uses legacy thresholds
-    # (signal >= 0.34-0.55) that filter out nearly all signals and produce
-    # too few trades (<50) for any statistical significance.
+    # walk_forward=False: single-period mode (train on first half, test on second).
+    # This is intentional for DIAGNOSTIC runs — it generates 50-200+ trades which
+    # are needed for statistically meaningful metrics (PF, win rate, Sharpe).
+    #
+    # walk_forward=True is reserved for FINAL VALIDATION only. With 504 days of
+    # synthetic data, walk_forward burns ~393 days as training/warmup, leaving
+    # only ~90 test days → produces <5 trades and meaningless Sharpe/-34.46 noise.
+    #
+    # session_type="core": relaxed entry thresholds (signal>=0.10, conf>=0.30)
+    # to generate enough trades for a statistically significant sample.
     result = backtester.run_backtest(
         symbols=ApexConfig.SYMBOLS[:40],
-        walk_forward=True,
+        walk_forward=False,   # diagnostic mode — single period, many trades
         session_type="core",
     )
 
@@ -169,6 +175,37 @@ if __name__ == "__main__":
 
         # Print results
         print_results(result, stress_results=stress_results)
+
+        # ── Export trade list to CSV for analytics module ───────────────────
+        import csv as _csv
+        _out = PROJECT_ROOT / "data" / "backtest_trades.csv"
+        _fields = [
+            "symbol", "entry_date", "exit_date", "pnl", "pnl_percent",
+            "regime", "hold_days", "exit_reason", "confidence", "direction",
+            "entry_price", "exit_price", "max_favorable", "max_adverse",
+        ]
+        with open(_out, "w", newline="", encoding="utf-8") as _f:
+            _w = _csv.DictWriter(_f, fieldnames=_fields, extrasaction="ignore")
+            _w.writeheader()
+            for _t in result.trades:
+                _w.writerow({
+                    "symbol":        _t.symbol,
+                    "entry_date":    str(_t.entry_date)[:10],
+                    "exit_date":     str(_t.exit_date)[:10],
+                    "pnl":           round(_t.pnl, 4),
+                    "pnl_percent":   round(_t.pnl_percent, 6),
+                    "regime":        _t.regime,
+                    "hold_days":     _t.hold_days,
+                    "exit_reason":   _t.exit_reason,
+                    "confidence":    round(getattr(_t, "confidence", 0.0), 6),
+                    "direction":     _t.direction,
+                    "entry_price":   round(_t.entry_price, 4),
+                    "exit_price":    round(_t.exit_price, 4),
+                    "max_favorable": round(_t.max_favorable, 4),
+                    "max_adverse":   round(_t.max_adverse, 4),
+                })
+        print(f"\n[✓] {len(result.trades)} backtest trades exported → {_out}")
+        print(f"    Run: PYTHONPATH=. venv/bin/python scripts/analyze_performance.py --csv {_out}")
 
         # Phase 4: GO/NO-GO
         go_result = go_no_go_assessment(result, stress_results=stress_results)

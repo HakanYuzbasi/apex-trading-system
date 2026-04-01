@@ -74,7 +74,7 @@ class TestEODDigestGenerator:
     def setup_method(self):
         self.tmp = tempfile.mkdtemp()
         self.data_dir = Path(self.tmp)
-        self.today = date(2026, 3, 22)
+        self.today = date.today()
         self.audit_dir = self.data_dir / "users" / "admin" / "audit"
         self.gen = EODDigestGenerator(data_dir=self.data_dir)
 
@@ -216,7 +216,7 @@ class TestEODDigestGenerator:
         assert path.exists()
         with open(path) as fh:
             data = json.load(fh)
-        assert data["report_date"] == "2026-03-22"
+        assert data["report_date"] == self.today.isoformat()
         assert "total_trades" in data
         assert "recommendations" in data
 
@@ -226,12 +226,12 @@ class TestEODDigestGenerator:
         self.gen.save(report)
         loaded = self.gen.load_latest(days_back=2)
         assert len(loaded) == 1
-        assert loaded[0]["report_date"] == "2026-03-22"
+        assert loaded[0]["report_date"] == self.today.isoformat()
 
     def test_report_date_field(self):
         _write_audit(self.audit_dir, self.today, [])
         report = self.gen.generate(report_date=self.today)
-        assert report.report_date == "2026-03-22"
+        assert report.report_date == self.today.isoformat()
         assert "Z" in report.generated_at
 
     def test_avg_slippage_bps(self):

@@ -46,11 +46,37 @@ class WebsocketStreamer:
         self._wss_hits: int = 0
         self._wss_misses: int = 0
 
+        # Reconnect metrics
+        self._reconnect_count: Dict[str, int] = {"equity": 0, "crypto": 0}
+        self._last_connect_ts: Dict[str, float] = {}
+        self._last_disconnect_ts: Dict[str, float] = {}
+        self._session_start_ts: float = datetime.now(timezone.utc).timestamp()
+
     @property
     def hit_rate(self) -> float:
         """Fraction of price fetches served from WSS cache (0.0–1.0)."""
         total = self._wss_hits + self._wss_misses
         return self._wss_hits / total if total > 0 else 0.0
+
+    def get_metrics(self) -> dict:
+        """Return current WebSocket connection health metrics."""
+        now = datetime.now(timezone.utc).timestamp()
+        session_uptime = now - self._session_start_ts
+        return {
+            "hit_rate":          round(self.hit_rate, 3),
+            "wss_hits":          self._wss_hits,
+            "wss_misses":        self._wss_misses,
+            "equity_reconnects": self._reconnect_count.get("equity", 0),
+            "crypto_reconnects": self._reconnect_count.get("crypto", 0),
+            "equity_connected":  self._equity_ready.is_set(),
+            "crypto_connected":  self._crypto_ready.is_set(),
+            "equity_last_connect_ts":     self._last_connect_ts.get("equity"),
+            "crypto_last_connect_ts":     self._last_connect_ts.get("crypto"),
+            "equity_last_disconnect_ts":  self._last_disconnect_ts.get("equity"),
+            "crypto_last_disconnect_ts":  self._last_disconnect_ts.get("crypto"),
+            "session_uptime_seconds":     round(session_uptime, 0),
+            "cached_symbols":    len(self._price_cache),
+        }
 
     async def wait_until_ready(self, timeout: float = 10.0) -> bool:
         """
@@ -161,6 +187,9 @@ class WebsocketStreamer:
                         self._crypto_ready.set()
                     logger.info(f"✅ [{stream_type.upper()}] WSS ready — {len(symbols)} symbols subscribed")
 
+                    # Track (re)connect timestamp
+                    self._last_connect_ts[stream_type] = datetime.now(timezone.utc).timestamp()
+
                     retry_delay = 1 # Reset health threshold
                     
                     # 3. Endless Consumption Pipeline
@@ -187,6 +216,8 @@ class WebsocketStreamer:
                 logger.info(f"[{stream_type.upper()}] WSS Gracefully Terminated.")
                 break
             except Exception as e:
+                self._reconnect_count[stream_type] = self._reconnect_count.get(stream_type, 0) + 1
+                self._last_disconnect_ts[stream_type] = datetime.now(timezone.utc).timestamp()
                 logger.warning(f"[{stream_type.upper()}] WSS stream crashed: {e}. Reconnecting in {retry_delay}s...")
                 await asyncio.sleep(retry_delay)
                 retry_delay = min(retry_delay * 2, 60)

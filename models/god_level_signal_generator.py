@@ -84,6 +84,30 @@ class GodLevelSignalGenerator:
         # Try to load existing models
         self.load_models()
 
+        # Signal Optimizer: TTL-based signal cache + latency guard
+        try:
+            from models.signal_optimizer import SignalOptimizer, OptimizationConfig
+            self._signal_optimizer = SignalOptimizer(OptimizationConfig(
+                enable_caching=True,
+                cache_ttl_seconds=int(getattr(ApexConfig, "GOD_LEVEL_SIGNAL_CACHE_TTL_SEC", 120)),
+                enable_parallel=False,           # GodLevel is already async
+                enable_feature_selection=False,  # Features fixed per symbol
+                enable_ensemble_optimization=False,
+            ))
+        except Exception as _so_err:
+            logger.debug("SignalOptimizer unavailable: %s", _so_err)
+            self._signal_optimizer = None
+
+        # Binary direction classifier (8% blend weight)
+        try:
+            from models.binary_signal_classifier import BinarySignalClassifier
+            self._binary_classifier = BinarySignalClassifier(
+                model_dir=str(self.model_dir / "binary")
+            )
+        except Exception as _bsc_err:
+            logger.debug("BinarySignalClassifier unavailable: %s", _bsc_err)
+            self._binary_classifier = None
+
         logger.info("God Level Signal Generator initialized")
         logger.info(f"  ML Libraries: sklearn={ML_LIBS['sklearn']}, xgboost={ML_LIBS['xgboost']}, lightgbm={ML_LIBS['lightgbm']}")
 
@@ -309,6 +333,59 @@ class GodLevelSignalGenerator:
             features.append(float(np.clip(pullback.iloc[-1], -3, 3)) if len(pullback) > 0 else 0.0)
         else:
             features.extend([0.5, 0.0, 0.0, 0.0])
+
+        # === 12. CRYPTO ALPHA FEATURES (5 features) ===
+        # Crypto-specific signals: volatility clustering, drawdown depth,
+        # momentum acceleration, tail-risk, and volume-range position.
+        # These also fire for equities (generic) with safe fallbacks.
+
+        # Feature 12.1 — Volatility clustering (ARCH effect proxy)
+        # autocorrelation of squared returns at lag-1 → high = volatile regime persists
+        if len(returns) >= 21:
+            _sq = returns.iloc[-20:] ** 2
+            _vc = float(_sq.autocorr(lag=1))
+            features.append(0.0 if np.isnan(_vc) else np.clip(_vc, -1.0, 1.0))
+        else:
+            features.append(0.0)
+
+        # Feature 12.2 — Drawdown from 60-day high
+        # (current - max_60) / max_60  →  negative means below recent peak
+        if len(prices) >= 60:
+            _peak = float(prices.iloc[-60:].max())
+            _dd60 = (float(prices.iloc[-1]) - _peak) / _peak if _peak > 0 else 0.0
+            features.append(float(np.clip(_dd60, -1.0, 0.0)))  # capped at 0 (only downside)
+        else:
+            features.append(0.0)
+
+        # Feature 12.3 — Momentum acceleration (2nd derivative)
+        # difference between 5-bar return and the 10-bar return momentum
+        if len(prices) >= 11:
+            _r5 = float(prices.iloc[-1] / prices.iloc[-5] - 1)
+            _r10 = float(prices.iloc[-1] / prices.iloc[-10] - 1)
+            features.append(float(np.clip(_r5 - _r10, -0.5, 0.5)))
+        else:
+            features.append(0.0)
+
+        # Feature 12.4 — Tail-risk indicator
+        # fraction of last 20 returns with |r| > 2σ (fat-tail detector)
+        if len(returns) >= 20:
+            _r20 = returns.iloc[-20:]
+            _sigma = float(_r20.std()) or 1e-8
+            _fat = float((_r20.abs() > 2 * _sigma).mean())
+            features.append(float(np.clip(_fat, 0.0, 1.0)))
+        else:
+            features.append(0.05)  # conservative default
+
+        # Feature 12.5 — Volume-range position (order imbalance proxy)
+        # (close - low) / (high - low) averaged over 5 bars, weighted by volume
+        if df is not None and all(c in df.columns for c in ['High', 'Low', 'Close', 'Volume']):
+            _tail = df.tail(5)
+            _hl = (_tail['High'] - _tail['Low']).replace(0, np.nan)
+            _cloc = ((_tail['Close'] - _tail['Low']) / _hl).fillna(0.5)
+            _vol_w = _tail['Volume'] / (_tail['Volume'].sum() or 1)
+            features.append(float(np.clip((_cloc * _vol_w).sum() - 0.5, -0.5, 0.5)))
+        else:
+            features.append(0.0)
 
         return np.array(features)
 
@@ -688,6 +765,22 @@ class GodLevelSignalGenerator:
         self.save_models()
         logger.info(f"God Level models trained with {len(self.models)} active models and saved to {self.model_dir}")
 
+        # Train binary direction classifier on same feature matrix
+        if self._binary_classifier is not None and len(X_train) >= 500:
+            try:
+                split = int(len(X_train) * 0.80)
+                y_binary = (y_train > 0).astype(int)
+                self._binary_classifier.train(
+                    X_train_scaled[:split], y_binary[:split],
+                    X_train_scaled[split:], y_binary[split:],
+                    regime="neutral",
+                    asset_class="equity",
+                )
+                self._binary_classifier.save_models()
+                logger.info("BinarySignalClassifier trained and saved")
+            except Exception as _bc_err:
+                logger.debug("Binary classifier training error: %s", _bc_err)
+
     def save_models(self):
         """Save trained models and scaler to disk."""
         if not self.models_trained:
@@ -715,13 +808,38 @@ class GodLevelSignalGenerator:
         try:
             with open(model_path, 'rb') as f:
                 model_data = pickle.load(f)
-            
+
+            scaler = model_data['scaler']
+
+            # Fix #4: Feature-count validation.
+            # If we added new features since the last save, the scaler's
+            # n_features_in_ will differ from the current extract_features()
+            # output length.  Detect the mismatch early and force a retrain
+            # rather than silently returning 0 ML predictions every cycle.
+            _expected = getattr(scaler, 'n_features_in_', None)
+            if _expected is not None:
+                import pandas as _pd_tmp
+                import numpy as _np_tmp
+                _dummy = _pd_tmp.Series(_np_tmp.random.randn(self.lookback + 10))
+                _probe = self.extract_features(_dummy)
+                if len(_probe) != _expected:
+                    logger.warning(
+                        "⚠️  GodLevel model feature count mismatch: saved=%d current=%d "
+                        "— invalidating stale models; retrain will happen on next weekly cycle.",
+                        _expected, len(_probe),
+                    )
+                    try:
+                        model_path.unlink()
+                    except Exception:
+                        pass
+                    return False
+
             self.models = model_data['models']
-            self.feature_scaler = model_data['scaler']
+            self.feature_scaler = scaler
             self.feature_importance = model_data.get('importance', {})
             self.models_trained = True
             self._init_explainers()
-            
+
             trained_at = model_data.get('trained_at', 'unknown')
             logger.info(f"✅ God Level models loaded from disk (trained at: {trained_at})")
             return True
@@ -770,6 +888,20 @@ class GodLevelSignalGenerator:
         """
         if len(prices) < self.lookback:
             return self._empty_signal()
+
+        # Signal Optimizer: check TTL cache before full recompute
+        _so = getattr(self, '_signal_optimizer', None)
+        if _so is not None and _so.config.enable_caching:
+            try:
+                _close_for_key = prices['Close'] if isinstance(prices, pd.DataFrame) else prices
+                _cache_key = f"{symbol}_{float(_close_for_key.iloc[-1]):.4f}_{len(prices)}"
+                _cached = _so._get_cached_signal(_cache_key)
+                if _cached is not None:
+                    logger.debug("GodLevel cache HIT for %s (rate=%.0f%%)",
+                                 symbol, _so._get_cache_hit_rate() * 100)
+                    return _cached
+            except Exception:
+                _cache_key = None
 
         # Extract features
         features = self.extract_features(prices)
@@ -830,6 +962,26 @@ class GodLevelSignalGenerator:
         except Exception as e:
             logger.debug(f"Failed to fetch earnings catalyst for {symbol}: {e}")
             components['earnings_catalyst'] = 0.0
+
+        # ADDED: Macro Cross-Asset Signal (VIX velocity + yield curve + DXY momentum)
+        try:
+            from models.macro_cross_asset_signal import get_macro_signal
+            _macro_weight = float(getattr(__import__('config', fromlist=['ApexConfig']).ApexConfig, 'MACRO_BLEND_WEIGHT', 0.08))
+            if _macro_weight > 0:
+                components['macro_cross_asset'] = get_macro_signal().get_signal()
+        except Exception as e:
+            logger.debug(f"Failed to fetch macro cross-asset signal: {e}")
+            components['macro_cross_asset'] = 0.0
+
+        # ADDED: IV Skew Signal (put/call skew + VIX term structure)
+        try:
+            from models.iv_skew_signal import get_iv_skew_signal
+            _iv_weight = float(getattr(__import__('config', fromlist=['ApexConfig']).ApexConfig, 'IV_SKEW_BLEND_WEIGHT', 0.05))
+            if _iv_weight > 0 and "CRYPTO:" not in str(symbol).upper():
+                components['iv_skew'] = get_iv_skew_signal().get_signal(symbol)
+        except Exception as e:
+            logger.debug(f"Failed to fetch IV skew signal for {symbol}: {e}")
+            components['iv_skew'] = 0.0
 
         # 2. ML Model Predictions
         ml_predictions = []
@@ -927,7 +1079,28 @@ class GodLevelSignalGenerator:
             components['micro_spread'] = 0.0
             components['micro_illiquidity'] = 0.0
 
-        return {
+        # 7. Binary direction classifier blend (8% weight, gated on is_trained)
+        if (
+            self._binary_classifier is not None
+            and self._binary_classifier.is_trained
+            and ML_LIBS.get('sklearn')
+        ):
+            try:
+                features_scaled_bin = self.feature_scaler.transform(features.reshape(1, -1))
+                bin_signal, bin_conf = self._binary_classifier.predict(
+                    features_scaled_bin, regime.value, "equity"
+                )
+                _bsc_weight = float(getattr(__import__('config', fromlist=['ApexConfig']).ApexConfig, "BINARY_CLASSIFIER_BLEND_WEIGHT", 0.08))
+                if abs(bin_signal) > 0.05:
+                    _blend_total = 1.0 + _bsc_weight
+                    signal = (signal + bin_signal * _bsc_weight) / _blend_total
+                    signal = float(np.clip(signal, -1.0, 1.0))
+                    components['binary_classifier'] = float(bin_signal)
+                    components['binary_classifier_conf'] = float(bin_conf)
+            except Exception as _bc_pred_err:
+                logger.debug("BinaryClassifier predict error: %s", _bc_pred_err)
+
+        _result = {
             'signal': signal,
             'confidence': confidence,
             'regime': regime.value,
@@ -935,6 +1108,16 @@ class GodLevelSignalGenerator:
             'shap_values': shap_explanation,
             'timestamp': datetime.now()
         }
+
+        # Store in Signal Optimizer cache
+        if _so is not None and _so.config.enable_caching and '_cache_key' in dir():
+            try:
+                if _cache_key is not None:
+                    _so._cache_signal(_cache_key, _result)
+            except Exception:
+                pass
+
+        return _result
 
     def _empty_signal(self) -> Dict:
         """Return empty/neutral signal."""

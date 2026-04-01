@@ -595,7 +595,7 @@ async def stream_trading_state():
         except Exception as e:
             logger.error(f"Error in broadcast loop: {e}")
 
-        await asyncio.sleep(getattr(ApexConfig, "POLL_INTERVAL_SECONDS", 1.0))
+        await asyncio.sleep(max(float(getattr(ApexConfig, "POLL_INTERVAL_SECONDS", 3.0)), 1.0))
 
 
 async def _collect_user_broker_overlay(user_id: str) -> Dict[str, object]:
@@ -825,6 +825,822 @@ async def get_walkforward_report(_user=Depends(require_user)):
         return report
     except Exception as e:
         logger.error(f"Walk-forward report failed: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/ops/stress-scenarios")
+async def get_stress_scenarios(_user=Depends(require_user)):
+    """Portfolio stress test — all predefined historical scenarios."""
+    try:
+        from risk.portfolio_stress_test import PortfolioStressTest
+        import asyncio
+
+        # Snapshot current positions and prices from running engine
+        _positions: dict = {}
+        _prices: dict = {}
+        _capital: float = 1_000_000.0
+        try:
+            _trading_engine = app.state.trading_engine  # type: ignore[attr-defined]
+            _positions = dict(getattr(_trading_engine, "positions", {}))
+            _prices = dict(getattr(_trading_engine, "price_cache", {}))
+            _capital = float(getattr(_trading_engine, "capital", 1_000_000.0))
+        except Exception:
+            pass
+
+        def _run():
+            engine = PortfolioStressTest(
+                positions={str(k): int(v) for k, v in _positions.items() if v != 0},
+                prices={str(k): float(v) for k, v in _prices.items() if v and v > 0},
+                capital=_capital,
+            )
+            raw = engine.run_all_scenarios()
+            out = []
+            for scenario_id, r in raw.items():
+                out.append({
+                    "scenario_id": scenario_id,
+                    "scenario_name": r.scenario_name,
+                    "scenario_type": r.scenario_type.value,
+                    "portfolio_pnl": round(r.portfolio_pnl, 2),
+                    "portfolio_return_pct": round(r.portfolio_return * 100, 2),
+                    "max_drawdown_pct": round(r.max_drawdown * 100, 2),
+                    "var_95_stressed": round(r.var_95_stressed, 2),
+                    "expected_shortfall": round(r.expected_shortfall, 2),
+                    "worst_positions": [
+                        {"symbol": s, "pnl": round(v, 2)} for s, v in (r.worst_positions or [])[:5]
+                    ],
+                    "breached_limits": r.breached_limits,
+                    "estimated_liquidation_cost": round(r.estimated_liquidation_cost, 2),
+                    "recommendations": r.recommendations[:3],
+                })
+            out.sort(key=lambda x: x["portfolio_pnl"])  # worst first
+            return {"scenarios": out, "capital": _capital, "n_positions": len(_positions)}
+
+        return await asyncio.to_thread(_run)
+    except Exception as e:
+        logger.error(f"Stress scenarios failed: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/ops/diagnostics")
+async def get_diagnostics_report(
+    symbol: Optional[str] = None,
+    lookback_days: int = 7,
+    _user=Depends(require_user),
+):
+    """Live gate-decision diagnostics — which gates block the most entries, per symbol or aggregate."""
+    try:
+        from config import ApexConfig
+        from monitoring.trade_diagnostics import TradeDiagnosticsTracker
+        import asyncio
+
+        tracker = TradeDiagnosticsTracker(data_dir=ApexConfig.DATA_DIR)
+        if symbol:
+            report = await asyncio.to_thread(tracker.get_symbol_report, symbol, lookback_days)
+            gate_attr = await asyncio.to_thread(tracker.get_gate_attribution, symbol, lookback_days)
+            return {"symbol_report": report, "gate_attribution": gate_attr}
+        else:
+            report = await asyncio.to_thread(tracker.get_report, lookback_days)
+            return report
+    except Exception as e:
+        logger.error(f"Diagnostics report failed: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/ops/wss-metrics")
+async def get_wss_metrics(_user=Depends(require_user)):
+    """WebSocket connection health metrics — hit rate, reconnects, latency."""
+    try:
+        from api.dependencies import get_engine
+        engine = get_engine()
+        if engine is None:
+            return {"error": "engine_not_running"}
+        # Fix #2: attribute name is 'websocket_streamer' (was incorrectly '_ws_streamer')
+        streamer = getattr(engine, 'websocket_streamer', None)
+        if streamer is None:
+            return {"error": "wss_not_initialised"}
+        metrics = streamer.get_metrics()
+        # Annotate with health status
+        warn_thr = float(getattr(ApexConfig, "WSS_HIT_RATE_WARN_THRESHOLD", 0.50))
+        total = metrics.get("wss_hits", 0) + metrics.get("wss_misses", 0)
+        hr = metrics.get("hit_rate", 0.0)
+        metrics["health"] = "degraded" if (total >= 20 and hr < warn_thr) else "ok"
+        metrics["hit_rate_warn_threshold"] = warn_thr
+        return metrics
+    except Exception as e:
+        logger.error("WSS metrics failed: %s", e)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/ops/staleness-report")
+async def get_staleness_report(_user=Depends(require_user)):
+    """Signal staleness watchdog report — which symbols are overdue for refresh."""
+    try:
+        from api.dependencies import get_engine
+        engine = get_engine()
+        if engine is None:
+            return {"error": "engine_not_running"}
+        watchdog = getattr(engine, '_staleness_watchdog', None)
+        if watchdog is None:
+            return {"error": "watchdog_not_initialised"}
+        return watchdog.get_report()
+    except Exception as e:
+        logger.error("Staleness report failed: %s", e)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/ops/correlation-heatmap")
+async def get_correlation_heatmap(
+    lookback_bars: int = 60,
+    _user=Depends(require_user),
+):
+    """Live NxN Pearson correlation matrix for all tracked symbols."""
+    try:
+        from api.dependencies import get_engine
+        engine = get_engine()
+        if engine is None:
+            return {"symbols": [], "matrix": [], "generated_at": ""}
+
+        sc = getattr(engine, '_signal_cascade', None)
+        if sc is None:
+            return {"symbols": [], "matrix": [], "generated_at": ""}
+
+        import math
+        from datetime import datetime, timezone
+
+        symbols = sorted(
+            [sym for sym, hist in sc._prices.items() if len(hist) >= 10]
+        )
+        n = len(symbols)
+        if n == 0:
+            return {"symbols": [], "matrix": [], "generated_at": ""}
+
+        def _get_rets(sym):
+            prices = list(sc._prices[sym])[-lookback_bars - 1:]
+            if len(prices) < 2:
+                return []
+            return [math.log(prices[i] / prices[i - 1])
+                    for i in range(1, len(prices))
+                    if prices[i - 1] > 0 and prices[i] > 0]
+
+        def _pearson(xs, ys):
+            k = min(len(xs), len(ys))
+            if k < 3:
+                return None
+            xs, ys = xs[-k:], ys[-k:]
+            mx = sum(xs) / k
+            my = sum(ys) / k
+            num = sum((x - mx) * (y - my) for x, y in zip(xs, ys))
+            dx = math.sqrt(sum((x - mx) ** 2 for x in xs))
+            dy = math.sqrt(sum((y - my) ** 2 for y in ys))
+            return round(num / (dx * dy), 3) if dx > 1e-12 and dy > 1e-12 else None
+
+        rets_cache = {sym: _get_rets(sym) for sym in symbols}
+        matrix = []
+        for i, s1 in enumerate(symbols):
+            row = []
+            for j, s2 in enumerate(symbols):
+                if i == j:
+                    row.append(1.0)
+                elif j < i:
+                    row.append(matrix[j][i])
+                else:
+                    row.append(_pearson(rets_cache[s1], rets_cache[s2]))
+            matrix.append(row)
+
+        return {
+            "symbols": symbols,
+            "matrix": matrix,
+            "generated_at": datetime.now(timezone.utc).isoformat(),
+            "lookback_bars": lookback_bars,
+        }
+    except Exception as e:
+        logger.error("Correlation heatmap failed: %s", e)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/ops/regime-backtest")
+async def get_regime_backtest(
+    date: Optional[str] = None,
+    _user=Depends(require_user),
+):
+    """Regime-conditional backtest — per-regime win rate, P&L, Sharpe from trade audit."""
+    try:
+        import asyncio
+        import sys
+        from pathlib import Path as _Path
+        from config import ApexConfig
+
+        async def _run():
+            sys.path.insert(0, str(_Path(__file__).parent.parent / "scripts"))
+            from regime_conditional_backtest import (
+                _load_exit_trades,
+                _group_by_regime,
+                _group_by_broker,
+                _group_by_exit_reason,
+                _load_mandate_stats,
+                _compute_regime_stats,
+                build_json_summary,
+            )
+            data_dir = _Path(ApexConfig.DATA_DIR)
+            trades = _load_exit_trades(data_dir, date)
+            if not trades:
+                return {"error": "no_trades", "regime_breakdown": {}, "overall": {}}
+            regime_stats = _group_by_regime(trades)
+            regime_stats_computed = {r: _compute_regime_stats(ts) for r, ts in regime_stats.items()}
+            broker_stats = _group_by_broker(trades)
+            broker_stats_computed = {b: _compute_regime_stats(ts) for b, ts in broker_stats.items()}
+            exit_buckets = _group_by_exit_reason(trades)
+            mandate_stats = _load_mandate_stats(data_dir, date)
+            all_stats = _compute_regime_stats(trades)
+            return build_json_summary(
+                regime_stats_computed,
+                broker_stats_computed,
+                exit_buckets,
+                mandate_stats,
+                all_stats,
+                date,
+            )
+
+        result = await asyncio.to_thread(_run)
+        return result
+    except Exception as e:
+        logger.error("Regime backtest failed: %s", e)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/ops/factor-pnl")
+async def get_factor_pnl(
+    lookback_days: int = 7,
+    _user=Depends(require_user),
+):
+    """Live factor P&L decomposition — breakdown by ML/technical/sentiment/momentum."""
+    try:
+        import asyncio
+        from config import ApexConfig
+        from monitoring.factor_pnl import FactorPnlAnalyzer
+        analyzer = FactorPnlAnalyzer(data_dir=ApexConfig.DATA_DIR)
+        report = await asyncio.to_thread(analyzer.build_report, lookback_days)
+        return report.to_dict()
+    except Exception as e:
+        logger.error("Factor P&L report failed: %s", e)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/ops/ic-report")
+async def get_ic_report(_user=Depends(require_user)):
+    """IC Tracker + Alpha Decay Calibrator combined health report."""
+    try:
+        import asyncio
+        from config import ApexConfig
+        result: dict = {}
+        # IC Tracker summary
+        try:
+            from monitoring.ic_tracker import ICTracker
+            ict = ICTracker(
+                state_path=str(ApexConfig.DATA_DIR / "ic_tracker_state.json"),
+                persist=False,
+            )
+            ic_summary = await asyncio.to_thread(ict.get_summary, 10)
+            dead   = await asyncio.to_thread(ict.get_dead_features)
+            strong = await asyncio.to_thread(ict.get_strong_features)
+            result["ic_tracker"] = {
+                "summary": {k: round(v, 4) for k, v in ic_summary.items()},
+                "dead_features":   sorted(dead),
+                "strong_features": sorted(strong),
+                "pending_count":   ict.get_pending_count(),
+                "observation_counts": ict.get_observation_counts(),
+            }
+        except Exception as _ict_e:
+            result["ic_tracker"] = {"error": str(_ict_e)}
+        # Alpha Decay Calibrator report
+        try:
+            from monitoring.alpha_decay_calibrator import AlphaDecayCalibrator
+            adc = AlphaDecayCalibrator(data_dir=ApexConfig.DATA_DIR)
+            result["alpha_decay"] = await asyncio.to_thread(adc.get_decay_report)
+        except Exception as _adc_e:
+            result["alpha_decay"] = {"error": str(_adc_e)}
+        return result
+    except Exception as e:
+        logger.error("IC report failed: %s", e)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/ops/rl-governor")
+async def get_rl_governor_endpoint(_user=Depends(require_user)):
+    """RL Weight Governor Q-table diagnostic: states, best actions, epsilon, update count."""
+    try:
+        from models.rl_weight_governor import get_rl_governor_report
+        return get_rl_governor_report()
+    except Exception as e:
+        logger.error("rl-governor endpoint failed: %s", e)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/ops/universe-scores")
+async def get_universe_scores(_user=Depends(require_user)):
+    """Dynamic universe selector: per-symbol quality scores from recent trade performance."""
+    try:
+        from api.dependencies import get_engine
+        engine = get_engine()
+        if engine is None:
+            return {"report": None, "note": "engine not running"}
+        us = getattr(engine, "_universe_selector", None)
+        if us is None:
+            return {"report": None, "note": "selector not initialised"}
+        return {"report": us.get_report()}
+    except Exception as e:
+        logger.error("universe-scores endpoint failed: %s", e)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/ops/factor-ic")
+async def get_factor_ic(_user=Depends(require_user)):
+    """Factor IC report: per-signal Information Coefficient from live trades."""
+    try:
+        from api.dependencies import get_engine
+        engine = get_engine()
+        if engine is None:
+            from monitoring.factor_ic_tracker import FactorICTracker
+            from config import ApexConfig
+            tracker = FactorICTracker(
+                persist_path=str(getattr(ApexConfig, "FACTOR_IC_PERSIST_PATH",
+                                         "data/factor_ic_state.json"))
+            )
+            return tracker.get_report_dict()
+        tracker = getattr(engine, "_factor_ic_tracker", None)
+        if tracker is None:
+            return {"signals": [], "top_factors": [], "weak_factors": [], "note": "tracker not initialised"}
+        return tracker.get_report_dict()
+    except Exception as e:
+        logger.error("factor-ic endpoint failed: %s", e)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/ops/adaptive-weights")
+async def get_adaptive_weights(_user=Depends(require_user)):
+    """Adaptive signal blend weights driven by rolling Factor IC."""
+    try:
+        from api.dependencies import get_engine
+        engine = get_engine()
+        if engine is None:
+            from monitoring.adaptive_weight_manager import AdaptiveWeightManager
+            from config import ApexConfig
+            mgr = AdaptiveWeightManager(
+                persist_path=str(getattr(ApexConfig, "ADAPTIVE_WEIGHTS_PERSIST_PATH",
+                                         "data/adaptive_weights.json"))
+            )
+            return mgr.get_report()
+        mgr = getattr(engine, "_adaptive_weights", None)
+        if mgr is None:
+            return {"weights": {}, "note": "manager not initialised"}
+        return mgr.get_report()
+    except Exception as e:
+        logger.error("adaptive-weights endpoint failed: %s", e)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/ops/backtest-gate")
+async def get_backtest_gate(_user=Depends(require_user)):
+    """Current backtest gate state: mode (live/paper/unknown), metrics, history."""
+    try:
+        from monitoring.backtest_gate import BacktestGate
+        gate = BacktestGate()
+        return gate.get_state()
+    except Exception as e:
+        logger.error("backtest-gate endpoint failed: %s", e)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/ops/backtest-gate/evaluate")
+async def run_backtest_gate(_user=Depends(require_user)):
+    """Trigger an on-demand backtest gate evaluation."""
+    try:
+        from monitoring.backtest_gate import BacktestGate
+        from dataclasses import asdict
+        gate = BacktestGate()
+        record = gate.run_evaluation()
+        return asdict(record)
+    except Exception as e:
+        logger.error("backtest-gate/evaluate failed: %s", e)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/ops/backtest-gate/force-live")
+async def force_backtest_live(_user=Depends(require_user)):
+    """Admin override: force backtest gate to LIVE mode."""
+    try:
+        from monitoring.backtest_gate import BacktestGate
+        gate = BacktestGate()
+        gate.force_live()
+        return {"status": "ok", "mode": "live"}
+    except Exception as e:
+        logger.error("backtest-gate/force-live failed: %s", e)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/ops/daily-briefing")
+async def get_daily_briefing(_user=Depends(require_user)):
+    """Latest daily strategy briefing (JSON)."""
+    try:
+        from monitoring.daily_briefing import get_briefing_generator
+        gen = get_briefing_generator()
+        latest = gen.get_latest()
+        if latest is None:
+            return {"status": "no_briefing", "message": "No briefing generated yet."}
+        return latest
+    except Exception as e:
+        logger.error("daily-briefing endpoint failed: %s", e)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/ops/daily-briefing/history")
+async def get_daily_briefing_history(days: int = 7, _user=Depends(require_user)):
+    """Last N daily briefings."""
+    try:
+        from monitoring.daily_briefing import get_briefing_generator
+        gen = get_briefing_generator()
+        return {"briefings": gen.get_history(days=days)}
+    except Exception as e:
+        logger.error("daily-briefing/history endpoint failed: %s", e)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/ops/daily-briefing/generate")
+async def generate_daily_briefing(_user=Depends(require_user)):
+    """Trigger an on-demand daily briefing generation."""
+    try:
+        from api.dependencies import get_engine
+        from monitoring.daily_briefing import DailyBriefingGenerator
+        engine = get_engine()
+        regime = "unknown"
+        if engine is not None:
+            regime = str(getattr(engine, "_current_regime", "unknown"))
+        gen = DailyBriefingGenerator()
+        briefing = gen.generate(regime=regime, engine=engine)
+        return briefing.to_dict()
+    except Exception as e:
+        logger.error("daily-briefing/generate failed: %s", e)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/ops/short-exposure")
+async def get_short_exposure(_user=Depends(require_user)):
+    """Current short positions: count, notional, per-symbol breakdown."""
+    try:
+        from api.dependencies import get_engine
+        from risk.short_selling_gate import get_short_exposure_summary
+        engine = get_engine()
+        positions = {}
+        price_cache = {}
+        if engine is not None:
+            positions = {s: float(q) for s, q in getattr(engine, "positions", {}).items()}
+            price_cache = dict(getattr(engine, "price_cache", {}))
+        return get_short_exposure_summary(positions, price_cache)
+    except Exception as e:
+        logger.error("short-exposure endpoint failed: %s", e)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/ops/ofi-summary")
+async def get_ofi_summary(_user=Depends(require_user)):
+    """Current order flow imbalance (OFI) per tracked symbol."""
+    try:
+        from data.order_flow_imbalance import get_ofi_signal
+        ofi = get_ofi_signal()
+        return {
+            "ofi_by_symbol": {k: round(v, 4) for k, v in ofi.get_summary().items()},
+            "config": {
+                "enabled": bool(getattr(__import__("config").ApexConfig, "OFI_ENABLED", True)),
+                "window": int(getattr(__import__("config").ApexConfig, "OFI_WINDOW", 20)),
+                "blend_weight": float(getattr(__import__("config").ApexConfig, "OFI_BLEND_WEIGHT", 0.06)),
+            },
+        }
+    except Exception as e:
+        logger.error("ofi-summary endpoint failed: %s", e)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/ops/bl-weights")
+async def get_bl_weights(_user=Depends(require_user)):
+    """Black-Litterman portfolio weights and per-symbol sizing multipliers."""
+    try:
+        from api.dependencies import get_engine
+        from risk.black_litterman import BlackLittermanAllocator
+        engine = get_engine()
+        bl = None
+        if engine is not None:
+            bl = getattr(engine, "_bl_allocator", None)
+        if bl is None:
+            bl = BlackLittermanAllocator()
+        return bl.get_report()
+    except Exception as e:
+        logger.error("bl-weights endpoint failed: %s", e)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/ops/earnings-intelligence")
+async def get_earnings_intelligence(symbol: str = "AAPL", _user=Depends(require_user)):
+    """Extended earnings intelligence: PEAD, revision trend, and persistence signals."""
+    try:
+        from data.earnings_catalyst import get_earnings_catalyst
+        cat = get_earnings_catalyst()
+        return {
+            "symbol": symbol,
+            "pead_signal": cat.get_signal(symbol),
+            "revision_signal": cat.get_revision_signal(symbol),
+            "persistence_signal": cat.get_persistence_signal(symbol),
+            "extended_signal": cat.get_extended_signal(symbol),
+        }
+    except Exception as e:
+        logger.error("earnings-intelligence endpoint failed: %s", e)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/ops/corr-regime")
+async def get_corr_regime_report(_user=Depends(require_user)):
+    """Correlation matrix regime: average pairwise correlation and sizing multiplier."""
+    try:
+        from monitoring.correlation_regime_detector import get_corr_regime_detector
+        return get_corr_regime_detector().get_report()
+    except Exception as e:
+        logger.error("corr-regime endpoint failed: %s", e)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/ops/vol-target")
+async def get_vol_target_report(_user=Depends(require_user)):
+    """Portfolio volatility targeting state: realised vol, target, sizing multiplier."""
+    try:
+        from risk.portfolio_vol_target import get_vol_target
+        return get_vol_target().get_report()
+    except Exception as e:
+        logger.error("vol-target endpoint failed: %s", e)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/ops/liquidation-risk")
+async def get_liquidation_risk(symbol: str = "CRYPTO:BTC/USD", _user=Depends(require_user)):
+    """Crypto liquidation cascade risk: funding rate, OI velocity, composite signal."""
+    try:
+        from monitoring.liquidation_monitor import get_liquidation_monitor
+        monitor = get_liquidation_monitor()
+        return {
+            "symbol_report": monitor.get_report(symbol),
+            "all_monitored": monitor.get_all_report(),
+        }
+    except Exception as e:
+        logger.error("liquidation-risk endpoint failed: %s", e)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/ops/iv-skew")
+async def get_iv_skew_report(symbol: str = "AAPL", _user=Depends(require_user)):
+    """IV skew signal: put/call skew + VIX term structure for a symbol."""
+    try:
+        from models.iv_skew_signal import get_iv_skew_signal
+        gen = get_iv_skew_signal()
+        return {
+            "symbol_report": gen.get_report(symbol),
+            "vix_term_signal": gen.get_vix_term_signal(),
+        }
+    except Exception as e:
+        logger.error("iv-skew endpoint failed: %s", e)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/ops/macro-signal")
+async def get_macro_signal_report(_user=Depends(require_user)):
+    """Macro cross-asset signal: VIX velocity, yield curve, DXY momentum composite."""
+    try:
+        from models.macro_cross_asset_signal import get_macro_signal
+        return get_macro_signal().get_report()
+    except Exception as e:
+        logger.error("macro-signal endpoint failed: %s", e)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/ops/gate-stats")
+async def get_gate_stats(_user=Depends(require_user)):
+    """Return gate rejection summary and infrastructure health indicators."""
+    try:
+        from api.dependencies import get_engine
+        from datetime import datetime, timezone
+        engine = get_engine()
+        result: dict = {"timestamp": datetime.now(timezone.utc).isoformat()}
+
+        if engine is None:
+            result["error"] = "engine not running"
+            return result
+
+        # Gate rejection counts (cleared every 300 cycles)
+        result["gate_rejection_counts"] = dict(
+            sorted(
+                getattr(engine, "_gate_rejection_counts", {}).items(),
+                key=lambda x: -x[1],
+            )
+        )
+
+        # Failed symbols
+        failed = getattr(engine, "_failed_symbols", set())
+        result["failed_symbols_count"] = len(failed)
+        result["failed_symbols"] = list(failed)[:20]
+
+        # Historical data coverage
+        runtime_syms = engine._runtime_symbols() if hasattr(engine, "_runtime_symbols") else []
+        loaded_syms = set(getattr(engine, "historical_data", {}).keys())
+        result["data_coverage"] = {
+            "runtime_symbols": len(runtime_syms),
+            "loaded": len(loaded_syms),
+            "pct_loaded": round(len(loaded_syms) / max(len(runtime_syms), 1) * 100, 1),
+        }
+
+        # IBKR status
+        ibkr = getattr(engine, "ibkr", None)
+        result["ibkr_status"] = {
+            "connected": ibkr is not None,
+            "persistently_down": getattr(ibkr, "_persistently_down", False) if ibkr else True,
+        }
+
+        # Stale prices (no live-feed timestamp)
+        price_cache = getattr(engine, "price_cache", {})
+        price_ts = getattr(engine, "_price_cache_ts", {})
+        no_live_ts = [s for s in price_cache if s not in price_ts and price_cache.get(s, 0) > 0]
+        result["stale_prices"] = {
+            "count": len(no_live_ts),
+            "symbols": no_live_ts[:10],
+        }
+
+        return result
+    except Exception as e:
+        logger.error("gate-stats endpoint failed: %s", e)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/ops/strategy-health")
+async def get_strategy_health(_user=Depends(require_user)):
+    """Rolling strategy health: 30-day Sharpe and paper-only mode status."""
+    try:
+        from api.dependencies import get_engine
+        engine = get_engine()
+        if engine is None:
+            # Fallback: load directly from persisted state file
+            from monitoring.strategy_health_monitor import StrategyHealthMonitor
+            from config import ApexConfig
+            shm = StrategyHealthMonitor(
+                persist_path=str(getattr(ApexConfig, "STRATEGY_HEALTH_PERSIST_PATH",
+                                         "data/strategy_health_state.json"))
+            )
+            return shm.get_state_dict()
+        shm = getattr(engine, "_strategy_health", None)
+        if shm is None:
+            return {"paper_only": False, "note": "monitor not initialised"}
+        return shm.get_state_dict()
+    except Exception as e:
+        logger.error("strategy-health endpoint failed: %s", e)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/ops/trade-postmortem")
+async def get_trade_postmortem(_user=Depends(require_user), n: int = 20):
+    """Last N trade post-mortems with failure classification and aggregated summary."""
+    try:
+        from api.dependencies import get_engine
+        engine = get_engine()
+        if engine is None:
+            return {"recent": [], "summary": {}, "note": "engine not running"}
+        tpm = getattr(engine, "_trade_postmortem", None)
+        if tpm is None:
+            return {"recent": [], "summary": {}, "note": "postmortem not initialised"}
+        return {
+            "recent": tpm.get_recent(min(n, 100)),
+            "summary": tpm.get_summary(),
+        }
+    except Exception as e:
+        logger.error("trade-postmortem endpoint failed: %s", e)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/ops/regime-transition")
+async def get_regime_transition(_user=Depends(require_user)):
+    """Latest regime transition prediction and indicator breakdown."""
+    try:
+        from api.dependencies import get_engine
+        engine = get_engine()
+        if engine is None:
+            return {"prediction": None, "note": "engine not running"}
+        rtp = getattr(engine, "_regime_transition_predictor", None)
+        if rtp is None:
+            return {"prediction": None, "note": "predictor not initialised"}
+        pred = rtp.predict()
+        return {"prediction": pred.to_dict()}
+    except Exception as e:
+        logger.error("regime-transition endpoint failed: %s", e)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/ops/exec-sim-history")
+async def get_exec_sim_history(_user=Depends(require_user)):
+    """Last 100 pre-trade execution simulator results."""
+    try:
+        from api.dependencies import get_engine
+        engine = get_engine()
+        if engine is None:
+            return {"records": [], "count": 0, "note": "engine not running"}
+        history = list(getattr(engine, "_exec_sim_history", []))
+        return {"records": history[-50:], "count": len(history)}
+    except Exception as e:
+        logger.error("exec-sim-history failed: %s", e)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/ops/signal-drift")
+async def get_signal_drift(_user=Depends(require_user)):
+    """Signal accuracy drift state — rolling vs baseline win-rate, retrain advisory."""
+    try:
+        from api.dependencies import get_engine
+        engine = get_engine()
+        if engine is None:
+            return {"state": None, "note": "engine not running"}
+        sdm = getattr(engine, "_signal_drift_monitor", None)
+        if sdm is None:
+            return {"state": None, "note": "drift monitor not initialised"}
+        return {"state": sdm.get_state().to_dict()}
+    except Exception as e:
+        logger.error("signal-drift endpoint failed: %s", e)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/ops/missed-opportunities")
+async def get_missed_opportunities(_user=Depends(require_user)):
+    """Missed opportunity report: signals filtered before execution + retrospective P&L."""
+    try:
+        from api.dependencies import get_engine
+        engine = get_engine()
+        if engine is None:
+            return {"pending": [], "report": {}, "note": "engine not running"}
+        mot = getattr(engine, "_missed_opportunity_tracker", None)
+        if mot is None:
+            return {"pending": [], "report": {}, "note": "tracker not initialised"}
+        report = mot.generate_report()
+        recent_pending = [
+            {
+                "symbol": o.symbol,
+                "signal_strength": round(o.signal_strength, 4),
+                "confidence": round(o.confidence, 4),
+                "direction": o.direction,
+                "regime": o.regime,
+                "filter_reason": o.filter_reason,
+                "entry_price": round(o.entry_price, 4),
+                "asset_class": o.asset_class,
+                "signal_date": o.signal_date,
+            }
+            for o in list(mot._pending)[-50:]
+        ]
+        from dataclasses import asdict
+        return {
+            "pending_count": len(mot._pending),
+            "completed_count": len(mot._completed),
+            "recent_pending": recent_pending,
+            "report": asdict(report),
+        }
+    except Exception as e:
+        logger.error("missed-opportunities endpoint failed: %s", e)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/ops/attribution-summary")
+async def get_attribution_summary(_user=Depends(require_user), lookback_days: int = 30):
+    """Performance attribution by sleeve, asset class, regime, and signal source."""
+    try:
+        from api.dependencies import get_engine
+        engine = get_engine()
+        if engine is None:
+            return {"summary": {}, "signal_sources": {}, "note": "engine not running"}
+        pa = getattr(engine, "performance_attribution", None)
+        if pa is None:
+            return {"summary": {}, "signal_sources": {}, "note": "attribution not initialised"}
+        summary = pa.get_summary(lookback_days=lookback_days)
+        signal_sources = pa.get_signal_source_summary(lookback_days=lookback_days)
+        return {"summary": summary, "signal_sources": signal_sources}
+    except Exception as e:
+        logger.error("attribution-summary endpoint failed: %s", e)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/ops/stress-state")
+async def get_stress_state(_user=Depends(require_user)):
+    """Current intraday stress control state: halt flags, size multiplier, worst scenario."""
+    try:
+        from api.dependencies import get_engine
+        engine = get_engine()
+        if engine is None:
+            return {"state": None, "note": "engine not running"}
+        state = getattr(engine, "_stress_control_state", None)
+        if state is None:
+            return {"state": None, "note": "stress engine not initialised"}
+        return {"state": state.to_dict()}
+    except Exception as e:
+        logger.error("stress-state endpoint failed: %s", e)
         raise HTTPException(status_code=500, detail=str(e))
 
 
@@ -1331,6 +2147,477 @@ async def toggle_crypto_sleeve(user=Depends(require_role("admin"))):
     new_state = ApexConfig.CRYPTO_SLEEVE_ENABLED
     logger.info(f"Crypto sleeve toggled: {current} -> {new_state} by user {getattr(user, 'user_id', 'unknown')}")
     return {"crypto_sleeve_enabled": new_state, "previous": current}
+
+
+@app.get("/ops/equity-curve")
+async def get_equity_curve(_user=Depends(require_user), points: int = 200):
+    """Recent equity curve (sampled) + drawdown series for charting."""
+    try:
+        from api.dependencies import get_engine
+        engine = get_engine()
+        if engine is None:
+            return {"curve": [], "drawdown": [], "note": "engine not running"}
+        pt = getattr(engine, "performance_tracker", None)
+        if pt is None:
+            return {"curve": [], "drawdown": [], "note": "tracker not initialised"}
+        curve_raw = list(pt.equity_curve)
+        # Downsample to requested points
+        n = len(curve_raw)
+        if n == 0:
+            return {"curve": [], "drawdown": [], "peak": 0.0, "current": 0.0, "drawdown_pct": 0.0}
+        step = max(1, n // points)
+        sampled = curve_raw[::step]
+        if sampled[-1] != curve_raw[-1]:
+            sampled.append(curve_raw[-1])
+        curve_out = [{"t": str(ts), "v": round(float(v), 2)} for ts, v in sampled]
+        # Drawdown series
+        peak = float(sampled[0][1])
+        dd_out = []
+        for ts, v in sampled:
+            val = float(v)
+            peak = max(peak, val)
+            dd = ((val - peak) / peak) * 100.0 if peak > 0 else 0.0
+            dd_out.append({"t": str(ts), "dd": round(dd, 3)})
+        current_val = float(curve_raw[-1][1])
+        peak_val = max(float(v) for _, v in curve_raw)
+        current_dd = ((current_val - peak_val) / peak_val * 100.0) if peak_val > 0 else 0.0
+        return {
+            "curve": curve_out,
+            "drawdown": dd_out,
+            "peak": round(peak_val, 2),
+            "current": round(current_val, 2),
+            "drawdown_pct": round(current_dd, 3),
+            "total_points": n,
+        }
+    except Exception as e:
+        logger.error("equity-curve endpoint failed: %s", e)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/ops/advanced-metrics")
+async def get_advanced_metrics(_user=Depends(require_user)):
+    """CVaR, Sortino, Calmar, Omega, VaR, skewness, kurtosis from the live equity curve."""
+    try:
+        from api.dependencies import get_engine
+        import asyncio
+        from risk.advanced_metrics import calculate_all_metrics
+        engine = get_engine()
+        if engine is None:
+            return {"note": "engine not running", "available": False}
+        pt = getattr(engine, "performance_tracker", None)
+        if pt is None:
+            return {"note": "performance_tracker not initialised", "available": False}
+        curve_raw = list(getattr(pt, "equity_curve", []))
+        if len(curve_raw) < 5:
+            return {"note": "insufficient equity history (need ≥5 points)", "available": False, "n_points": len(curve_raw)}
+        vals = [float(v) for _, v in curve_raw]
+        # Daily returns from equity values
+        returns_raw = [(vals[i] - vals[i - 1]) / vals[i - 1] for i in range(1, len(vals)) if vals[i - 1] > 0]
+        if len(returns_raw) < 2:
+            return {"note": "insufficient return history", "available": False}
+        import numpy as np
+        returns = np.array(returns_raw)
+        metrics = await asyncio.to_thread(calculate_all_metrics, returns)
+        # Sanitize non-finite values
+        def _safe(v):
+            if v is None:
+                return None
+            try:
+                f = float(v)
+                return None if not (f == f) or abs(f) > 1e9 else round(f, 6)
+            except (TypeError, ValueError):
+                return None
+        return {
+            "available": True,
+            "n_returns": len(returns),
+            "cvar_95": _safe(metrics.get("cvar_95")),
+            "cvar_99": _safe(metrics.get("cvar_99")),
+            "var_95": _safe(metrics.get("var_95")),
+            "var_99": _safe(metrics.get("var_99")),
+            "sortino_ratio": _safe(metrics.get("sortino_ratio")),
+            "calmar_ratio": _safe(metrics.get("calmar_ratio")),
+            "omega_ratio": _safe(metrics.get("omega_ratio")),
+            "downside_deviation": _safe(metrics.get("downside_deviation")),
+            "tail_ratio": _safe(metrics.get("tail_ratio")),
+            "skewness": _safe(metrics.get("skewness")),
+            "kurtosis": _safe(metrics.get("kurtosis")),
+            "max_dd_duration": _safe(metrics.get("max_dd_duration")),
+        }
+    except Exception as e:
+        logger.error("advanced-metrics endpoint failed: %s", e)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# --------------------------------------------------------------------------------
+# Signal A/B Gate
+# --------------------------------------------------------------------------------
+
+@app.get("/ops/ab-gate")
+async def get_ab_gate(_user=Depends(require_user)):
+    """Return SignalABGate status: control/challenger variants, promotion history."""
+    try:
+        from api.dependencies import get_engine
+        engine = get_engine()
+        if engine is None:
+            return {"available": False, "note": "engine not running"}
+        gate = getattr(engine, "_signal_ab_gate", None)
+        if gate is None:
+            return {"available": False, "note": "SignalABGate not initialised"}
+        status = gate.get_status()
+        return {"available": True, **status}
+    except Exception as e:
+        logger.error("ab-gate endpoint failed: %s", e)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/ops/ab-gate/register")
+async def register_ab_challenger(request: Request, _user=Depends(require_user)):
+    """
+    Register a new challenger signal weight set for A/B testing.
+
+    Body: {"weights": {"ml": 0.5, "tech": 0.3, "sentiment": 0.2}, "name": "my-variant"}
+    """
+    try:
+        from api.dependencies import get_engine
+        engine = get_engine()
+        if engine is None:
+            raise HTTPException(status_code=503, detail="engine not running")
+        gate = getattr(engine, "_signal_ab_gate", None)
+        if gate is None:
+            raise HTTPException(status_code=503, detail="SignalABGate not initialised")
+        body = await request.json()
+        weights = body.get("weights")
+        name = body.get("name", "challenger")
+        if not isinstance(weights, dict) or not weights:
+            raise HTTPException(status_code=400, detail="weights dict required")
+        gate.register_challenger(weights=weights, name=name)
+        logger.info("A/B challenger registered: %s weights=%s", name, weights)
+        return {"registered": True, "name": name, "weights": weights}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error("ab-gate register failed: %s", e)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# --------------------------------------------------------------------------------
+# Feature Importance (IC) Drift Dashboard
+# --------------------------------------------------------------------------------
+
+@app.get("/ops/feature-ic")
+async def get_feature_ic(_user=Depends(require_user)):
+    """Return per-feature rolling IC (30d + 90d), status, dead/strong sets."""
+    try:
+        from api.dependencies import get_engine
+        engine = get_engine()
+        if engine is None:
+            return {"available": False, "note": "engine not running"}
+        ict = getattr(engine, "_ic_tracker", None)
+        if ict is None:
+            return {"available": False, "note": "ICTracker not initialised"}
+
+        obs_counts = ict.get_observation_counts()
+        if not obs_counts:
+            return {
+                "available": True,
+                "note": "No observations yet — IC tracking accumulates over time",
+                "features": [], "dead": [], "strong": [], "pending": ict.get_pending_count(),
+            }
+
+        features = []
+        for feat in obs_counts:
+            stats = ict.get_stats(feat)
+            features.append({
+                "feature": feat,
+                "ic_30d": round(stats.ic_30d, 4),
+                "ic_90d": round(stats.ic_90d, 4),
+                "n_obs": stats.n_obs,
+                "status": stats.status,
+            })
+        features.sort(key=lambda x: -abs(x["ic_30d"]))
+
+        return {
+            "available": True,
+            "n_features": len(features),
+            "pending_snapshots": ict.get_pending_count(),
+            "dead_count": len(ict.get_dead_features()),
+            "strong_count": len(ict.get_strong_features()),
+            "dead": sorted(ict.get_dead_features()),
+            "strong": sorted(ict.get_strong_features()),
+            "features": features,
+            "thresholds": {
+                "dead": ict.IC_DEAD_THRESHOLD,
+                "suspect": ict.IC_SUSPECT_THRESHOLD,
+                "strong": ict.IC_STRONG_THRESHOLD,
+            },
+        }
+    except Exception as e:
+        logger.error("feature-ic endpoint failed: %s", e)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# --------------------------------------------------------------------------------
+# Online Learning Pipeline
+# --------------------------------------------------------------------------------
+
+@app.get("/ops/online-learning")
+async def get_online_learning(_user=Depends(require_user)):
+    """Return Online Learning Pipeline state: runs, champion accuracy, promotions."""
+    try:
+        from api.dependencies import get_engine
+        engine = get_engine()
+        if engine is None:
+            return {"available": False, "note": "engine not running"}
+        pipeline = getattr(engine, "_online_learning_pipeline", None)
+        if pipeline is None:
+            return {"available": False, "note": "OnlineLearningPipeline not initialised"}
+        return pipeline.get_state()
+    except Exception as e:
+        logger.error("online-learning endpoint failed: %s", e)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# --------------------------------------------------------------------------------
+# Paper Account (Implementation Shortfall Tracker)
+# --------------------------------------------------------------------------------
+
+@app.get("/ops/paper-account")
+async def get_paper_account(_user=Depends(require_user)):
+    """Return shadow paper account snapshot: paper vs live P&L and implementation shortfall."""
+    try:
+        from api.dependencies import get_engine
+        engine = get_engine()
+        if engine is None:
+            return {"available": False, "note": "engine not running"}
+        pa = getattr(engine, "_paper_account", None)
+        if pa is None:
+            return {"available": False, "note": "PaperAccount not initialised"}
+        return pa.get_snapshot()
+    except Exception as e:
+        logger.error("paper-account endpoint failed: %s", e)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# --------------------------------------------------------------------------------
+# Alert History Feed
+# --------------------------------------------------------------------------------
+
+@app.get("/ops/alerts")
+async def get_alert_history(n: int = 50, _user=Depends(require_user)):
+    """Return recent alert history from the in-memory alert buffer."""
+    try:
+        from api.dependencies import get_engine
+        engine = get_engine()
+        if engine is None:
+            return {"available": False, "note": "engine not running", "alerts": []}
+        am = getattr(engine, "_alert_manager", None)
+        if am is None:
+            return {"available": False, "note": "AlertManager not initialised", "alerts": []}
+        return {
+            "available": True,
+            "channel": am.channel,
+            "alerts": am.get_recent_alerts(n),
+            "total_buffered": len(am._history),
+        }
+    except Exception as e:
+        logger.error("alerts endpoint failed: %s", e)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# --------------------------------------------------------------------------------
+# HMM Regime Detector state
+# --------------------------------------------------------------------------------
+
+@app.get("/ops/hmm-regime")
+async def get_hmm_regime(_user=Depends(require_user)):
+    """Return current HMM regime state: label, confidence, state probabilities."""
+    try:
+        from api.dependencies import get_engine
+        engine = get_engine()
+        if engine is None:
+            return {"available": False, "note": "engine not running"}
+        det = getattr(engine, "_hmm_regime_detector", None)
+        if det is None:
+            return {"available": False, "note": "HMMRegimeDetector not initialised"}
+        snap = det.get_snapshot()
+        snap["current_vix_regime"] = str(getattr(engine, "_current_regime", "unknown"))
+        return snap
+    except Exception as e:
+        logger.error("hmm-regime endpoint failed: %s", e)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# --------------------------------------------------------------------------------
+# Signal Portfolio Constructor weights
+# --------------------------------------------------------------------------------
+
+@app.get("/ops/portfolio-weights")
+async def get_portfolio_weights(_user=Depends(require_user)):
+    """Return signal-aware HRP target weights computed by SignalPortfolioConstructor."""
+    try:
+        from api.dependencies import get_engine
+        engine = get_engine()
+        if engine is None:
+            return {"available": False, "note": "engine not running", "weights": {}}
+        spc = getattr(engine, "_signal_portfolio_constructor", None)
+        if spc is None:
+            return {"available": False, "note": "SignalPortfolioConstructor not initialised", "weights": {}}
+        return spc.get_portfolio_snapshot()
+    except Exception as e:
+        logger.error("portfolio-weights endpoint failed: %s", e)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# --------------------------------------------------------------------------------
+# Model Registry: version tracking + champion/challenger + audit trail
+# --------------------------------------------------------------------------------
+
+@app.get("/ops/model-registry")
+async def get_model_registry(_user=Depends(require_user)):
+    """Return model registry snapshot: champion versions, IC history, rollback events."""
+    try:
+        from api.dependencies import get_engine
+        engine = get_engine()
+        if engine is None:
+            return {"available": False, "note": "engine not running", "models": {}}
+        reg = getattr(engine, "_model_registry", None)
+        if reg is None:
+            return {"available": False, "note": "ModelRegistry not initialised", "models": {}}
+        return reg.get_snapshot()
+    except Exception as e:
+        logger.error("model-registry endpoint failed: %s", e)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# --------------------------------------------------------------------------------
+# Cross-Asset Pairs Arbitrage snapshot
+# --------------------------------------------------------------------------------
+
+@app.get("/ops/cross-asset-pairs")
+async def get_cross_asset_pairs(_user=Depends(require_user)):
+    """Return cross-asset pairs arbitrage snapshot: active pairs, z-scores, overlay signals."""
+    try:
+        from api.dependencies import get_engine
+        engine = get_engine()
+        if engine is None:
+            return {"available": False, "note": "engine not running", "active_pairs": []}
+        capa = getattr(engine, "_cross_asset_pairs", None)
+        if capa is None:
+            return {"available": False, "note": "CrossAssetPairsArb not initialised", "active_pairs": []}
+        return capa.get_snapshot()
+    except Exception as e:
+        logger.error("cross-asset-pairs endpoint failed: %s", e)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# --------------------------------------------------------------------------------
+# IV Crush Strategy snapshot
+# --------------------------------------------------------------------------------
+
+@app.get("/ops/iv-crush")
+async def get_iv_crush(_user=Depends(require_user)):
+    """Return IV crush strategy snapshot: pre-earnings IV signals and post-earnings PEAD signals."""
+    try:
+        from api.dependencies import get_engine
+        engine = get_engine()
+        if engine is None:
+            return {"available": False, "note": "engine not running", "active_signals": []}
+        ivc = getattr(engine, "_iv_crush_strategy", None)
+        if ivc is None:
+            return {"available": False, "note": "IVCrushStrategy not initialised", "active_signals": []}
+        return ivc.get_snapshot()
+    except Exception as e:
+        logger.error("iv-crush endpoint failed: %s", e)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# --------------------------------------------------------------------------------
+# Order Rejections Feed
+# --------------------------------------------------------------------------------
+
+@app.get("/ops/order-rejections")
+async def get_order_rejections(
+    limit: int = 50,
+    reason_code: str = "",
+    _user=Depends(require_user),
+):
+    """
+    Return the most-recent pre-trade gateway rejections from the audit JSONL files.
+    Reads today's + yesterday's files so the feed stays populated across midnight.
+    """
+    try:
+        from api.dependencies import get_engine
+        from datetime import timedelta
+        engine = get_engine()
+        if engine is None:
+            return {"available": False, "note": "engine not running", "rejections": []}
+
+        audit_dir = getattr(engine, "user_data_dir", None)
+        if audit_dir is None:
+            return {"available": False, "note": "audit_dir unavailable", "rejections": []}
+
+        gateway_dir = Path(audit_dir) / "audit" / "pretrade_gateway"
+        if not gateway_dir.exists():
+            return {"available": True, "rejections": [], "total_scanned": 0}
+
+        today = datetime.utcnow()
+        dates = [today.strftime("%Y%m%d"), (today - timedelta(days=1)).strftime("%Y%m%d")]
+
+        records = []
+        total_scanned = 0
+        for date_str in dates:
+            fpath = gateway_dir / f"pretrade_gateway_{date_str}.jsonl"
+            if not fpath.exists():
+                continue
+            try:
+                with open(fpath, "r", encoding="utf-8") as f:
+                    for line in f:
+                        line = line.strip()
+                        if not line:
+                            continue
+                        try:
+                            rec = json.loads(line)
+                        except json.JSONDecodeError:
+                            continue
+                        total_scanned += 1
+                        if rec.get("allowed", True):
+                            continue  # only surface rejections
+                        if reason_code and rec.get("reason_code") != reason_code:
+                            continue
+                        records.append({
+                            "event_id": rec.get("event_id", ""),
+                            "timestamp": rec.get("timestamp", ""),
+                            "symbol": rec.get("symbol", ""),
+                            "asset_class": rec.get("asset_class", ""),
+                            "side": rec.get("side", ""),
+                            "quantity": rec.get("quantity", 0),
+                            "price": rec.get("price", 0.0),
+                            "reason_code": rec.get("reason_code", ""),
+                            "message": rec.get("message", ""),
+                            "metadata": rec.get("metadata", {}),
+                            "actor": rec.get("actor", ""),
+                        })
+            except Exception as e:
+                logger.warning("order-rejections: failed to read %s: %s", fpath, e)
+
+        # Most-recent first
+        records.sort(key=lambda r: r["timestamp"], reverse=True)
+        records = records[:limit]
+
+        # Aggregate reason_code counts for the summary bar
+        from collections import Counter
+        reason_counts = Counter(r["reason_code"] for r in records)
+
+        return {
+            "available": True,
+            "total_scanned": total_scanned,
+            "total_rejected": len(records),
+            "reason_breakdown": dict(reason_counts),
+            "rejections": records,
+        }
+    except Exception as e:
+        logger.error("order-rejections endpoint failed: %s", e)
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 # --------------------------------------------------------------------------------

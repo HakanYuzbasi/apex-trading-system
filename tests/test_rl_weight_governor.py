@@ -14,7 +14,7 @@ from models.rl_weight_governor import (
 
 
 def _make_gov() -> RLWeightGovernor:
-    return RLWeightGovernor(model_dir="/tmp/apex_rl_test")
+    return RLWeightGovernor(model_dir=tempfile.mkdtemp())
 
 
 class TestWeightRetrieval:

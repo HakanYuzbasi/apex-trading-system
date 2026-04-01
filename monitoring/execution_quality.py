@@ -165,9 +165,18 @@ class ExecutionQualityTracker:
         for high-slippage symbols. 1.0 means no penalty.
         """
         stats = self.get_symbol_slippage_bps(symbol)
-        if stats["count"] < self._min_fills:
+        return self._penalty_from_stats(stats.get("count", 0), stats.get("p95", 0.0))
+
+    def get_regime_sizing_penalty(self, regime: str) -> float:
+        """Return a multiplier in [penalty_floor, 1.0] for poor execution regimes."""
+        stats = self.get_regime_summary().get(regime, {})
+        return self._penalty_from_stats(stats.get("count", 0), stats.get("p95_bps", 0.0))
+
+    def _penalty_from_stats(self, count: int, p95_bps: float) -> float:
+        """Convert p95 slippage stats into a bounded sizing multiplier."""
+        if int(count or 0) < self._min_fills:
             return 1.0
-        p95 = stats["p95"]
+        p95 = float(p95_bps or 0.0)
         if p95 <= self._penalty_p95_bps:
             return 1.0
         # Linear ramp: at 2× threshold → floor

@@ -105,7 +105,9 @@ async def public_websocket_endpoint(websocket: WebSocket):
             except Exception:
                 pass # Swallow errors to prevent crashing the loop
             
-            await asyncio.sleep(1.0)
+            await asyncio.sleep(
+                max(float(getattr(ApexConfig, "PUBLIC_WS_POLL_INTERVAL_SECONDS", 5.0)), 1.0)
+            )
             
     # Run the sender loop as a task
     sender_task = asyncio.create_task(_send_sanitized_state())

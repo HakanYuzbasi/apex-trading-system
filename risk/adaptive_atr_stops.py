@@ -53,26 +53,27 @@ logger = logging.getLogger(__name__)
 # trending regimes → wider stops (let positions breathe with trend)
 # mean-reverting / volatile → tighter (lock in gains fast)
 _ATR_MULT: Dict[str, float] = {
-    "strong_bull": 2.00,
-    "bull":        1.80,
-    "neutral":     1.50,   # mean-reverting regime → tightest
-    "bear":        1.80,
-    "strong_bear": 2.00,
-    "volatile":    2.40,   # wide: high noise, avoid stop-outs
-    "crisis":      2.80,   # very wide: intraday swings huge
+    "strong_bull": 2.20,
+    "bull":        2.00,
+    "neutral":     2.00,   # mean-reverting regime → widened from 1.50
+    "bear":        2.00,
+    "strong_bear": 2.20,
+    "volatile":    2.60,   # wide: high noise, avoid stop-outs
+    "crisis":      3.00,   # very wide: intraday swings huge
 }
-_DEFAULT_ATR_MULT = 1.80
+_DEFAULT_ATR_MULT = 2.00
 
 # Stop bounds (fraction of price)
-_MIN_STOP_PCT = 0.004   # 0.4% minimum stop distance
-_MAX_STOP_PCT = 0.12    # 12% maximum stop distance
+_MIN_STOP_PCT = 0.006   # 0.6% minimum stop distance (widened)
+_MAX_STOP_PCT = 0.15    # 15% maximum stop distance
 
 # Profit tiers for trailing tightening
 _PROFIT_TIERS = [
-    (0.08, 0.50),  # pnl > 8% → trailing = 50% of normal distance
-    (0.05, 0.65),  # pnl > 5% → trailing = 65%
-    (0.03, 0.80),  # pnl > 3% → trailing = 80%
-    (0.015, 0.90), # pnl > 1.5% → trailing = 90%
+    (0.12, 0.40),  # pnl > 12% → trailing = 40% of normal distance
+    (0.08, 0.50),  # pnl > 8% → trailing = 50%
+    (0.05, 0.70),  # pnl > 5% → trailing = 70%
+    (0.03, 0.85),  # pnl > 3% → trailing = 85%
+    # Removed extremely aggressive 1.5% tier to prevent position choking
 ]
 
 

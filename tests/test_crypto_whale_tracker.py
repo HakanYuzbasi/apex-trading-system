@@ -174,12 +174,13 @@ class TestPortfolioKellyOptimizer(unittest.TestCase):
         self.assertGreater(mult, 0.0)
         self.assertLessEqual(mult, self.optimizer.MAX_LEVERAGE)
 
-    def test_poor_odds_return_zero(self):
-        """p ≈ 0.25 blended → Kelly <= 0 → return 0.0 (don't trade)."""
+    def test_poor_odds_return_min_leverage(self):
+        """p ≈ 0.25 blended → Kelly <= 0 → return MIN_LEVERAGE (cold-start floor,
+        not zero) so early poor performance doesn't freeze trade count."""
         mult = self.optimizer.calculate_sizing_multiplier(
             ml_confidence=0.1, historical_win_rate=0.2, is_high_vix=False
         )
-        self.assertEqual(mult, 0.0)
+        self.assertEqual(mult, self.optimizer.MIN_LEVERAGE)
 
     def test_high_vix_cuts_size(self):
         """High-VIX flag reduces multiplier by 40%."""
@@ -209,11 +210,10 @@ class TestRLWeightGovernor(unittest.TestCase):
     """Tests for models/rl_weight_governor.py (Phase 7)."""
 
     def setUp(self):
-        import importlib
+        import tempfile
         import models.rl_weight_governor as mod
-        importlib.reload(mod)
         self.mod = mod
-        self.governor = mod.RLWeightGovernor(model_dir="/tmp/apex_test_rl")
+        self.governor = mod.RLWeightGovernor(model_dir=tempfile.mkdtemp())
 
     def test_returns_dict_with_required_keys(self):
         """get_optimal_weights must include core component keys."""

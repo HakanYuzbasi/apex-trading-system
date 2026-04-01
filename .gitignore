@@ -35,14 +35,23 @@ trading_state.json
 .run/
 .claude/
 data/*.lock
+data/audit/
+data/backtests/
+data/daily_briefings/
+data/eod_reports/
+data/shadow_deployments/
+data/trade_diagnostics.jsonl
+data/trade_audit_warmup.jsonl
 data/users/**/*.json
 data/users/**/*.jsonl
 data/users/*/runtime/
 data/users/*/performance_attribution.json.bak*
 data/*.bak.*
+validation_output_phase1.txt
 
 # Model files (can be large)
 models/saved/
+models/saved_ultimate/
 *.pkl
 *.joblib
 *.h5
@@ -98,6 +107,8 @@ venv.bak/
 # VS Code
 .vscode/
 *.code-workspace
+frontend/.next/
+frontend/node_modules/
 
 # macOS
 .DS_Store

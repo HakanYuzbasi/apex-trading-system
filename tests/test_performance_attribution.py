@@ -27,6 +27,7 @@ def test_entry_exit_lifecycle_persists_and_computes_drag(tmp_path):
         entry_slippage_bps=2.0,
         entry_time=entry_time,
         source="unit_test_entry",
+        generator_signals={"institutional": 0.62, "god_level": 0.21},
     )
     assert "AAPL" in tracker.open_positions
 
@@ -54,6 +55,8 @@ def test_entry_exit_lifecycle_persists_and_computes_drag(tmp_path):
     assert closed["modeled_exit_slippage_cost"] == pytest.approx(0.44)
     assert closed["modeled_execution_drag"] == pytest.approx(5.64)
     assert closed["source"] == "unit_test_exit"
+    assert closed["dominant_generator"] == "institutional"
+    assert closed["generator_signals"]["god_level"] == pytest.approx(0.21)
 
     restored = PerformanceAttributionTracker(data_dir=tmp_path, max_closed_trades=100)
     assert len(restored.closed_trades) == 1
@@ -209,6 +212,50 @@ def test_summary_aggregates_by_sleeve_and_asset_class(tmp_path):
     assert summary["social_governor"]["events"] == 1
     assert summary["social_governor"]["blocked_alpha_opportunity"] == pytest.approx(120.0)
     assert summary["social_governor"]["avoided_drawdown_estimate"] == pytest.approx(260.0)
+
+
+def test_expectancy_ledger_groups_by_asset_regime_and_generator(tmp_path):
+    tracker = PerformanceAttributionTracker(data_dir=tmp_path, max_closed_trades=100)
+    entry_time = datetime(2026, 1, 4, 9, 30, 0)
+    exit_time = datetime(2026, 1, 4, 15, 30, 0)
+
+    for symbol, entry_signal, net_pnl in (
+        ("AAPL", 0.55, 45.0),
+        ("MSFT", 0.52, -10.0),
+        ("NVDA", 0.49, 30.0),
+    ):
+        tracker.record_entry(
+            symbol=symbol,
+            asset_class="EQUITY",
+            sleeve="equities_sleeve",
+            side="LONG",
+            quantity=5,
+            entry_price=100.0,
+            entry_signal=entry_signal,
+            entry_confidence=0.75,
+            governor_tier="green",
+            governor_regime="risk_on",
+            entry_time=entry_time,
+            generator_signals={"institutional": entry_signal, "advanced": 0.10},
+        )
+        tracker.record_exit(
+            symbol=symbol,
+            quantity=5,
+            exit_price=101.0,
+            gross_pnl=net_pnl + 1.0,
+            net_pnl=net_pnl,
+            commissions=1.0,
+            exit_reason="tp",
+            exit_time=exit_time,
+        )
+
+    ledger = tracker.get_expectancy_ledger(lookback_days=365, min_trades=2)
+    bucket = ledger["by_bucket"]["EQUITY|risk_on|institutional"]
+    assert ledger["eligible_bucket_count"] == 1
+    assert bucket["trades"] == 3
+    assert bucket["wins"] == 2
+    assert bucket["eligible"] is True
+    assert bucket["avg_confidence"] == pytest.approx(0.75)
 
 
 def test_tracker_load_normalizes_and_merges_crypto_symbol_variants(tmp_path):

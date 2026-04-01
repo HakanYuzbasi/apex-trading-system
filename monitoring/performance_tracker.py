@@ -6,7 +6,7 @@ FIXED: Proper equity curve tracking with float conversion
 import logging
 import math
 from datetime import datetime
-from typing import List, Dict, Tuple
+from typing import List, Dict, Tuple, Optional
 import numpy as np
 import json
 import collections
@@ -19,13 +19,17 @@ logger = logging.getLogger(__name__)
 class PerformanceTracker:
     """Track trading performance metrics."""
     
-    def __init__(self):
+    def __init__(
+        self,
+        data_dir: Optional[Path] = None,
+        history_filename: str = "performance_history.json",
+    ):
         self.trades: collections.deque = collections.deque(maxlen=5000)
         self.equity_curve: collections.deque = collections.deque(maxlen=100000)  # ✅ Memory capped
         self.benchmark_curve: collections.deque = collections.deque(maxlen=100000) # 🎯 Phase 2
         self.starting_capital: float = 0.0
-        self.data_dir = Path("data")
-        self.history_file = self.data_dir / "performance_history.json"
+        self.data_dir = Path(data_dir) if data_dir is not None else Path("data")
+        self.history_file = self.data_dir / str(history_filename)
         self._load_state()
 
     
@@ -518,7 +522,7 @@ class PerformanceTracker:
     def _save_state(self):
         """Save performance history to disk."""
         try:
-            self.data_dir.mkdir(exist_ok=True)
+            self.data_dir.mkdir(parents=True, exist_ok=True)
             state = {
                 'trades': list(self.trades),
                 'equity_curve': list(self.equity_curve),
@@ -604,5 +608,49 @@ class PerformanceTracker:
         logger.warning(
             "🩹 Performance history reset (%s). Seeded baseline equity: $%.2f",
             reason,
+            capital,
+        )
+
+    async def rebase_baseline(
+        self,
+        *,
+        starting_capital: float,
+        reason: str = "runtime_rebase",
+        reset_trades: bool = False,
+        clear_benchmark: bool = False,
+    ) -> None:
+        """Append a new equity baseline without destroying accumulated trade context."""
+        try:
+            capital = float(starting_capital)
+        except Exception:
+            logger.warning("Cannot rebase performance baseline with invalid capital: %s", starting_capital)
+            return
+
+        if capital <= 0:
+            logger.warning("Cannot rebase performance baseline with non-positive capital: %s", capital)
+            return
+
+        if reset_trades:
+            self.trades.clear()
+        if clear_benchmark:
+            self.benchmark_curve.clear()
+
+        now_iso = datetime.now().isoformat()
+        last_value = None
+        if self.equity_curve:
+            try:
+                last_value = float(self.equity_curve[-1][1])
+            except Exception:
+                last_value = None
+        if last_value is None or abs(last_value - capital) > 1e-9:
+            self.equity_curve.append((now_iso, capital))
+
+        self.starting_capital = capital
+        await self._save_state_async()
+        logger.warning(
+            "🩹 Performance baseline rebased (%s). Preserved trades=%d equity_points=%d baseline=$%.2f",
+            reason,
+            len(self.trades),
+            len(self.equity_curve),
             capital,
         )

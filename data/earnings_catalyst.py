@@ -1,21 +1,25 @@
 """
 data/earnings_catalyst.py — Post-Earnings Announcement Drift (PEAD) Signal
+                             + Earnings Revision Trends
+                             + Multi-Quarter Surprise Persistence
 
-One of the most durable market anomalies: stocks that beat earnings estimates
-by >5% drift upward for 20-60 days; misses drift downward. This module
-computes a decaying PEAD signal for any equity symbol.
+Three independent earnings-intelligence signals:
 
-Signal range: [-1.0, 1.0]
-  +1.0 = strong beat, fresh (day 0 after report)
-   0.0 = no recent earnings / neutral surprise
-  -1.0 = strong miss, fresh
+  1. PEAD signal      — time-decaying post-earnings drift (original).
+  2. Revision signal  — consensus estimate drift over the past 30 days.
+                        Analysts upgrading estimates → positive; downgrading → negative.
+                        Range: [-1, +1].
+  3. Persistence      — consistency of beats/misses across the last N quarters.
+                        4-quarter consecutive beat → +1.0; consecutive miss → -1.0.
+                        Range: [-1, +1].
 
-Signal decays linearly to 0 over drift_days (default: 20 trading days).
+  Extended combined signal: 0.50×PEAD + 0.30×revision + 0.20×persistence.
 
 Usage:
     from data.earnings_catalyst import EarningsCatalystSignal
     catalyst = EarningsCatalystSignal()
-    signal = catalyst.get_signal("AAPL")   # e.g. 0.72 (recent 10% beat)
+    signal = catalyst.get_signal("AAPL")           # PEAD only
+    extended = catalyst.get_extended_signal("AAPL") # all three combined
 """
 from __future__ import annotations
 
@@ -111,6 +115,69 @@ class EarningsCatalystSignal:
             except Exception:
                 pass
 
+    def get_revision_signal(self, symbol: str) -> float:
+        """
+        Earnings estimate revision signal.
+
+        Compares current quarter EPS estimate vs estimate from 30 days ago using
+        yfinance analyst price-target trend as a proxy (direct estimate history
+        requires paid data). Falls back to 0.0 when unavailable.
+
+        Returns [-1, +1]: positive = upgrades, negative = downgrades.
+        """
+        clean = self._clean_symbol(symbol)
+        if not clean or not self._is_equity(symbol):
+            return 0.0
+
+        cache_key = f"rev_{clean}"
+        now = time.time()
+        cached = self._cache.get(cache_key)
+        if cached is not None and (now - cached[1]) < self.cache_ttl_sec:
+            return cached[0]
+
+        signal = self._compute_revision(clean)
+        self._cache[cache_key] = (signal, now)
+        return signal
+
+    def get_persistence_signal(self, symbol: str, n_quarters: int = 4) -> float:
+        """
+        Multi-quarter earnings surprise persistence.
+
+        Scores the consistency of beats/misses across the last n_quarters.
+        Returns [-1, +1]: +1 = n consecutive beats, -1 = n consecutive misses.
+        """
+        clean = self._clean_symbol(symbol)
+        if not clean or not self._is_equity(symbol):
+            return 0.0
+
+        cache_key = f"persist_{clean}"
+        now = time.time()
+        cached = self._cache.get(cache_key)
+        if cached is not None and (now - cached[1]) < self.cache_ttl_sec:
+            return cached[0]
+
+        signal = self._compute_persistence(clean, n_quarters)
+        self._cache[cache_key] = (signal, now)
+        return signal
+
+    def get_extended_signal(self, symbol: str) -> float:
+        """
+        Combined earnings intelligence signal.
+
+        Blends:
+          0.50 × PEAD (time-decaying post-announcement drift)
+          0.30 × Revision trend (consensus estimate upgrades/downgrades)
+          0.20 × Persistence (multi-quarter beat/miss consistency)
+
+        Returns [-1, +1].
+        """
+        pead = self.get_signal(symbol)
+        revision = self.get_revision_signal(symbol)
+        persistence = self.get_persistence_signal(symbol)
+
+        extended = 0.50 * pead + 0.30 * revision + 0.20 * persistence
+        return float(max(-1.0, min(1.0, extended)))
+
     # ------------------------------------------------------------------
     # Private
     # ------------------------------------------------------------------
@@ -182,6 +249,110 @@ class EarningsCatalystSignal:
             logger.debug("EarningsCatalyst: fetch failed for %s: %s", symbol, exc)
             return None
 
+    def _compute_revision(self, symbol: str) -> float:
+        """
+        Use analyst recommendation trends as a proxy for estimate revisions.
+        Maps Strong Buy/Buy/Hold/Sell/Strong Sell to +1/-1 direction; computes
+        net change between current month and 1-month-ago recommendations.
+        Falls back to 0.0 if data unavailable.
+        """
+        try:
+            import yfinance as yf
+            import warnings
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore")
+                ticker = yf.Ticker(symbol)
+                rec = ticker.recommendations
+
+            if rec is None or rec.empty or len(rec) < 2:
+                return 0.0
+
+            def _score_row(row) -> float:
+                counts = {}
+                for col in ["strongBuy", "buy", "hold", "sell", "strongSell"]:
+                    counts[col] = int(row.get(col, 0))
+                total = sum(counts.values())
+                if total == 0:
+                    return 0.0
+                # Weighted sentiment: SB=+2, B=+1, H=0, S=-1, SS=-2
+                net = (counts.get("strongBuy", 0) * 2
+                       + counts.get("buy", 0) * 1
+                       + counts.get("hold", 0) * 0
+                       + counts.get("sell", 0) * -1
+                       + counts.get("strongSell", 0) * -2)
+                return net / (total * 2.0)  # normalise to [-1, +1]
+
+            # Use last two available monthly rows
+            recent = _score_row(rec.iloc[-1])
+            prior = _score_row(rec.iloc[-2])
+            drift = recent - prior   # positive = upgrades, negative = downgrades
+            signal = float(max(-1.0, min(1.0, drift * 5.0)))  # scale
+            logger.debug("EarningsCatalyst revision %s: recent=%.3f prior=%.3f → %.3f",
+                         symbol, recent, prior, signal)
+            return signal
+        except Exception as exc:
+            logger.debug("EarningsCatalyst revision fetch failed for %s: %s", symbol, exc)
+            return 0.0
+
+    def _compute_persistence(self, symbol: str, n_quarters: int) -> float:
+        """
+        Multi-quarter surprise persistence scorer.
+
+        Fetches earnings history and scores the last n_quarters of surprise signs.
+        """
+        try:
+            import yfinance as yf
+            import warnings
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore")
+                ticker = yf.Ticker(symbol)
+                hist = ticker.get_earnings_history()
+
+            if hist is None or hist.empty:
+                return 0.0
+
+            surprises = []
+            for i in range(len(hist) - 1, -1, -1):
+                row = hist.iloc[i]
+                actual = row.get("epsActual")
+                estimate = row.get("epsEstimate")
+                if actual is None or estimate is None or estimate == 0:
+                    continue
+                surprise = float((actual - estimate) / abs(estimate))
+                surprises.append(surprise)
+                if len(surprises) >= n_quarters:
+                    break
+
+            if not surprises:
+                return 0.0
+
+            # Score: fraction of quarters with material positive surprise minus negative
+            material_thresh = 0.02  # 2% threshold for materiality
+            beats = sum(1 for s in surprises if s > material_thresh)
+            misses = sum(1 for s in surprises if s < -material_thresh)
+            total = len(surprises)
+
+            net_score = (beats - misses) / total  # in [-1, +1]
+
+            # Boost for consecutive streaks
+            streak = 0
+            for s in surprises:  # most recent first
+                if net_score > 0 and s > material_thresh:
+                    streak += 1
+                elif net_score < 0 and s < -material_thresh:
+                    streak += 1
+                else:
+                    break
+
+            streak_boost = min(streak / n_quarters, 1.0) * 0.20  # up to +20% boost
+            signal = float(max(-1.0, min(1.0, net_score + (streak_boost if net_score > 0 else -streak_boost))))
+            logger.debug("EarningsCatalyst persistence %s: beats=%d misses=%d streak=%d → %.3f",
+                         symbol, beats, misses, streak, signal)
+            return signal
+        except Exception as exc:
+            logger.debug("EarningsCatalyst persistence fetch failed for %s: %s", symbol, exc)
+            return 0.0
+
     @staticmethod
     def _clean_symbol(symbol: str) -> str:
         return symbol.split(":")[-1].split("/")[0].upper().strip()
@@ -214,3 +385,18 @@ def get_earnings_catalyst() -> EarningsCatalystSignal:
 def get_earnings_signal(symbol: str) -> float:
     """Convenience function: return PEAD signal for symbol."""
     return get_earnings_catalyst().get_signal(symbol)
+
+
+def get_extended_earnings_signal(symbol: str) -> float:
+    """Convenience function: return extended earnings signal (PEAD + revision + persistence)."""
+    return get_earnings_catalyst().get_extended_signal(symbol)
+
+
+def get_earnings_revision_signal(symbol: str) -> float:
+    """Convenience function: return analyst revision trend signal."""
+    return get_earnings_catalyst().get_revision_signal(symbol)
+
+
+def get_earnings_persistence_signal(symbol: str) -> float:
+    """Convenience function: return multi-quarter persistence signal."""
+    return get_earnings_catalyst().get_persistence_signal(symbol)

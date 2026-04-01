@@ -42,10 +42,11 @@ XGBOOST_AVAILABLE = False
 LIGHTGBM_AVAILABLE = False
 
 try:
-    from sklearn.ensemble import RandomForestRegressor, GradientBoostingRegressor
+    from sklearn.ensemble import RandomForestClassifier, GradientBoostingClassifier
     from sklearn.preprocessing import RobustScaler
     from sklearn.impute import SimpleImputer
-    from sklearn.metrics import mean_squared_error, mean_absolute_error
+    from sklearn.metrics import log_loss, accuracy_score, balanced_accuracy_score
+    from sklearn.calibration import CalibratedClassifierCV
     from joblib import dump, load
     import sklearn
     ML_AVAILABLE = True
@@ -401,6 +402,13 @@ class UltimateSignalGenerator:
         historical_returns = {}
         historical_prices = {}
         
+        # SOTA: Phase 1 Cross-Asset Benchmarks
+        spy_data = historical_data.get("SPY", historical_data.get("QQQ", None))
+        btc_data = historical_data.get("BTC/USD", historical_data.get("BTC-USD", None))
+        
+        spy_returns = spy_data['Close'].pct_change() if spy_data is not None and 'Close' in spy_data else None
+        btc_returns = btc_data['Close'].pct_change() if btc_data is not None and 'Close' in btc_data else None
+        
         for i, (symbol, data) in enumerate(historical_data.items()):
             logger.info(f"[{i+1}/{len(historical_data)}] Extracting features for {symbol}...")
             if len(data) < self.lookback + target_horizon + 10:
@@ -410,7 +418,11 @@ class UltimateSignalGenerator:
             prices = data['Close']
             
             # Extract features for entire history (vectorized)
-            df_features = self.feature_engine.extract_features_vectorized(data)
+            df_features = self.feature_engine.extract_features_vectorized(
+                data,
+                spy_returns=spy_returns,
+                btc_returns=btc_returns
+            )
 
             # ✅ ENHANCEMENT: Add sentiment and momentum placeholders
             # (Ranks will be computed globally in the next step)
@@ -419,8 +431,15 @@ class UltimateSignalGenerator:
             if 'momentum_rank' not in df_features.columns:
                 df_features['momentum_rank'] = 0.5
             
-            # Calculate targets
-            future_returns = prices.pct_change(target_horizon).shift(-target_horizon)
+            # ✅ Implement Triple-Barrier Meta-Labeling
+            # Label = 1 if Take Profit hit first
+            # Label = 0 if Stop Loss or Vertical Barrier hit first
+            future_returns = FeatureEngine.compute_triple_barrier(
+                data, 
+                pt_mult=1.5, 
+                sl_mult=1.0, 
+                max_bars=target_horizon
+            )
             
             # Store in symbol dict for global processing
             historical_features[symbol] = df_features
@@ -453,10 +472,14 @@ class UltimateSignalGenerator:
             future_returns = historical_returns[symbol]
             
             # Valid samples
+            base_signal = self.compute_base_signal_vectorized(df_features)
+            trade_proposed = np.abs(base_signal) > 0.10  # Propose trade if base signal clears threshold
+
             valid_mask = (
                 ~df_features.isnull().any(axis=1) &
                 ~future_returns.isnull() &
-                ~regimes_series.isnull()
+                ~regimes_series.isnull() &
+                trade_proposed
             )
             
             X_sym = df_features[valid_mask][self.feature_engine.feature_names].values
@@ -548,18 +571,27 @@ class UltimateSignalGenerator:
                 # Train on fold
                 model.fit(X_train, y_train)
 
-                # Evaluate
-                train_pred = model.predict(X_train)
-                val_pred = model.predict(X_val)
+                # Evaluate (using Log Loss and Accuracy for Classification)
+                if hasattr(model, 'predict_proba'):
+                    train_proba = model.predict_proba(X_train)
+                    val_proba = model.predict_proba(X_val)
+                    train_p1 = train_proba[:, 1] if train_proba.shape[1] > 1 else np.zeros_like(y_train)
+                    val_p1 = val_proba[:, 1] if val_proba.shape[1] > 1 else np.zeros_like(y_val)
+                    # Clip to avoid log(0)
+                    train_loss = log_loss(y_train, np.clip(train_p1, 1e-6, 1-1e-6), labels=[0, 1])
+                    val_loss = log_loss(y_val, np.clip(val_p1, 1e-6, 1-1e-6), labels=[0, 1])
+                else:
+                    train_pred = model.predict(X_train)
+                    val_pred = model.predict(X_val)
+                    train_loss = log_loss(y_train, np.clip(train_pred, 1e-6, 1-1e-6), labels=[0, 1])
+                    val_loss = log_loss(y_val, np.clip(val_pred, 1e-6, 1-1e-6), labels=[0, 1])
                 
-                train_mse = mean_squared_error(y_train, train_pred)
-                val_mse = mean_squared_error(y_val, val_pred)
+                # Directional accuracy (overall classification accuracy)
+                val_pred_class = model.predict(X_val)
+                dir_acc = accuracy_score(y_val, val_pred_class)
                 
-                # Directional accuracy
-                dir_acc = np.mean((val_pred > 0) == (y_val > 0))
-                
-                train_scores.append(train_mse)
-                val_scores.append(val_mse)
+                train_scores.append(train_loss)
+                val_scores.append(val_loss)
                 dir_accs.append(dir_acc)
             
             # Final training on all data with preprocessing fitted on full dataset
@@ -581,9 +613,20 @@ class UltimateSignalGenerator:
             avg_val_mse = np.mean(val_scores)
             avg_dir_acc = np.mean(dir_accs)
             
-            # Extract feature importance if available
+            # Extract feature importance if available (handling CalibratedClassifierCV wrapper)
             if hasattr(model, 'feature_importances_'):
                 importance = dict(zip(selected_features, model.feature_importances_))
+            elif hasattr(model, 'calibrated_classifiers_'):
+                imp_list = []
+                for clf in model.calibrated_classifiers_:
+                    # handle both old (base_estimator) and new (estimator) sklearn API
+                    base_est = getattr(clf, 'estimator', getattr(clf, 'base_estimator', None))
+                    if base_est is not None and hasattr(base_est, 'feature_importances_'):
+                        imp_list.append(base_est.feature_importances_)
+                if imp_list:
+                    importance = dict(zip(selected_features, np.mean(imp_list, axis=0)))
+                else:
+                    importance = {}
             else:
                 importance = {}
             
@@ -652,51 +695,68 @@ class UltimateSignalGenerator:
             lgb_params = {'max_depth': 3, 'learning_rate': 0.03, 'subsample': 0.6, 'reg_alpha': 0.2, 'reg_lambda': 0.2}
         
         if ML_AVAILABLE:
-            models['rf'] = RandomForestRegressor(
-                n_estimators=150,  # More trees for better ensemble
-                max_depth=rf_params['max_depth'],
-                min_samples_leaf=rf_params['min_samples_leaf'],
-                min_samples_split=rf_params['min_samples_split'],
-                max_features='sqrt',
-                n_jobs=-1,
-                random_state=self.random_seed
+            models['rf'] = CalibratedClassifierCV(
+                estimator=RandomForestClassifier(
+                    n_estimators=50,  # Reduced from 150 since CV=3 creates 3 models (150 total)
+                    max_depth=rf_params['max_depth'],
+                    min_samples_leaf=rf_params['min_samples_leaf'],
+                    min_samples_split=rf_params['min_samples_split'],
+                    max_features='sqrt',
+                    n_jobs=-1,
+                    random_state=self.random_seed
+                ),
+                method='isotonic',
+                cv=3
             )
-            models['gb'] = GradientBoostingRegressor(
-                n_estimators=150,
-                max_depth=gb_params['max_depth'],
-                learning_rate=gb_params['learning_rate'],
-                subsample=gb_params['subsample'],
-                min_samples_leaf=gb_params['min_samples_leaf'],
-                random_state=self.random_seed
+            models['gb'] = CalibratedClassifierCV(
+                estimator=GradientBoostingClassifier(
+                    n_estimators=50,
+                    max_depth=gb_params['max_depth'],
+                    learning_rate=gb_params['learning_rate'],
+                    subsample=gb_params['subsample'],
+                    min_samples_leaf=gb_params['min_samples_leaf'],
+                    random_state=self.random_seed
+                ),
+                method='isotonic',
+                cv=3
             )
         
         if XGBOOST_AVAILABLE:
-            models['xgb'] = xgb.XGBRegressor(
-                n_estimators=150,
-                max_depth=xgb_params['max_depth'],
-                learning_rate=xgb_params['learning_rate'],
-                subsample=xgb_params['subsample'],
-                colsample_bytree=0.7,
-                reg_alpha=xgb_params['reg_alpha'],
-                reg_lambda=xgb_params['reg_lambda'],
-                random_state=self.random_seed,
-                verbosity=0
+            models['xgb'] = CalibratedClassifierCV(
+                estimator=xgb.XGBClassifier(
+                    n_estimators=50,
+                    max_depth=xgb_params['max_depth'],
+                    learning_rate=xgb_params['learning_rate'],
+                    subsample=xgb_params['subsample'],
+                    colsample_bytree=0.7,
+                    reg_alpha=xgb_params['reg_alpha'],
+                    reg_lambda=xgb_params['reg_lambda'],
+                    random_state=self.random_seed,
+                    eval_metric='logloss',
+                    verbosity=0
+                ),
+                method='isotonic',
+                cv=3
             )
         
         if LIGHTGBM_AVAILABLE:
-            models['lgb'] = lgb.LGBMRegressor(
-                n_estimators=150,
-                max_depth=lgb_params['max_depth'],
-                learning_rate=lgb_params['learning_rate'],
-                subsample=lgb_params['subsample'],
-                reg_alpha=lgb_params['reg_alpha'],
-                reg_lambda=lgb_params['reg_lambda'],
-                random_state=self.random_seed,
-                verbose=-1
+            models['lgb'] = CalibratedClassifierCV(
+                estimator=lgb.LGBMClassifier(
+                    n_estimators=50,
+                    max_depth=lgb_params['max_depth'],
+                    learning_rate=lgb_params['learning_rate'],
+                    subsample=lgb_params['subsample'],
+                    reg_alpha=lgb_params['reg_alpha'],
+                    reg_lambda=lgb_params['reg_lambda'],
+                    random_state=self.random_seed,
+                    verbose=-1
+                ),
+                method='isotonic',
+                cv=3
             )
 
         # ── Extended ML methods ──
-        if EXTENDED_ML_AVAILABLE:
+        if False and EXTENDED_ML_AVAILABLE:
             # ElasticNet: L1+L2 linear baseline (regime-aware alpha)
             en_config = {
                 'volatile': {'alpha': 0.1, 'l1_ratio': 0.7},
@@ -857,7 +917,9 @@ class UltimateSignalGenerator:
         data: Union[pd.Series, pd.DataFrame],
         sentiment_score: float = 0.0,
         momentum_rank: float = 0.5,
-        track_for_drift: bool = True
+        track_for_drift: bool = True,
+        spy_returns: Optional[pd.Series] = None,
+        btc_returns: Optional[pd.Series] = None
     ) -> SignalOutput:
         """
         ✨ ULTIMATE SIGNAL GENERATION
@@ -925,7 +987,9 @@ class UltimateSignalGenerator:
             features, data_quality = self.feature_engine.extract_single_sample(
                 data, 
                 sentiment_score=sentiment_score,
-                momentum_rank=momentum_rank
+                momentum_rank=momentum_rank,
+                spy_returns=spy_returns,
+                btc_returns=btc_returns
             )
             
             if data_quality < 0.5:
@@ -1015,21 +1079,31 @@ class UltimateSignalGenerator:
             else:
                 rule_signal = momentum * 0.35 + mean_rev * 0.15 + trend * 0.35 + volatility * 0.15
 
-            combined_signal = ml_prediction * ml_w + rule_signal * rules_w
-
-            # Direction agreement scaling: boost when models agree
-            if direction_agreement > 0.7:
-                combined_signal *= (1.0 + (direction_agreement - 0.7) * 0.3)
-
-            signal = float(np.clip(combined_signal, -1, 1))
-
+            # Meta-Labeling Logic
+            # Base model supplies direction, Meta ML model supplies probability (sizing)
+            base_signal = rule_signal
+            
+            if abs(base_signal) < 0.10:
+                # Base model does not propose a trade
+                return self._neutral_signal(symbol, timestamp)
+            
+            # The base signal triggered. The ML models predict the probability of success.
+            # ml_prediction is essentially the weighted probability from the base ML models.
+            ml_probability = np.clip(ml_prediction, 0.0, 1.0)
+            
+            # Provide direction from Base Signal, sizing (confidence) from Meta Model
+            signal = float(np.sign(base_signal) * ml_probability)
+            
             # Confidence (enhanced with regime probability and agreement)
             regime_confidence = getattr(assessment, 'confidence', 0.5)
             confidence = self._calc_confidence(
-                ml_std, data_quality, abs(signal),
+                ml_std, data_quality, abs(base_signal),
                 direction_agreement=direction_agreement,
                 regime_confidence=regime_confidence
             )
+            
+            # Override confidence with our calibrated ML probability for direct sizing down the line
+            confidence = float(ml_probability)
             
             # Feature hash
             feature_hash = hashlib.md5(features.tobytes()).hexdigest()[:8]
@@ -1289,6 +1363,18 @@ class UltimateSignalGenerator:
             timestamp=timestamp
         )
     
+    def compute_base_signal_vectorized(self, df_features: pd.DataFrame) -> pd.Series:
+        """Vectorized rule-based base signal to match generate_signal logic for filtering training datasets."""
+        # Simple proxy for the standalone un-vectorized functions
+        mom = df_features['mom_5d'].clip(-0.5, 0.5) * 2.0
+        # mean_rev: negative zscore -> buy
+        mean_rev = -df_features.get('vwap_zscore_5d', pd.Series(0, index=df_features.index)).clip(-2, 2) / 2.0
+        trend = (df_features['ma_cross_5_20'] * 0.5 + df_features.get('ma_cross_20_50', 0) * 0.5)
+        vol = df_features['vol_regime']
+        
+        base = mom * 0.35 + mean_rev * 0.15 + trend * 0.35 + vol * 0.15
+        return base.fillna(0.0)
+
     def _calc_momentum(self, prices: pd.Series) -> float:
         """Multi-timeframe momentum with acceleration detection.
 

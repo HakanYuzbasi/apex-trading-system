@@ -20,6 +20,7 @@ jobs:
   social-risk-daily:
     runs-on: ubuntu-latest
     env:
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
       FRESHNESS_SLA_SECONDS: ${{ github.event.inputs.freshness_sla_seconds || '1800' }}
 
     steps:

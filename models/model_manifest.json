@@ -1,174 +1,180 @@
 {
   "files": [
     {
-      "modified_at": "2026-03-23T00:56:39.480411+00:00",
+      "modified_at": "2026-03-28T12:32:04.691409+00:00",
       "path": "models/saved_ultimate/bear/anomaly_gb.pkl",
-      "sha256": "e4d88a1da526b9575769f5d09be2ad7243801413de01c60445cdc1e3a5d59c72",
-      "size_bytes": 1485811
+      "sha256": "2157685113c050ad8a8708ac8eac76a34083c5fbc843413693dfffb5d719b1f7",
+      "size_bytes": 1368179
     },
     {
-      "modified_at": "2026-03-23T00:56:39.465187+00:00",
+      "modified_at": "2026-03-28T12:32:04.675800+00:00",
       "path": "models/saved_ultimate/bear/bayesian_ridge.pkl",
-      "sha256": "e453a34fa3e6cf8f1d9bd6daa56c411c55d1f46d9d2ee457f4897b30034def40",
-      "size_bytes": 12779
+      "sha256": "35a7da84cb8a9b09f63ddf3d6db1aba48761a13d3ba148f42f1ce556bd55e8c4",
+      "size_bytes": 13659
     },
     {
-      "modified_at": "2026-03-23T00:56:39.482489+00:00",
+      "modified_at": "2026-03-28T12:32:04.694561+00:00",
       "path": "models/saved_ultimate/bear/catboost.pkl",
-      "sha256": "00dc93e2ba294fe983d1bbc842fd4df7c7327bc485845ee5116d3d1b75aacf4d",
-      "size_bytes": 205149
+      "sha256": "be2c7e1a7935eb02c36a2e4fecb3f06d47195a3766bdde1fea94bc0291be708a",
+      "size_bytes": 204860
     },
     {
-      "modified_at": "2026-03-23T00:56:39.464624+00:00",
+      "modified_at": "2026-03-28T12:32:04.675125+00:00",
       "path": "models/saved_ultimate/bear/elastic_net.pkl",
-      "sha256": "046ba5af74af2edec37077646b7cc0cb212af726908703a70d742ae5f09863ad",
+      "sha256": "761d2cecab700f04024babf6bdc745121d6859191792015974361be9b27996cc",
       "size_bytes": 2507
     },
     {
-      "modified_at": "2026-03-23T00:56:39.463958+00:00",
+      "modified_at": "2026-03-28T12:32:04.674408+00:00",
       "path": "models/saved_ultimate/bear/gb.pkl",
-      "sha256": "2e26472099e0c279e4c71d6bbc6c56789b4e593db3147babcfd899b80711e40e",
-      "size_bytes": 117115
+      "sha256": "4ebc2e19e31e707152e31a4efbd870230b62b138484cbdcb738324f2c0736d6f",
+      "size_bytes": 146074
     },
     {
-      "modified_at": "2026-03-23T00:56:39.492642+00:00",
+      "modified_at": "2026-03-23T20:04:38.634290+00:00",
       "path": "models/saved_ultimate/bear/imputer.pkl",
-      "sha256": "7372a0b31dda908ed901fc4126926be286d0cca272ba6b9b077c4b741048827f",
+      "sha256": "85f4acb9767c837accb640703fc0013c79df7de518e7a6eb45935e806b54d060",
       "size_bytes": 767
     },
     {
-      "modified_at": "2026-03-23T00:56:39.461874+00:00",
+      "modified_at": "2026-03-28T12:32:04.672258+00:00",
       "path": "models/saved_ultimate/bear/rf.pkl",
-      "sha256": "5966d49fad86da0a13b9aa53cf7ffb1c6eca6fe8ba2311e0946964129435fb0c",
-      "size_bytes": 126177
+      "sha256": "ce63ec04015c15d6096cb6685e2398c38c721c2222ab6a49cea298a179ac9c5f",
+      "size_bytes": 232897
     },
     {
-      "modified_at": "2026-03-23T00:56:39.492877+00:00",
+      "modified_at": "2026-03-23T20:04:38.634668+00:00",
       "path": "models/saved_ultimate/bear/scaler.pkl",
-      "sha256": "10815e1475c7b3460acf6b846082b08c5561f68c73d314a7a30580b1768dc0ec",
+      "sha256": "8b69e1b1a17c7e1ce57232ddd1d11648f96db8d3c63ac13ab1f43b9ee958b4ae",
       "size_bytes": 1023
     },
     {
-      "modified_at": "2026-03-23T00:56:39.492326+00:00",
+      "modified_at": "2026-03-28T12:32:04.734042+00:00",
       "path": "models/saved_ultimate/bear/stacking.pkl",
-      "sha256": "98c474bbde75b88c09aba1b7efaef94538ff4413e6b834c9f74130c07411b348",
+      "sha256": "5d4a18b83c854be1495b82e08e4424780732338115e998483f9f7ce24d32d931",
+      "size_bytes": 487611
+    },
+    {
+      "modified_at": "2026-03-28T12:32:04.646646+00:00",
+      "path": "models/saved_ultimate/bull/anomaly_gb.pkl",
+      "sha256": "263d354beb74daef8f007bc27c2aa633aea0ae6ad414f1cb6da849997ac7cdd9",
+      "size_bytes": 1177371
+    },
+    {
+      "modified_at": "2026-03-28T12:32:04.624946+00:00",
+      "path": "models/saved_ultimate/bull/bayesian_ridge.pkl",
+      "sha256": "4818354fdd6e169f5e9a622cd12cea699225aeeca3362b41a62ecbe1867edb32",
+      "size_bytes": 18571
+    },
+    {
+      "modified_at": "2026-03-28T12:32:04.648911+00:00",
+      "path": "models/saved_ultimate/bull/catboost.pkl",
+      "sha256": "e3b6cb6d1295aa0a4b921f1d44b8f229bb027c40f027796ad99807d6c6e7c6c2",
+      "size_bytes": 119548
+    },
+    {
+      "modified_at": "2026-03-28T12:32:04.623981+00:00",
+      "path": "models/saved_ultimate/bull/elastic_net.pkl",
+      "sha256": "c0907380b15257fe7733e92a50c310b67eeb4dccc198a89baf0c574e1d19250f",
+      "size_bytes": 2555
+    },
+    {
+      "modified_at": "2026-03-28T12:32:04.623301+00:00",
+      "path": "models/saved_ultimate/bull/gb.pkl",
+      "sha256": "1dd14180aea03656b2567bcfcc78d508dbf36fc76c125362025acb3e02859126",
+      "size_bytes": 110378
+    },
+    {
+      "modified_at": "2026-03-28T12:32:04.659143+00:00",
+      "path": "models/saved_ultimate/bull/imputer.pkl",
+      "sha256": "872363e8a3744fbfcf04dce12231f00973e353bfc1f05de9c85bce6402deb1df",
+      "size_bytes": 767
+    },
+    {
+      "modified_at": "2026-03-28T12:32:04.619340+00:00",
+      "path": "models/saved_ultimate/bull/rf.pkl",
+      "sha256": "60e15df1d5b5d7fb7213ad7f224f57d38ef76b7865c3710039f5a3735e6b26f2",
+      "size_bytes": 250497
+    },
+    {
+      "modified_at": "2026-03-28T12:32:04.659422+00:00",
+      "path": "models/saved_ultimate/bull/scaler.pkl",
+      "sha256": "96a8351f66c222c8c405cfb55075eb2b3ec21d8ad40595f3e782fcce3067c5d2",
+      "size_bytes": 1023
+    },
+    {
+      "modified_at": "2026-03-28T12:32:04.658677+00:00",
+      "path": "models/saved_ultimate/bull/stacking.pkl",
+      "sha256": "c848d26858f618a74a2f3bffd2b6b10e0cd4adb6218f6615e097245d72d88e69",
+      "size_bytes": 163723
+    },
+    {
+      "modified_at": "2026-03-23T20:04:38.685843+00:00",
+      "path": "models/saved_ultimate/metadata.pkl",
+      "sha256": "07596c1553f08206ac7060cbcdb9c8e13927894f8e4a79c670025b9f90507f24",
+      "size_bytes": 19085
+    },
+    {
+      "modified_at": "2026-03-23T20:04:38.668572+00:00",
+      "path": "models/saved_ultimate/neutral/anomaly_gb.pkl",
+      "sha256": "84abe59a206026059e51dc173bdc27b35d5d1d06df04fbc8e07ee71a30c73942",
+      "size_bytes": 1273379
+    },
+    {
+      "modified_at": "2026-03-23T20:04:38.651430+00:00",
+      "path": "models/saved_ultimate/neutral/bayesian_ridge.pkl",
+      "sha256": "e8aa0e6d79a2d8d36b525e15b223fcb4b53c5ec15143e5d62e3b96952559fea5",
+      "size_bytes": 35307
+    },
+    {
+      "modified_at": "2026-03-23T20:04:38.672755+00:00",
+      "path": "models/saved_ultimate/neutral/catboost.pkl",
+      "sha256": "442d75b610a51b56f2c4ccdb2d21089c8ae5fe62ad17dd573ff28b2ad0fb63dc",
+      "size_bytes": 205004
+    },
+    {
+      "modified_at": "2026-03-23T20:04:38.650840+00:00",
+      "path": "models/saved_ultimate/neutral/elastic_net.pkl",
+      "sha256": "67c42688ebf148b0be866edb1316536243570c45c13b0af1a0be69a9039cbcf9",
+      "size_bytes": 2507
+    },
+    {
+      "modified_at": "2026-03-23T20:04:38.650006+00:00",
+      "path": "models/saved_ultimate/neutral/gb.pkl",
+      "sha256": "56618f1e7b482ac708510fddf51f24e285c927bea46603bde73ef30c0894720c",
+      "size_bytes": 162346
+    },
+    {
+      "modified_at": "2026-03-23T20:04:38.684388+00:00",
+      "path": "models/saved_ultimate/neutral/imputer.pkl",
+      "sha256": "c2c82c504e1e2a17200d337c69a713331d5eaa5e4ccd95bec31a7a0ece73beb3",
+      "size_bytes": 767
+    },
+    {
+      "modified_at": "2026-03-23T20:04:38.647729+00:00",
+      "path": "models/saved_ultimate/neutral/rf.pkl",
+      "sha256": "b69b2cf5b51d609d23670a75cd2b770887d9b4c5e4bc5eb68e9bda91bc8b0153",
+      "size_bytes": 351249
+    },
+    {
+      "modified_at": "2026-03-23T20:04:38.684551+00:00",
+      "path": "models/saved_ultimate/neutral/scaler.pkl",
+      "sha256": "2b9de1b0005a276a52aead490fddb51eb69834059f3c9dc15cfa97b997f578bf",
+      "size_bytes": 1023
+    },
+    {
+      "modified_at": "2026-03-23T20:04:38.683540+00:00",
+      "path": "models/saved_ultimate/neutral/stacking.pkl",
+      "sha256": "ccc609e44973f53c0cfa01db433a67ec36b6ef19a7603594d2f3bd43a92ef533",
       "size_bytes": 278763
     },
     {
-      "modified_at": "2026-03-23T00:56:39.433915+00:00",
-      "path": "models/saved_ultimate/bull/anomaly_gb.pkl",
-      "sha256": "7456878d441ac27da1f1b2cb6edd23abc6814be22c7590e4a041148dcb4d9e90",
-      "size_bytes": 1153419
-    },
-    {
-      "modified_at": "2026-03-23T00:56:39.413765+00:00",
-      "path": "models/saved_ultimate/bull/bayesian_ridge.pkl",
-      "sha256": "cdf8d398753ec15825b603c19503090e7be0ad36427cfa8585adb2bc150af74e",
-      "size_bytes": 27883
-    },
-    {
-      "modified_at": "2026-03-23T00:56:39.438076+00:00",
-      "path": "models/saved_ultimate/bull/catboost.pkl",
-      "sha256": "4d9b189fad389fb8c0bed6e087b976a498f6a5ed57e292dff6c5905906580fcf",
-      "size_bytes": 119549
-    },
-    {
-      "modified_at": "2026-03-23T00:56:39.413167+00:00",
-      "path": "models/saved_ultimate/bull/elastic_net.pkl",
-      "sha256": "b224431fccc7a5d24d6430dab3dbd189502fbbd56f6c529c75841c06eb881e85",
-      "size_bytes": 2523
-    },
-    {
-      "modified_at": "2026-03-23T00:56:39.412792+00:00",
-      "path": "models/saved_ultimate/bull/gb.pkl",
-      "sha256": "0794f6654f81e85a7e174aea96b9f6ed6db46f755948d7d5fc08e0233277a36e",
-      "size_bytes": 111531
-    },
-    {
-      "modified_at": "2026-03-23T00:56:39.448922+00:00",
-      "path": "models/saved_ultimate/bull/imputer.pkl",
-      "sha256": "ac06e4865ab01540dc9261de578ee4d610c2efd1465c0bf794d285415c3a0a0e",
-      "size_bytes": 767
-    },
-    {
-      "modified_at": "2026-03-23T00:56:39.410011+00:00",
-      "path": "models/saved_ultimate/bull/rf.pkl",
-      "sha256": "019e34b9c0447700112fc7ad05d9d8fb1f1a25d97b2aa13fe71634df87d29b36",
-      "size_bytes": 272641
-    },
-    {
-      "modified_at": "2026-03-23T00:56:39.449188+00:00",
-      "path": "models/saved_ultimate/bull/scaler.pkl",
-      "sha256": "81a223ac94f6204ff0876ad40fd6ab53df31f57ba841e900ca326e2c5f394e0b",
-      "size_bytes": 1023
-    },
-    {
-      "modified_at": "2026-03-23T00:56:39.448732+00:00",
-      "path": "models/saved_ultimate/bull/stacking.pkl",
-      "sha256": "508cad02fce96d760b5633fbba08dcdc2dcc3ccbb3ef918266c4dea129448017",
-      "size_bytes": 163755
-    },
-    {
-      "modified_at": "2026-03-23T00:56:39.537657+00:00",
-      "path": "models/saved_ultimate/metadata.pkl",
-      "sha256": "af3ab334d4325aaa8a8387e3b23d1136faba93d89416b806ef8192ce25317700",
-      "size_bytes": 18902
-    },
-    {
-      "modified_at": "2026-03-23T00:56:39.524452+00:00",
-      "path": "models/saved_ultimate/neutral/anomaly_gb.pkl",
-      "sha256": "6ee99586b5528d15d6ca233062f3ae608447f6bd1bdb44cb7a942d4a699a86d0",
-      "size_bytes": 1461403
-    },
-    {
-      "modified_at": "2026-03-23T00:56:39.508997+00:00",
-      "path": "models/saved_ultimate/neutral/bayesian_ridge.pkl",
-      "sha256": "5a8899d8bdef54daf95cb08174587a616d2daa9c3fe3f81ab7208fd19d567a2e",
-      "size_bytes": 12827
-    },
-    {
-      "modified_at": "2026-03-23T00:56:39.526465+00:00",
-      "path": "models/saved_ultimate/neutral/catboost.pkl",
-      "sha256": "95b8d541adf112acbc06e26f085c34809294bc4128629d837e59410bcf72e86e",
-      "size_bytes": 205453
-    },
-    {
-      "modified_at": "2026-03-23T00:56:39.508623+00:00",
-      "path": "models/saved_ultimate/neutral/elastic_net.pkl",
-      "sha256": "034f36cb1149a1a5a44c26b6ba006049392da5a4c205bb5a9f496999c850ca33",
-      "size_bytes": 2507
-    },
-    {
-      "modified_at": "2026-03-23T00:56:39.508075+00:00",
-      "path": "models/saved_ultimate/neutral/gb.pkl",
-      "sha256": "ccc6c6a8e50c463ade5e396ec632a81fddb51bb9cb7fd18174305519cc4e291a",
-      "size_bytes": 128779
-    },
-    {
-      "modified_at": "2026-03-23T00:56:39.536859+00:00",
-      "path": "models/saved_ultimate/neutral/imputer.pkl",
-      "sha256": "43eb9315ae8582281c6bdfcce86d794b8eded583f968a4c4efc34761b25adb80",
-      "size_bytes": 767
-    },
-    {
-      "modified_at": "2026-03-23T00:56:39.505363+00:00",
-      "path": "models/saved_ultimate/neutral/rf.pkl",
-      "sha256": "81c78f8c95ccdb9a097b40ad122007d30b82bf150123cf7cd5315b756a630aee",
-      "size_bytes": 152097
-    },
-    {
-      "modified_at": "2026-03-23T00:56:39.537011+00:00",
-      "path": "models/saved_ultimate/neutral/scaler.pkl",
-      "sha256": "90e367ff938927b00e7dece4c35c9ea5f5d61bb7b1511ee75356157bbc106317",
-      "size_bytes": 1023
-    },
-    {
-      "modified_at": "2026-03-23T00:56:39.536689+00:00",
-      "path": "models/saved_ultimate/neutral/stacking.pkl",
-      "sha256": "4f456e028f03e0a0ac07d76f854d38175861ae04a54cc348e8986b3e42f210d9",
-      "size_bytes": 278187
+      "modified_at": "2026-03-26T05:13:31.331996+00:00",
+      "path": "models/saved_ultimate/q_table_governor.json",
+      "sha256": "9c267ecf0b779ed87d100bd4b07dd973c90b0e3cb20916d4bb7e719262da8e10",
+      "size_bytes": 328
     }
   ],
-  "generated_at": "2026-03-23T00:56:44.252456+00:00",
+  "generated_at": "2026-03-31T01:10:02.258797+00:00",
   "version": 1
 }

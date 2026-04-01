@@ -8,9 +8,10 @@ Two-channel logging:
   - DEBUG log (/private/tmp/apex_debug.log): everything (DEBUG+), for
     post-mortem investigation.
 
-Console mirrors the main log (WARNING+) so stdout stays quiet in prod.
+Console shows warnings/errors plus explicit terminal observability snapshots.
 """
 
+import json
 import logging
 import logging.handlers
 import sys
@@ -85,6 +86,14 @@ class NoDebugFilter(logging.Filter):
     """Block DEBUG records (used on console handler)."""
     def filter(self, record: logging.LogRecord) -> bool:
         return record.levelno > logging.DEBUG
+
+
+class ConsoleObservabilityFilter(logging.Filter):
+    """Allow warnings/errors plus opt-in terminal metrics snapshots."""
+    def filter(self, record: logging.LogRecord) -> bool:
+        return record.levelno >= logging.WARNING or bool(
+            getattr(record, "terminal_metrics", False)
+        )
 
 
 # IBKR connectivity blips (Error 1100/1102) are logged at ERROR by ib_insync
@@ -239,11 +248,12 @@ def setup_logging(
         root.addHandler(debug_handler)
 
     # ------------------------------------------------------------------
-    # 3. Console — mirrors main log (WARNING+ only), coloured on TTY
+    # 3. Console — warnings/errors plus explicit terminal observability snapshots
     # ------------------------------------------------------------------
     if console_output:
         console = logging.StreamHandler(sys.stdout)
-        console.setLevel(logging.WARNING)
+        console.setLevel(logging.INFO)
+        console.addFilter(ConsoleObservabilityFilter())
         is_tty = hasattr(sys.stdout, "isatty") and sys.stdout.isatty()
         console.setFormatter(MainFormatter(use_color=is_tty))
         root.addHandler(console)
@@ -287,6 +297,15 @@ def setup_logging(
 # ---------------------------------------------------------------------------
 # Helpers kept for callers that import them directly
 # ---------------------------------------------------------------------------
+
+def emit_terminal_metrics(logger: logging.Logger, event: str, metrics: Dict[str, Any]) -> None:
+    """Emit a structured observability snapshot to stdout without enabling the full INFO firehose."""
+    payload = {"event": event, **metrics}
+    logger.info(
+        "TERMINAL_METRICS %s",
+        json.dumps(payload, default=str, sort_keys=True, separators=(",", ":")),
+        extra={"terminal_metrics": True},
+    )
 
 class TradingLogger:
     """Thin wrapper — exists for backward compat with existing call sites."""

@@ -42,6 +42,31 @@ import MandateCopilotPanel from "@/components/dashboard/MandateCopilotPanel";
 import SocialGovernorPanel from "@/components/dashboard/SocialGovernorPanel";
 import WalkForwardPanel from "@/components/dashboard/WalkForwardPanel";
 import PortfolioHeatPanel from "@/components/dashboard/PortfolioHeatPanel";
+import RegimeSharpePanel from "@/components/dashboard/RegimeSharpePanel";
+import FactorPnlPanel from "@/components/dashboard/FactorPnlPanel";
+import CorrelationHeatmapPanel from "@/components/dashboard/CorrelationHeatmapPanel";
+import RegimeBacktestPanel from "@/components/dashboard/RegimeBacktestPanel";
+import WssMetricsWidget from "@/components/dashboard/WssMetricsWidget";
+import ICReportPanel from "@/components/dashboard/ICReportPanel";
+import MissionControlPanel from "@/components/dashboard/MissionControlPanel";
+import TradePostMortemPanel from "@/components/dashboard/TradePostMortemPanel";
+import EquityCurvePanel from "@/components/dashboard/EquityCurvePanel";
+import StressPanel from "@/components/dashboard/StressPanel";
+import AttributionPanel from "@/components/dashboard/AttributionPanel";
+import MissedOpportunitiesPanel from "@/components/dashboard/MissedOpportunitiesPanel";
+import AdvancedMetricsPanel from "@/components/dashboard/AdvancedMetricsPanel";
+import TcaReportPanel from "@/components/dashboard/TcaReportPanel";
+import StressScenariosPanel from "@/components/dashboard/StressScenariosPanel";
+import OrderRejectionsPanel from "@/components/dashboard/OrderRejectionsPanel";
+import FeatureIcPanel from "@/components/dashboard/FeatureIcPanel";
+import AbGatePanel from "@/components/dashboard/AbGatePanel";
+import PortfolioWeightsPanel from "@/components/dashboard/PortfolioWeightsPanel";
+import HmmRegimePanel from "@/components/dashboard/HmmRegimePanel";
+import AlertHistoryPanel from "@/components/dashboard/AlertHistoryPanel";
+import PaperAccountPanel from "@/components/dashboard/PaperAccountPanel";
+import ModelRegistryPanel from "@/components/dashboard/ModelRegistryPanel";
+import CrossAssetPairsPanel from "@/components/dashboard/CrossAssetPairsPanel";
+import IVCrushPanel from "@/components/dashboard/IVCrushPanel";
 import SignalHeatmap from "@/components/SignalHeatmap";
 import { Skeleton } from "@/components/ui/skeleton";
 import { useWebSocket } from "@/hooks/useWebSocket";
@@ -70,7 +95,7 @@ import {
   sortIndicator,
 } from "@/lib/formatters";
 
-type DashboardTab = "trading" | "mandate" | "social" | "walkforward" | "heat";
+type DashboardTab = "trading" | "mandate" | "social" | "walkforward" | "heat" | "diagnostics" | "factorpnl" | "corrmap" | "regimebt" | "wssmetrics" | "icreport" | "missioncontrol" | "postmortem" | "equitycurve" | "stress" | "attribution" | "missed" | "advancedmetrics" | "tca" | "stressscenarios" | "orderrejections" | "featureic" | "abgate" | "portfolioweights" | "hmmregime" | "alerts" | "paperaccount" | "modelregistry" | "crossassetpairs" | "ivcrush";
 type LensKey = "performance" | "risk" | "execution";
 type SortDirection = "asc" | "desc";
 type PositionSortKey = "symbol" | "qty" | "entry" | "current" | "pnl" | "pnl_pct" | "signal_direction";
@@ -1399,11 +1424,36 @@ export default function Dashboard({ isPublic = false }: { isPublic?: boolean }) 
         {/* ── Tab Navigation ── */}
         <nav className="flex items-center gap-2 rounded-2xl border border-border/70 bg-background/60 p-1.5">
           {([
+            ["missioncontrol", "Mission Control"],
             ["trading", "Trading"],
             ["mandate", "Mandate Copilot"],
             ["social", "Social Audit"],
             ["walkforward", "Walk-Forward"],
             ["heat", "Portfolio Heat"],
+            ["diagnostics", "Gate Diagnostics"],
+            ["factorpnl", "Factor P&L"],
+            ["corrmap", "Correlation"],
+            ["regimebt", "Regime Backtest"],
+            ["wssmetrics", "WSS Metrics"],
+            ["icreport", "IC / Decay"],
+            ["postmortem", "Post-Mortem"],
+            ["equitycurve", "Equity Curve"],
+            ["stress", "Stress Engine"],
+            ["attribution", "Attribution"],
+            ["missed", "Missed Opps"],
+            ["advancedmetrics", "Risk Metrics"],
+            ["tca", "TCA Report"],
+            ["stressscenarios", "Stress Test"],
+            ["orderrejections", "Rejections"],
+            ["featureic", "Feature IC"],
+            ["abgate", "A/B Gate"],
+            ["portfolioweights", "Portfolio Weights"],
+            ["hmmregime", "HMM Regime"],
+            ["alerts", "Alerts"],
+            ["paperaccount", "Paper Account"],
+            ["modelregistry", "Model Registry"],
+            ["crossassetpairs", "Cross-Asset Pairs"],
+            ["ivcrush", "IV Crush"],
           ] as [DashboardTab, string][]).map(([tab, label]) => (
             <button
               key={tab}
@@ -1419,7 +1469,9 @@ export default function Dashboard({ isPublic = false }: { isPublic?: boolean }) 
           ))}
         </nav>
 
-        {activeTab === "mandate" ? (
+        {activeTab === "missioncontrol" ? (
+          <MissionControlPanel />
+        ) : activeTab === "mandate" ? (
           <MandateCopilotPanel onSessionExpired={handleSessionExpired} />
         ) : activeTab === "social" ? (
           <SocialGovernorPanel socialAudit={cockpit?.social_audit as any} />
@@ -1427,6 +1479,56 @@ export default function Dashboard({ isPublic = false }: { isPublic?: boolean }) 
           <WalkForwardPanel />
         ) : activeTab === "heat" ? (
           <PortfolioHeatPanel />
+        ) : activeTab === "diagnostics" ? (
+          <RegimeSharpePanel />
+        ) : activeTab === "factorpnl" ? (
+          <FactorPnlPanel />
+        ) : activeTab === "corrmap" ? (
+          <CorrelationHeatmapPanel />
+        ) : activeTab === "regimebt" ? (
+          <RegimeBacktestPanel />
+        ) : activeTab === "wssmetrics" ? (
+          <div className="p-4 max-w-sm">
+            <WssMetricsWidget />
+          </div>
+        ) : activeTab === "icreport" ? (
+          <ICReportPanel />
+        ) : activeTab === "postmortem" ? (
+          <TradePostMortemPanel />
+        ) : activeTab === "equitycurve" ? (
+          <EquityCurvePanel />
+        ) : activeTab === "stress" ? (
+          <StressPanel />
+        ) : activeTab === "attribution" ? (
+          <AttributionPanel />
+        ) : activeTab === "missed" ? (
+          <MissedOpportunitiesPanel />
+        ) : activeTab === "advancedmetrics" ? (
+          <AdvancedMetricsPanel />
+        ) : activeTab === "tca" ? (
+          <TcaReportPanel />
+        ) : activeTab === "stressscenarios" ? (
+          <StressScenariosPanel />
+        ) : activeTab === "orderrejections" ? (
+          <OrderRejectionsPanel />
+        ) : activeTab === "featureic" ? (
+          <FeatureIcPanel />
+        ) : activeTab === "abgate" ? (
+          <AbGatePanel />
+        ) : activeTab === "portfolioweights" ? (
+          <PortfolioWeightsPanel />
+        ) : activeTab === "hmmregime" ? (
+          <HmmRegimePanel />
+        ) : activeTab === "alerts" ? (
+          <AlertHistoryPanel />
+        ) : activeTab === "paperaccount" ? (
+          <PaperAccountPanel />
+        ) : activeTab === "modelregistry" ? (
+          <ModelRegistryPanel />
+        ) : activeTab === "crossassetpairs" ? (
+          <CrossAssetPairsPanel />
+        ) : activeTab === "ivcrush" ? (
+          <IVCrushPanel />
         ) : null}
 
 

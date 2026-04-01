@@ -40,9 +40,15 @@ class _DummyPerformanceTracker:
     def __init__(self):
         self.equity_curve = [("2026-01-01T00:00:00", 1_300_000.0)]
         self.reset_calls = []
+        self.rebase_calls = []
 
     async def reset_history(self, *, starting_capital: float, reason: str):
         self.reset_calls.append((float(starting_capital), str(reason)))
+
+    async def rebase_baseline(self, *, starting_capital: float, reason: str, reset_trades: bool = False, clear_benchmark: bool = False):
+        self.rebase_calls.append(
+            (float(starting_capital), str(reason), bool(reset_trades), bool(clear_benchmark))
+        )
 
 
 class _DummyDrawdownBreaker:
@@ -87,7 +93,10 @@ async def test_unified_latch_rebase_for_paper(monkeypatch):
     assert system.risk_manager.starting_capital == 120_000.0
     assert system.risk_manager.peak_capital == 120_000.0
     assert system.risk_manager.day_start_capital == 120_000.0
-    assert system.performance_tracker.reset_calls == [(120_000.0, "unified_latch_reset")]
+    assert system.performance_tracker.rebase_calls == [
+        (120_000.0, "unified_latch_reset", False, False)
+    ]
+    assert system.performance_tracker.reset_calls == []
     assert system.drawdown_breaker.reset_calls == [120_000.0]
     assert system._last_good_total_equity == 120_000.0
     assert "paper_risk_rebase=applied" in notes
@@ -119,7 +128,10 @@ async def test_startup_state_sanitize_rebases_paper_state(monkeypatch):
     assert system.risk_manager.day_start_capital == 100_000.0
     assert system.risk_manager.circuit_breaker.reset_called is True
     assert system.risk_manager.save_called is True
-    assert system.performance_tracker.reset_calls == [(100_000.0, "paper_startup_rebase")]
+    assert system.performance_tracker.rebase_calls == [
+        (100_000.0, "paper_startup_rebase", False, False)
+    ]
+    assert system.performance_tracker.reset_calls == []
     assert system.drawdown_breaker.reset_calls == [100_000.0]
     assert system._last_good_total_equity == 100_000.0
 
@@ -152,7 +164,10 @@ async def test_paper_broker_mix_rebase_when_new_broker_joins(monkeypatch):
     assert system.risk_manager.starting_capital == 1_260_000.0
     assert system.risk_manager.peak_capital == 1_260_000.0
     assert system.risk_manager.day_start_capital == 1_260_000.0
-    assert system.performance_tracker.reset_calls == [(1_260_000.0, "paper_broker_mix_rebase")]
+    assert system.performance_tracker.rebase_calls == [
+        (1_260_000.0, "paper_broker_mix_rebase", False, False)
+    ]
+    assert system.performance_tracker.reset_calls == []
     assert system.drawdown_breaker.reset_calls == [1_260_000.0]
     assert system.equity_outlier_guard.seed_calls == [1_260_000.0]
     assert system.risk_manager.circuit_breaker.reset_called is True

@@ -1,15 +1,15 @@
 import uuid
 import time
 import logging
+import importlib
+from functools import lru_cache
+from types import ModuleType
 from datetime import datetime, timedelta, timezone
 from fastapi import APIRouter, HTTPException, BackgroundTasks
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
-import pandas as pd
-import numpy as np
 
 from config import ApexConfig
-from backtesting.advanced_backtester import AdvancedBacktester
 
 logger = logging.getLogger("api.backtest")
 
@@ -24,9 +24,20 @@ class BacktestRunRequest(BaseModel):
     position_size_usd: float = 5000.0
     use_mock_data: bool = True
 
+
+@lru_cache(maxsize=1)
+def _load_backtest_runtime() -> tuple[ModuleType, ModuleType, type]:
+    """Import heavy backtest dependencies only when the API endpoint is used."""
+    pandas_module = importlib.import_module("pandas")
+    numpy_module = importlib.import_module("numpy")
+    backtester_module = importlib.import_module("backtesting.advanced_backtester")
+    return pandas_module, numpy_module, backtester_module.AdvancedBacktester
+
+
 class MockSignalGenerator:
     def generate_ml_signal(self, symbol, prices):
-        return {'signal': np.random.randn() * 0.5}
+        _, numpy_module, _ = _load_backtest_runtime()
+        return {"signal": float(numpy_module.random.randn() * 0.5)}
 
 def cleanup_expired_reports():
     """Background task to clean up reports older than 7 days."""
@@ -59,22 +70,24 @@ async def run_backtest(
     output_filename = BACKTEST_REPORTS_DIR / f"{report_id}.html"
 
     try:
+        pandas_module, numpy_module, advanced_backtester_cls = _load_backtest_runtime()
+
         # Generate mock data
-        np.random.seed(42)
-        dates = pd.date_range(request.start_date, request.end_date, freq='D')
+        numpy_module.random.seed(42)
+        dates = pandas_module.date_range(request.start_date, request.end_date, freq='D')
         
         data = {}
         for symbol in ['AAPL', 'MSFT', 'GOOGL']:
-            close = 100 + np.random.randn(len(dates)).cumsum()
-            data[symbol] = pd.DataFrame({
-                'Open': close + np.random.randn(len(dates)) * 0.5,
-                'High': close + abs(np.random.randn(len(dates))),
-                'Low': close - abs(np.random.randn(len(dates))),
+            close = 100 + numpy_module.random.randn(len(dates)).cumsum()
+            data[symbol] = pandas_module.DataFrame({
+                'Open': close + numpy_module.random.randn(len(dates)) * 0.5,
+                'High': close + abs(numpy_module.random.randn(len(dates))),
+                'Low': close - abs(numpy_module.random.randn(len(dates))),
                 'Close': close,
-                'Volume': np.random.randint(1000000, 10000000, len(dates))
+                'Volume': numpy_module.random.randint(1000000, 10000000, len(dates))
             }, index=dates)
 
-        backtester = AdvancedBacktester(initial_capital=100000)
+        backtester = advanced_backtester_cls(initial_capital=100000)
         results = backtester.run_backtest(
             data=data,
             signal_generator=MockSignalGenerator(),

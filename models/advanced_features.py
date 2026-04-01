@@ -38,18 +38,18 @@ class FeatureEngine:
         'volume': ['volume_surge', 'obv_zscore', 'mfi_14', 'volume_ma20', 'volume_ma5', 'volume_regime'],
         'intraday': ['intraday_range', 'body_size', 'close_pressure', 'close_pressure_5d',
                      'am_momentum', 'pm_momentum', 'session_reversal'],
-        'microstructure': ['illiquidity', 'illiquidity_surge'],
+        'microstructure': ['illiquidity', 'illiquidity_surge', 'l2_imbalance', 'l2_imbalance_surge'],
         'regime': ['drawdown', 'runup', 'asymmetry', 'regime_bull', 'regime_duration'],
         'dynamics': ['hurst_20d', 'hurst_60d', 'hurst_regime', 'vov_20d', 'tail_risk_ratio'],
         'context': ['sentiment_score', 'momentum_rank'],
         'vwap_microstructure': [
-            'vwap_dev',              # (close - typical_price) / typical_price
-            'vwap_zscore_5d',        # 5-day rolling z-score of vwap_dev
-            'obi_proxy',             # (close - low) / (high - low) — buy/sell pressure
-            'obi_momentum_5d',       # EMA-smoothed OBI proxy
-            'vwap_reversion_signal', # -vwap_zscore_5d * (1 - obi_proxy) → mean-rev long signal
-            'cross_asset_corr_spy',  # 20d rolling corr with SPY (injectable; 0 default)
-            'cross_asset_corr_btc',  # 20d rolling corr with BTC (injectable; 0 default)
+            'vwap_dev',              
+            'vwap_zscore_5d',        
+            'obi_proxy',             
+            'obi_momentum_5d',       
+            'vwap_reversion_signal', 
+            'cross_asset_corr_spy',  
+            'cross_asset_corr_btc',  
         ]
     }
     
@@ -64,8 +64,10 @@ class FeatureEngine:
         for group_features in self.FEATURE_GROUPS.values():
             self.feature_names.extend(group_features)
     
-    def extract_features_vectorized(self, data: Union[pd.Series, pd.DataFrame]) -> pd.DataFrame:
-        """🚀 VECTORIZED: Extract all features at once including Volume and Intraday factors."""
+    def extract_features_vectorized(self, data: Union[pd.Series, pd.DataFrame],
+                                    spy_returns: Optional[pd.Series] = None,
+                                    btc_returns: Optional[pd.Series] = None) -> pd.DataFrame:
+        """🚀 VECTORIZED: Extract all features at once including L2 Imbalance and Cross-Asset Beta."""
         if isinstance(data, pd.Series):
             p = data
             df = pd.DataFrame(index=p.index)
@@ -237,6 +239,22 @@ class FeatureEngine:
         else:
             df['illiquidity'] = 0.0
             df['illiquidity_surge'] = 1.0
+            
+        # 🚀 PHASE 1: LEVEL-2 ORDER BOOK IMBALANCE
+        if 'bid_size' in data and 'ask_size' in data:
+            bid, ask = data['bid_size'], data['ask_size']
+            df['l2_imbalance'] = (bid - ask) / (bid + ask + 1e-8)
+            df['l2_imbalance_surge'] = df['l2_imbalance'] - df['l2_imbalance'].rolling(10).mean()
+        else:
+            # Micro-structure approximation using tick pressure if L2 missing
+            df['l2_imbalance'] = pd.Series(0.0, index=df.index)
+            df['l2_imbalance_surge'] = pd.Series(0.0, index=df.index)
+            if h is not None and low_px is not None:
+                # Approximate buying pressure vs selling pressure
+                tick_buy = (p - low_px)
+                tick_sell = (h - p)
+                df['l2_imbalance'] = (tick_buy - tick_sell) / (tick_buy + tick_sell + 1e-8)
+                df['l2_imbalance_surge'] = df['l2_imbalance'] - df['l2_imbalance'].rolling(10).mean()
         
         # Closing auction pressure (institutions showing hand)
         if h is not None and low_px is not None and o is not None:
@@ -386,10 +404,18 @@ class FeatureEngine:
             df['obi_momentum_5d'] = 0.5
             df['vwap_reversion_signal'] = 0.0
 
-        # Cross-asset correlation stubs — injectable by the signal generator when
-        # SPY/BTC reference series are available; default 0 for single-symbol mode.
-        df['cross_asset_corr_spy'] = 0.0
-        df['cross_asset_corr_btc'] = 0.0
+        # 🚀 PHASE 1: CROSS-ASSET BETA TRACKING
+        if spy_returns is not None:
+            aligned_spy = spy_returns.reindex(returns.index).fillna(0)
+            df['cross_asset_corr_spy'] = returns.rolling(20).corr(aligned_spy).fillna(0)
+        else:
+            df['cross_asset_corr_spy'] = 0.0
+            
+        if btc_returns is not None:
+            aligned_btc = btc_returns.reindex(returns.index).fillna(0)
+            df['cross_asset_corr_btc'] = returns.rolling(20).corr(aligned_btc).fillna(0)
+        else:
+            df['cross_asset_corr_btc'] = 0.0
 
         return df.fillna(0).replace([np.inf, -np.inf], 0)
     
@@ -397,7 +423,9 @@ class FeatureEngine:
             self, 
             data: Union[pd.Series, pd.DataFrame],
             sentiment_score: Optional[float] = None,
-            momentum_rank: Optional[float] = None
+            momentum_rank: Optional[float] = None,
+            spy_returns: Optional[pd.Series] = None,
+            btc_returns: Optional[pd.Series] = None
         ) -> Tuple[np.ndarray, float]:
         """Extract features for single prediction (most recent data)."""
         if len(data) < self.lookback:
@@ -405,7 +433,11 @@ class FeatureEngine:
     
         # Use vectorized extraction on recent window
         window = data.iloc[-300:] if len(data) > 300 else data
-        df_features = self.extract_features_vectorized(window)
+        df_features = self.extract_features_vectorized(
+            window, 
+            spy_returns=spy_returns, 
+            btc_returns=btc_returns
+        )
 
         # ✅ BUG FIX: Ensure all required features exist and are correctly ordered
         for feat in self.feature_names:
@@ -434,3 +466,81 @@ class FeatureEngine:
         data_quality = non_zero / len(features) if len(features) > 0 else 0.0
         
         return features, data_quality
+
+    @staticmethod
+    def compute_triple_barrier(
+        df: pd.DataFrame, 
+        pt_mult: float = 1.5, 
+        sl_mult: float = 1.0, 
+        max_bars: int = 60
+    ) -> pd.Series:
+        """
+        Compute Triple-Barrier labels for metalabeling architecture.
+        
+        Upper Barrier (Take Profit)
+        Lower Barrier (Stop Loss)
+        Vertical Barrier (Time Limit)
+        
+        Returns:
+            pd.Series containing 1 (Upper Barrier touched first), 
+            or 0 (Lower/Vertical Barrier hit first).
+        """
+        labels = pd.Series(0, index=df.index, dtype=int)
+        
+        # Require High, Low, Close for accurate pricing
+        if not all(col in df.columns for col in ['High', 'Low', 'Close']):
+            logger.warning("Triple-barrier requires High/Low/Close columns. Falling back to naive return target.")
+            # Fallback for synthetic/incomplete datasets
+            p = df.get('Close', df.iloc[:, 0])
+            returns = p.pct_change(max_bars).shift(-max_bars)
+            return (returns > 0.005).astype(int)
+
+        # Convert to fast numpy arrays
+        c = df['Close'].values
+        h = df['High'].values
+        l = df['Low'].values
+        n = len(c)
+        
+        # Approximate ATR dynamically
+        # Standard ATR 14 implementation in numpy
+        prev_close = np.roll(c, 1)
+        prev_close[0] = c[0]
+        tr1 = h - l
+        tr2 = np.abs(h - prev_close)
+        tr3 = np.abs(l - prev_close)
+        tr = np.maximum(np.maximum(tr1, tr2), tr3)
+        
+        # Simple rolling mean for ATR
+        atr = np.zeros_like(c)
+        lookback = 14
+        for i in range(n):
+            if i < lookback:
+                atr[i] = np.mean(tr[:i+1])
+            else:
+                atr[i] = np.mean(tr[i-lookback+1:i+1])
+        
+        # Prevent division by zero and tiny ATRs
+        min_atr = c * 0.002
+        atr = np.maximum(atr, min_atr)
+        
+        label_vals = np.zeros(n, dtype=int)
+        
+        # Inner loop over events - Numba is ideal here, but pure python with numpy is ok for arrays < 50k
+        for i in range(n - 1):
+            entry_price = c[i]
+            upper_barrier = entry_price + (atr[i] * pt_mult)
+            lower_barrier = entry_price - (atr[i] * sl_mult)
+            
+            # Look forward up to max_bars
+            limit = min(n, i + max_bars + 1)
+            
+            for j in range(i + 1, limit):
+                if h[j] >= upper_barrier:
+                    label_vals[i] = 1
+                    break
+                elif l[j] <= lower_barrier:
+                    label_vals[i] = 0
+                    break
+        
+        labels.iloc[:] = label_vals
+        return labels

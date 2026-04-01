@@ -394,9 +394,19 @@ class SignalEnhancer:
             trend_str = float(np.abs(np.mean(returns)) / (np.std(returns) + 1e-10))
             comps["adx_proxy"] = min(1.0, trend_str)
 
-        net = (comps.get("mom_1", 0.0) * 0.4
-               + comps.get("mom_5", 0.0) * 0.4
-               + comps.get("vol_signal", 0.0) * 0.2)
+        # Calibration: less weight on 1-bar noise (especially for crypto)
+        # More weight on 5-bar trend and volume conviction
+        w1, w5, wv = 0.25, 0.45, 0.30
+        
+        # High confidence override: if ML signal is strong (>0.4), 
+        # reduce the penalty of the 1-bar momentum if it is opposing
+        if abs(raw_signal) > 0.4 and (raw_signal * comps.get("mom_1", 0.0)) < 0:
+            w1 *= 0.5
+            wv += 0.125
+            
+        net = (comps.get("mom_1", 0.0) * w1
+               + comps.get("mom_5", 0.0) * w5
+               + comps.get("vol_signal", 0.0) * wv)
         return float(net), comps
 
     # ------------------------------------------------------------------

@@ -228,9 +228,16 @@ start_retraining() {
     return
   fi
   cd "$BASE_DIR"
-  nohup bash -c "while true; do \"$BASE_DIR/venv/bin/python\" scripts/train_god_level_models.py; sleep 86400; done" > "$LOG_DIR/retraining_daemon.log" 2>&1 < /dev/null &
+  local runtime_env="${APEX_ENVIRONMENT:-${APEX_ENV:-${ENV:-prod}}}"
+  runtime_env="$(printf '%s' "$runtime_env" | tr '[:upper:]' '[:lower:]')"
+  local default_retrain_interval_seconds="86400"
+  if [[ "$runtime_env" == "dev" || "$runtime_env" == "development" || "$runtime_env" == "local" ]]; then
+    default_retrain_interval_seconds="604800"
+  fi
+  local retrain_interval_seconds="${APEX_RETRAIN_INTERVAL_SECONDS:-$default_retrain_interval_seconds}"
+  nohup bash -c "while true; do \"$BASE_DIR/venv/bin/python\" scripts/train_god_level_models.py; sleep \"$retrain_interval_seconds\"; done" > "$LOG_DIR/retraining_daemon.log" 2>&1 < /dev/null &
   echo $! > "$RETRAINING_PID_FILE"
-  echo "Started retraining daemon (PID $(read_pid "$RETRAINING_PID_FILE"))"
+  echo "Started retraining daemon (PID $(read_pid "$RETRAINING_PID_FILE")) with interval ${retrain_interval_seconds}s"
 }
 
 stop_service() {

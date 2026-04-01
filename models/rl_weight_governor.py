@@ -63,15 +63,34 @@ class RLWeightGovernor:
         if self.q_table_path.exists():
             try:
                 with open(self.q_table_path, "r") as f:
-                    self.q_table = json.load(f)
-                logger.info("✅ RL Governor Q-Table Loaded Successfully.")
+                    data = json.load(f)
+                # Support both legacy format (plain dict) and new format (with metadata)
+                if isinstance(data, dict) and "q_table" in data:
+                    self.q_table = data["q_table"]
+                    self.epsilon = float(data.get("epsilon", self.epsilon))
+                    self._total_updates = int(data.get("total_updates", 0))
+                else:
+                    # Legacy: raw q_table dict
+                    self.q_table = data
+                n_states = len(self.q_table)
+                logger.info(
+                    "✅ RL Governor Q-Table loaded: %d states, epsilon=%.3f, updates=%d",
+                    n_states, self.epsilon, getattr(self, '_total_updates', 0),
+                )
             except Exception as e:
                 logger.warning(f"Failed to load Q-Table: {e}. Starting fresh.")
                 
     def _save_q_table(self):
         try:
-            with open(self.q_table_path, "w") as f:
-                json.dump(self.q_table, f)
+            payload = {
+                "q_table": self.q_table,
+                "epsilon": self.epsilon,
+                "total_updates": getattr(self, '_total_updates', 0),
+            }
+            tmp = self.q_table_path.with_suffix(".tmp")
+            with open(tmp, "w") as f:
+                json.dump(payload, f)
+            tmp.replace(self.q_table_path)
         except Exception as e:
             logger.warning(f"Failed to save RL Q-Table: {e}")
 
@@ -193,8 +212,31 @@ class RLWeightGovernor:
         }
 
 
-# Global Singleton Integration Ready
-_governor = RLWeightGovernor()
+# ── Global singleton ─────────────────────────────────────────────────────────
+# Uses ApexConfig.MODELS_DIR if available; falls back to a relative path.
+# Call init_rl_governor(model_dir) at startup to ensure the correct absolute path.
+
+def _resolve_model_dir() -> str:
+    try:
+        from config import ApexConfig
+        return str(ApexConfig.MODELS_DIR)
+    except Exception:
+        return "models/saved"
+
+
+_governor: RLWeightGovernor = RLWeightGovernor(model_dir=_resolve_model_dir())
+
+
+def init_rl_governor(model_dir: str) -> RLWeightGovernor:
+    """
+    (Re)initialize the global RL governor with an explicit model_dir.
+    Call this at engine startup so the Q-table is loaded from the correct path.
+    Returns the governor instance.
+    """
+    global _governor
+    _governor = RLWeightGovernor(model_dir=model_dir)
+    return _governor
+
 
 def get_rl_weights(regime: str, is_high_volatility: bool = False) -> Dict[str, float]:
     return _governor.get_optimal_weights(regime, is_high_volatility)

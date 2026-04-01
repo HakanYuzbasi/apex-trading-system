@@ -84,8 +84,8 @@ class PerformanceGovernor:
     }
     _CONTROLS: Dict[GovernorTier, Tuple[float, float, float, bool]] = {
         GovernorTier.GREEN: (1.00, 0.00, 0.00, False),
-        GovernorTier.YELLOW: (0.75, 0.03, 0.05, False),
-        GovernorTier.ORANGE: (0.50, 0.07, 0.10, False),
+        GovernorTier.YELLOW: (0.75, 0.02, 0.03, False),
+        GovernorTier.ORANGE: (0.50, 0.04, 0.06, False),
         GovernorTier.RED: (0.25, 0.12, 0.20, True),
     }
 
@@ -297,16 +297,16 @@ class PerformanceGovernor:
     def save_state(self, path: "str | Path") -> None:
         """Persist rolling samples and tier state to disk."""
         try:
+            def _safe_ts(ts: datetime) -> str:
+                # Always write naive UTC (strip tzinfo) for consistent load_state behaviour
+                return ts.replace(tzinfo=None).isoformat() if ts.tzinfo else ts.isoformat()
+
             state = {
                 "tier": self._tier.value,
                 "recovery_streak": self._recovery_streak,
-                "last_sample_time": (
-                    self._last_sample_time.isoformat()
-                    if self._last_sample_time is not None
-                    else None
-                ),
+                "last_sample_time": _safe_ts(self._last_sample_time) if self._last_sample_time else None,
                 "samples": [
-                    [ts.isoformat(), float(val)]
+                    [_safe_ts(ts), float(val)]
                     for ts, val in self._samples
                 ],
             }
@@ -320,7 +320,7 @@ class PerformanceGovernor:
     def load_state(self, path: "str | Path") -> bool:
         """
         Restore samples and tier from disk.  Returns True on success.
-        Silently ignores missing or corrupt files.
+        Silently ignores missing or corrupt files (bad rows, None values, tz conflicts).
         """
         try:
             p = Path(path)
@@ -332,18 +332,30 @@ class PerformanceGovernor:
             tier_val = state.get("tier", "green")
             self._tier = GovernorTier(tier_val) if tier_val in GovernorTier._value2member_map_ else GovernorTier.GREEN
             self._recovery_streak = int(state.get("recovery_streak", 0))
+
             last_ts = state.get("last_sample_time")
             if last_ts:
-                parsed = datetime.fromisoformat(last_ts)
-                # Always store as naive UTC to match datetime.now() used in update()
-                self._last_sample_time = parsed.replace(tzinfo=None) if parsed.tzinfo else parsed
+                try:
+                    parsed = datetime.fromisoformat(str(last_ts))
+                    self._last_sample_time = parsed.replace(tzinfo=None) if parsed.tzinfo else parsed
+                except (ValueError, TypeError):
+                    self._last_sample_time = None
+
             samples_raw = state.get("samples", [])
             self._samples = []
             for row in samples_raw[-self.lookback_points:]:
-                ts_str, val = row
-                parsed = datetime.fromisoformat(ts_str)
-                ts = parsed.replace(tzinfo=None) if parsed.tzinfo else parsed
-                self._samples.append((ts, float(val)))
+                try:
+                    if not isinstance(row, (list, tuple)) or len(row) < 2:
+                        continue
+                    ts_str, val = row[0], row[1]
+                    if ts_str is None or val is None:
+                        continue
+                    parsed = datetime.fromisoformat(str(ts_str))
+                    ts = parsed.replace(tzinfo=None) if parsed.tzinfo else parsed
+                    self._samples.append((ts, float(val)))
+                except (ValueError, TypeError, AttributeError):
+                    logger.debug("PerformanceGovernor: skipping malformed sample row: %r", row)
+                    continue
 
             # Re-compute snapshot from restored samples
             if len(self._samples) >= self.min_samples:

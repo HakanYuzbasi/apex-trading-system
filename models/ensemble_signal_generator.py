@@ -26,8 +26,15 @@ from sklearn.linear_model import LogisticRegression
 from sklearn.preprocessing import StandardScaler
 from sklearn.impute import SimpleImputer
 from sklearn.metrics import accuracy_score
-import xgboost as xgb
-import lightgbm as lgb
+try:
+    import xgboost as xgb
+except ImportError:
+    xgb = None  # type: ignore[assignment]
+
+try:
+    import lightgbm as lgb
+except ImportError:
+    lgb = None  # type: ignore[assignment]
 from joblib import dump, load
 from models.regime_common import get_regime
 
@@ -247,6 +254,8 @@ class EnsembleSignalGenerator:
         
         # XGBoost
         try:
+            if xgb is None:
+                raise ImportError("xgboost not installed")
             xgb_model = xgb.XGBClassifier(
                 n_estimators=100, max_depth=5, learning_rate=0.05,
                 subsample=0.8, colsample_bytree=0.8, random_state=42, verbosity=0
@@ -259,6 +268,8 @@ class EnsembleSignalGenerator:
         
         # LightGBM
         try:
+            if lgb is None:
+                raise ImportError("lightgbm not installed")
             lgb_model = lgb.LGBMClassifier(
                 n_estimators=100, max_depth=5, learning_rate=0.05,
                 subsample=0.8, random_state=42, verbose=-1
@@ -543,7 +554,7 @@ class EnsembleSignalGenerator:
                 
                 # XGBoost special handling
                 xgb_path = f"{regime_dir}/xgb.json"
-                if os.path.exists(xgb_path):
+                if os.path.exists(xgb_path) and xgb is not None:
                     model = xgb.XGBClassifier()
                     model.load_model(xgb_path)
                     self.regime_models[regime]['xgb'] = model

@@ -417,6 +417,25 @@ class IBKRConnector:
         if errorCode == 10141:
             self._fatal_error = f"Error {errorCode}: {errorString}"
             logger.critical(f"❌ IBKR UNRECOVERABLE ERROR: {self._fatal_error}")
+        elif errorCode in (201, 202):
+            # 201: Order rejected by risk management
+            # 202: Order cancelled by broker
+            sym = getattr(contract, "symbol", "?") if contract is not None else "?"
+            logger.error(
+                "❌ IBKR order rejected (reqId=%d, code=%d, sym=%s): %s",
+                reqId, errorCode, sym, errorString,
+            )
+        elif errorCode in (103, 110, 399, 10147, 10148):
+            # 103: Invalid contract, 110: Invalid price, 399: cannot place
+            # 10147/10148: account risk / position size limit
+            sym = getattr(contract, "symbol", "?") if contract is not None else "?"
+            logger.warning(
+                "⚠️ IBKR order warning (reqId=%d, code=%d, sym=%s): %s",
+                reqId, errorCode, sym, errorString,
+            )
+        elif errorCode < 1000 and errorCode not in (0, 2104, 2106, 2158):
+            # Log other non-info error codes at debug level to avoid noise
+            logger.debug("IBKR api message (reqId=%d, code=%d): %s", reqId, errorCode, errorString)
 
     def _on_disconnected(self):
         """Handle disconnection from IBKR."""
@@ -461,9 +480,41 @@ class IBKRConnector:
         self._persistently_down = True
         logger.error(
             "❌ IBKR persistently down after %d reconnect attempts – "
-            "execution loop will degrade to Alpaca-only (Upgrade A)",
+            "execution loop will degrade to Alpaca-only; background recovery loop started",
             max_retries,
         )
+        # Spawn a persistent background recovery task that keeps retrying every 5 minutes
+        # so that a TWS restart or network recovery is picked up without needing an engine restart.
+        asyncio.ensure_future(self._persistent_recovery_loop())
+
+    async def _persistent_recovery_loop(self):
+        """
+        Background loop that keeps retrying IBKR connection every IBKR_RECOVERY_INTERVAL_SECONDS
+        (default: 300s) once _persistently_down has been set.  Exits when connection succeeds or
+        when _fatal_error is set.
+        """
+        from config import ApexConfig
+        interval = float(getattr(ApexConfig, "IBKR_RECOVERY_INTERVAL_SECONDS", 300.0))
+        attempt = 0
+        while self._persistently_down and not self._fatal_error:
+            await asyncio.sleep(interval)
+            if not self._persistently_down or self._fatal_error:
+                return
+            attempt += 1
+            logger.info("🔄 IBKR recovery attempt #%d (background loop)...", attempt)
+            try:
+                self.ib.disconnect()
+            except Exception:
+                pass
+            await asyncio.sleep(1.0)
+            try:
+                await self.connect()
+                self._reconnect_failure_count = 0
+                self._persistently_down = False
+                logger.info("✅ IBKR recovered after %d background attempt(s)", attempt)
+                return
+            except Exception as e:
+                logger.warning("🔁 IBKR recovery attempt #%d failed: %s — retrying in %.0fs", attempt, e, interval)
 
     def set_data_callback(self, callback: Callable[[str], None]):
         """Set callback to be called on every data update (for heartbeat monitoring)."""
@@ -1571,8 +1622,10 @@ class IBKRConnector:
                 elif trade.orderStatus.status in ['Cancelled', 'ApiCancelled', 'Inactive']:
                     error_msg = ""
                     if trade.log:
-                        error_msg = f" - {trade.log[-1].message}"
-                    logger.error(f"❌ Order {action} {quantity} {symbol} cancelled{error_msg}")
+                        last_entry = trade.log[-1]
+                        code_tag = f"[{last_entry.errorCode}] " if getattr(last_entry, "errorCode", 0) else ""
+                        error_msg = f" - {code_tag}{last_entry.message}" if last_entry.message else ""
+                    logger.error(f"❌ Order {action} {quantity} {symbol} cannot be placed{error_msg}")
                     return None
 
             # Timeout - cancel the order
@@ -1685,9 +1738,14 @@ class IBKRConnector:
                 }
             
             else:
-                logger.error(f"❌ Limit order rejected for {symbol}, status: {status}")
+                error_msg = ""
+                if trade.log:
+                    last_entry = trade.log[-1]
+                    code_tag = f"[{last_entry.errorCode}] " if getattr(last_entry, "errorCode", 0) else ""
+                    error_msg = f" - {code_tag}{last_entry.message}" if last_entry.message else ""
+                logger.error(f"❌ Limit order rejected for {symbol}, status: {status}{error_msg}")
                 return None
-            
+
         except Exception as e:
             logger.error(f"❌ Limit order error: {e}")
             return None
@@ -1802,6 +1860,12 @@ class IBKRConnector:
                             "execution_algo": "PASSIVE_LIMIT",
                         }
                     if status in ["Cancelled", "ApiCancelled", "Inactive"]:
+                        _sor_err = ""
+                        if active_trade and active_trade.log:
+                            _last = active_trade.log[-1]
+                            _code_tag = f"[{_last.errorCode}] " if getattr(_last, "errorCode", 0) else ""
+                            _sor_err = f" — {_code_tag}{_last.message}" if _last.message else ""
+                        logger.warning("⚠️ SOR [%s] step %d rejected (%s)%s — falling back", symbol, step, status, _sor_err)
                         break  # Move to next step
 
             # Fallback — sweep the book with a market order

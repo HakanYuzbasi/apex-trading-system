@@ -286,6 +286,29 @@ class TestSignalConsensusEngine:
         weights = self.engine._calculate_dynamic_weights("neutral")
         assert weights["a"] > weights["b"]
 
+    def test_accuracy_weights_use_recent_history(self):
+        """Recent losses should matter more than stale wins."""
+        for _ in range(30):
+            self.engine.record_outcome("AAPL", {"a": 0.6, "b": 0.6, "c": 0.6}, 0.02)
+        for _ in range(30):
+            self.engine.record_outcome("AAPL", {"a": 0.6, "b": -0.6, "c": -0.6}, -0.02)
+
+        perf_a = self.engine.performance["a"]
+        perf_b = self.engine.performance["b"]
+        assert perf_a.accuracy_30d < perf_b.accuracy_30d
+
+    def test_precomputed_consensus_evaluation(self):
+        """Execution loop can evaluate consensus from already-computed signals."""
+        result = self.engine.evaluate_precomputed_signals(
+            symbol="AAPL",
+            generator_signals={"a": 0.5, "b": 0.4, "c": 0.3},
+            generator_confidences={"a": 0.8, "b": 0.7, "c": 0.6},
+            prices=make_prices(200),
+        )
+        assert result.vetoed is False
+        assert result.consensus_signal > 0
+        assert result.consensus_confidence > 0
+
     def test_generator_failure_handled(self):
         """Engine should handle generator exceptions gracefully."""
         from models.signal_consensus_engine import SignalConsensusEngine

@@ -140,6 +140,25 @@ class IntradayStressEngine:
         if not normalized_positions:
             return self.idle_state(reason="no_positions")
 
+        # Guard: skip stress evaluation when gross exposure is too small to produce
+        # meaningful percentage-based stress returns. On tiny portfolios (e.g. a single
+        # crypto position worth <$5k) the COVID-crash PnL normalises to extreme negatives
+        # (e.g. -59355%) which is a false positive halt. Stress risk is immaterial at this
+        # portfolio size anyway.
+        gross_exposure = sum(
+            abs(float(qty)) * float(normalized_prices.get(sym, 0.0))
+            for sym, qty in normalized_positions.items()
+        )
+        min_stress_exposure = float(getattr(
+            __import__("config", fromlist=["ApexConfig"]).ApexConfig,
+            "INTRADAY_STRESS_MIN_EXPOSURE",
+            5000.0,
+        ) if True else 5000.0)
+        if gross_exposure < min_stress_exposure:
+            return self.idle_state(
+                reason=f"gross_exposure_too_small:{gross_exposure:.0f}<{min_stress_exposure:.0f}"
+            )
+
         tester = PortfolioStressTest(
             positions=normalized_positions,
             prices=normalized_prices,

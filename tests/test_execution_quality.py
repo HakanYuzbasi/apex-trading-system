@@ -126,6 +126,14 @@ class TestSizingPenalty:
         penalty = t.get_sizing_penalty("AAPL")
         assert penalty >= 0.70
 
+    def test_regime_penalty_applied_for_poor_execution_window(self):
+        t = _make_tracker(penalty_p95_bps=10.0, penalty_floor=0.70, min_fills_for_penalty=3)
+        for _ in range(5):
+            _fill(t, regime="crisis", expected=200.0, fill=202.0)
+        penalty = t.get_regime_sizing_penalty("crisis")
+        assert penalty < 1.0
+        assert penalty >= 0.70
+
 
 class TestBrokerRegimeSummary:
 

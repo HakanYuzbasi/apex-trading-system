@@ -15,11 +15,12 @@ from __future__ import annotations
 
 import json
 import logging
-from dataclasses import dataclass, asdict
+from dataclasses import dataclass, asdict, field
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Dict, List, Optional, Any
 
+from core.entry_policy import select_dominant_generator, normalize_generator_signals
 from core.symbols import normalize_symbol
 
 logger = logging.getLogger(__name__)
@@ -48,6 +49,8 @@ class EntryAttribution:
     tech_signal: float = 0.0
     sentiment_signal: float = 0.0
     cs_momentum_signal: float = 0.0
+    dominant_generator: str = "composite"
+    generator_signals: Dict[str, float] = field(default_factory=dict)
 
 
 @dataclass
@@ -82,6 +85,8 @@ class ClosedTradeAttribution:
     tech_signal: float = 0.0
     sentiment_signal: float = 0.0
     cs_momentum_signal: float = 0.0
+    dominant_generator: str = "composite"
+    generator_signals: Dict[str, float] = field(default_factory=dict)
 
 
 class PerformanceAttributionTracker:
@@ -138,6 +143,20 @@ class PerformanceAttributionTracker:
             right = float(incoming.get(field, default) or default)
             return ((left * existing_qty) + (right * incoming_qty)) / total_qty
 
+        def _weighted_generator_signals() -> Dict[str, float]:
+            left = normalize_generator_signals(existing.get("generator_signals", {}))
+            right = normalize_generator_signals(incoming.get("generator_signals", {}))
+            names = set(left) | set(right)
+            if not names:
+                return {}
+            merged_signals: Dict[str, float] = {}
+            for name in names:
+                merged_signals[name] = (
+                    ((left.get(name, 0.0) * existing_qty) + (right.get(name, 0.0) * incoming_qty))
+                    / total_qty
+                )
+            return merged_signals
+
         merged = dict(existing)
         merged.update(incoming)
         merged["symbol"] = canonical_symbol
@@ -152,6 +171,8 @@ class PerformanceAttributionTracker:
             "entry_slippage_bps",
         ):
             merged[field] = _weighted(field)
+        merged["generator_signals"] = _weighted_generator_signals()
+        merged["dominant_generator"] = select_dominant_generator(merged["generator_signals"])
 
         try:
             existing_time = str(existing.get("entry_time") or "")
@@ -214,12 +235,20 @@ class PerformanceAttributionTracker:
         tech_signal: float = 0.0,
         sentiment_signal: float = 0.0,
         cs_momentum_signal: float = 0.0,
+        dominant_generator: Optional[str] = None,
+        generator_signals: Optional[Dict[str, float]] = None,
     ) -> None:
         """Record/refresh open position attribution context."""
         if quantity <= 0 or entry_price <= 0:
             return
 
         canonical_symbol = self._canonical_symbol(symbol)
+        normalized_generator_signals = normalize_generator_signals(generator_signals)
+        resolved_dominant_generator = (
+            str(dominant_generator).lower()
+            if dominant_generator
+            else select_dominant_generator(normalized_generator_signals)
+        )
 
         entry = EntryAttribution(
             symbol=canonical_symbol,
@@ -242,6 +271,8 @@ class PerformanceAttributionTracker:
             tech_signal=float(tech_signal or 0.0),
             sentiment_signal=float(sentiment_signal or 0.0),
             cs_momentum_signal=float(cs_momentum_signal or 0.0),
+            dominant_generator=resolved_dominant_generator,
+            generator_signals=normalized_generator_signals,
         )
         self.open_positions[canonical_symbol] = self._merge_open_position_rows(
             self.open_positions.get(canonical_symbol),
@@ -361,6 +392,11 @@ class PerformanceAttributionTracker:
             tech_signal=float(entry_ctx.get("tech_signal", 0.0) or 0.0),
             sentiment_signal=float(entry_ctx.get("sentiment_signal", 0.0) or 0.0),
             cs_momentum_signal=float(entry_ctx.get("cs_momentum_signal", 0.0) or 0.0),
+            dominant_generator=str(
+                entry_ctx.get("dominant_generator")
+                or select_dominant_generator(entry_ctx.get("generator_signals", {}))
+            ).lower(),
+            generator_signals=normalize_generator_signals(entry_ctx.get("generator_signals", {})),
         )
         self.closed_trades.append(asdict(closed))
         if len(self.closed_trades) > self.max_closed_trades:
@@ -569,6 +605,83 @@ class PerformanceAttributionTracker:
             b["avg_holding_hours"] = round(b["avg_holding_hours"] / t, 2)
 
         return {"lookback_days": lookback_days, "by_signal_source": result}
+
+    def get_expectancy_ledger(
+        self,
+        lookback_days: int = 60,
+        min_trades: int = 5,
+    ) -> Dict[str, Any]:
+        cutoff = datetime.now() - timedelta(days=max(1, int(lookback_days)))
+        by_bucket: Dict[str, Dict[str, Any]] = {}
+
+        for row in self.closed_trades:
+            try:
+                exit_dt = datetime.fromisoformat(str(row.get("exit_time")))
+            except Exception:
+                continue
+            if exit_dt < cutoff:
+                continue
+
+            asset_class = str(row.get("asset_class", "UNKNOWN")).upper()
+            regime = str(row.get("governor_regime", "unknown")).lower()
+            dominant_generator = str(
+                row.get("dominant_generator")
+                or select_dominant_generator(row.get("generator_signals", {}))
+            ).lower()
+            key = f"{asset_class}|{regime}|{dominant_generator}"
+            bucket = by_bucket.setdefault(
+                key,
+                {
+                    "asset_class": asset_class,
+                    "regime": regime,
+                    "dominant_generator": dominant_generator,
+                    "trades": 0,
+                    "wins": 0,
+                    "net_pnl": 0.0,
+                    "total_pnl_bps": 0.0,
+                    "total_confidence": 0.0,
+                    "total_signal": 0.0,
+                    "modeled_execution_drag": 0.0,
+                },
+            )
+            bucket["trades"] += 1
+            net_pnl = float(row.get("net_pnl", 0.0) or 0.0)
+            bucket["net_pnl"] += net_pnl
+            bucket["wins"] += int(net_pnl > 0.0)
+            bucket["total_pnl_bps"] += float(row.get("pnl_bps_on_entry_notional", 0.0) or 0.0)
+            bucket["total_confidence"] += float(row.get("entry_confidence", 0.0) or 0.0)
+            bucket["total_signal"] += abs(float(row.get("entry_signal", 0.0) or 0.0))
+            bucket["modeled_execution_drag"] += float(
+                row.get("modeled_execution_drag", 0.0) or 0.0
+            )
+
+        eligible_bucket_count = 0
+        for bucket in by_bucket.values():
+            trades = max(1, int(bucket["trades"]))
+            bucket["losses"] = trades - int(bucket["wins"])
+            bucket["win_rate"] = round(float(bucket["wins"] / trades), 4)
+            bucket["avg_net_pnl"] = round(float(bucket["net_pnl"] / trades), 4)
+            bucket["avg_pnl_bps"] = round(float(bucket["total_pnl_bps"] / trades), 2)
+            bucket["avg_confidence"] = round(float(bucket["total_confidence"] / trades), 4)
+            bucket["avg_signal_abs"] = round(float(bucket["total_signal"] / trades), 4)
+            bucket["avg_modeled_execution_drag"] = round(
+                float(bucket["modeled_execution_drag"] / trades),
+                4,
+            )
+            bucket["eligible"] = trades >= max(1, int(min_trades))
+            if bucket["eligible"]:
+                eligible_bucket_count += 1
+            del bucket["total_pnl_bps"]
+            del bucket["total_confidence"]
+            del bucket["total_signal"]
+
+        return {
+            "lookback_days": int(lookback_days),
+            "min_trades": int(min_trades),
+            "bucket_count": len(by_bucket),
+            "eligible_bucket_count": eligible_bucket_count,
+            "by_bucket": by_bucket,
+        }
 
     def record_social_governor_impact(
         self,

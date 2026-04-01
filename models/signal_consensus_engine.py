@@ -31,15 +31,17 @@ class GeneratorPerformance:
     generator_name: str
     total_signals: int = 0
     correct_signals: int = 0
+    correct_history: List[int] = field(default_factory=list)
     returns_history: List[float] = field(default_factory=list)
     weight: float = 0.333
     last_updated: datetime = field(default_factory=datetime.now)
 
     @property
     def accuracy_30d(self) -> float:
-        if self.total_signals < 5:
+        if len(self.correct_history) < 5:
             return 0.50
-        return self.correct_signals / max(1, self.total_signals)
+        recent = self.correct_history[-30:]
+        return float(np.mean(recent)) if recent else 0.50
 
     @property
     def sharpe_30d(self) -> float:
@@ -137,7 +139,6 @@ class SignalConsensusEngine:
         """
         signals: Dict[str, float] = {}
         confidences: Dict[str, float] = {}
-        now = datetime.now()
 
         # Run each generator
         for name, gen in self.generators.items():
@@ -152,55 +153,90 @@ class SignalConsensusEngine:
         # Check minimum generator count
         if len(signals) < self.min_generators:
             return self._vetoed_result(
-                symbol, now, signals, confidences,
+                symbol, datetime.now(), signals, confidences,
                 f"Only {len(signals)}/{self.min_generators} generators produced signals"
             )
 
-        # Calculate dynamic weights
-        regime = self._estimate_regime(prices)
-        weights = self._calculate_dynamic_weights(regime)
+        return self.evaluate_precomputed_signals(
+            symbol=symbol,
+            generator_signals=signals,
+            generator_confidences=confidences,
+            prices=prices,
+        )
 
-        # Compute weighted consensus signal
+    def evaluate_precomputed_signals(
+        self,
+        symbol: str,
+        generator_signals: Dict[str, float],
+        generator_confidences: Optional[Dict[str, float]] = None,
+        prices: Optional[pd.Series] = None,
+        timestamp: Optional[datetime] = None,
+    ) -> ConsensusResult:
+        """
+        Evaluate consensus from already-computed generator outputs.
+
+        This path is used by the execution loop, which already has raw generator
+        outputs and should not re-run expensive model inference just to obtain
+        a consensus gate decision.
+        """
+        now = timestamp or datetime.now()
+        signals = {
+            name: float(np.clip(sig, -1, 1))
+            for name, sig in (generator_signals or {}).items()
+            if sig is not None and np.isfinite(sig)
+        }
+        confidences = {
+            name: float(np.clip((generator_confidences or {}).get(name, 0.5), 0.0, 1.0))
+            for name in signals
+        }
+
+        if len(signals) < self.min_generators:
+            return self._vetoed_result(
+                symbol,
+                now,
+                signals,
+                confidences,
+                f"Only {len(signals)}/{self.min_generators} generators produced signals",
+            )
+
+        regime = self._estimate_regime(prices) if prices is not None else "neutral"
+        weights = self._calculate_dynamic_weights(regime)
+        active_weights = {name: weights.get(name, 1.0 / len(signals)) for name in signals}
+
         weighted_signal = 0.0
         weighted_confidence = 0.0
         total_weight = 0.0
 
-        for name in signals:
-            w = weights.get(name, 1.0 / len(signals))
-            weighted_signal += signals[name] * w
-            weighted_confidence += confidences[name] * w
-            total_weight += w
+        for name, signal in signals.items():
+            weight = active_weights[name]
+            weighted_signal += signal * weight
+            weighted_confidence += confidences[name] * weight
+            total_weight += weight
 
         if total_weight > 0:
             weighted_signal /= total_weight
             weighted_confidence /= total_weight
 
-        # Direction agreement
         directions = {name: np.sign(sig) for name, sig in signals.items() if abs(sig) > 0.05}
         if not directions:
             return self._vetoed_result(
-                symbol, now, signals, confidences,
-                "All signals too weak (< 0.05)"
+                symbol,
+                now,
+                signals,
+                confidences,
+                "All signals too weak (< 0.05)",
             )
 
         majority_dir = np.sign(sum(directions.values()))
-        agreeing = sum(1 for d in directions.values() if d == majority_dir)
+        agreeing = sum(1 for direction in directions.values() if direction == majority_dir)
         agreement = agreeing / len(directions)
-
         majority_agrees = agreement >= self.min_agreement
+        strong_consensus = agreement >= 0.99 and all(abs(sig) > 0.3 for sig in signals.values())
 
-        # Strong consensus: all agree with decent strength
-        strong_consensus = (
-            agreement >= 0.99 and
-            all(abs(s) > 0.3 for s in signals.values())
-        )
-
-        # Conviction score
         conviction = self._compute_conviction_score(
-            signals, weights, agreement, weighted_confidence, strong_consensus
+            signals, active_weights, agreement, weighted_confidence, strong_consensus
         )
 
-        # Veto check
         vetoed = not majority_agrees or conviction < self.min_conviction
         veto_reason = ""
         if not majority_agrees:
@@ -208,7 +244,6 @@ class SignalConsensusEngine:
         elif conviction < self.min_conviction:
             veto_reason = f"Conviction {conviction:.0f} < {self.min_conviction:.0f}"
 
-        # Store for outcome tracking
         self._signal_history.append({
             "symbol": symbol,
             "timestamp": now,
@@ -226,7 +261,7 @@ class SignalConsensusEngine:
             direction_agreement=agreement,
             generator_signals=signals,
             generator_confidences=confidences,
-            generator_weights=weights,
+            generator_weights=active_weights,
             majority_agrees=majority_agrees,
             strong_consensus=strong_consensus,
             vetoed=vetoed,
@@ -255,8 +290,12 @@ class SignalConsensusEngine:
             perf.total_signals += 1
 
             # Correct if signal direction matches return direction
-            if np.sign(signal) == np.sign(actual_return) and abs(actual_return) > 0.001:
+            correct = int(np.sign(signal) == np.sign(actual_return) and abs(actual_return) > 0.001)
+            if correct:
                 perf.correct_signals += 1
+            perf.correct_history.append(correct)
+            if len(perf.correct_history) > 100:
+                perf.correct_history = perf.correct_history[-100:]
 
             # Track return magnitude (signal-weighted)
             perf.returns_history.append(actual_return * np.sign(signal))
@@ -358,6 +397,10 @@ class SignalConsensusEngine:
             weights = {k: np.clip(v, 0.10, 0.60) for k, v in weights.items()}
             total = sum(weights.values())
             weights = {k: v / total for k, v in weights.items()}
+
+        for name, weight in weights.items():
+            if name in self.performance:
+                self.performance[name].weight = float(weight)
 
         return weights
 
