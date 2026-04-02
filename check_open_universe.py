@@ -55,11 +55,11 @@ def main():
     print()
 
     if open_crypto:
-        print(f"✅ Crypto symbols in open_universe (first 10):")
+        print("✅ Crypto symbols in open_universe (first 10):")
         for sym in open_crypto[:10]:
             print(f"   - {sym}")
     else:
-        print(f"❌ NO CRYPTO in open_universe!")
+        print("❌ NO CRYPTO in open_universe!")
         print()
         print("Checking why...")
 

@@ -1044,7 +1044,7 @@ def main() -> None:
     print(f"\n{'═' * 60}")
     print("  Apex Trading — Backtest v3 Optimised Strategies")
     print(f"  Period : {START.date()} → {END.date()}")
-    print(f"  Capital: $100,000 per strategy | Slippage: dynamic")
+    print("  Capital: $100,000 per strategy | Slippage: dynamic")
     print(f"{'═' * 60}")
 
     print("  Downloading market data …", end=" ", flush=True)
@@ -1090,7 +1090,7 @@ def main() -> None:
 
     all_results: dict[str, tuple[dict, dict]] = {}
 
-    print(f"\n  Running 6 strategies with Monte Carlo (1 000 sims each) …\n")
+    print("\n  Running 6 strategies with Monte Carlo (1 000 sims each) …\n")
     for name, fn, eng in strategies:
         eng.data = data
         results, mc = run_and_report(eng, fn, START, END, name)

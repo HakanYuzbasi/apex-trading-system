@@ -582,7 +582,8 @@ def main():
 
     data = load_data()
     if len(data) < 3:
-        print("❌ Insufficient data. Check network."); return
+        print("❌ Insufficient data. Check network.")
+        return
 
     # v1 baseline results (from previous run — hard-coded for comparison)
     v1 = {
@@ -612,7 +613,8 @@ def main():
             print_result(name, r)
         except Exception as e:
             print(f"   ❌ Error: {e}")
-            import traceback; traceback.print_exc()
+            import traceback
+            traceback.print_exc()
             results_v2[name] = {'total_return': 0, 'sharpe_ratio': 0,
                                 'max_drawdown': 0, 'win_rate': 0}
 

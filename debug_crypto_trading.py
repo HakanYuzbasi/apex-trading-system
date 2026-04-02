@@ -67,7 +67,7 @@ async def main():
     if crypto_open:
         print(f"   Sample crypto in open_universe: {crypto_open[:3]}")
     else:
-        print(f"   ⚠️  NO CRYPTO in open_universe!")
+        print("   ⚠️  NO CRYPTO in open_universe!")
     print()
 
     # 5. Check Alpaca connection

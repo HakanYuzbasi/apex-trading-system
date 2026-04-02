@@ -127,7 +127,8 @@ class PCRSignal:
     def _fetch_sync(self) -> Optional[PCRContext]:
         # Try CBOE API first (may be blocked in some environments)
         try:
-            import urllib.request, json as _json
+            import urllib.request
+            import json as _json
             for url in (_CBOE_PCR_URL_1, _CBOE_PCR_URL_2):
                 try:
                     req = urllib.request.Request(

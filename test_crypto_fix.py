@@ -36,7 +36,7 @@ def test_crypto_config():
         print(f"❌ ERROR: Broken symbols found in config: {[s for s in broken_symbols if s in crypto_pairs]}")
         return False
     else:
-        print(f"✓ No broken symbols in config")
+        print("✓ No broken symbols in config")
 
     print()
     return True

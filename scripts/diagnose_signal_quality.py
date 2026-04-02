@@ -61,7 +61,7 @@ if signal_strengths:
     ic = np.corrcoef(signal_strengths, forward_returns)[0, 1]
     accuracy = correct_direction / total_signals
     print(f"\n{'='*60}")
-    print(f"SIGNAL QUALITY DIAGNOSTIC (Synthetic Data)")
+    print("SIGNAL QUALITY DIAGNOSTIC (Synthetic Data)")
     print(f"{'='*60}")
     print(f"  Total signals evaluated:     {total_signals}")
     print(f"  IC (signal vs 5d return):    {ic:.4f}")
@@ -70,14 +70,14 @@ if signal_strengths:
     print(f"  Avg confidence:              {np.mean(confidence_levels):.4f}")
     print(f"  Signal std:                  {np.std(signal_strengths):.4f}")
     print(f"  Forward return std:          {np.std(forward_returns):.4f}")
-    print(f"\n  BASELINE CHECK:")
+    print("\n  BASELINE CHECK:")
     if abs(ic) < 0.05 and abs(accuracy - 0.50) < 0.05:
-        print(f"  CONFIRMED: No exploitable signal in synthetic GBM data.")
-        print(f"  This is the expected null result — synthetic data has no alpha.")
-        print(f"  The NO-GO verdict is correct for this data environment.")
+        print("  CONFIRMED: No exploitable signal in synthetic GBM data.")
+        print("  This is the expected null result — synthetic data has no alpha.")
+        print("  The NO-GO verdict is correct for this data environment.")
     elif ic > 0.05 or accuracy > 0.55:
-        print(f"  WARNING: Positive signal detected — possible look-ahead bias.")
+        print("  WARNING: Positive signal detected — possible look-ahead bias.")
     else:
-        print(f"  Marginal signal quality — below threshold for profitable trading.")
+        print("  Marginal signal quality — below threshold for profitable trading.")
 else:
     print("  No signals generated.")

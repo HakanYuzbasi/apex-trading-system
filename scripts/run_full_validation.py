@@ -717,15 +717,15 @@ def main():
         print("  STATUS: NO-GO — Strategy requires further development")
         print("═" * 74)
         print(f"\n  {passed}/{total} gates passed. Strategy is not ready for deployment.")
-        print(f"  Review the regime breakdown and ICIR table above to identify")
-        print(f"  which signal components lack edge and which regimes bleed.")
+        print("  Review the regime breakdown and ICIR table above to identify")
+        print("  which signal components lack edge and which regimes bleed.")
         if result.regime_performance:
             bleeding = [r for r, p in result.regime_performance.items()
                         if p.get('negative_sharpe') or p.get('avg_pnl', 0) < 0]
             if bleeding:
                 print(f"\n  Bleeding regimes: {', '.join(bleeding)}")
-                print(f"  Consider adding regime filters to disable trading in these regimes,")
-                print(f"  or recalibrate signal weights for these market conditions.")
+                print("  Consider adding regime filters to disable trading in these regimes,")
+                print("  or recalibrate signal weights for these market conditions.")
 
     print("\n" + "═" * 74)
     print(f"  Backtest complete. {result.total_trades} trades analyzed.")

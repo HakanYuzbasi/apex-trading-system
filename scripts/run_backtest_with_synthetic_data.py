@@ -127,7 +127,7 @@ def patch_market_data():
         return df.copy()
 
     MarketDataFetcher.fetch_historical_data = fetch_historical_data
-    print(f"[SYNTHETIC] MarketDataFetcher patched — generating synthetic OHLCV data")
+    print("[SYNTHETIC] MarketDataFetcher patched — generating synthetic OHLCV data")
 
 
 if __name__ == "__main__":
@@ -212,7 +212,7 @@ if __name__ == "__main__":
             print(f"  Total trades:             {len(result.trades)}")
             print(f"  Total P&L:                ${total_pnl:,.2f}")
             print(f"  Avg cost per trade:       ${avg_cost:.2f}")
-            print(f"  (Gross Sharpe not separable — costs embedded in execution prices)")
+            print("  (Gross Sharpe not separable — costs embedded in execution prices)")
 
         # ICIR — cannot compute without forward return correlation data
         print("\n" + "=" * 70)

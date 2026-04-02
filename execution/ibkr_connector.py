@@ -425,7 +425,7 @@ class IBKRConnector:
             return
         
         if self._fatal_error:
-            logger.error(f"IBKR disconnected due to fatal error. Reconnection ABORTED.")
+            logger.error("IBKR disconnected due to fatal error. Reconnection ABORTED.")
             return
 
         logger.warning("IBKR disconnected. Attempting to reconnect...")

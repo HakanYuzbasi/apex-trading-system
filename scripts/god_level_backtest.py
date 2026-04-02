@@ -1451,7 +1451,7 @@ class GodLevelBacktester:
         bleeding_regimes = [r for r, p in regime_performance.items() if p.get('negative_sharpe')]
         if bleeding_regimes:
             logger.warning(f"\n  *** WARNING: Strategy bleeds in regimes: {bleeding_regimes}")
-            logger.warning(f"  *** Consider adding regime filter or disabling trading in these regimes")
+            logger.warning("  *** Consider adding regime filter or disabling trading in these regimes")
 
         logger.info(f"\nTotal Return: {total_return:.2f}%")
         logger.info(f"Sharpe Ratio: {sharpe_ratio:.2f} (risk-free adjusted)")
@@ -2194,14 +2194,14 @@ def go_no_go_assessment(result: BacktestResult, stress_results: Dict = None) -> 
     print(f"\n  {'=' * 50}")
     if all_pass:
         print(f"  VERDICT: GO ({passed}/{total} gates passed)")
-        print(f"  Strategy is cleared for paper trading deployment.")
+        print("  Strategy is cleared for paper trading deployment.")
     elif passed >= 6:
         print(f"  VERDICT: CONDITIONAL GO ({passed}/{total} gates passed)")
         print(f"  Strategy shows promise but has {total - passed} failing gate(s).")
-        print(f"  Recommended: paper trade with reduced size, monitor failing gates.")
+        print("  Recommended: paper trade with reduced size, monitor failing gates.")
     else:
         print(f"  VERDICT: NO-GO ({passed}/{total} gates passed)")
-        print(f"  Strategy requires further development before deployment.")
+        print("  Strategy requires further development before deployment.")
         failed = [name for name, p, _ in gates if not p]
         print(f"  Failing gates: {', '.join(failed)}")
     print(f"  {'=' * 50}")
