@@ -5,18 +5,60 @@ import pytest
 from fastapi.testclient import TestClient
 from starlette.websockets import WebSocketDisconnect
 
-from api.auth import AUTH_CONFIG, USER_STORE
+from api.auth import AUTH_CONFIG, RATE_LIMITER, USER_STORE
 from api.server import PROMETHEUS_AVAILABLE, app
+from services.common.db import init_db
+
+
+_ADMIN_TEST_PASSWORD = "admin-test-pass-123"
+_TEST_SECRET_KEY = "test-secret-key-for-e2e-auth-tests"
 
 
 @pytest.fixture
 def client():
+    # Ensure DB tables exist before running e2e tests
+    loop = asyncio.new_event_loop()
+    loop.run_until_complete(init_db())
+    loop.close()
+    # Set admin password so admin login works via env var fallback
+    old_pw = os.environ.get("APEX_ADMIN_PASSWORD")
+    old_sk = os.environ.get("APEX_SECRET_KEY")
+    os.environ["APEX_ADMIN_PASSWORD"] = _ADMIN_TEST_PASSWORD
+    os.environ["APEX_SECRET_KEY"] = _TEST_SECRET_KEY
+    # Align secret key across both auth modules
+    AUTH_CONFIG.secret_key = _TEST_SECRET_KEY
+    try:
+        from services.auth import service as auth_svc
+        auth_svc.SECRET_KEY = _TEST_SECRET_KEY
+    except Exception:
+        pass
+    # Reset rate limiter so tests don't get 429'd
+    RATE_LIMITER.requests.clear()
+    RATE_LIMITER._last_seen.clear()
     original_enabled = AUTH_CONFIG.enabled
     AUTH_CONFIG.enabled = True
     try:
         yield TestClient(app)
     finally:
         AUTH_CONFIG.enabled = original_enabled
+        if old_pw is None:
+            os.environ.pop("APEX_ADMIN_PASSWORD", None)
+        else:
+            os.environ["APEX_ADMIN_PASSWORD"] = old_pw
+        if old_sk is None:
+            os.environ.pop("APEX_SECRET_KEY", None)
+        else:
+            os.environ["APEX_SECRET_KEY"] = old_sk
+
+
+def _login_admin(client: TestClient) -> dict:
+    """Login as admin using the APEX_ADMIN_PASSWORD env var fallback."""
+    resp = client.post(
+        "/auth/login",
+        json={"username": "admin", "password": _ADMIN_TEST_PASSWORD},
+    )
+    assert resp.status_code == 200, f"Admin login failed: {resp.text}"
+    return resp.json()
 
 
 def _register_and_login(client: TestClient):
@@ -107,14 +149,13 @@ def test_kill_switch_reset_endpoint_requires_admin_and_queues_command(
     )
     assert user_resp.status_code == 403
 
-    admin = asyncio.run(USER_STORE.get_user("admin"))
-    assert admin is not None
-    assert admin.api_key
+    admin_tokens = _login_admin(client)
+    admin_header = {"Authorization": f"Bearer {admin_tokens['access_token']}"}
 
     admin_resp = client.post(
         "/ops/kill-switch/reset",
         json={"reason": "Reset after verified false-positive trigger"},
-        headers={"X-API-Key": admin.api_key},
+        headers=admin_header,
     )
     assert admin_resp.status_code == 200
     body = admin_resp.json()
@@ -126,11 +167,11 @@ def test_kill_switch_reset_endpoint_requires_admin_and_queues_command(
     duplicate_resp = client.post(
         "/ops/kill-switch/reset",
         json={"reason": "Second request should be blocked"},
-        headers={"X-API-Key": admin.api_key},
+        headers=admin_header,
     )
     assert duplicate_resp.status_code == 409
 
-    status_resp = client.get("/ops/kill-switch", headers={"X-API-Key": admin.api_key})
+    status_resp = client.get("/ops/kill-switch", headers=admin_header)
     assert status_resp.status_code == 200
     status = status_resp.json()
     assert status["command"]["kill_switch_reset_requested"] is True
@@ -188,9 +229,8 @@ def test_governor_policy_approve_and_rollback_endpoints_require_admin_and_audit(
     )
     assert non_admin.status_code == 403
 
-    admin = asyncio.run(USER_STORE.get_user("admin"))
-    assert admin is not None
-    assert admin.api_key
+    admin_tokens = _login_admin(client)
+    admin_header = {"Authorization": f"Bearer {admin_tokens['access_token']}"}
 
     approved = client.post(
         "/ops/governor/policies/approve",
@@ -198,7 +238,7 @@ def test_governor_policy_approve_and_rollback_endpoints_require_admin_and_audit(
             "policy_id": candidate.policy_id(),
             "reason": "Production promotion approved by risk committee",
         },
-        headers={"X-API-Key": admin.api_key},
+        headers=admin_header,
     )
     assert approved.status_code == 200
     approved_body = approved.json()
@@ -207,7 +247,7 @@ def test_governor_policy_approve_and_rollback_endpoints_require_admin_and_audit(
 
     active_after_approval = client.get(
         "/ops/governor/policies/active",
-        headers={"X-API-Key": admin.api_key},
+        headers=admin_header,
     )
     assert active_after_approval.status_code == 200
     versions = [p["version"] for p in active_after_approval.json()["policies"] if p["policy_key"] == "EQUITY:default"]
@@ -220,7 +260,7 @@ def test_governor_policy_approve_and_rollback_endpoints_require_admin_and_audit(
             "regime": "default",
             "reason": "Live Sharpe degradation, revert to prior stable policy",
         },
-        headers={"X-API-Key": admin.api_key},
+        headers=admin_header,
     )
     assert rolled_back.status_code == 200
     rollback_body = rolled_back.json()
@@ -229,7 +269,7 @@ def test_governor_policy_approve_and_rollback_endpoints_require_admin_and_audit(
 
     active_after_rollback = client.get(
         "/ops/governor/policies/active",
-        headers={"X-API-Key": admin.api_key},
+        headers=admin_header,
     )
     assert active_after_rollback.status_code == 200
     versions = [p["version"] for p in active_after_rollback.json()["policies"] if p["policy_key"] == "EQUITY:default"]
@@ -237,7 +277,7 @@ def test_governor_policy_approve_and_rollback_endpoints_require_admin_and_audit(
 
     audit_resp = client.get(
         "/ops/governor/policies/audit?asset_class=EQUITY&regime=default&limit=100",
-        headers={"X-API-Key": admin.api_key},
+        headers=admin_header,
     )
     assert audit_resp.status_code == 200
     actions = [event.get("action") for event in audit_resp.json()["events"]]
@@ -274,12 +314,11 @@ def test_social_governor_decision_audit_endpoint_requires_admin(
     )
     assert unauth.status_code in {401, 403}
 
-    admin = asyncio.run(USER_STORE.get_user("admin"))
-    assert admin is not None
-    assert admin.api_key
+    admin_tokens = _login_admin(client)
+    admin_header = {"Authorization": f"Bearer {admin_tokens['access_token']}"}
     admin_resp = client.get(
         "/api/v1/social-governor/decisions?asset_class=EQUITY&regime=risk_off&limit=10",
-        headers={"X-API-Key": admin.api_key},
+        headers=admin_header,
     )
     assert admin_resp.status_code == 200
     body = admin_resp.json()

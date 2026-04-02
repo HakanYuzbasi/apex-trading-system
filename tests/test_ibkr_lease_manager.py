@@ -6,7 +6,6 @@ from execution.ibkr_lease_manager import IBKRLeaseManager
 async def lease_manager(monkeypatch):
     """Provides a fresh lease manager forcing local non-redis mode for deterministic tests."""
     import execution.ibkr_lease_manager
-    from execution.ibkr_lease_manager import IBKRLeaseManager
     
     # Mock get_redis where it's used
     monkeypatch.setattr("execution.ibkr_lease_manager.get_redis", _mock_get_redis)

@@ -368,10 +368,10 @@ class EODDigestGenerator:
         for line in lines:
             logger.info(line)
 
-    def load_latest(self, days_back: int = 7) -> List[EODReport]:
+    def load_latest(self, days_back: int = 7, as_of: Optional[date] = None) -> List[EODReport]:
         """Load the most recent N daily reports from disk."""
         reports = []
-        today = date.today()
+        today = as_of or date.today()
         for i in range(days_back):
             d = today - timedelta(days=i)
             path = self._reports_dir / f"{d.isoformat()}_digest.json"

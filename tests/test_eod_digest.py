@@ -224,7 +224,7 @@ class TestEODDigestGenerator:
         _write_audit(self.audit_dir, self.today, [_make_exit()])
         report = self.gen.generate(report_date=self.today)
         self.gen.save(report)
-        loaded = self.gen.load_latest(days_back=2)
+        loaded = self.gen.load_latest(days_back=2, as_of=self.today)
         assert len(loaded) == 1
         assert loaded[0]["report_date"] == "2026-03-22"
 

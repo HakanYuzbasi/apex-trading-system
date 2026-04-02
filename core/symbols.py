@@ -162,50 +162,36 @@ def normalize_symbols(symbols: Iterable[str]) -> Tuple[str, ...]:
     return tuple(normalize_symbol(s) for s in symbols)
 
 
-def is_market_open(raw_or_parsed, timestamp, assume_daily: bool = False) -> bool:
-    """
-    Market hours helper by asset class.
-    DEPRECATED: Use core.market_hours.is_market_open instead.
-    
-    For daily bars (midnight timestamps), pass assume_daily=True to avoid
-    rejecting valid trading days due to time-of-day checks.
-    """
-    # Lazy import to avoid circular dependency (market_hours imports AssetClass from symbols)
-    from core.market_hours import is_market_open as _is_market_open
-    return _is_market_open(raw_or_parsed, timestamp, assume_daily)
-
-
-# PSEUDO-TESTS
-# parse_symbol("FX:EUR/USD") -> FX:EUR/USD
-# parse_symbol("CRYPTO:BTC/USDT") -> CRYPTO:BTC/USDT
-# parse_symbol("BTC/USDT") -> CRYPTO:BTC/USDT
-
-
-# --- FIX: MARKET HOURS OVERRIDE ---
 import pytz
 from datetime import datetime
 
-def custom_is_market_open(symbol: str, timestamp=None, **kwargs) -> bool:
-    # Handle assume_daily from kwargs
-    assume_daily = kwargs.get('assume_daily', False)
-    
+
+def is_market_open(raw_or_parsed, timestamp=None, assume_daily: bool = False, **kwargs) -> bool:
+    """
+    Market hours helper by asset class.
+
+    For daily bars (midnight timestamps), pass assume_daily=True to avoid
+    rejecting valid trading days due to time-of-day checks.
+    """
+    assume_daily = assume_daily or kwargs.get('assume_daily', False)
+
     if timestamp is None:
         timestamp = datetime.utcnow()
     try:
-        parsed = parse_symbol(symbol)
-        
+        parsed = parse_symbol(raw_or_parsed) if isinstance(raw_or_parsed, str) else raw_or_parsed
+
         # Crypto is 24/7
-        if parsed.asset_class.name == 'CRYPTO' or parsed.asset_class.value == 'CRYPTO': 
+        if parsed.asset_class.name == 'CRYPTO' or parsed.asset_class.value == 'CRYPTO':
             return True
-            
+
         # Forex is 24/5 (Mon-Fri)
-        if parsed.asset_class.name == 'FOREX' or parsed.asset_class.value == 'FOREX': 
+        if parsed.asset_class.name == 'FOREX' or parsed.asset_class.value == 'FOREX':
             return timestamp.weekday() < 5
-            
+
         # Equities / Options (Mon-Fri)
-        if timestamp.weekday() >= 5: 
+        if timestamp.weekday() >= 5:
             return False
-            
+
         # If assume_daily is True, we only care about the day (Mon-Fri)
         if assume_daily:
             return True
@@ -214,14 +200,10 @@ def custom_is_market_open(symbol: str, timestamp=None, **kwargs) -> bool:
         eastern = pytz.timezone('America/New_York')
         now_est = timestamp.astimezone(eastern) if timestamp.tzinfo else pytz.utc.localize(timestamp).astimezone(eastern)
         est_hour = now_est.hour + now_est.minute / 60.0
-        
+
         # 9.5 = 9:30 AM EST | 16.0 = 4:00 PM EST
         return 9.5 <= est_hour <= 16.0
     except Exception:
         # If it fails to parse, assume it's open to be safe
         return True
-
-# Override the buggy library globally
-is_market_open = custom_is_market_open
-# ----------------------------------
 

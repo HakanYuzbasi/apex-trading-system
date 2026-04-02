@@ -535,7 +535,7 @@ class TestRiskGuardUnit:
         assert ok is False
         assert reason == "max_order_notional"
 
-    def test_max_order_notional_blocks(self):
+    def test_max_order_notional_blocks_large_qty(self):
         rg = RiskGuard(max_order_notional=50000)
         rg.reset(100_000)
         rg.on_new_bar(100_000, datetime(2024, 1, 2), 1)  # initialize guard

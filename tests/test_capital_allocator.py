@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import random
 import tempfile
 from pathlib import Path
 
@@ -55,7 +56,7 @@ class TestAllocationLogic:
 
     def test_strong_equity_gets_higher_allocation(self):
         ca = _make_allocator(rebalance_threshold=0.0)
-        import random; rng = random.Random(1)
+        rng = random.Random(1)
         eq_rets = [0.02 + rng.gauss(0, 0.003) for _ in range(20)]
         cr_rets = [-0.01 + rng.gauss(0, 0.003) for _ in range(20)]
         _feed(ca, eq_rets, cr_rets)
@@ -64,7 +65,7 @@ class TestAllocationLogic:
 
     def test_strong_crypto_gets_higher_allocation(self):
         ca = _make_allocator(rebalance_threshold=0.0)
-        import random; rng = random.Random(2)
+        rng = random.Random(2)
         eq_rets = [-0.01 + rng.gauss(0, 0.003) for _ in range(20)]
         cr_rets = [0.02 + rng.gauss(0, 0.003) for _ in range(20)]
         _feed(ca, eq_rets, cr_rets)
@@ -88,7 +89,7 @@ class TestAllocationLogic:
 
     def test_allocations_respect_min_max(self):
         ca = _make_allocator(min_alloc=0.15, max_alloc=0.85, rebalance_threshold=0.0)
-        import random; rng = random.Random(77)
+        rng = random.Random(77)
         eq_rets = [0.05 + rng.gauss(0, 0.005) for _ in range(20)]
         cr_rets = [-0.05 + rng.gauss(0, 0.005) for _ in range(20)]
         _feed(ca, eq_rets, cr_rets)
@@ -124,7 +125,7 @@ class TestRebalanceTrigger:
 
     def test_no_rebalance_when_shift_small(self):
         ca = _make_allocator(rebalance_threshold=0.99)  # impossibly high threshold
-        import random; rng = random.Random(10)
+        rng = random.Random(10)
         eq_rets = [0.01 + rng.gauss(0, 0.003) for _ in range(20)]
         cr_rets = [0.009 + rng.gauss(0, 0.003) for _ in range(20)]
         _feed(ca, eq_rets, cr_rets)
@@ -133,7 +134,7 @@ class TestRebalanceTrigger:
 
     def test_rebalance_when_shift_large(self):
         ca = _make_allocator(rebalance_threshold=0.01)  # low threshold
-        import random; rng = random.Random(11)
+        rng = random.Random(11)
         eq_rets = [0.05 + rng.gauss(0, 0.005) for _ in range(20)]
         cr_rets = [-0.03 + rng.gauss(0, 0.005) for _ in range(20)]
         _feed(ca, eq_rets, cr_rets)
@@ -142,7 +143,7 @@ class TestRebalanceTrigger:
 
     def test_current_fracs_updated_on_rebalance(self):
         ca = _make_allocator(rebalance_threshold=0.01)
-        import random; rng = random.Random(12)
+        rng = random.Random(12)
         eq_rets = [0.05 + rng.gauss(0, 0.005) for _ in range(20)]
         cr_rets = [-0.03 + rng.gauss(0, 0.005) for _ in range(20)]
         _feed(ca, eq_rets, cr_rets)
@@ -198,7 +199,7 @@ class TestPersistence:
         with tempfile.TemporaryDirectory() as tmp:
             ca = CapitalAllocator(data_dir=Path(tmp), rebalance_threshold=0.01)
             # Use varied returns so std > 0 → Sharpe computed; equity clearly wins
-            import random; rng = random.Random(42)
+            rng = random.Random(42)
             eq_rets = [0.03 + rng.gauss(0, 0.005) for _ in range(20)]
             cr_rets = [-0.02 + rng.gauss(0, 0.005) for _ in range(20)]
             _feed(ca, eq_rets, cr_rets)
@@ -211,7 +212,7 @@ class TestPersistence:
     def test_persist_writes_json(self):
         with tempfile.TemporaryDirectory() as tmp:
             ca = CapitalAllocator(data_dir=Path(tmp), rebalance_threshold=0.01)
-            import random; rng = random.Random(99)
+            rng = random.Random(99)
             eq_rets = [0.04 + rng.gauss(0, 0.005) for _ in range(20)]
             cr_rets = [-0.02 + rng.gauss(0, 0.005) for _ in range(20)]
             _feed(ca, eq_rets, cr_rets)

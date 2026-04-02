@@ -21,6 +21,8 @@ Grafana Dashboard:
     Import the provided JSON dashboard or create custom panels.
 """
 
+from __future__ import annotations
+
 import threading
 import time
 from typing import Dict, Optional
@@ -48,10 +50,14 @@ class MetricsHandler(BaseHTTPRequestHandler):
 
     def do_GET(self):
         if self.path == '/metrics':
-            self.send_response(200)
-            self.send_header('Content-Type', CONTENT_TYPE_LATEST)
-            self.end_headers()
-            self.wfile.write(generate_latest(REGISTRY))
+            if PROMETHEUS_AVAILABLE:
+                self.send_response(200)
+                self.send_header('Content-Type', CONTENT_TYPE_LATEST)
+                self.end_headers()
+                self.wfile.write(generate_latest(REGISTRY))
+            else:
+                self.send_response(503)
+                self.end_headers()
         elif self.path == '/health':
             self.send_response(200)
             self.send_header('Content-Type', 'application/json')

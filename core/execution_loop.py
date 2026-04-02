@@ -473,9 +473,8 @@ class ApexTradingSystem:
         self.advanced_executor = None
         if getattr(ApexConfig, "USE_ADVANCED_EXECUTION", True):
             try:
-                from execution.advanced_order_executor import AdvancedOrderExecutor
                 self.advanced_executor = AdvancedOrderExecutor(
-                    risk_gateway=self.risk_manager, 
+                    risk_gateway=self.risk_manager,
                     broker_dispatch=self.broker_dispatch
                 )
                 logger.info("🧊 Phase 15 Iceberg Router initialized successfully")
@@ -6808,6 +6807,15 @@ class ApexTradingSystem:
                 )
                 return
 
+        # Pre-initialise signal/confidence/data/price so that the gate checks below
+        # (which may run before signal generation) see defined names.  The real values
+        # are assigned later during signal generation; these defaults are safe because
+        # every gate is wrapped in a try/except and guarded by feature-flag checks.
+        signal: float = 0.0
+        confidence: float = 0.0
+        data = self.historical_data.get(symbol)  # may be None
+        price: float = self.price_cache.get(symbol, 0.0)
+
         # Check 2.14: News Confirmation Gate (async, cached 20 min)
         # Blocks or penalises entries when news sentiment strongly contradicts the signal.
         if (
@@ -7563,8 +7571,8 @@ class ApexTradingSystem:
                     _src = getattr(self, '_strategy_rotation', None)
                     if _src is not None:
                         _rot_weights = _src.get_blend_weights(_blend_regime)
-                        _ml_total = _rot_weights.get("ml", _DEFAULT_WEIGHT if False else _ml_w)
-                        _tech_total = _rot_weights.get("tech", _DEFAULT_WEIGHT if False else _tech_w)
+                        _ml_total = _rot_weights.get("ml", _ml_w)
+                        _tech_total = _rot_weights.get("tech", _tech_w)
                         _mt_sum = _ml_total + _tech_total
                         if _mt_sum > 0 and abs(_ml_total / _mt_sum - _ml_w) > 0.05:
                             _ml_w = _ml_total / _mt_sum
@@ -8078,6 +8086,14 @@ class ApexTradingSystem:
                     pnl_pct = (entry_price / price - 1) * 100
 
                 holding_days = (datetime.now() - entry_time).days
+
+                # Resolve governor controls early so exit logic can reference them
+                _gov_ctrl, governor_regime_key, active_policy = self._resolve_governor_controls(
+                    asset_class=asset_class,
+                    market_regime=self._current_regime,
+                    tier=perf_snapshot.tier,
+                )
+
                 should_exit = False
                 exit_reason = ""
                 stress_partial_reduction_qty = 0.0
@@ -11311,7 +11327,7 @@ class ApexTradingSystem:
                                     fill_price=float(attribution_entry_price),
                                     qty=float(abs(shares)),
                                     regime=str(self._current_regime),
-                                    broker=str(broker_used) if 'broker_used' in dir() else "unknown",
+                                    broker=str(locals().get('broker_used', 'unknown')),
                                     order_type="market",
                                 )
                             # Record signal for ModelDriftMonitor (awaiting outcome at exit)

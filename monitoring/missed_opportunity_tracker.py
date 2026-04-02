@@ -8,11 +8,15 @@ to identify systematic alpha leakage and overly conservative filters.
 Used to answer: "What high earners is our strategy missing?"
 """
 
+from __future__ import annotations
+
 import json
 import logging
 import os
 from collections import defaultdict
 from dataclasses import asdict, dataclass, field
+
+import pandas as pd
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional

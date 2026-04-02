@@ -269,6 +269,17 @@ class DatabaseUserStore:
         for entry in DatabaseUserStore._legacy_users():
             if str(entry.get("user_id")) == user_id:
                 return DatabaseUserStore._legacy_user_to_model(entry)
+
+        # Env-var admin fallback: mirrors validate_credentials admin recovery
+        if user_id in {"admin"} and (os.getenv("APEX_ADMIN_PASSWORD") or "").strip():
+            return User(
+                user_id="admin",
+                username="admin",
+                email="admin@apex.local",
+                roles=["admin", "user"],
+                permissions=["admin", "read", "write", "trade"],
+            )
+
         return None
 
     @staticmethod
