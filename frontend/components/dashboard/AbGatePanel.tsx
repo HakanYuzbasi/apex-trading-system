@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { useAuthContext } from "@/lib/auth-context";
+import { useAuthContext } from "@/components/auth/AuthProvider";
 
 interface VariantState {
   name: string;
@@ -85,7 +85,7 @@ function VariantCard({ variant, label, highlight }: { variant: VariantState; lab
 }
 
 export default function AbGatePanel() {
-  const { token } = useAuthContext();
+  const { accessToken: token } = useAuthContext();
   const [data, setData] = useState<AbGateData | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);

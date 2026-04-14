@@ -4,7 +4,7 @@ import { useEffect, useRef, useState, useCallback } from "react";
 
 const STORAGE_ACCESS = "apex_access_token";
 
-interface WebSocketMessage {
+export interface WebSocketMessage {
     type: string;
     [key: string]: unknown;
 }
@@ -33,6 +33,35 @@ function getStoredAccessToken(): string | null {
     } catch {
         return null;
     }
+}
+
+function resolveBaseWsUrl(explicitUrl: string): string {
+    const envUrl = process.env.NEXT_PUBLIC_WS_URL?.trim();
+    if (envUrl) {
+        return envUrl;
+    }
+
+    if (explicitUrl !== "ws://localhost:8000/ws") {
+        return explicitUrl;
+    }
+
+    const apiUrl = process.env.NEXT_PUBLIC_API_URL?.trim();
+    if (apiUrl) {
+        try {
+            const parsed = new URL(apiUrl);
+            const protocol = parsed.protocol === "https:" ? "wss:" : "ws:";
+            return `${protocol}//${parsed.host}/ws`;
+        } catch {
+            return explicitUrl;
+        }
+    }
+
+    if (typeof window === "undefined") {
+        return explicitUrl;
+    }
+
+    const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
+    return `${protocol}//${window.location.hostname}:8000/ws`;
 }
 
 function buildWsUrl(base: string, isPublic?: boolean): string | null {
@@ -82,14 +111,38 @@ export function useWebSocket(isPublic?: boolean, {
     const onMessageRef = useRef(onMessage);
     onMessageRef.current = onMessage;
 
+    const clearReconnectTimeout = useCallback(() => {
+        if (reconnectTimeoutRef.current) {
+            clearTimeout(reconnectTimeoutRef.current);
+            reconnectTimeoutRef.current = undefined;
+        }
+    }, []);
+
+    const scheduleReconnect = useCallback((reconnect: () => void) => {
+        clearReconnectTimeout();
+        const delay = Math.min(
+            reconnectInterval * Math.pow(2, attemptRef.current),
+            MAX_RECONNECT_DELAY_MS
+        );
+        attemptRef.current += 1;
+        setState((s) => ({ ...s, reconnectAttempt: attemptRef.current }));
+        reconnectTimeoutRef.current = setTimeout(reconnect, delay);
+    }, [clearReconnectTimeout, reconnectInterval]);
+
     const connect = useCallback(function connectSocket() {
         if (!shouldConnect || stoppedRef.current) return;
-        if (wsRef.current?.readyState === WebSocket.OPEN) return;
+        if (
+            wsRef.current?.readyState === WebSocket.OPEN ||
+            wsRef.current?.readyState === WebSocket.CONNECTING
+        ) {
+            return;
+        }
 
+        clearReconnectTimeout();
         setState((s) => ({ ...s, isConnecting: true }));
 
         try {
-            const baseWsUrl = process.env.NEXT_PUBLIC_WS_URL || url;
+            const baseWsUrl = resolveBaseWsUrl(url);
             const wsUrl = buildWsUrl(baseWsUrl, isPublic);
             if (!wsUrl) {
                 stoppedRef.current = true;
@@ -104,6 +157,7 @@ export function useWebSocket(isPublic?: boolean, {
             const socket = new WebSocket(wsUrl);
 
             socket.onopen = () => {
+                clearReconnectTimeout();
                 attemptRef.current = 0;
                 stoppedRef.current = false;
                 setState((s) => ({
@@ -139,20 +193,15 @@ export function useWebSocket(isPublic?: boolean, {
                     return;
                 }
 
-                // Exponential backoff: 3s, 6s, 12s … capped at 30s
-                const delay = Math.min(
-                    reconnectInterval * Math.pow(2, attemptRef.current),
-                    MAX_RECONNECT_DELAY_MS
-                );
-                attemptRef.current += 1;
-                setState((s) => ({ ...s, reconnectAttempt: attemptRef.current }));
-                reconnectTimeoutRef.current = setTimeout(connectSocket, delay);
+                scheduleReconnect(connectSocket);
             };
 
             socket.onerror = () => {
                 // onerror always fires before onclose; let onclose handle reconnect logic.
                 // Suppress the noisy "{}" log — the close event has the real info.
-                socket.close();
+                if (socket.readyState === WebSocket.OPEN || socket.readyState === WebSocket.CONNECTING) {
+                    socket.close();
+                }
             };
 
             socket.onmessage = (event) => {
@@ -170,9 +219,11 @@ export function useWebSocket(isPublic?: boolean, {
                         };
                         stateShadowRef.current = merged;
                         data = merged;
-                    } else {
+                    } else if (raw.type === "state_update") {
                         // Full state_update — replace shadow entirely.
                         stateShadowRef.current = raw;
+                        data = raw;
+                    } else {
                         data = raw;
                     }
 
@@ -186,14 +237,9 @@ export function useWebSocket(isPublic?: boolean, {
             wsRef.current = socket;
         } catch {
             // Failed to even create the socket (e.g. bad URL)
-            const delay = Math.min(
-                reconnectInterval * Math.pow(2, attemptRef.current),
-                MAX_RECONNECT_DELAY_MS
-            );
-            attemptRef.current += 1;
-            reconnectTimeoutRef.current = setTimeout(connectSocket, delay);
+            scheduleReconnect(connectSocket);
         }
-    }, [url, reconnectInterval, shouldConnect, isPublic]);
+    }, [clearReconnectTimeout, isPublic, scheduleReconnect, shouldConnect, url]);
 
     useEffect(() => {
         stoppedRef.current = false;
@@ -202,18 +248,26 @@ export function useWebSocket(isPublic?: boolean, {
 
         return () => {
             stoppedRef.current = true;
-            if (reconnectTimeoutRef.current) clearTimeout(reconnectTimeoutRef.current);
-            if (wsRef.current) wsRef.current.close();
+            clearReconnectTimeout();
+            if (wsRef.current) {
+                wsRef.current.close();
+                wsRef.current = null;
+            }
         };
-    }, [connect]);
+    }, [clearReconnectTimeout, connect]);
 
     // Expose a manual retry so the UI can offer a "Reconnect" button after auth failure
     const retry = useCallback(() => {
         stoppedRef.current = false;
         attemptRef.current = 0;
         setState((s) => ({ ...s, lastError: undefined, reconnectAttempt: 0 }));
+        clearReconnectTimeout();
+        if (wsRef.current) {
+            wsRef.current.close();
+            wsRef.current = null;
+        }
         connect();
-    }, [connect]);
+    }, [clearReconnectTimeout, connect]);
 
     return {
         isConnected: state.isConnected,

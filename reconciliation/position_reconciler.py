@@ -23,6 +23,12 @@ from enum import Enum
 import json
 from pathlib import Path
 
+try:
+    from core.symbols import normalize_symbol as _normalize_sym
+except Exception:
+    def _normalize_sym(s: str) -> str:  # type: ignore[misc]
+        return s
+
 logger = logging.getLogger(__name__)
 
 
@@ -203,6 +209,22 @@ class PositionReconciler:
                 # Skip if both zero
                 if local_qty == 0 and broker_qty == 0:
                     continue
+                    
+                # CROSS-VALIDATION: Check if this symbol exists in the other set under a different name
+                # (e.g. XRPUSD vs CRYPTO:XRP/USD)
+                normalized_current = _normalize_sym(symbol)
+                if local_qty == 0 and broker_qty != 0:
+                    # Check if broker symbol exists in local under a normalized match
+                    for l_sym, l_qty in local_positions.items():
+                        if _normalize_sym(l_sym) == normalized_current:
+                            local_qty = l_qty
+                            break
+                elif local_qty != 0 and broker_qty == 0:
+                    # Check if local symbol exists in broker under a normalized match
+                    for b_sym, b_qty in broker_positions.items():
+                        if _normalize_sym(b_sym) == normalized_current:
+                            broker_qty = b_qty
+                            break
 
                 price = price_cache.get(symbol, 0)
                 local_sym_value = abs(local_qty) * price

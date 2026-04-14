@@ -216,8 +216,14 @@ class IBKRConnector:
 
         if sec_type == "CASH":
             return f"FX:{symbol}/{currency}"
+            
         if sec_type == "CRYPTO":
+            # Normalise IBKR crypto (e.g., XRPUSD) to system format (CRYPTO:XRP/USD)
+            if symbol.endswith(currency) and len(symbol) > len(currency):
+                base = symbol[:-len(currency)]
+                return f"CRYPTO:{base}/{currency}"
             return f"CRYPTO:{symbol}/{currency}"
+            
         return symbol
 
     def _unit_label(self, asset_class: AssetClass) -> str:
@@ -776,9 +782,10 @@ class IBKRConnector:
             accounts = self.ib.wrapper.accounts
             if accounts:
                 self.account = accounts[0]
+                logger.info("📋 Available Accounts: %s", ", ".join(accounts))
+                logger.info("📋 Active Account: %s", self.account)
             
             logger.info(f"✅ Connected to Interactive Brokers (clientId={current_client_id})!")
-            logger.info(f"📋 Account: {self.account}")
             
             # Hook up data event listener
             self.ib.pendingTickersEvent += self._on_data_update
@@ -1272,18 +1279,11 @@ class IBKRConnector:
                 last = float(ticker.last or 0.0)
                 if bid > 0 and ask > 0:
                     break
-            try:
-                self.ib.cancelMktData(contract)
-            except Exception:
-                pass
-
             if bid > 0 and ask > 0:
                 return {
                     "symbol": normalized,
                     "bid": bid,
                     "ask": ask,
-                    "mid": (bid + ask) / 2.0,
-                    "last": last,
                 }
             return {}
         except Exception:
@@ -1416,6 +1416,32 @@ class IBKRConnector:
         except Exception as e:
             logger.error(f"❌ Error getting detailed positions: {e}")
             return {}
+
+    async def get_net_liquidation(self) -> float:
+        """Fetch the account's NetLiquidation value (NAV) from IBKR."""
+        try:
+            if not self.ib.isConnected():
+                return 0.0
+            
+            summary = self.ib.accountSummary()
+            for item in summary:
+                if item.tag == 'NetLiquidation':
+                    return float(item.value)
+            
+            # Fallback to get_account_values if summary is empty
+            acc_values = self.ib.accountValues()
+            for v in acc_values:
+                if v.tag == 'NetLiquidation' and v.currency == 'USD':
+                    return float(v.value)
+                    
+            return 0.0
+        except Exception as e:
+            logger.error(f"❌ Error getting IBKR NetLiquidation: {e}")
+            return 0.0
+
+    async def get_account_equity(self) -> float:
+        """Alias for get_net_liquidation for consistent multi-venue cross-validation."""
+        return await self.get_net_liquidation()
     
     async def ensure_delayed_data_mode(self):
         """Ensure delayed data mode is active."""

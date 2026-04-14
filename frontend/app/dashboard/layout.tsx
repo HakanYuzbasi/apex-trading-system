@@ -2,12 +2,13 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { BarChart3, Bitcoin, Layers } from "lucide-react";
+import { BarChart3, Bitcoin, Layers, ShieldAlert } from "lucide-react";
 
 const sessionLinks = [
   { href: "/dashboard", label: "Overview", icon: Layers },
   { href: "/dashboard/core", label: "Core Strategy", icon: BarChart3 },
   { href: "/dashboard/crypto", label: "Crypto Sleeve", icon: Bitcoin },
+  { href: "/dashboard/broker-sync", label: "Broker Sync", icon: ShieldAlert },
 ];
 
 export default function DashboardLayout({

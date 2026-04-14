@@ -145,7 +145,7 @@ const POSITION_PARITY_ALERT_CYCLES = Math.max(1, Number(process.env.APEX_POSITIO
 const POSITION_PARITY_WATCHDOG_TTL_MS = Number(process.env.APEX_POSITION_PARITY_WATCHDOG_TTL_MS || "300000");
 
 function getApiBase(): string {
-  return (process.env.NEXT_PUBLIC_API_URL || process.env.APEX_API_URL || DEFAULT_API_BASE).replace(/\/+$/, "");
+  return (process.env.APEX_API_URL || process.env.NEXT_PUBLIC_API_URL || DEFAULT_API_BASE).replace(/\/+$/, "");
 }
 
 function normalizeBrokerName(value: unknown): "alpaca" | "ibkr" | null {
@@ -350,6 +350,13 @@ function normalizePositionRow(row: unknown): PositionRow | null {
   const expiry = normalizeExpiryToken(rec.expiry ?? rec.lastTradeDateOrContractMonth ?? "");
   const right = normalizeRight(String(rec.right ?? ""));
   const strike = asNumber(rec.strike, 0);
+  const signalVal = asNumber(rec.signal ?? rec.current_signal, 0);
+  let signalDir = String(rec.signal_direction ?? "UNKNOWN").toUpperCase();
+  if (signalDir === "UNKNOWN") {
+    if (signalVal > 0) signalDir = "LONG";
+    else if (signalVal < 0) signalDir = "SHORT";
+  }
+
   return {
     symbol,
     qty,
@@ -358,8 +365,8 @@ function normalizePositionRow(row: unknown): PositionRow | null {
     current: asNumber(rec.current ?? rec.current_price, 0),
     pnl: asNumber(rec.pnl ?? rec.unrealized_pl, 0),
     pnl_pct: asNumber(rec.pnl_pct ?? rec.unrealized_plpc, 0),
-    signal: asNumber(rec.signal ?? rec.current_signal, 0),
-    signal_direction: String(rec.signal_direction ?? "UNKNOWN"),
+    signal: signalVal,
+    signal_direction: signalDir,
     source_id: rec.source_id ? String(rec.source_id) : undefined,
     broker_type: brokerType,
     security_type: securityType || undefined,
@@ -557,6 +564,9 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
     if (heartbeat.healthy === false && current.status === "live") {
       current.status = "stale";
       current.stale = true;
+    } else if (heartbeat.healthy === true && current.status !== "live") {
+      current.status = "live";
+      current.stale = false;
     }
   }
   for (const row of brokerRuntimeByType.values()) {

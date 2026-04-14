@@ -1,11 +1,10 @@
 import { NextRequest, NextResponse } from "next/server";
+import { getBackendApiBase, getRequestToken, buildAuthHeaders } from "@/app/api/_lib/backend";
 
-const BACKEND = process.env.APEX_API_URL ?? "http://localhost:8000";
-
-async function safeFetch(url: string, token?: string) {
+async function safeFetch(url: string, headers: Record<string, string>) {
   try {
     const res = await fetch(url, {
-      headers: token ? { authorization: `Bearer ${token}` } : {},
+      headers,
       cache: "no-store",
     });
     if (!res.ok) return null;
@@ -16,8 +15,11 @@ async function safeFetch(url: string, token?: string) {
 }
 
 export async function GET(req: NextRequest) {
-  const token = req.headers.get("authorization")?.replace("Bearer ", "") ?? "";
-  const data = await safeFetch(`${BACKEND}/ops/advanced-metrics`, token);
+  const token = getRequestToken(req);
+  const data = await safeFetch(
+    `${getBackendApiBase()}/ops/advanced-metrics`,
+    buildAuthHeaders(token)
+  );
   if (!data) {
     return NextResponse.json({
       available: false,

@@ -1,6 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-
-const BACKEND = process.env.APEX_API_URL ?? "http://localhost:8000";
+import { getBackendApiBase } from "@/app/api/_lib/backend";
 
 async function safeFetch(url: string, token?: string) {
   try {
@@ -17,7 +16,7 @@ async function safeFetch(url: string, token?: string) {
 
 export async function GET(req: NextRequest) {
   const token = req.headers.get("authorization")?.replace("Bearer ", "") ?? "";
-  const data = await safeFetch(`${BACKEND}/ops/paper-account`, token);
+  const data = await safeFetch(`${getBackendApiBase()}/ops/paper-account`, token);
   if (!data) {
     return NextResponse.json({
       available: false,

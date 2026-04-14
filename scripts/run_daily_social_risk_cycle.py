@@ -14,6 +14,7 @@ import json
 import logging
 import subprocess
 import sys
+import time
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, List
@@ -30,7 +31,11 @@ logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 
 
+_RETRY_DELAYS = (5, 15, 45)  # seconds; 3 attempts total
+
+
 def _run(cmd: List[str]) -> None:
+    """Run a subprocess command, raising on non-zero exit."""
     logger.info("running: %s", " ".join(cmd))
     proc = subprocess.run(cmd, cwd=PROJECT_ROOT, capture_output=True, text=True)
     if proc.stdout:
@@ -38,7 +43,37 @@ def _run(cmd: List[str]) -> None:
     if proc.stderr:
         logger.warning(proc.stderr.strip())
     if proc.returncode != 0:
-        raise RuntimeError(f"command failed ({proc.returncode}): {' '.join(cmd)}")
+        raise RuntimeError(
+            f"command failed ({proc.returncode}): {' '.join(cmd)}\n"
+            f"stderr: {proc.stderr.strip()[-2000:]}"
+        )
+
+
+def _run_with_retry(cmd: List[str], *, max_attempts: int = 3) -> None:
+    """Run a subprocess with exponential-backoff retry.
+
+    Retries the command on failure up to *max_attempts* times, waiting
+    progressively longer between attempts.  Permanent failures (i.e. the
+    command failed on every attempt) raise the last captured RuntimeError.
+    """
+    last_exc: Exception = RuntimeError("no attempts made")
+    for attempt, delay in enumerate((_RETRY_DELAYS + (0,))[:max_attempts], start=1):
+        try:
+            _run(cmd)
+            return  # success
+        except RuntimeError as exc:
+            last_exc = exc
+            if attempt < max_attempts:
+                logger.warning(
+                    "attempt %d/%d failed; retrying in %ds. error: %s",
+                    attempt, max_attempts, delay, str(exc)[:300],
+                )
+                time.sleep(delay)
+            else:
+                logger.error(
+                    "all %d attempts failed for: %s", max_attempts, " ".join(cmd)
+                )
+    raise last_exc
 
 
 def main() -> int:
@@ -55,7 +90,7 @@ def main() -> int:
     artifacts_dir.mkdir(parents=True, exist_ok=True)
 
     py = sys.executable
-    _run(
+    _run_with_retry(
         [
             py,
             "scripts/build_social_risk_inputs.py",
@@ -73,7 +108,7 @@ def main() -> int:
     ]
     if not args.activate:
         calibration_cmd.append("--no-activate")
-    _run(calibration_cmd)
+    _run_with_retry(calibration_cmd)
 
     social_inputs_path = data_dir / "social_risk_inputs.json"
     social_inputs: Dict[str, object] = {}

@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { useAuthContext } from "@/lib/auth-context";
+import { useAuthContext } from "@/components/auth/AuthProvider";
 
 interface PendingOpp {
   symbol: string;
@@ -48,7 +48,7 @@ function pnlColor(pnl: number) {
 }
 
 export default function MissedOpportunitiesPanel() {
-  const { token } = useAuthContext();
+  const { accessToken: token } = useAuthContext();
   const [data, setData] = useState<MissedData | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [lastUpdated, setLastUpdated] = useState("");

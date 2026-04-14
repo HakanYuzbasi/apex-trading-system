@@ -16,6 +16,7 @@ class AssetClass(Enum):
     EQUITY = "EQUITY"
     FOREX = "FOREX"
     CRYPTO = "CRYPTO"
+    OPTION = "OPTION"
 
 
 # Common fiat currencies for FX/crypto quotes
@@ -116,6 +117,13 @@ def parse_symbol(raw: str) -> ParsedSymbol:
         normalized = f"CRYPTO:{base}/{quote}"
         return ParsedSymbol(raw=raw, asset_class=AssetClass.CRYPTO, base=base, quote=quote, normalized=normalized)
 
+    if s.startswith("OPTION:") or s.startswith("OPT:"):
+        contract = s.split(":", 1)[1].strip()
+        if not contract:
+            raise ValueError("Invalid option symbol")
+        normalized = f"OPTION:{contract}"
+        return ParsedSymbol(raw=raw, asset_class=AssetClass.OPTION, base=contract, quote="USD", normalized=normalized)
+
     # Auto-detect pairs with separators (e.g., EUR/USD, BTC/USDT)
     if any(sep in s for sep in _PAIR_SEPARATORS):
         try:
@@ -130,6 +138,15 @@ def parse_symbol(raw: str) -> ParsedSymbol:
             raise
 
         raise ValueError(f"Invalid pair format: {s}")
+
+    # Default to equity, but try a final check for common dense crypto pairs (e.g. BTCUSD, UNIUSD)
+    if len(s) >= 6 and s.endswith(tuple(KNOWN_CRYPTO_QUOTES)):
+        for quote in KNOWN_CRYPTO_QUOTES:
+            if s.endswith(quote):
+                base = s[:-len(quote)]
+                if base in KNOWN_CRYPTO_ASSETS:
+                    normalized = f"CRYPTO:{base}/{quote}"
+                    return ParsedSymbol(raw=raw, asset_class=AssetClass.CRYPTO, base=base, quote=quote, normalized=normalized)
 
     # Default to equity
     return ParsedSymbol(raw=raw, asset_class=AssetClass.EQUITY, base=s, quote="USD", normalized=s)
@@ -176,4 +193,3 @@ def is_market_open(raw_or_parsed, timestamp, assume_daily: bool = False) -> bool
 # parse_symbol("FX:EUR/USD") -> FX:EUR/USD
 # parse_symbol("CRYPTO:BTC/USDT") -> CRYPTO:BTC/USDT
 # parse_symbol("BTC/USDT") -> CRYPTO:BTC/USDT
-

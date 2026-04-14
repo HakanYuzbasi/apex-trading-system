@@ -15791,8 +15791,8 @@ class ApexTradingSystem:
         """Export initial state."""
         try:
             state = {
-                'capital': self.capital,
-                'starting_capital': self.capital,
+                'capital': float(self.capital) if self.capital is not None else float(self._session_config.get("initial_capital", 1000000.0)),
+                'starting_capital': float(self.capital) if self.capital is not None else float(self._session_config.get("initial_capital", 1000000.0)),
                 'positions': {},
                 'daily_pnl': 0.0,
                 'daily_pnl_realized': 0.0,

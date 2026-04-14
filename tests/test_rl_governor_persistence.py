@@ -5,6 +5,7 @@ import json
 import tempfile
 from pathlib import Path
 
+from models.model_manifest import build_manifest, verify_manifest, write_manifest
 from models.rl_weight_governor import (
     RLWeightGovernor,
     ACTIONS,
@@ -84,6 +85,19 @@ class TestQTablePersistence:
             path.write_text("{{NOT_JSON}}")
             g = RLWeightGovernor(model_dir=d)
             assert g.q_table == {}
+
+    def test_q_table_save_keeps_manifest_valid(self, tmp_path: Path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        model_dir = tmp_path / "models" / "saved_ultimate"
+        model_dir.mkdir(parents=True)
+        manifest_path = tmp_path / "models" / "model_manifest.json"
+
+        governor = RLWeightGovernor(model_dir=str(model_dir))
+        write_manifest(build_manifest(base_dirs=[model_dir], patterns=("*.json",)), manifest_path)
+
+        governor.update_q_value("bull", False, 0, reward=0.02)
+
+        assert verify_manifest(manifest_path) == []
 
 
 # ── init_rl_governor factory ──────────────────────────────────────────────────

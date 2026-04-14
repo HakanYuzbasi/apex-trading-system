@@ -7,10 +7,11 @@ Multi-Phase Environment Simulator (WITH OEMS DEPLOYMENT)
 
 import numpy as np
 import logging
-from typing import Tuple, Dict
+from typing import Tuple, Dict, Optional
 import os
 import pandas as pd
 from quant_system.execution.cost_model import TransactionCostModel
+from quant_system.execution.revolut_cost_model import RevolutCostModel, AssetType
 from quant_system.features.state_scaler import OnlineStateScaler
 from quant_system.execution.oems import OrderManagementSystem
 
@@ -20,21 +21,43 @@ class RLSimulatorEnv:
     def __init__(
         self, price_array: np.ndarray, meta_probs: np.ndarray, confidences: np.ndarray,
         disagreements: np.ndarray, features: np.ndarray, regimes: np.ndarray,
-        lambda_dd: float = 2.0, lambda_vol: float = 1.0, lambda_cost_ratio: float = 0.5
+        lambda_dd: float = 2.0, lambda_vol: float = 1.0, lambda_cost_ratio: float = 0.5,
+        broker: str = "generic",
+        revolut_asset_type: AssetType = "crypto_other",
+        revolut_monthly_stablecoin_vol: float = 0.0,
+        lambda_revolut_tier: float = 3.0,
     ):
         self.prices, self.meta_probs, self.confidences = price_array, meta_probs, confidences
         self.disagreements, self.features, self.regimes = disagreements, features, regimes
-        
-        self.lambda_dd, self.lambda_vol, self.lambda_cost_ratio = lambda_dd, lambda_vol, lambda_cost_ratio * 1.2 
-        self.cost_model = TransactionCostModel(base_spread_bps=2.0)
-        self.scaler = OnlineStateScaler(15, exclude_dims=[13]) 
+
+        self.broker = broker
+        self.revolut_asset_type: AssetType = revolut_asset_type
+        self.lambda_revolut_tier = lambda_revolut_tier
+
+        self.lambda_dd, self.lambda_vol, self.lambda_cost_ratio = lambda_dd, lambda_vol, lambda_cost_ratio * 1.2
+
+        # Choose cost model based on broker
+        if broker == "revolut":
+            self.revolut_cost_model = RevolutCostModel(
+                monthly_stablecoin_volume_eur=revolut_monthly_stablecoin_vol,
+            )
+            self.cost_model: Optional[TransactionCostModel] = None
+        else:
+            self.revolut_cost_model = None
+            self.cost_model = TransactionCostModel(base_spread_bps=2.0)
+
+        # State dim = 15 (generic) or 16 (revolut — adds tier proximity)
+        self._state_dim = 16 if broker == "revolut" else 15
+        self.scaler = OnlineStateScaler(self._state_dim, exclude_dims=[13])
         self.oems = OrderManagementSystem()
-        
+
         self.STATE_INDEX = {
             "feat0": 0, "feat1": 1, "feat2": 2, "feat3": 3,
             "meta_prob": 4, "confidence": 5, "disagreement": 6,
             "expected_impact": 7, "recent_cost_spike": 8, "prob_ma": 9,
-            "position": 10, "pnl": 11, "drawdown": 12, "regime": 13, "previous_action": 14
+            "position": 10, "pnl": 11, "drawdown": 12, "regime": 13, "previous_action": 14,
+            # Revolut-only (dim 15):
+            "stablecoin_tier_proximity": 15,
         }
         
         self.recent_cost_spike = 0.0
@@ -76,14 +99,30 @@ class RLSimulatorEnv:
         if open_pnl > self.peak_pnl: self.peak_pnl = open_pnl
         drawdown = min(0.0, open_pnl - self.peak_pnl)
         
-        raw = np.zeros(15)
+        raw = np.zeros(self._state_dim)
         raw[0:4] = self.features[t_lag, :4]
         raw[4] = self.meta_probs[t_lag]
         raw[5] = self.confidences[t_lag]
         raw[6] = self.disagreements[t_lag]
-        raw[7] = self.cost_model.estimate_expected_impact(100000*self.position_sz, 1e6, np.std(self.prices[max(0,t-20):t+1])/self.prices[t], self.regimes[t])
+
+        # Expected impact — use whichever cost model is active
+        if self.revolut_cost_model is not None:
+            raw[7] = self.revolut_cost_model.estimate_expected_impact(
+                100_000 * self.position_sz,
+                self.revolut_asset_type,
+                monthly_stablecoin_vol=self.revolut_cost_model.monthly_stablecoin_volume_eur,
+            )
+            if self._state_dim > 15:
+                raw[15] = self.revolut_cost_model.stablecoin_tier_proximity()
+        else:
+            raw[7] = self.cost_model.estimate_expected_impact(
+                100_000 * self.position_sz, 1e6,
+                np.std(self.prices[max(0, t-20):t+1]) / self.prices[t],
+                self.regimes[t],
+            )
+
         raw[8] = self.recent_cost_spike
-        raw[9] = np.mean(self.meta_probs[max(0,t-10):t+1])
+        raw[9] = np.mean(self.meta_probs[max(0, t-10):t+1])
         raw[10] = self.position_sz
         raw[11] = open_pnl
         raw[12] = drawdown
@@ -141,13 +180,24 @@ class RLSimulatorEnv:
         cost_ratio = 0.0
         realized_pnl = 0.0
         base_reward = 0.0
+        tier_activated = False
         
         if executed_volume > 0.01: 
             # Physical reduction applying OEMS properties
             qty_liquidated = fraction_to_sell = action_fraction * self.asset_quantity
             self.asset_quantity -= qty_liquidated
             
-            costs = self.cost_model.calculate_cost(current_price, 100000 * executed_volume, 1000000, volatility, regime)
+            order_eur = 100_000 * executed_volume
+            if self.revolut_cost_model is not None:
+                breakdown = self.revolut_cost_model.calculate_cost(
+                    current_price, order_eur, self.revolut_asset_type
+                )
+                costs = breakdown.to_dict()
+                tier_activated = breakdown.fee_tier_activated
+            else:
+                costs = self.cost_model.calculate_cost(
+                    current_price, order_eur, 1_000_000, volatility, regime
+                )
             current_cost = costs['total_fractional_cost']
             
             self.recent_cost_spike = self.alpha_cost * current_cost + (1 - self.alpha_cost) * self.recent_cost_spike
@@ -170,7 +220,18 @@ class RLSimulatorEnv:
         penalty_vol = self.lambda_vol * volatility
         penalty_cost = self.lambda_cost_ratio * np.log(1 + cost_ratio)
         
-        reward = (base_reward - penalty_dd - penalty_vol) * confidence - penalty_cost
+        # Revolut-specific penalty: sharp cost jump when fee tier activates
+        penalty_revolut_tier = 0.0
+        if self.revolut_cost_model is not None and tier_activated:
+            # Proportional to how far above the cap the cumulative volume is.
+            proximity = self.revolut_cost_model.stablecoin_tier_proximity()
+            penalty_revolut_tier = self.lambda_revolut_tier * max(0.0, proximity - 0.9)
+
+        reward = (
+            (base_reward - penalty_dd - penalty_vol) * confidence
+            - penalty_cost
+            - penalty_revolut_tier
+        )
         self.metrics['total_reward'] += reward
         
         s_scaled, s_raw = self._build_state()

@@ -3,7 +3,7 @@ import { NextResponse } from "next/server";
 export const dynamic = "force-dynamic";
 export const revalidate = 0;
 
-const BASE = process.env.APEX_API_BASE ?? "http://127.0.0.1:8000";
+const BASE = process.env.APEX_API_URL ?? process.env.APEX_API_BASE ?? "http://127.0.0.1:8000";
 
 async function safeFetch(path: string, token?: string) {
   try {

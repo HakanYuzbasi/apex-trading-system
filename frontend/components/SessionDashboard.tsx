@@ -13,7 +13,6 @@ import {
 import {
   useSessionMetrics,
   useSessionPositions,
-  type CockpitPosition,
 } from "@/lib/api";
 import { SESSION_CONFIG, type SessionType } from "@/lib/constants";
 import {
@@ -23,10 +22,23 @@ import {
   normalizeDrawdownPct,
   sortIndicator,
 } from "@/lib/formatters";
-import { Skeleton } from "@/components/ui/skeleton";
+import { ErrorState } from "@/components/ui/ErrorState";
+import { LoadingSpinner } from "@/components/ui/LoadingSpinner";
 
 type SortKey = "symbol" | "qty" | "entry" | "current" | "pnl" | "pnl_pct" | "signal_direction";
 type SortDir = "asc" | "desc";
+
+function formatMoneyOrDash(value: number | null | undefined): string {
+  return value == null ? "—" : formatCurrencyWithCents(value);
+}
+
+function formatPctOrDash(value: number | null | undefined): string {
+  return value == null ? "—" : formatPct(value);
+}
+
+function formatFixedOrDash(value: number | null | undefined, digits = 2): string {
+  return value == null ? "—" : Number(value).toFixed(digits);
+}
 
 function MetricTile({
   label,
@@ -70,9 +82,9 @@ export default function SessionDashboard({
   sessionType: SessionType;
 }) {
   const cfg = SESSION_CONFIG[sessionType];
-  const { data: metrics, isLoading: metricsLoading } =
+  const { data: metrics, isLoading: metricsLoading, error: metricsFetchError } =
     useSessionMetrics(sessionType);
-  const { data: posData, isLoading: posLoading } =
+  const { data: posData, isLoading: posLoading, error: positionsFetchError } =
     useSessionPositions(sessionType);
 
   const [sortKey, setSortKey] = useState<SortKey>("pnl");
@@ -83,13 +95,21 @@ export default function SessionDashboard({
     [posData?.positions]
   );
 
+  const metricsError =
+    metrics?.error ??
+    (metricsFetchError instanceof Error ? metricsFetchError.message : null);
+  const positionsError =
+    posData?.error ??
+    (positionsFetchError instanceof Error ? positionsFetchError.message : null);
+  const hasRenderableData = Boolean(metrics?.available || posData?.available || positions.length > 0);
+
   const sortedPositions = useMemo(() => {
     const sorted = [...positions];
     sorted.sort((a, b) => {
       if (sortKey === "symbol" || sortKey === "signal_direction") {
-        return String(a[sortKey]).localeCompare(String(b[sortKey]));
+        return String(a?.[sortKey] ?? "").localeCompare(String(b?.[sortKey] ?? ""));
       }
-      return Number(a[sortKey]) - Number(b[sortKey]);
+      return Number(a?.[sortKey] ?? 0) - Number(b?.[sortKey] ?? 0);
     });
     if (sortDir === "desc") sorted.reverse();
     return sorted;
@@ -105,25 +125,36 @@ export default function SessionDashboard({
   };
 
   // Derived metrics
-  const capital = metrics?.capital ?? cfg.initialCapital;
-  const startingCapital = metrics?.starting_capital ?? cfg.initialCapital;
-  const dailyPnl = metrics?.daily_pnl ?? 0;
-  const totalPnl = metrics?.total_pnl ?? 0;
-  const sharpe = metrics?.sharpe_ratio ?? 0;
-  const winRate = metrics?.win_rate ?? 0;
-  const drawdown = metrics?.max_drawdown ?? 0;
+  const capital = metrics?.capital ?? null;
+  const startingCapital = metrics?.starting_capital ?? metrics?.initial_capital ?? cfg.initialCapital;
+  const dailyPnl = metrics?.daily_pnl ?? null;
+  const totalPnl = metrics?.total_pnl ?? null;
+  const sharpe = metrics?.sharpe_ratio ?? null;
+  const winRate = metrics?.win_rate ?? null;
+  const drawdown = metrics?.max_drawdown ?? null;
   const totalTrades = metrics?.total_trades ?? 0;
 
   const SessionIcon = sessionType === "crypto" ? Bitcoin : BarChart3;
 
-  if (metricsLoading && posLoading) {
+  if ((metricsLoading || posLoading) && !hasRenderableData) {
     return (
       <div className="mx-auto max-w-[1600px] px-4 py-6">
-        <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
-          {Array.from({ length: 8 }).map((_, i) => (
-            <Skeleton key={i} className="h-24 rounded-xl" />
-          ))}
-        </div>
+        <LoadingSpinner
+          label={`Loading ${cfg.label}`}
+          detail="Pulling session-scoped metrics and positions through the dashboard BFF."
+        />
+      </div>
+    );
+  }
+
+  if (!hasRenderableData && (metricsError || positionsError)) {
+    return (
+      <div className="mx-auto max-w-[1600px] px-4 py-6">
+        <ErrorState
+          title={`${cfg.label} unavailable`}
+          message={metricsError ?? positionsError ?? "Session telemetry is temporarily unavailable."}
+          onRetry={() => window.location.reload()}
+        />
       </div>
     );
   }
@@ -146,6 +177,12 @@ export default function SessionDashboard({
         )}
       </div>
 
+      {(metricsError || positionsError) && (
+        <div className="mb-6 rounded-2xl border border-amber-500/25 bg-amber-500/10 px-4 py-3 text-sm text-amber-200">
+          {metricsError ?? positionsError}
+        </div>
+      )}
+
       {/* Sharpe Target Banner */}
       <div className="mb-6 rounded-xl border border-border/70 bg-background/70 p-4">
         <div className="mb-2 flex items-center justify-between">
@@ -154,19 +191,21 @@ export default function SessionDashboard({
           </span>
           <span
             className={`text-sm font-bold ${
-              sharpe >= cfg.sharpeTarget ? "text-positive" : "text-foreground"
+              sharpe !== null && sharpe >= cfg.sharpeTarget ? "text-positive" : "text-foreground"
             }`}
           >
-            Current: {sharpe.toFixed(2)}
+            Current: {formatFixedOrDash(sharpe)}
           </span>
         </div>
         <div className="h-3 w-full overflow-hidden rounded-full bg-muted">
           <div
             className={`h-full rounded-full transition-all duration-500 ${
-              sharpe >= cfg.sharpeTarget ? "bg-positive" : "bg-primary"
+              sharpe !== null && sharpe >= cfg.sharpeTarget ? "bg-positive" : "bg-primary"
             }`}
             style={{
-              width: `${Math.min(100, Math.max(0, (sharpe / cfg.sharpeTarget) * 100))}%`,
+              width: sharpe === null
+                ? "0%"
+                : `${Math.min(100, Math.max(0, (sharpe / cfg.sharpeTarget) * 100))}%`,
             }}
           />
         </div>
@@ -176,26 +215,26 @@ export default function SessionDashboard({
       <div className="mb-6 grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
         <MetricTile
           label="Capital"
-          value={formatCurrency(capital)}
+          value={capital !== null ? formatCurrency(capital) : "—"}
           subValue={`Started: ${formatCurrency(startingCapital)}`}
           icon={DollarSign}
         />
         <MetricTile
           label="Daily P&L"
-          value={formatCurrencyWithCents(dailyPnl)}
-          tone={dailyPnl >= 0 ? "positive" : "negative"}
-          icon={dailyPnl >= 0 ? TrendingUp : TrendingDown}
+          value={formatMoneyOrDash(dailyPnl)}
+          tone={(dailyPnl ?? 0) >= 0 ? "positive" : "negative"}
+          icon={(dailyPnl ?? 0) >= 0 ? TrendingUp : TrendingDown}
         />
         <MetricTile
           label="Total P&L"
-          value={formatCurrencyWithCents(totalPnl)}
-          subValue={`${startingCapital > 0 ? formatPct(totalPnl / startingCapital) : "0%"} return`}
-          tone={totalPnl >= 0 ? "positive" : "negative"}
+          value={formatMoneyOrDash(totalPnl)}
+          subValue={totalPnl !== null && startingCapital > 0 ? `${formatPct(totalPnl / startingCapital)} return` : "Return unavailable"}
+          tone={(totalPnl ?? 0) >= 0 ? "positive" : "negative"}
           icon={Gauge}
         />
         <MetricTile
           label="Win Rate"
-          value={formatPct(winRate)}
+          value={formatPctOrDash(winRate)}
           subValue={`${totalTrades} total trades`}
           icon={ShieldCheck}
         />
@@ -206,7 +245,7 @@ export default function SessionDashboard({
         <div className="rounded-xl border border-border/70 bg-background/70 p-4">
           <p className="text-xs text-muted-foreground">Sharpe Ratio</p>
           <p className="text-2xl font-bold text-foreground">
-            {sharpe.toFixed(2)}
+            {formatFixedOrDash(sharpe)}
           </p>
           <p className="text-xs text-muted-foreground">
             Target: {cfg.sharpeTarget.toFixed(1)}
@@ -215,7 +254,7 @@ export default function SessionDashboard({
         <div className="rounded-xl border border-border/70 bg-background/70 p-4">
           <p className="text-xs text-muted-foreground">Max Drawdown</p>
           <p className="text-2xl font-bold text-negative">
-            {normalizeDrawdownPct(drawdown).toFixed(1)}%
+            {drawdown !== null ? `${normalizeDrawdownPct(drawdown).toFixed(1)}%` : "—"}
           </p>
           <p className="text-xs text-muted-foreground">Budget: 10%</p>
         </div>
@@ -237,9 +276,18 @@ export default function SessionDashboard({
         </h2>
 
         {positions.length === 0 ? (
-          <p className="py-8 text-center text-sm text-muted-foreground">
-            No open positions in {cfg.label.toLowerCase()}.
-          </p>
+          posData?.available === false && positionsError ? (
+            <ErrorState
+              title="Positions unavailable"
+              message={positionsError}
+              onRetry={() => window.location.reload()}
+              className="min-h-[180px]"
+            />
+          ) : (
+            <p className="py-8 text-center text-sm text-muted-foreground">
+              No open positions in {cfg.label.toLowerCase()}.
+            </p>
+          )
         ) : (
           <div className="overflow-x-auto">
             <table className="w-full text-left text-sm">
@@ -274,42 +322,42 @@ export default function SessionDashboard({
                     className="border-b border-border/30 transition-colors hover:bg-muted/30"
                   >
                     <td className="px-2 py-2 font-medium text-foreground">
-                      {pos.symbol}
+                      {pos?.symbol ?? "—"}
                     </td>
                     <td className="px-2 py-2 font-mono text-foreground">
-                      {pos.qty}
+                      {pos?.qty ?? "—"}
                     </td>
                     <td className="px-2 py-2 font-mono text-foreground">
-                      {formatCurrencyWithCents(pos.entry)}
+                      {formatMoneyOrDash(pos?.entry ?? null)}
                     </td>
                     <td className="px-2 py-2 font-mono text-foreground">
-                      {formatCurrencyWithCents(pos.current)}
+                      {formatMoneyOrDash(pos?.current ?? null)}
                     </td>
                     <td
                       className={`px-2 py-2 font-mono font-semibold ${
-                        pos.pnl >= 0 ? "text-positive" : "text-negative"
+                        (pos?.pnl ?? 0) >= 0 ? "text-positive" : "text-negative"
                       }`}
                     >
-                      {formatCurrencyWithCents(pos.pnl)}
+                      {formatMoneyOrDash(pos?.pnl ?? null)}
                     </td>
                     <td
                       className={`px-2 py-2 font-mono ${
-                        pos.pnl_pct >= 0 ? "text-positive" : "text-negative"
+                        (pos?.pnl_pct ?? 0) >= 0 ? "text-positive" : "text-negative"
                       }`}
                     >
-                      {pos.pnl_pct.toFixed(2)}%
+                      {pos?.pnl_pct != null ? `${pos.pnl_pct.toFixed(2)}%` : "—"}
                     </td>
                     <td className="px-2 py-2">
                       <span
                         className={`rounded px-1.5 py-0.5 text-xs font-medium ${
-                          pos.signal_direction === "LONG" || pos.signal_direction === "BUY"
+                          pos?.signal_direction === "LONG" || pos?.signal_direction === "BUY"
                             ? "bg-positive/15 text-positive"
-                            : pos.signal_direction === "SHORT" || pos.signal_direction === "SELL"
+                            : pos?.signal_direction === "SHORT" || pos?.signal_direction === "SELL"
                               ? "bg-negative/15 text-negative"
                               : "bg-muted text-muted-foreground"
                         }`}
                       >
-                        {pos.signal_direction}
+                        {pos?.signal_direction ?? "UNKNOWN"}
                       </span>
                     </td>
                   </tr>

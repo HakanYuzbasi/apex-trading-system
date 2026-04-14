@@ -47,6 +47,39 @@ def _hash_file(path: Path) -> str:
     return digest.hexdigest()
 
 
+def _normalize_manifest_path(path: Path) -> str:
+    if not path.is_absolute():
+        return path.as_posix()
+
+    try:
+        return path.resolve().relative_to(Path.cwd().resolve()).as_posix()
+    except ValueError:
+        return path.as_posix()
+
+
+def _is_managed_model_path(file_path: Path, base_dirs: Sequence[Path] = DEFAULT_MODEL_DIRS) -> bool:
+    resolved_file = file_path.resolve()
+    cwd = Path.cwd().resolve()
+    for base_dir in base_dirs:
+        candidate_root = base_dir if base_dir.is_absolute() else cwd / base_dir
+        try:
+            resolved_file.relative_to(candidate_root.resolve())
+            return True
+        except ValueError:
+            continue
+    return False
+
+
+def _build_manifest_entry(file_path: Path) -> ModelManifestEntry:
+    stat = file_path.stat()
+    return ModelManifestEntry(
+        path=_normalize_manifest_path(file_path),
+        sha256=_hash_file(file_path),
+        size_bytes=stat.st_size,
+        modified_at=datetime.fromtimestamp(stat.st_mtime, tz=timezone.utc).isoformat(),
+    )
+
+
 def _iter_model_files(base_dirs: Sequence[Path], patterns: Sequence[str]) -> Iterable[Path]:
     seen = set()
     for base in base_dirs:
@@ -65,15 +98,7 @@ def build_manifest(
 ) -> Dict[str, object]:
     entries: List[ModelManifestEntry] = []
     for file_path in sorted(_iter_model_files(base_dirs, patterns)):
-        stat = file_path.stat()
-        entries.append(
-            ModelManifestEntry(
-                path=file_path.as_posix(),
-                sha256=_hash_file(file_path),
-                size_bytes=stat.st_size,
-                modified_at=datetime.fromtimestamp(stat.st_mtime, tz=timezone.utc).isoformat(),
-            )
-        )
+        entries.append(_build_manifest_entry(file_path))
 
     return {
         "version": 1,
@@ -92,6 +117,23 @@ def write_manifest(manifest: Dict[str, object], output_path: Path = DEFAULT_MANI
 def load_manifest(path: Path = DEFAULT_MANIFEST_PATH) -> Dict[str, object]:
     with path.open("r", encoding="utf-8") as f:
         return json.load(f)
+
+
+def sync_manifest_entry(file_path: Path, manifest_path: Path = DEFAULT_MANIFEST_PATH) -> Path:
+    if not _is_managed_model_path(file_path):
+        return manifest_path
+
+    manifest = load_manifest(manifest_path)
+    updated_entry = _build_manifest_entry(file_path).to_dict()
+    normalized_path = updated_entry["path"]
+    files = [
+        entry for entry in (manifest.get("files", []) or []) if entry.get("path") != normalized_path
+    ]
+    files.append(updated_entry)
+    manifest["files"] = sorted(files, key=lambda entry: str(entry.get("path", "")))
+    manifest["generated_at"] = datetime.now(timezone.utc).isoformat()
+    write_manifest(manifest, manifest_path)
+    return manifest_path
 
 
 def verify_manifest(path: Path = DEFAULT_MANIFEST_PATH) -> List[str]:

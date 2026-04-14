@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { useAuthContext } from "@/lib/auth-context";
+import { useAuthContext } from "@/components/auth/AuthProvider";
 
 interface PairRecord {
   leg_y: string;
@@ -59,7 +59,7 @@ function SignalBadge({ value }: { value: number }) {
 }
 
 export default function CrossAssetPairsPanel() {
-  const { token } = useAuthContext();
+  const { accessToken: token } = useAuthContext();
   const [data, setData] = useState<CrossAssetPairsData | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);

@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { useAuthContext } from "@/lib/auth-context";
+import { useAuthContext } from "@/components/auth/AuthProvider";
 
 interface AlertRecord {
   event_type: string;
@@ -67,7 +67,7 @@ function AlertBadge({ type }: { type: string }) {
 }
 
 export default function AlertHistoryPanel() {
-  const { token } = useAuthContext();
+  const { accessToken: token } = useAuthContext();
   const [data, setData] = useState<AlertsData | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);

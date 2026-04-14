@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { useAuthContext } from "@/lib/auth-context";
+import { useAuthContext } from "@/components/auth/AuthProvider";
 
 interface WinRates {
   paper: number;
@@ -64,7 +64,7 @@ function ShortfallGauge({ pct }: { pct: number }) {
 }
 
 export default function PaperAccountPanel() {
-  const { token } = useAuthContext();
+  const { accessToken: token } = useAuthContext();
   const [data, setData] = useState<PaperAccountData | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);

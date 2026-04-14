@@ -444,38 +444,16 @@ body::before {
   box-shadow: 0 12px 40px -4px rgba(0, 0, 0, 0.4) !important;
 }
 
-/* Force Command Palette and Modals to the Absolute Top */
+/* Modal / dialog z-index — single source of truth */
 [data-radix-portal],
-[role="dialog"],
-[data-state="open"]>.fixed,
-.fixed.inset-0 {
+div[role="dialog"],
+div[cmdk-dialog],
+[cmdk-overlay] {
   z-index: 99999 !important;
 }
 
-/* Ultimate Z-Index Hammer for Command Palette & Modals */
-div[role="dialog"],
-div[data-radix-portal],
-div[cmdk-dialog],
-[cmdk-overlay],
-.fixed {
-  z-index: 2147483647 !important;
-}
-
-
-/* ========================================= */
-/* ABSOLUTE Z-INDEX OVERRIDE FOR MODALS      */
-/* ========================================= */
-
-/* 1. Force Shadcn's default modal layer to the absolute maximum */
-.z-50,
-[data-radix-portal],
-div[role="dialog"] {
-  z-index: 2147483647 !important;
-}
-
-/* 2. Force the glass cards to stay flat on the bottom layer */
+/* Glass cards stay in normal flow */
 .glass-card {
-  z-index: 0 !important;
+  z-index: 0;
   isolation: isolate;
-  transform: translateZ(0);
 }

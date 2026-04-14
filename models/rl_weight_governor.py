@@ -8,9 +8,8 @@ the constituent ML weights across market regimes, instead of using static matric
 import numpy as np
 import json
 import logging
-import time
 from pathlib import Path
-from typing import Dict, Tuple
+from typing import Dict
 
 logger = logging.getLogger(__name__)
 
@@ -91,8 +90,20 @@ class RLWeightGovernor:
             with open(tmp, "w") as f:
                 json.dump(payload, f)
             tmp.replace(self.q_table_path)
+            self._sync_manifest_entry()
         except Exception as e:
             logger.warning(f"Failed to save RL Q-Table: {e}")
+
+    def _sync_manifest_entry(self):
+        try:
+            from config import ApexConfig
+            from models.model_manifest import sync_manifest_entry
+
+            manifest_path = Path(ApexConfig.MODEL_MANIFEST_PATH)
+            if manifest_path.exists():
+                sync_manifest_entry(self.q_table_path, manifest_path)
+        except Exception as e:
+            logger.warning(f"Failed to sync RL Q-Table manifest entry: {e}")
 
     def _get_state_key(self, regime: str, is_high_volatility: bool) -> str:
         """Discretize the current environment into a finite Markov State."""

@@ -148,7 +148,8 @@ class TradingExcellenceManager:
         signal: float,
         confidence: float,
         entry_price: float,
-        current_price: float
+        current_price: float,
+        rolling_sharpe: float = 0.0
     ) -> Optional[MismatchAlert]:
         """
         Check for signal-position mismatch.
@@ -189,10 +190,30 @@ class TradingExcellenceManager:
         else:
             signal_direction = 'neutral'
 
-        # Check for mismatches
-        severity = MismatchSeverity.NONE
         recommendation = "Hold position"
         urgency = "low"
+
+        # Apply strategy health multiplier to thresholds
+        # If Sharpe < 0, we want to be much more aggressive in exiting weakening trades.
+        _aggression_mult = 1.0
+        if rolling_sharpe < -0.5:
+            _aggression_mult = 0.5  # Half the threshold (e.g. 0.10 -> 0.05)
+        elif rolling_sharpe < 0:
+            _aggression_mult = 0.8  # Tighten by 20%
+            
+        mod_thresh = self.MODERATE_MISMATCH_THRESHOLD * _aggression_mult
+        strong_thresh = self.STRONG_MISMATCH_THRESHOLD * (2.0 - _aggression_mult) # If mult is 0.5, strong_thresh becomes MORE negative? NO.
+        # Wait, for STRONG_MISMATCH (which is negative, e.g. -0.15), 
+        # higher aggression means a value CLOSER TO ZERO (e.g. -0.05).
+        # So it should be: thresh * _aggression_mult if thresh is positive, 
+        # and thresh * _aggression_mult if thresh is negative? No, that makes it more negative.
+        # Let's use simple logic:
+        
+        strong_mismatch_val = self.STRONG_MISMATCH_THRESHOLD
+        if rolling_sharpe < 0:
+            strong_mismatch_val = -0.05  # Tighten significantly
+        
+        moderate_mismatch_val = mod_thresh
 
         # Strong opposite signal with high confidence = CRITICAL
         if position_side == 'LONG' and signal < self.CRITICAL_MISMATCH_THRESHOLD and confidence > self.CRITICAL_CONFIDENCE_THRESHOLD:
@@ -206,33 +227,29 @@ class TradingExcellenceManager:
             urgency = "immediate"
 
         # Signal flipped opposite = STRONG
-        elif position_side == 'LONG' and signal < self.STRONG_MISMATCH_THRESHOLD:
+        elif (position_side == 'LONG' and signal < strong_mismatch_val) or \
+             (position_side == 'SHORT' and signal > -strong_mismatch_val):
             severity = MismatchSeverity.STRONG
-            recommendation = "EXIT - Signal has turned bearish"
-            urgency = "high"
-
-        elif position_side == 'SHORT' and signal > -self.STRONG_MISMATCH_THRESHOLD:
-            severity = MismatchSeverity.STRONG
-            recommendation = "EXIT - Signal has turned bullish"
+            recommendation = f"EXIT - Signal turned contrary ({signal:+.2f})"
             urgency = "high"
 
         # Signal is neutral/weak = MODERATE
-        elif abs(signal) < self.MODERATE_MISMATCH_THRESHOLD:
+        elif abs(signal) < moderate_mismatch_val:
             severity = MismatchSeverity.MODERATE
             if pnl_pct > 3:
-                recommendation = f"TAKE PROFITS - Signal neutral, sitting on {pnl_pct:.1f}% gain"
+                recommendation = f"TAKE PROFITS - Signal neutral, sit on {pnl_pct:.1f}% gain"
                 urgency = "moderate"
             elif pnl_pct < -1:
                 recommendation = f"EXIT - Signal neutral, position losing {abs(pnl_pct):.1f}%"
                 urgency = "high"
             else:
-                recommendation = "Monitor closely - signal has weakened significantly"
+                recommendation = "Monitor - signal has weakened significantly"
                 urgency = "moderate"
 
         # Signal weakening = WEAK
         elif not signal_aligned and abs(signal) < self.WEAK_MISMATCH_THRESHOLD:
             severity = MismatchSeverity.WEAK
-            recommendation = "Signal weakening - consider tightening stops"
+            recommendation = "Signal weakening - tighten stops"
             urgency = "low"
 
         if severity == MismatchSeverity.NONE:
@@ -584,13 +601,10 @@ class TradingExcellenceManager:
 
 
 # Convenience function for quick checks
-def quick_mismatch_check(
-    position_side: str,
-    signal: float,
-    confidence: float,
     pnl_pct: float,
     hold_hours: float = 0.0,
     is_crypto: bool = False,
+    rolling_sharpe: float = 0.0
 ) -> Tuple[bool, str]:
     """
     Quick check for signal-position mismatch without full object.
@@ -616,6 +630,13 @@ def quick_mismatch_check(
     elif hold_hours > 4.0:
         _wt = _wt * 0.50        # Stale: tighten (e.g. -0.50 → -0.25)
         _nt = _nt * 0.50
+
+    # Strategy Health Adjustment (Aggression)
+    if rolling_sharpe < 0:
+        # Tighten exit requirements significantly
+        _aggression = 1.0 - (min(0.0, rolling_sharpe) * -0.5) # e.g. -1.0 sharpe -> 1.5 aggression
+        _wt = _wt / max(1.0, _aggression) # Tighten (make less negative)
+        _nt = _nt / max(1.0, _aggression)
 
     # LONG position checks
     if position_side == 'LONG':

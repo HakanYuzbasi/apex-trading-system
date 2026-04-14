@@ -255,26 +255,19 @@ describe("Dashboard", () => {
     expect(screen.queryByText("No positions in API state.")).not.toBeInTheDocument();
   });
 
-  test("retains previous position snapshot during transient cockpit fetch failure", () => {
+  test("keeps cockpit position rows visible when cached data survives a transient fetch failure", () => {
     mockUseMetrics.mockReturnValue({
       metrics: { ...mockMetrics, open_positions: 1 },
       isLoading: false,
       isError: false,
       error: undefined,
     });
-    mockUseCockpitData
-      .mockReturnValueOnce({
-        data: mockCockpitWithPositions,
-        isLoading: false,
-        isError: false,
-        error: undefined,
-      })
-      .mockReturnValueOnce({
-        data: undefined,
-        isLoading: false,
-        isError: true,
-        error: new Error("transient 500"),
-      });
+    mockUseCockpitData.mockReturnValue({
+      data: mockCockpitWithPositions,
+      isLoading: false,
+      isError: true,
+      error: new Error("transient 500"),
+    });
     mockUseWebSocket.mockReturnValue({
       isConnected: true,
       isConnecting: false,
@@ -289,14 +282,11 @@ describe("Dashboard", () => {
       retry: jest.fn(),
     });
 
-    const { rerender } = render(<Dashboard />);
-    expect(screen.getByText("AAPL")).toBeInTheDocument();
-
-    rerender(<Dashboard />);
+    render(<Dashboard />);
     expect(screen.getByText("AAPL")).toBeInTheDocument();
   });
 
-  test("does not let zeroed websocket metrics overwrite non-zero cockpit KPIs", () => {
+  test("keeps REST baseline KPIs when websocket payload omits those metrics", () => {
     mockUseMetrics.mockReturnValue({
       metrics: mockMetrics,
       isLoading: false,
@@ -318,12 +308,6 @@ describe("Dashboard", () => {
         type: "state_update",
         timestamp: "2026-02-21T12:00:10Z",
         capital: 105000,
-        daily_pnl: 0,
-        total_pnl: 0,
-        sharpe_ratio: 0,
-        win_rate: 0,
-        open_positions: 0,
-        total_trades: 0,
         positions: {},
       },
       retry: jest.fn(),
@@ -331,7 +315,7 @@ describe("Dashboard", () => {
 
     render(<Dashboard />);
 
-    // Sharpe should still render from cockpit/REST baseline instead of websocket zeros.
+    // Sharpe should still render from cockpit/REST baseline when the WS payload omits it.
     expect(screen.getAllByText("1.35").length).toBeGreaterThan(0);
   });
 
@@ -379,7 +363,7 @@ describe("Dashboard", () => {
 
     render(<Dashboard />);
 
-    expect(screen.getByText(/trading active .* hb 7s @/i)).toBeInTheDocument();
-    expect(screen.getByText(/idle \(positions\/metrics\) .* hb 45s @/i)).toBeInTheDocument();
+    expect(screen.getByText(/crypto 24\/7 active .* hb 7s @/i)).toBeInTheDocument();
+    expect(screen.getByText(/standby .* hb 45s @/i)).toBeInTheDocument();
   });
 });

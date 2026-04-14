@@ -61,6 +61,11 @@ jest.mock('framer-motion', () => ({
   AnimatePresence: ({ children }) => children,
 }))
 
+jest.mock('react-markdown', () => ({
+  __esModule: true,
+  default: ({ children }) => <div>{children}</div>,
+}))
+
 // Mock three.js and react-three-fiber
 jest.mock('@react-three/fiber', () => ({
   Canvas: ({ children }) => <div>{children}</div>,

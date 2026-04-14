@@ -11,7 +11,10 @@ from datetime import datetime
 from cryptography.fernet import Fernet
 from alpaca.trading.client import TradingClient
 from ib_insync import IB
+import json
+from pathlib import Path
 
+from config import ApexConfig
 from models.broker import BrokerConnection, BrokerType
 from core.exceptions import ApexBrokerError
 from services.common.db import db_session
@@ -447,7 +450,8 @@ class BrokerService:
             positions = await self._fetch_connection_positions(connection, credentials)
             self._positions_cache[connection.id] = positions
             return positions
-        except Exception as exc:  # SWALLOW: use last-known positions when broker fetch fails
+        except Exception as exc:  # SWALLOW: Use engine's state or last-known cache when broker fetch fails
+            # 1. Try internal cache first
             cached = self._positions_cache.get(connection.id)
             if cached is not None:
                 stale_positions: List[Dict[str, Any]] = []
@@ -457,6 +461,38 @@ class BrokerService:
                     stale_row["source_status"] = "degraded"
                     stale_positions.append(stale_row)
                 return stale_positions
+            
+            # 2. Hard Fallback: Check engine's trading_state.json for positions
+            try:
+                state_path = ApexConfig.DATA_DIR / "trading_state.json"
+                if state_path.exists():
+                    with open(state_path, "r") as f:
+                        state_data = json.load(f)
+                    
+                    engine_positions = state_data.get("positions", {})
+                    if engine_positions:
+                        logger.info(f"Using harness state-file fallback for {connection.broker_type.value} positions")
+                        rows = []
+                        for sym, data in engine_positions.items():
+                            # Approximate matching: if we have multiple brokers, this might be messy, 
+                            # but for single-broker deployments it restores the UI.
+                            rows.append({
+                                "source": f"{connection.name} (Harness Fallback)",
+                                "source_id": connection.id,
+                                "broker_type": connection.broker_type.value,
+                                "symbol": sym,
+                                "qty": data.get("qty", 0),
+                                "side": data.get("side", "LONG"),
+                                "avg_cost": data.get("avg_price", 0),
+                                "current_price": data.get("current_price", 0),
+                                "stale": True,
+                                "as_of": state_data.get("timestamp"),
+                                "source_status": "degraded",
+                            })
+                        return rows
+            except Exception as fallback_exc:
+                logger.debug(f"Harness state position fallback failed: {fallback_exc}")
+
             raise ApexBrokerError(
                 code="BROKER_POSITION_FETCH_FAILED",
                 message=f"Unable to fetch positions for connection {connection.id}",
@@ -821,7 +857,8 @@ class BrokerService:
             snapshot = await self._fetch_connection_equity(connection, credentials)
             self._equity_cache[connection.id] = snapshot
             return snapshot
-        except Exception as exc:  # SWALLOW: use last-known cached equity snapshot when broker is unavailable
+        except Exception as exc:  # SWALLOW: Use engine's state or last-known cache when broker is unavailable
+            # 1. Try internal cache first
             cached = self._equity_cache.get(connection.id)
             if cached is not None:
                 return BrokerEquitySnapshot(
@@ -832,6 +869,34 @@ class BrokerService:
                     source=cached.source,
                     source_id=cached.source_id,
                 )
+            
+            # 2. Hard Fallback: Check engine's trading_state.json
+            try:
+                state_path = ApexConfig.DATA_DIR / "trading_state.json"
+                if state_path.exists():
+                    with open(state_path, "r") as f:
+                        state_data = json.load(f)
+                    
+                    # Check if engine has fresh heartbeats for this broker
+                    heartbeats = state_data.get("broker_heartbeats", {})
+                    hb = heartbeats.get(connection.broker_type.value)
+                    if hb and hb.get("healthy"):
+                        # Extract equity from breakdown or daily_pnl_by_broker if available
+                        # But simpler: use the aggregated 'capital' if it matches the broker context
+                        val = state_data.get("capital") or state_data.get("equity")
+                        if val is not None and val > 0:
+                            logger.info(f"Using harness state-file fallback for {connection.broker_type.value} equity")
+                            return BrokerEquitySnapshot(
+                                value=float(val),
+                                broker=connection.broker_type.value,
+                                stale=True,
+                                as_of=state_data.get("timestamp", datetime.utcnow().isoformat() + "Z"),
+                                source=f"{connection.name} (Harness Fallback)",
+                                source_id=connection.id,
+                            )
+            except Exception as fallback_exc:
+                logger.debug(f"Harness state fallback failed: {fallback_exc}")
+
             raise ApexBrokerError(
                 code="BROKER_EQUITY_FETCH_FAILED",
                 message=f"Unable to fetch equity for connection {connection.id}",

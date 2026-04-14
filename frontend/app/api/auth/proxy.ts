@@ -7,8 +7,12 @@ function normalizeBase(base: string): string {
 }
 
 function getApiBaseCandidates(): string[] {
-  const configured = process.env.NEXT_PUBLIC_API_URL || process.env.APEX_API_URL || "";
-  const candidates = [configured, DEFAULT_API_BASE, "http://localhost:8000"]
+  // APEX_API_URL is a server-only var pointing to the Docker service name (http://apex-api:8000).
+  // NEXT_PUBLIC_API_URL is the browser-visible URL (http://localhost:8000) — unreachable from inside Docker.
+  // Always include APEX_API_URL as a separate candidate so it is tried even when NEXT_PUBLIC_API_URL is set.
+  const publicUrl = process.env.NEXT_PUBLIC_API_URL || "";
+  const dockerUrl = process.env.APEX_API_URL || "";
+  const candidates = [dockerUrl, publicUrl, DEFAULT_API_BASE, "http://localhost:8000"]
     .map((value) => String(value || "").trim())
     .filter(Boolean)
     .map(normalizeBase);

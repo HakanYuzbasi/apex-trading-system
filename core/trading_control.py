@@ -181,3 +181,52 @@ def mark_equity_reconciliation_latch_processed(
     )
     write_control_state(filepath, state)
     return state
+
+
+# ---------------------------------------------------------------------------
+# Broker mode control
+# ---------------------------------------------------------------------------
+
+_VALID_BROKER_MODES = frozenset(("alpaca", "ibkr", "both"))
+
+
+def request_broker_mode_change(filepath: Path, requested_by: str, new_mode: str) -> Dict[str, object]:
+    """Persist a broker mode change to the shared control file.
+
+    The trading engine reads this file via get_active_broker_mode() on every
+    call to _get_connector_for(), so the change takes effect within the cache
+    TTL (default 5 s) without any container restart.
+
+    NOTE: Do NOT mutate ApexConfig in memory here — the API and the trading
+    engine run in separate Docker containers with no shared memory space.
+    """
+    if new_mode not in _VALID_BROKER_MODES:
+        raise ValueError(f"Invalid broker mode {new_mode!r}. Must be one of: {sorted(_VALID_BROKER_MODES)}")
+    state = read_control_state(filepath)
+    state.update(
+        {
+            "broker_mode_active": new_mode,
+            "broker_mode_changed_at": datetime.utcnow().isoformat() + "Z",
+            "broker_mode_changed_by": requested_by,
+        }
+    )
+    write_control_state(filepath, state)
+    return state
+
+
+def get_active_broker_mode(filepath: Path) -> str:
+    """Return the current active broker mode.
+
+    Reads from the control file first; falls back to the ApexConfig default
+    so the function works even before any change has been written.
+    """
+    try:
+        from config import ApexConfig  # local import to avoid circular deps
+        _default = str(getattr(ApexConfig, "BROKER_MODE", "both"))
+    except Exception:
+        _default = "both"
+    state = read_control_state(filepath)
+    mode = state.get("broker_mode_active")
+    if isinstance(mode, str) and mode in _VALID_BROKER_MODES:
+        return mode
+    return _default

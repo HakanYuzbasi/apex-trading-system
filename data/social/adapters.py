@@ -9,12 +9,74 @@ from __future__ import annotations
 
 import json
 import os
-from dataclasses import dataclass
+import random
+import time
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
-from urllib.error import URLError
+from urllib.error import URLError, HTTPError
 from urllib.request import Request, urlopen
+
+
+# ---------------------------------------------------------------------------
+# Retry + Circuit-Breaker helpers
+# ---------------------------------------------------------------------------
+
+_RETRY_DELAYS = (2, 8, 32)          # exponential backoff base delays (seconds)
+_RETRY_JITTER = 0.5                  # ±50 % jitter applied to each delay
+_CB_FAILURE_THRESHOLD = 3           # consecutive failures before opening circuit
+_CB_COOLDOWN_SECONDS = 1800         # 30-minute cooldown before circuit resets
+
+# HTTP status codes that are worth retrying
+_RETRYABLE_STATUS = frozenset({429, 500, 502, 503, 504})
+# HTTP status codes that indicate a permanent config error — do NOT retry
+_PERMANENT_ERROR_STATUS = frozenset({401, 403, 404})
+
+
+@dataclass
+class SourceCircuitBreaker:
+    """Simple per-adapter circuit breaker.
+
+    States
+    ------
+    closed:  Normal operation — all requests proceed.
+    open:    Too many consecutive failures — requests are blocked for *cooldown_seconds*.
+    half-open: Cooldown elapsed — a single probe attempt is allowed; success
+               closes the circuit, failure resets the cooldown.
+    """
+
+    cooldown_seconds: float = _CB_COOLDOWN_SECONDS
+    failure_threshold: int = _CB_FAILURE_THRESHOLD
+
+    _consecutive_failures: int = field(default=0, init=False, repr=False)
+    _opened_at: Optional[datetime] = field(default=None, init=False, repr=False)
+
+    @property
+    def is_open(self) -> bool:
+        """Return True while the circuit is open (requests should be blocked)."""
+        if self._opened_at is None:
+            return False
+        elapsed = (datetime.utcnow() - self._opened_at).total_seconds()
+        if elapsed >= self.cooldown_seconds:
+            # Transition to half-open; allow a probe attempt
+            return False
+        return True
+
+    def record_success(self) -> None:
+        self._consecutive_failures = 0
+        self._opened_at = None
+
+    def record_failure(self) -> None:
+        self._consecutive_failures += 1
+        if self._consecutive_failures >= self.failure_threshold:
+            if self._opened_at is None:
+                self._opened_at = datetime.utcnow()
+
+    def reset(self) -> None:
+        """Manually reset the circuit to closed state."""
+        self._consecutive_failures = 0
+        self._opened_at = None
 
 
 def _clamp(value: float, lower: float, upper: float) -> float:
@@ -90,6 +152,7 @@ class SocialSourceAdapter:
     def __init__(self, data_dir: Path, timeout_seconds: float = 3.0):
         self.data_dir = Path(data_dir)
         self.timeout_seconds = float(timeout_seconds)
+        self._cb = SourceCircuitBreaker()
 
     def fetch(self, now: Optional[datetime] = None, freshness_sla_seconds: int = 1800) -> SourceSnapshot:
         now_dt = _normalize_dt(now or datetime.utcnow())
@@ -160,10 +223,20 @@ class SocialSourceAdapter:
     def _load_payload(self) -> Tuple[Optional[Dict[str, object]], str, List[str]]:
         endpoint = os.getenv(self.env_endpoint_key, "").strip() if self.env_endpoint_key else ""
         if endpoint:
-            data, flags = self._fetch_http_payload(endpoint)
-            if data is not None:
-                return data, "http", flags
-            return None, "http", flags
+            if self._cb.is_open:
+                # Circuit is open: skip HTTP and fall through to local file
+                pass
+            else:
+                data, flags = self._fetch_with_retry(endpoint)
+                if data is not None:
+                    self._cb.record_success()
+                    return data, "http", flags
+                # Record per-failure inside _fetch_with_retry already; if we
+                # got None after exhausting retries the circuit may have opened.
+                if not flags or "auth_error" in flags:
+                    # Auth errors are permanent — don't retry, propagate immediately
+                    return None, "http", flags
+                return None, "http", flags
 
         local_override = os.getenv(f"APEX_SOCIAL_{self.source_name}_FILE", "").strip()
         local_path = Path(local_override) if local_override else (self.data_dir / "social" / self.default_local_name)
@@ -178,23 +251,75 @@ class SocialSourceAdapter:
 
         return None, "none", ["missing_source_file"]
 
-    def _fetch_http_payload(self, endpoint: str) -> Tuple[Optional[Dict[str, object]], List[str]]:
+    def _fetch_with_retry(
+        self, endpoint: str, *, max_attempts: int = 3
+    ) -> Tuple[Optional[Dict[str, object]], List[str]]:
+        """HTTP fetch with exponential-backoff retry and circuit-breaker integration.
+
+        Steps per attempt
+        -----------------
+        1. Issue the GET request.
+        2. On HTTP 429/5xx → wait (honouring Retry-After), then retry.
+        3. On HTTP 401/403/404 → immediate non-retryable failure.
+        4. On URLError / timeout → wait and retry.
+        5. After *max_attempts* consecutive failures → record failure in CB;
+           if CB threshold reached, open the circuit.
+        """
         headers: Dict[str, str] = {"Accept": "application/json"}
         token = os.getenv(self.env_token_key, "").strip() if self.env_token_key else ""
         if token:
             headers["Authorization"] = f"Bearer {token}"
-        req = Request(endpoint, headers=headers, method="GET")
-        try:
-            with urlopen(req, timeout=self.timeout_seconds) as resp:
-                body = resp.read().decode("utf-8", errors="replace")
-            loaded = json.loads(body)
-            if isinstance(loaded, dict):
-                return loaded, []
-            return None, ["invalid_payload_type"]
-        except URLError:
-            return None, ["endpoint_unreachable"]
-        except Exception:
-            return None, ["fetch_error"]
+
+        last_flags: List[str] = []
+        for attempt, base_delay in enumerate(_RETRY_DELAYS[:max_attempts], start=1):
+            req = Request(endpoint, headers=headers, method="GET")
+            try:
+                with urlopen(req, timeout=self.timeout_seconds) as resp:
+                    body = resp.read().decode("utf-8", errors="replace")
+                loaded = json.loads(body)
+                if isinstance(loaded, dict):
+                    self._cb.record_success()
+                    return loaded, []
+                last_flags = ["invalid_payload_type"]
+                self._cb.record_failure()
+            except HTTPError as exc:
+                status = exc.code
+                if status in _PERMANENT_ERROR_STATUS:
+                    # Auth / not-found — retrying would be pointless
+                    self._cb.record_failure()
+                    return None, ["auth_error" if status in (401, 403) else "not_found"]
+                if status in _RETRYABLE_STATUS or status >= 500:
+                    retry_after = float(exc.headers.get("Retry-After", base_delay))
+                    wait = min(
+                        retry_after,
+                        base_delay * (1 + random.uniform(-_RETRY_JITTER, _RETRY_JITTER)),
+                    )
+                    last_flags = [f"http_{status}"]
+                    self._cb.record_failure()
+                    if attempt < max_attempts:
+                        time.sleep(wait)
+                        continue
+                else:
+                    last_flags = [f"http_{status}"]
+                    self._cb.record_failure()
+            except URLError:
+                last_flags = ["endpoint_unreachable"]
+                self._cb.record_failure()
+                if attempt < max_attempts:
+                    jittered = base_delay * (
+                        1 + random.uniform(-_RETRY_JITTER, _RETRY_JITTER)
+                    )
+                    time.sleep(jittered)
+                    continue
+            except Exception:
+                last_flags = ["fetch_error"]
+                self._cb.record_failure()
+
+        return None, last_flags
+
+    def _fetch_http_payload(self, endpoint: str) -> Tuple[Optional[Dict[str, object]], List[str]]:
+        """Legacy shim — delegates to the retry-aware implementation."""
+        return self._fetch_with_retry(endpoint)
 
     def _normalize_payload(self, payload: Dict[str, object]) -> Tuple[Dict[str, object], List[str]]:
         flags: List[str] = []

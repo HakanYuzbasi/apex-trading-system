@@ -39,8 +39,16 @@ class LiveMonitor:
     def update_state(self, state: Dict):
         """Update current state."""
         try:
-            state['timestamp'] = datetime.now().isoformat()
+            if 'timestamp' not in state:
+                state['timestamp'] = datetime.now().isoformat()
             
+            if 'hedge_status' not in state:
+                state['hedge_status'] = "Inactive"
+            if 'latency_heatmap' not in state:
+                state['latency_heatmap'] = []
+            if 'sentiment_health' not in state:
+                state['sentiment_health'] = {}
+                
             with open(self.state_file, 'w') as f:
                 json.dump(state, f, indent=2)
             

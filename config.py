@@ -58,8 +58,8 @@ class ApexConfig:
 
     # Passive Limit Execution (Pillar 1B — spread capture during market hours)
     PASSIVE_LIMIT_ENABLED = True     # Post at mid-price first; step toward touch if unfilled
-    PASSIVE_LIMIT_STEP_SECONDS = 10  # Seconds to wait at each urgency step
-    PASSIVE_LIMIT_MAX_STEPS = 3      # Steps before falling back to market sweep
+    PASSIVE_LIMIT_STEP_SECONDS = 5   # Seconds to wait at each urgency step (Faster capture)
+    PASSIVE_LIMIT_MAX_STEPS = 5      # Steps before falling back to market sweep (Wider sweep)
     PASSIVE_LIMIT_MIN_SPREAD_BPS = 2 # Skip passive limit if estimated spread < 2bps
 
     # --- PHASE B: DYNAMIC LIMITS ---
@@ -1791,7 +1791,7 @@ class ApexConfig:
     # Hard block when agreement < MIN_AGREEMENT; soft confidence penalty when
     # agreement < SOFT_THRESHOLD.
     SIGNAL_CONSENSUS_GATE_ENABLED: bool = os.getenv("APEX_SIGNAL_CONSENSUS_GATE", "true").lower() == "true"
-    SIGNAL_CONSENSUS_MIN_AGREEMENT: float = float(os.getenv("APEX_SIGNAL_CONSENSUS_MIN_AGREE", "0.40"))
+    SIGNAL_CONSENSUS_MIN_AGREEMENT: float = float(os.getenv("APEX_SIGNAL_CONSENSUS_MIN_AGREE", "0.60"))
     SIGNAL_CONSENSUS_SOFT_THRESHOLD: float = float(os.getenv("APEX_SIGNAL_CONSENSUS_SOFT_THRESH", "0.55"))
     SIGNAL_CONSENSUS_CONF_PENALTY: float = float(os.getenv("APEX_SIGNAL_CONSENSUS_CONF_PENALTY", "0.10"))
 

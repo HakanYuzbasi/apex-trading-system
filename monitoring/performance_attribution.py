@@ -49,6 +49,12 @@ class EntryAttribution:
     tech_signal: float = 0.0
     sentiment_signal: float = 0.0
     cs_momentum_signal: float = 0.0
+    # Advanced Meta-Labeling Features
+    kalman_residual: float = 0.0
+    bayesian_prob: float = 0.0
+    vix_level: float = 0.0
+    sector_concentration: float = 0.0
+    meta_confidence: float = 1.0
     dominant_generator: str = "composite"
     generator_signals: Dict[str, float] = field(default_factory=dict)
 
@@ -85,6 +91,12 @@ class ClosedTradeAttribution:
     tech_signal: float = 0.0
     sentiment_signal: float = 0.0
     cs_momentum_signal: float = 0.0
+    # Advanced Meta-Labeling Features (propagated)
+    kalman_residual: float = 0.0
+    bayesian_prob: float = 0.0
+    vix_level: float = 0.0
+    sector_concentration: float = 0.0
+    meta_confidence: float = 1.0
     dominant_generator: str = "composite"
     generator_signals: Dict[str, float] = field(default_factory=dict)
 
@@ -169,6 +181,11 @@ class PerformanceAttributionTracker:
             "vix_multiplier",
             "governor_size_multiplier",
             "entry_slippage_bps",
+            "kalman_residual",
+            "bayesian_prob",
+            "vix_level",
+            "sector_concentration",
+            "meta_confidence",
         ):
             merged[field] = _weighted(field)
         merged["generator_signals"] = _weighted_generator_signals()
@@ -235,6 +252,11 @@ class PerformanceAttributionTracker:
         tech_signal: float = 0.0,
         sentiment_signal: float = 0.0,
         cs_momentum_signal: float = 0.0,
+        kalman_residual: float = 0.0,
+        bayesian_prob: float = 0.0,
+        vix_level: float = 0.0,
+        sector_concentration: float = 0.0,
+        meta_confidence: float = 1.0,
         dominant_generator: Optional[str] = None,
         generator_signals: Optional[Dict[str, float]] = None,
     ) -> None:
@@ -271,6 +293,11 @@ class PerformanceAttributionTracker:
             tech_signal=float(tech_signal or 0.0),
             sentiment_signal=float(sentiment_signal or 0.0),
             cs_momentum_signal=float(cs_momentum_signal or 0.0),
+            kalman_residual=float(kalman_residual or 0.0),
+            bayesian_prob=float(bayesian_prob or 0.0),
+            vix_level=float(vix_level or 0.0),
+            sector_concentration=float(sector_concentration or 0.0),
+            meta_confidence=float(meta_confidence or 1.0),
             dominant_generator=resolved_dominant_generator,
             generator_signals=normalized_generator_signals,
         )
@@ -392,6 +419,11 @@ class PerformanceAttributionTracker:
             tech_signal=float(entry_ctx.get("tech_signal", 0.0) or 0.0),
             sentiment_signal=float(entry_ctx.get("sentiment_signal", 0.0) or 0.0),
             cs_momentum_signal=float(entry_ctx.get("cs_momentum_signal", 0.0) or 0.0),
+            kalman_residual=float(entry_ctx.get("kalman_residual", 0.0) or 0.0),
+            bayesian_prob=float(entry_ctx.get("bayesian_prob", 0.0) or 0.0),
+            vix_level=float(entry_ctx.get("vix_level", 0.0) or 0.0),
+            sector_concentration=float(entry_ctx.get("sector_concentration", 0.0) or 0.0),
+            meta_confidence=float(entry_ctx.get("meta_confidence", 1.0) or 1.0),
             dominant_generator=str(
                 entry_ctx.get("dominant_generator")
                 or select_dominant_generator(entry_ctx.get("generator_signals", {}))

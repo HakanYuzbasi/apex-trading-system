@@ -1,6 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-
-const BACKEND = process.env.APEX_API_URL ?? "http://localhost:8000";
+import { getBackendApiBase } from "@/app/api/_lib/backend";
 
 async function safeFetch(url: string, token?: string) {
   try {
@@ -24,7 +23,7 @@ export async function GET(req: NextRequest) {
   const params = new URLSearchParams({ limit });
   if (reasonCode) params.set("reason_code", reasonCode);
 
-  const data = await safeFetch(`${BACKEND}/ops/order-rejections?${params}`, token);
+  const data = await safeFetch(`${getBackendApiBase()}/ops/order-rejections?${params}`, token);
   if (!data) {
     return NextResponse.json({
       available: false,

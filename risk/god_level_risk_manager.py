@@ -343,9 +343,15 @@ class GodLevelRiskManager:
         kelly = (win_prob * win_loss - (1 - win_prob)) / max(win_loss, 0.001)
         regime_scale = {"strong_bull": 0.85, "bull": 0.75, "neutral": 0.60, "bear": 0.50, "strong_bear": 0.40, "volatile": 0.25}
         
-        # Clamp to 0.02 minimum for warm-up phases where win_prob=0.4 makes kelly negative
+        # Base Kelly modified by regime
+        adjusted_kelly = kelly * 0.5 * regime_scale.get(regime, 0.5)
+        
+        # Asymmetric Scale: High confidence = Half Kelly. Low confidence = Quarter Kelly.
+        confidence_multiplier = 0.5 + confidence  # Range 0.5 to 1.5
+        
         import numpy as np
-        return float(np.clip(kelly * 0.5 * regime_scale.get(regime, 0.5), 0.02, 0.25))
+        # Clamp to 0.02 minimum, maximum 0.50 (Half-Kelly)
+        return float(np.clip(adjusted_kelly * confidence_multiplier, 0.02, 0.50))
 
     def _volatility_adjusted_size(self, atr_pct: float) -> float:
         """Volatility-target position sizing.

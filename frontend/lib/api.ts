@@ -13,11 +13,15 @@ import useSWR from "swr";
 
 const DEFAULT_API_BASE =
   typeof window !== "undefined"
-    ? window.location.origin
-    : "http://localhost:3000";
+    ? `${window.location.protocol}//${window.location.hostname}:8000`
+    : "http://localhost:8000";
 
 export function getApiUrl(path: string): string {
-  const base = process.env.NEXT_PUBLIC_API_BASE ?? DEFAULT_API_BASE;
+  if (path.startsWith("/api/")) {
+    return path;
+  }
+  // Try NEXT_PUBLIC_API_URL (Docker default) then NEXT_PUBLIC_API_BASE, then hardcoded fallback
+  const base = process.env.NEXT_PUBLIC_API_URL ?? process.env.NEXT_PUBLIC_API_BASE ?? DEFAULT_API_BASE;
   return `${base}${path}`;
 }
 
@@ -220,13 +224,13 @@ export type CockpitData = {
 };
 
 export type MetricsData = {
-  capital: number;
-  starting_capital: number;
-  daily_pnl: number;
-  total_pnl: number;
-  max_drawdown: number;
-  sharpe_ratio: number;
-  win_rate: number;
+  capital: number | null;
+  starting_capital: number | null;
+  daily_pnl: number | null;
+  total_pnl: number | null;
+  max_drawdown: number | null;
+  sharpe_ratio: number | null;
+  win_rate: number | null;
   open_positions: number;
   total_trades: number;
   [key: string]: unknown;
@@ -242,6 +246,67 @@ export type SessionInfo = {
 export type SessionsResponse = {
   session_mode: string;
   sessions: SessionInfo[];
+};
+
+export type SessionStatusData = {
+  session_type: string;
+  available: boolean;
+  error: string | null;
+  upstream_status: number | null;
+  timestamp: string | null;
+  status: string | null;
+  initial_capital: number | null;
+  symbols_count: number | null;
+  capital: number | null;
+  starting_capital: number | null;
+  daily_pnl: number | null;
+  daily_pnl_realized: number | null;
+  total_pnl: number | null;
+  max_drawdown: number | null;
+  sharpe_ratio: number | null;
+  win_rate: number | null;
+  open_positions: number;
+  total_trades: number;
+};
+
+export type SessionMetricsData = MetricsData & {
+  session_type: string;
+  available: boolean;
+  error: string | null;
+  upstream_status: number | null;
+  timestamp: string | null;
+  initial_capital: number | null;
+  daily_pnl_realized: number | null;
+  option_positions: number;
+  open_positions_total: number;
+  sharpe_target: number | null;
+  max_positions: number | null;
+  signal_threshold: number | null;
+  confidence_threshold: number | null;
+};
+
+export type SessionPositionsData = {
+  session_type: string;
+  available: boolean;
+  error: string | null;
+  upstream_status: number | null;
+  timestamp: string | null;
+  positions: CockpitPosition[];
+};
+
+export type PitchMetricsData = {
+  available: boolean;
+  error: string | null;
+  timestamp: string | null;
+  source: string;
+  equity: number | null;
+  realized_pnl_today: number | null;
+  active_margin: number | null;
+  active_margin_utilization: number | null;
+  sharpe_ratio: number | null;
+  max_drawdown: number | null;
+  curve_points: number;
+  sample_interval_seconds: number | null;
 };
 
 // ---------------------------------------------------------------------------
@@ -261,7 +326,7 @@ const jsonFetcher = async (url: string) => {
 export function useCockpitData(isPublic = false) {
   const path = isPublic ? "/api/public/cockpit" : "/api/v1/cockpit";
   const { data, isLoading, isValidating, error } = useSWR<CockpitData>(getApiUrl(path), jsonFetcher, {
-    refreshInterval: 5000,
+    refreshInterval: 2000,
     revalidateOnFocus: true,
   });
   return { data: data ?? null, isLoading, isValidating, isError: !!error, error };
@@ -272,7 +337,7 @@ export function useMetrics(isPublic = false) {
   const { data, isLoading, isValidating, error } = useSWR<MetricsData>(
     getApiUrl(path),
     jsonFetcher,
-    { refreshInterval: 10000 }
+    { refreshInterval: 2000 }
   );
   return { metrics: data ?? null, isLoading, isValidating, isError: !!error, error };
 }
@@ -282,26 +347,26 @@ export function useMetrics(isPublic = false) {
 // ---------------------------------------------------------------------------
 
 export function useSessionStatus(sessionType: string) {
-  return useSWR<Record<string, unknown>>(
+  return useSWR<SessionStatusData>(
     getApiUrl(`/api/v1/session/${sessionType}/status`),
     jsonFetcher,
-    { refreshInterval: 5000 }
+    { refreshInterval: 2000 }
   );
 }
 
 export function useSessionPositions(sessionType: string) {
-  return useSWR<{ session_type: string; positions: CockpitPosition[] }>(
+  return useSWR<SessionPositionsData>(
     getApiUrl(`/api/v1/session/${sessionType}/positions`),
     jsonFetcher,
-    { refreshInterval: 5000 }
+    { refreshInterval: 2000 }
   );
 }
 
 export function useSessionMetrics(sessionType: string) {
-  return useSWR<MetricsData & { session_type: string; sharpe_target: number }>(
+  return useSWR<SessionMetricsData>(
     getApiUrl(`/api/v1/session/${sessionType}/metrics`),
     jsonFetcher,
-    { refreshInterval: 10000 }
+    { refreshInterval: 2000 }
   );
 }
 
@@ -311,4 +376,29 @@ export function useSessions() {
     jsonFetcher,
     { refreshInterval: 30000 }
   );
+}
+
+export function useBrokerMode() {
+  return useSWR<{ broker_mode: string }>(
+    getApiUrl("/api/v1/broker-mode"),
+    jsonFetcher,
+    { refreshInterval: 2000 }
+  );
+}
+
+export function usePitchMetrics() {
+  return useSWR<PitchMetricsData>(
+    getApiUrl("/api/v1/pitch-metrics"),
+    jsonFetcher,
+    { refreshInterval: 5000, revalidateOnFocus: true }
+  );
+}
+
+export async function changeBrokerMode(mode: string, token: string | null = null) {
+  return apiJson<{ status: string; broker_mode: string }>("/api/v1/broker-mode", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ target_mode: mode }),
+    token,
+  });
 }

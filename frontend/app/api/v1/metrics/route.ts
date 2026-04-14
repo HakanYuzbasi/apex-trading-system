@@ -15,7 +15,7 @@ let LAST_GOOD_METRICS_SNAPSHOT: MetricsSnapshotCache | null = null;
 const METRICS_SNAPSHOT_CACHE_TTL_MS = Number(process.env.APEX_METRICS_UI_STABILITY_MS || "30000");
 
 function getApiBase(): string {
-  return (process.env.NEXT_PUBLIC_API_URL || process.env.APEX_API_URL || DEFAULT_API_BASE).replace(/\/+$/, "");
+  return (process.env.APEX_API_URL || process.env.NEXT_PUBLIC_API_URL || DEFAULT_API_BASE).replace(/\/+$/, "");
 }
 
 export async function GET(request: NextRequest): Promise<NextResponse> {

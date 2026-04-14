@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { useAuthContext } from "@/lib/auth-context";
+import { useAuthContext } from "@/components/auth/AuthProvider";
 
 interface ModelVersion {
   version_id: string;
@@ -73,7 +73,7 @@ function fmtTs(epoch?: number | null): string {
 }
 
 export default function ModelRegistryPanel() {
-  const { token } = useAuthContext();
+  const { accessToken: token } = useAuthContext();
   const [data, setData] = useState<ModelRegistryData | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -153,7 +153,7 @@ export default function ModelRegistryPanel() {
                 </div>
                 <div className="text-right space-y-1">
                   <div className="flex items-center gap-2 justify-end">
-                    <StatusBadge status="champion" />
+                    <StatusBadge status={summary.champion_id ? "champion" : "challenger"} />
                     {summary.champion_ic != null && (
                       <span className="text-[11px] font-mono font-semibold text-foreground">
                         IC {(summary.champion_ic * 100).toFixed(2)}%

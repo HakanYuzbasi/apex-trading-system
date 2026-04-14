@@ -11,6 +11,7 @@ import {
   LogOut,
   Moon,
   RefreshCw,
+  Server,
   ShieldCheck,
   Sun,
   Timer,
@@ -60,6 +61,7 @@ import StressScenariosPanel from "@/components/dashboard/StressScenariosPanel";
 import OrderRejectionsPanel from "@/components/dashboard/OrderRejectionsPanel";
 import FeatureIcPanel from "@/components/dashboard/FeatureIcPanel";
 import AbGatePanel from "@/components/dashboard/AbGatePanel";
+import SentimentHealthPanel from "@/components/dashboard/SentimentHealthPanel";
 import PortfolioWeightsPanel from "@/components/dashboard/PortfolioWeightsPanel";
 import HmmRegimePanel from "@/components/dashboard/HmmRegimePanel";
 import AlertHistoryPanel from "@/components/dashboard/AlertHistoryPanel";
@@ -67,6 +69,11 @@ import PaperAccountPanel from "@/components/dashboard/PaperAccountPanel";
 import ModelRegistryPanel from "@/components/dashboard/ModelRegistryPanel";
 import CrossAssetPairsPanel from "@/components/dashboard/CrossAssetPairsPanel";
 import IVCrushPanel from "@/components/dashboard/IVCrushPanel";
+import StrategyAllocationPanel from "@/components/dashboard/StrategyAllocationPanel";
+import SocialPulsePanel from "@/components/dashboard/SocialPulsePanel";
+import BriefingArchivePanel from "@/components/dashboard/BriefingArchivePanel";
+import BrokerModePanel from "@/components/dashboard/BrokerModePanel";
+import BrokerReconciliationPanel from "@/components/dashboard/BrokerReconciliationPanel";
 import SignalHeatmap from "@/components/SignalHeatmap";
 import { Skeleton } from "@/components/ui/skeleton";
 import { useWebSocket } from "@/hooks/useWebSocket";
@@ -95,7 +102,7 @@ import {
   sortIndicator,
 } from "@/lib/formatters";
 
-type DashboardTab = "trading" | "mandate" | "social" | "walkforward" | "heat" | "diagnostics" | "factorpnl" | "corrmap" | "regimebt" | "wssmetrics" | "icreport" | "missioncontrol" | "postmortem" | "equitycurve" | "stress" | "attribution" | "missed" | "advancedmetrics" | "tca" | "stressscenarios" | "orderrejections" | "featureic" | "abgate" | "portfolioweights" | "hmmregime" | "alerts" | "paperaccount" | "modelregistry" | "crossassetpairs" | "ivcrush";
+type DashboardTab = "trading" | "mandate" | "social" | "walkforward" | "heat" | "diagnostics" | "factorpnl" | "corrmap" | "regimebt" | "wssmetrics" | "icreport" | "missioncontrol" | "postmortem" | "equitycurve" | "stress" | "attribution" | "missed" | "advancedmetrics" | "tca" | "stressscenarios" | "orderrejections" | "featureic" | "abgate" | "portfolioweights" | "hmmregime" | "alerts" | "paperaccount" | "modelregistry" | "crossassetpairs" | "ivcrush" | "briefings" | "brokersync";
 type LensKey = "performance" | "risk" | "execution";
 type SortDirection = "asc" | "desc";
 type PositionSortKey = "symbol" | "qty" | "entry" | "current" | "pnl" | "pnl_pct" | "signal_direction";
@@ -457,6 +464,14 @@ export default function Dashboard({ isPublic = false }: { isPublic?: boolean }) 
   const wsAggregatedEquity = sanitizeMoney(wsData?.aggregated_equity ?? wsData?.total_equity, Number.NaN);
   const capital = aggregatedEquity !== null ? aggregatedEquity : (Number.isFinite(wsAggregatedEquity) ? wsAggregatedEquity : sanitizedMetrics.capital);
   const dailyPnl = sanitizedMetrics.daily_pnl;
+  const realizedPnl = Number.isFinite(Number((wsData as any)?.realized_pnl)) ? Number((wsData as any).realized_pnl) : 0;
+  const activeMargin = Number.isFinite(Number((wsData as any)?.active_margin)) ? Number((wsData as any).active_margin) : 0;
+  const leverageLimit = Number.isFinite(Number((wsData as any)?.leverage_limit)) ? Number((wsData as any).leverage_limit) : 1.0;
+  const neuralLatencyMicros = useMemo(() => {
+    const heatmap = (wsData as any)?.latency_heatmap as Array<{ name: string; micros: number }> | undefined;
+    if (!heatmap || heatmap.length === 0) return null;
+    return Math.max(...heatmap.map((e) => Number(e.micros) || 0));
+  }, [wsData]);
   const dailyPnlByBroker = (cockpit?.status as any)?.daily_pnl_by_broker ?? { ibkr: 0, alpaca: 0 };
   const stressLiquidation = (cockpit?.status as any)?.stress_liquidation ?? null;
   const shadowDeployment = (cockpit?.status as any)?.shadow_deployment ?? null;
@@ -1105,6 +1120,20 @@ export default function Dashboard({ isPublic = false }: { isPublic?: boolean }) 
                 {isDisconnected ? <WifiOff className="h-3.5 w-3.5" /> : <Wifi className="h-3.5 w-3.5" />}
                 {isDisconnected ? "Disconnected" : isStale ? "Connected (Stale)" : "Connected"}
               </span>
+              {/* Broker mode indicator — always visible in header */}
+              <button
+                type="button"
+                onClick={() => setActiveTab("trading")}
+                title="Click to manage broker routing"
+                className={`inline-flex items-center gap-1.5 rounded-full px-3 py-1 text-xs font-semibold transition hover:opacity-80 ${
+                  ((wsData as any)?.broker_mode ?? "both") === "alpaca"
+                    ? "bg-positive/15 text-positive"
+                    : "bg-primary/15 text-primary"
+                }`}
+              >
+                <Server className="h-3.5 w-3.5" />
+                {((wsData as any)?.broker_mode ?? "both") === "alpaca" ? "Alpaca Only" : "IBKR Split"}
+              </button>
               <Button variant="outline" className="rounded-xl" onClick={() => window.location.reload()}>
                 <RefreshCw className="h-4 w-4" />
                 Refresh
@@ -1306,6 +1335,87 @@ export default function Dashboard({ isPublic = false }: { isPublic?: boolean }) 
             <p className="apex-kpi-value mt-2 text-lg font-semibold text-foreground">{showLoading ? <Skeleton className="h-5 w-14" /> : `${(alphaRetention * 100).toFixed(2)}%`}</p>
             <p className="mt-1 text-xs text-muted-foreground">vs SPY Benchmark</p>
           </button>
+
+          {/* Today Realized PnL */}
+          <button type="button" className="apex-panel apex-interactive rounded-2xl p-4 text-left" onClick={() => setActiveLens("performance")}>
+            <div className="flex items-center justify-between">
+              <p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">Realized PnL</p>
+              {realizedPnl >= 0 ? <TrendingUp className="h-4 w-4 text-positive" /> : <TrendingDown className="h-4 w-4 text-negative" />}
+            </div>
+            <p className={`apex-kpi-value mt-2 text-lg font-semibold ${realizedPnl >= 0 ? "text-positive" : "text-negative"}`}>
+              {showLoading ? <Skeleton className="h-5 w-20" /> : formatCompactCurrency(realizedPnl)}
+            </p>
+            <p className="mt-1 text-xs text-muted-foreground">Closed trades only</p>
+          </button>
+
+          {/* Active Margin */}
+          <button type="button" className="apex-panel apex-interactive rounded-2xl p-4 text-left" onClick={() => setActiveLens("risk")}>
+            <div className="flex items-center justify-between">
+              <p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">Active Margin</p>
+              <ShieldCheck className="h-4 w-4 text-primary" />
+            </div>
+            <p className="apex-kpi-value mt-2 text-lg font-semibold text-foreground">
+              {showLoading ? <Skeleton className="h-5 w-20" /> : formatCompactCurrency(activeMargin)}
+            </p>
+            <p className="mt-1 text-xs text-muted-foreground">Required margin notional</p>
+          </button>
+
+          {/* Risk Allocation (leverage limit) */}
+          <button type="button" className="apex-panel apex-interactive rounded-2xl p-4 text-left" onClick={() => setActiveLens("risk")}>
+            <div className="flex items-center justify-between">
+              <p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">Risk Allocation</p>
+              <Gauge className="h-4 w-4 text-primary" />
+            </div>
+            <p className={`apex-kpi-value mt-2 text-lg font-semibold ${leverageLimit >= 1.0 ? "text-positive" : leverageLimit >= 0.5 ? "text-foreground" : "text-negative"}`}>
+              {showLoading ? <Skeleton className="h-5 w-14" /> : `${(leverageLimit * 100).toFixed(0)}%`}
+            </p>
+            <p className="mt-1 text-xs text-muted-foreground">Global leverage gate</p>
+          </button>
+
+          {/* Neural Latency */}
+          <button type="button" className="apex-panel apex-interactive rounded-2xl p-4 text-left" onClick={() => setActiveLens("execution")}>
+            <div className="flex items-center justify-between">
+              <p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">Neural Latency</p>
+              <Timer className="h-4 w-4 text-primary" />
+            </div>
+            <p className={`apex-kpi-value mt-2 text-lg font-semibold ${neuralLatencyMicros !== null && neuralLatencyMicros < 2000 ? "text-positive" : neuralLatencyMicros !== null ? "text-warning" : "text-muted-foreground"}`}>
+              {showLoading ? <Skeleton className="h-5 w-14" /> : neuralLatencyMicros !== null ? `${neuralLatencyMicros.toFixed(0)} µs` : "—"}
+            </p>
+            <p className="mt-1 text-xs text-muted-foreground">Max strategy latency</p>
+          </button>
+
+          {/* Equity Sparkline (mini) */}
+          <button type="button" className="apex-panel apex-interactive rounded-2xl p-4 text-left col-span-1 xl:col-span-2" onClick={() => setActiveTab("equitycurve")}>
+            <div className="flex items-center justify-between mb-2">
+              <p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">Equity Curve</p>
+              <TrendingUp className="h-4 w-4 text-primary" />
+            </div>
+            {showLoading ? (
+              <Skeleton className="h-12 w-full" />
+            ) : (
+              <svg viewBox="0 0 200 48" className="w-full h-12" preserveAspectRatio="none">
+                <polyline
+                  points={(() => {
+                    const eq = capital;
+                    const start = Math.max(1, eq - Math.abs(dailyPnl) * 10);
+                    const pts = Array.from({ length: 20 }, (_, i) => {
+                      const x = (i / 19) * 200;
+                      const progress = i / 19;
+                      const y = 48 - ((start + (eq - start) * progress - start) / Math.max(1, eq - start)) * 44 - 2;
+                      return `${x.toFixed(1)},${Math.max(2, Math.min(46, y)).toFixed(1)}`;
+                    });
+                    return pts.join(" ");
+                  })()}
+                  fill="none"
+                  stroke={dailyPnl >= 0 ? "hsl(var(--positive))" : "hsl(var(--negative))"}
+                  strokeWidth="2"
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                />
+              </svg>
+            )}
+            <p className="mt-1 text-xs text-muted-foreground">Today trend · click for full curve</p>
+          </button>
         </EquityPanel>
 
         <section className="grid grid-cols-1 gap-4 xl:grid-cols-[1.25fr_0.75fr]">
@@ -1453,7 +1563,9 @@ export default function Dashboard({ isPublic = false }: { isPublic?: boolean }) 
             ["paperaccount", "Paper Account"],
             ["modelregistry", "Model Registry"],
             ["crossassetpairs", "Cross-Asset Pairs"],
+            ["briefings", "Briefings Archive"],
             ["ivcrush", "IV Crush"],
+            ["brokersync", "Broker Sync"],
           ] as [DashboardTab, string][]).map(([tab, label]) => (
             <button
               key={tab}
@@ -1527,19 +1639,56 @@ export default function Dashboard({ isPublic = false }: { isPublic?: boolean }) 
           <ModelRegistryPanel />
         ) : activeTab === "crossassetpairs" ? (
           <CrossAssetPairsPanel />
+        ) : activeTab === "briefings" ? (
+          <BriefingArchivePanel />
         ) : activeTab === "ivcrush" ? (
           <IVCrushPanel />
+        ) : activeTab === "brokersync" ? (
+          <div className="apex-panel apex-fade-up rounded-2xl p-5">
+            <div className="mb-4 flex items-center justify-between">
+              <div>
+                <h2 className="text-lg font-semibold text-foreground">Broker Reconciliation</h2>
+                <p className="text-sm text-muted-foreground">
+                  All raw Alpaca positions vs active APEX strategy pairs — orphaned positions highlighted in red.
+                </p>
+              </div>
+              <span className="rounded-full bg-negative/15 px-2.5 py-1 text-xs font-semibold text-negative">
+                Live · 30 s refresh
+              </span>
+            </div>
+            <BrokerReconciliationPanel
+              brokerPositions={(wsData as any)?.broker_positions}
+              lastUpdated={(wsData as any)?.timestamp}
+            />
+          </div>
         ) : null}
 
 
         {activeTab === "trading" ? (
           <>
+            {/* Broker Routing — full-width, top of trading tab */}
+            <BrokerModePanel brokerMode={(wsData as any)?.broker_mode ?? "both"} />
 
             <section className="grid grid-cols-1 gap-4 xl:grid-cols-[0.95fr_1.05fr]">
               <article className="apex-panel apex-fade-up rounded-2xl p-5">
                 <div className="mb-4 flex items-center justify-between">
                   <h2 className="text-lg font-semibold text-foreground">Sleeve Attribution</h2>
                   <span className="text-xs text-muted-foreground">30d lookback</span>
+                </div>
+
+                <div className="lg:col-span-1">
+                  <SentimentHealthPanel
+                    sentiment_health={(wsData as any)?.sentiment_health}
+                  />
+                  <div className="mt-4">
+                     <StrategyAllocationPanel allocation={(wsData as any)?.strategy_allocation} />
+                  </div>
+                  <div className="mt-4">
+                     <SocialPulsePanel pulse={(wsData as any)?.social_pulse} />
+                  </div>
+                </div>
+                <div className="lg:col-span-2">
+                  <ControlsPanel />
                 </div>
 
                 <div className="space-y-3">

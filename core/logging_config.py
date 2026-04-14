@@ -47,8 +47,8 @@ _MAIN_LOG_INFO_KEYWORDS = (
     "bullish signal", "bearish signal",
     # Mandate / governor
     "mandate", "governor policy",
-    # Walk-forward / model
-    "model retrained", "regime change",
+    # Walk-forward / model / PPO
+    "model retrained", "regime change", "[shadow mode] ppo suggests",
 )
 
 

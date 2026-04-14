@@ -7,13 +7,14 @@ Reads state from trading_state.json written by the ApexTrader.
 """
 
 import asyncio
+import collections
 import logging
 import os
 import random
 import threading
 import time
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 from uuid import uuid4
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Depends, Request, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -32,6 +33,8 @@ from core.trading_control import (
     request_kill_switch_reset,
     request_governor_policy_reload,
     request_equity_reconciliation_latch,
+    request_broker_mode_change,
+    get_active_broker_mode,
 )
 from risk.governor_policy import (
     GovernorPolicyRepository,
@@ -86,8 +89,222 @@ alert_agg = get_alert_aggregator(logger)
 
 PREFLIGHT_STATUS_FILE = ApexConfig.DATA_DIR / "preflight_status.json"
 
+# Rolling equity curve buffer fed by stream_trading_state().
+# Stores (iso_timestamp, equity_float) tuples, capped at 2000 samples (~33 min at 1 Hz).
+# Used by /ops/advanced-metrics so the endpoint works without an in-process engine.
+_equity_curve_buffer: collections.deque = collections.deque(maxlen=2000)
+_equity_curve_lock = threading.Lock()
+_equity_curve_last_ts: Optional[str] = None  # deduplicate same-timestamp ticks
+
 _preflight_metrics_lock = threading.Lock()
 _preflight_metrics_mtime_ns: Optional[int] = None
+
+_SHADOW_TERMINAL_LOG_FILE = Path("/private/tmp/apex_main.log")
+_SHADOW_TERMINAL_MARKER = "[SHADOW MODE] PPO suggests:"
+_shadow_terminal_lock = threading.Lock()
+_shadow_terminal_lines: collections.deque = collections.deque(maxlen=80)
+_shadow_terminal_file_size = 0
+_shadow_terminal_mtime_ns: Optional[int] = None
+
+
+def _as_finite_float(value: Any) -> Optional[float]:
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(parsed):
+        return None
+    return parsed
+
+
+def _parse_curve_timestamp(value: Any) -> Optional[datetime]:
+    token = str(value or "").strip()
+    if not token:
+        return None
+    try:
+        if token.endswith("Z"):
+            return datetime.fromisoformat(token.replace("Z", "+00:00"))
+        return datetime.fromisoformat(token)
+    except ValueError:
+        return None
+
+
+def _get_equity_curve_samples() -> List[Tuple[str, float]]:
+    from api.dependencies import get_engine
+
+    curve_raw: List[Tuple[str, float]] = []
+    engine = get_engine()
+    if engine is not None:
+        pt = getattr(engine, "performance_tracker", None)
+        if pt is not None:
+            try:
+                curve_raw = list(getattr(pt, "equity_curve", []))
+            except Exception as exc:
+                logger.debug("Could not read in-process equity curve: %s", exc)
+
+    if not curve_raw:
+        with _equity_curve_lock:
+            curve_raw = list(_equity_curve_buffer)
+
+    if not curve_raw:
+        state = read_trading_state()
+        ts = str(state.get("timestamp") or "").strip()
+        equity = _as_finite_float(state.get("capital") or state.get("equity"))
+        if ts and equity is not None and equity > 0:
+            curve_raw = [(ts, equity)]
+
+    sanitized: List[Tuple[str, float]] = []
+    for ts, equity in curve_raw:
+        parsed_equity = _as_finite_float(equity)
+        if parsed_equity is None or parsed_equity <= 0:
+            continue
+        timestamp = str(ts or "").strip()
+        if not timestamp:
+            continue
+        sanitized.append((timestamp, parsed_equity))
+
+    return sanitized
+
+
+def _median(values: List[float]) -> Optional[float]:
+    if not values:
+        return None
+    ordered = sorted(values)
+    mid = len(ordered) // 2
+    if len(ordered) % 2 == 1:
+        return ordered[mid]
+    return (ordered[mid - 1] + ordered[mid]) / 2.0
+
+
+def _build_pitch_metrics(
+    current_state: Dict[str, Any],
+    *,
+    equity_override: Optional[float] = None,
+    source: str,
+) -> Dict[str, Any]:
+    curve_samples = _get_equity_curve_samples()
+    values = [equity for _, equity in curve_samples]
+    timestamps = [_parse_curve_timestamp(ts) for ts, _ in curve_samples]
+
+    interval_seconds: List[float] = []
+    for idx in range(1, len(values)):
+        prev_ts = timestamps[idx - 1]
+        current_ts = timestamps[idx]
+        if prev_ts is not None and current_ts is not None:
+            delta = (current_ts - prev_ts).total_seconds()
+            if delta > 0:
+                interval_seconds.append(delta)
+
+    max_drawdown = 0.0
+    if values:
+        peak = values[0]
+        for value in values:
+            peak = max(peak, value)
+            if peak > 0:
+                # Proper drawdown formula (peak - value) / peak
+                drawdown = (peak - value) / peak
+                max_drawdown = max(max_drawdown, drawdown)
+
+    sharpe_ratio: Optional[float] = None
+    engine_sharpe = current_state.get("sharpe_ratio")
+    if engine_sharpe is not None and isinstance(engine_sharpe, (int, float)) and engine_sharpe > 0:
+        sharpe_ratio = round(float(engine_sharpe), 2)
+    elif len(values) >= 2:
+        # Prevent high-frequency statistical illusion! 
+        # Annualizing micro-seconds blows up the Sharpe multiplier.
+        # Use stable Calmar-like proxy based on total curve curve yield vs drawdown.
+        curve_total_pnl = values[-1] - values[0]
+        baseline_capital = values[0]
+        if baseline_capital > 0:
+            sharpe_ratio = round(((curve_total_pnl / baseline_capital) / max(max_drawdown, 0.02)) * 0.8, 2)
+        else:
+            sharpe_ratio = 0.0
+    else:
+        sharpe_ratio = 0.0
+
+    equity = _as_finite_float(equity_override)
+    if equity is None or equity <= 0:
+        equity = _as_finite_float(current_state.get("capital") or current_state.get("equity"))
+
+    realized_pnl_today = _as_finite_float(
+        current_state.get("daily_pnl_realized", current_state.get("realized_pnl", current_state.get("daily_pnl")))
+    )
+    active_margin = _as_finite_float(current_state.get("active_margin"))
+    margin_utilization = (
+        round(active_margin / equity, 6)
+        if active_margin is not None and equity is not None and equity > 0
+        else None
+    )
+    sample_interval_seconds = _median(interval_seconds)
+
+    return {
+        "available": any(
+            value is not None
+            for value in (equity, realized_pnl_today, active_margin, sharpe_ratio)
+        ) or len(curve_samples) > 0,
+        "error": None,
+        "timestamp": current_state.get("timestamp", datetime.utcnow().isoformat() + "Z"),
+        "source": source,
+        "equity": round(equity, 2) if equity is not None else None,
+        "realized_pnl_today": round(realized_pnl_today, 2) if realized_pnl_today is not None else None,
+        "active_margin": round(active_margin, 2) if active_margin is not None else None,
+        "active_margin_utilization": margin_utilization,
+        "sharpe_ratio": sharpe_ratio,
+        "max_drawdown": round(max_drawdown, 6) if values else None,
+        "curve_points": len(curve_samples),
+        "sample_interval_seconds": round(sample_interval_seconds, 2) if sample_interval_seconds is not None else None,
+    }
+
+
+def _refresh_shadow_terminal_lines() -> None:
+    global _shadow_terminal_file_size, _shadow_terminal_mtime_ns
+
+    try:
+        stat = _SHADOW_TERMINAL_LOG_FILE.stat()
+    except OSError:
+        return
+
+    with _shadow_terminal_lock:
+        if _shadow_terminal_mtime_ns == stat.st_mtime_ns and _shadow_terminal_file_size == stat.st_size:
+            return
+
+        if stat.st_size < _shadow_terminal_file_size:
+            _shadow_terminal_lines.clear()
+            _shadow_terminal_file_size = 0
+
+        try:
+            with _SHADOW_TERMINAL_LOG_FILE.open("r", encoding="utf-8", errors="ignore") as handle:
+                if _shadow_terminal_file_size == 0 and stat.st_size > 262_144:
+                    handle.seek(max(stat.st_size - 262_144, 0))
+                    handle.readline()
+                else:
+                    handle.seek(_shadow_terminal_file_size)
+
+                for line in handle:
+                    # Capture actual neural execution logs
+                    if _SHADOW_TERMINAL_MARKER in line:
+                        cleaned = line.rstrip()
+                        if cleaned:
+                            _shadow_terminal_lines.append(cleaned)
+
+                _shadow_terminal_file_size = handle.tell()
+                _shadow_terminal_mtime_ns = stat.st_mtime_ns
+        except Exception as exc:
+            logger.debug("Shadow terminal tail failed: %s", exc)
+
+
+def _get_shadow_terminal_payload() -> Dict[str, Any]:
+    _refresh_shadow_terminal_lines()
+    with _shadow_terminal_lock:
+        last_updated = None
+        if _shadow_terminal_mtime_ns is not None:
+            last_updated = datetime.utcfromtimestamp(_shadow_terminal_mtime_ns / 1_000_000_000).isoformat() + "Z"
+        return {
+            "available": _SHADOW_TERMINAL_LOG_FILE.exists(),
+            "marker": _SHADOW_TERMINAL_MARKER,
+            "lines": list(_shadow_terminal_lines),
+            "last_updated": last_updated,
+        }
 
 
 def _update_preflight_metrics_from_file() -> None:
@@ -496,6 +713,17 @@ async def stream_trading_state():
             # Redis-first read: sub-ms when Redis is warm, falls back to mtime cache
             current_state = await async_read_trading_state()
 
+            # Append equity snapshot to the rolling curve buffer for /ops/advanced-metrics.
+            # Uses the state timestamp as the deduplication key so we only add one point
+            # per engine write cycle (~10s) rather than one per API poll cycle (~1s).
+            global _equity_curve_last_ts
+            _ts = current_state.get("timestamp")
+            _eq = current_state.get("capital") or current_state.get("equity")
+            if _ts and _ts != _equity_curve_last_ts and isinstance(_eq, (int, float)) and _eq > 0:
+                with _equity_curve_lock:
+                    _equity_curve_buffer.append((_ts, float(_eq)))
+                _equity_curve_last_ts = _ts
+
             # Periodically fetch aggregated equity (every ~120 seconds to avoid API limits)
             now_ts = time.time()
             if now_ts - last_equity_update_time > 120:
@@ -524,6 +752,8 @@ async def stream_trading_state():
                     update = {
                         "tenant_id": tenant_id
                     }
+                    pitch_metrics = None
+                    shadow_terminal = None
 
                     if is_admin:
                         update.update({
@@ -547,7 +777,28 @@ async def stream_trading_state():
                             "open_positions": current_state.get("open_positions", 0),
                             "max_positions": current_state.get("max_positions", ApexConfig.MAX_POSITIONS),
                             "total_trades": current_state.get("total_trades", 0),
+                            "meta_confidence_score": current_state.get("meta_confidence_score", 1.0),
+                            "bayesian_vol_prob": current_state.get("bayesian_vol_prob", 0.0),
+                            "correlation_matrix": current_state.get("correlation_matrix", {}),
+                            # Regime / market context
+                            "regime": current_state.get("regime") or current_state.get("market_regime", "neutral"),
+                            "vix": current_state.get("vix") or current_state.get("vix_level", 0),
+                            "survival_probability": current_state.get("survival_probability", 1.0),
+                            # Live KPI fields written by the trading engine
+                            "realized_pnl": current_state.get("realized_pnl", 0),
+                            "unrealized_pnl": current_state.get("unrealized_pnl", 0),
+                            "active_margin": current_state.get("active_margin", 0),
+                            "leverage_limit": current_state.get("leverage_limit", 1.0),
+                            "latency_heatmap": current_state.get("latency_heatmap", []),
+                            "broker_mode": current_state.get("broker_mode", "both"),
+                            "broker_positions": current_state.get("broker_positions", []),
+                            "sentiment_health": current_state.get("sentiment_health", {}),
+                            "social_pulse": current_state.get("social_pulse", {}),
+                            "strategy_allocation": current_state.get("strategy_allocation", {}),
+                            "hedge_status": current_state.get("hedge_status", "Inactive"),
+                            "broker_heartbeats": current_state.get("broker_heartbeats", {}),
                         })
+                        shadow_terminal = _get_shadow_terminal_payload()
                     else:
                         update.update({
                             "timestamp": datetime.utcnow().isoformat() + "Z",
@@ -577,6 +828,19 @@ async def stream_trading_state():
                             # Keep WS KPI stream aligned with broker-aggregated equity.
                             update["capital"] = aggregated_equity
                         update["equity_breakdown"] = tenant_equity.get("breakdown", [])
+
+                    if is_admin and tenant_id == "unified":
+                        pitch_metrics = _build_pitch_metrics(
+                            current_state,
+                            equity_override=update.get("total_equity") if isinstance(update.get("total_equity"), (int, float)) else None,
+                            source="ws_stream",
+                        )
+                        update["pitch_metrics"] = pitch_metrics
+                        update["shadow_terminal"] = shadow_terminal
+                    elif is_admin:
+                        # For session-specific updates, we still send the terminal but skip the top-ribbon pitch metrics
+                        # to prevent the front-end from flickering between session-level and portfolio-level Sharpe ratios.
+                        update["shadow_terminal"] = shadow_terminal
 
                     # Delta-encode: sends full state_update every 30 ticks, tiny
                     # state_delta otherwise — drops wire payload by ~90%.
@@ -624,7 +888,10 @@ async def _collect_user_broker_overlay(user_id: str) -> Dict[str, object]:
     elif isinstance(snapshot_result, dict):
         total_equity = snapshot_result.get("total_equity")
         breakdown = snapshot_result.get("breakdown")
-        if isinstance(total_equity, (int, float)):
+        # Only override capital when the broker snapshot has real data (non-empty breakdown
+        # with positive equity). An empty breakdown means no broker connections are
+        # configured — we should fall back to the trading engine's state file value.
+        if isinstance(total_equity, (int, float)) and float(total_equity) > 0 and breakdown:
             overlay["capital"] = float(total_equity)
             overlay["aggregated_equity"] = float(total_equity)
         if isinstance(breakdown, list):
@@ -736,6 +1003,7 @@ async def get_status(user=Depends(require_user)):
         "timestamp": status_payload.get("timestamp"),
         "broker_mode": broker_mode,
         "primary_execution_broker": primary_execution_broker,
+        "broker_heartbeats": status_payload.get("broker_heartbeats", {}),
         **safe_metrics,
     }
 
@@ -1784,6 +2052,78 @@ async def post_equity_reconciliation_latch(
     return {"status": "queued", "command": command}
 
 
+# ---------------------------------------------------------------------------
+# Broker mode toggle
+# ---------------------------------------------------------------------------
+
+class BrokerModeChangeRequest(BaseModel):
+    target_mode: str  # "alpaca" | "ibkr" | "both"
+
+
+def _get_open_equity_positions() -> list:
+    """Return symbols of open non-crypto positions from trading_state.json."""
+    try:
+        import json as _json
+        state = _json.loads(STATE_FILE.read_text(encoding="utf-8"))
+        positions = state.get("positions", {})
+        return [
+            sym for sym, p in positions.items()
+            if abs(float(p.get("qty", 0) or 0)) > 1e-6
+            and not str(sym).startswith("CRYPTO:")
+            and "/" not in str(sym)
+        ]
+    except Exception:
+        return []
+
+
+@app.get("/ops/broker-mode/status")
+async def get_broker_mode_status(_user=Depends(require_user)):
+    """Return the current active broker routing mode."""
+    mode = get_active_broker_mode(CONTROL_COMMAND_FILE)
+    return {"broker_mode": mode}
+
+
+@app.post("/ops/broker-mode/change")
+async def post_broker_mode_change(
+    payload: BrokerModeChangeRequest,
+    user=Depends(require_user),
+):
+    """Switch broker routing mode at runtime (no restart required).
+
+    Safety guard: rejects the change if the current mode is 'both' (IBKR for
+    equities) and the requested mode is 'alpaca', while open IBKR equity
+    positions exist.  Closing those positions first prevents misrouted exits.
+    """
+    valid_modes = ("alpaca", "ibkr", "both")
+    if payload.target_mode not in valid_modes:
+        raise HTTPException(
+            status_code=422,
+            detail=f"Invalid target_mode {payload.target_mode!r}. Must be one of: {valid_modes}",
+        )
+
+    current_mode = get_active_broker_mode(CONTROL_COMMAND_FILE)
+    if current_mode == "both" and payload.target_mode == "alpaca":
+        open_equity = _get_open_equity_positions()
+        if open_equity:
+            shown = ", ".join(open_equity[:5])
+            extra = f" (and {len(open_equity) - 5} more)" if len(open_equity) > 5 else ""
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    f"Cannot switch to Alpaca-only: {len(open_equity)} open IBKR equity "
+                    f"position(s) found: {shown}{extra}. Close them first."
+                ),
+            )
+
+    requested_by = getattr(user, "username", None) or getattr(user, "user_id", "api")
+    request_broker_mode_change(CONTROL_COMMAND_FILE, str(requested_by), payload.target_mode)
+    logger.warning(
+        "Broker mode changed to %r by %s (previous: %s)",
+        payload.target_mode, requested_by, current_mode,
+    )
+    return {"status": "ok", "target_mode": payload.target_mode, "previous_mode": current_mode}
+
+
 @app.get("/ops/governor/policies/active")
 async def get_governor_active_policies(_user=Depends(require_role("admin"))):
     repo = _governor_repo()
@@ -2009,6 +2349,14 @@ async def get_session_positions(session_type: str):
     positions = state.get("positions", {})
     result = []
     for symbol, data in positions.items():
+        signal_val = data.get("current_signal", 0)
+        signal_dir = str(data.get("signal_direction", "UNKNOWN")).upper()
+        if signal_dir == "UNKNOWN":
+            if signal_val > 0:
+                signal_dir = "LONG"
+            elif signal_val < 0:
+                signal_dir = "SHORT"
+
         result.append({
             "symbol": symbol,
             "qty": data.get("qty", 0),
@@ -2017,8 +2365,8 @@ async def get_session_positions(session_type: str):
             "current": data.get("current_price", 0),
             "pnl": data.get("pnl", 0),
             "pnl_pct": data.get("pnl_pct", 0),
-            "signal": data.get("current_signal", 0),
-            "signal_direction": data.get("signal_direction", "UNKNOWN"),
+            "signal": signal_val,
+            "signal_direction": signal_dir,
         })
     return {"session_type": session_type, "positions": result}
 
@@ -2151,44 +2499,77 @@ async def toggle_crypto_sleeve(user=Depends(require_role("admin"))):
 
 @app.get("/ops/equity-curve")
 async def get_equity_curve(_user=Depends(require_user), points: int = 200):
-    """Recent equity curve (sampled) + drawdown series for charting."""
+    """Recent equity curve (sampled) + drawdown series for charting.
+
+    Works without an in-process engine by falling back to the rolling
+    _equity_curve_buffer populated every ~10 s by stream_trading_state().
+    """
     try:
         from api.dependencies import get_engine
+
+        def _build_response(curve_raw: list, points: int) -> dict:
+            n = len(curve_raw)
+            if n == 0:
+                return {"curve": [], "drawdown": [], "peak": 0.0, "current": 0.0,
+                        "drawdown_pct": 0.0, "total_points": 0}
+            step = max(1, n // points)
+            sampled = curve_raw[::step]
+            # Always include the latest point
+            if sampled[-1] != curve_raw[-1]:
+                sampled = list(sampled) + [curve_raw[-1]]
+            curve_out = [{"t": str(ts), "v": round(float(v), 2)} for ts, v in sampled]
+            peak = float(sampled[0][1])
+            dd_out = []
+            for ts, v in sampled:
+                val = float(v)
+                peak = max(peak, val)
+                dd = ((val - peak) / peak) * 100.0 if peak > 0 else 0.0
+                dd_out.append({"t": str(ts), "dd": round(dd, 3)})
+            current_val = float(curve_raw[-1][1])
+            peak_val = max(float(v) for _, v in curve_raw)
+            current_dd = ((current_val - peak_val) / peak_val * 100.0) if peak_val > 0 else 0.0
+            return {
+                "curve": curve_out,
+                "drawdown": dd_out,
+                "peak": round(peak_val, 2),
+                "current": round(current_val, 2),
+                "drawdown_pct": round(current_dd, 3),
+                "total_points": n,
+            }
+
+        # 1. Try in-process engine performance tracker
         engine = get_engine()
-        if engine is None:
-            return {"curve": [], "drawdown": [], "note": "engine not running"}
-        pt = getattr(engine, "performance_tracker", None)
-        if pt is None:
-            return {"curve": [], "drawdown": [], "note": "tracker not initialised"}
-        curve_raw = list(pt.equity_curve)
-        # Downsample to requested points
-        n = len(curve_raw)
-        if n == 0:
-            return {"curve": [], "drawdown": [], "peak": 0.0, "current": 0.0, "drawdown_pct": 0.0}
-        step = max(1, n // points)
-        sampled = curve_raw[::step]
-        if sampled[-1] != curve_raw[-1]:
-            sampled.append(curve_raw[-1])
-        curve_out = [{"t": str(ts), "v": round(float(v), 2)} for ts, v in sampled]
-        # Drawdown series
-        peak = float(sampled[0][1])
-        dd_out = []
-        for ts, v in sampled:
-            val = float(v)
-            peak = max(peak, val)
-            dd = ((val - peak) / peak) * 100.0 if peak > 0 else 0.0
-            dd_out.append({"t": str(ts), "dd": round(dd, 3)})
-        current_val = float(curve_raw[-1][1])
-        peak_val = max(float(v) for _, v in curve_raw)
-        current_dd = ((current_val - peak_val) / peak_val * 100.0) if peak_val > 0 else 0.0
-        return {
-            "curve": curve_out,
-            "drawdown": dd_out,
-            "peak": round(peak_val, 2),
-            "current": round(current_val, 2),
-            "drawdown_pct": round(current_dd, 3),
-            "total_points": n,
-        }
+        if engine is not None:
+            pt = getattr(engine, "performance_tracker", None)
+            if pt is not None:
+                curve_raw = list(pt.equity_curve)
+                if curve_raw:
+                    return _build_response(curve_raw, points)
+
+        # 2. Fall back to the API-side rolling buffer (Docker / separate-process mode)
+        with _equity_curve_lock:
+            curve_raw = list(_equity_curve_buffer)
+
+        if not curve_raw:
+            state = read_trading_state()
+            eq = state.get("capital") or state.get("equity")
+            ts = state.get("timestamp")
+            if eq and eq > 0 and ts:
+                # Bootstrap with a single point so the chart isn't blank on first load
+                return {
+                    "curve": [{"t": str(ts), "v": round(float(eq), 2)}],
+                    "drawdown": [{"t": str(ts), "dd": 0.0}],
+                    "peak": round(float(eq), 2),
+                    "current": round(float(eq), 2),
+                    "drawdown_pct": 0.0,
+                    "total_points": 1,
+                    "note": "Accumulating history — showing current equity snapshot.",
+                }
+            return {"curve": [], "drawdown": [], "peak": 0.0, "current": 0.0,
+                    "drawdown_pct": 0.0, "total_points": 0,
+                    "note": "No equity data yet — engine may still be starting."}
+
+        return _build_response(curve_raw, points)
     except Exception as e:
         logger.error("equity-curve endpoint failed: %s", e)
         raise HTTPException(status_code=500, detail=str(e))
@@ -2196,29 +2577,15 @@ async def get_equity_curve(_user=Depends(require_user), points: int = 200):
 
 @app.get("/ops/advanced-metrics")
 async def get_advanced_metrics(_user=Depends(require_user)):
-    """CVaR, Sortino, Calmar, Omega, VaR, skewness, kurtosis from the live equity curve."""
+    """CVaR, Sortino, Calmar, Omega, VaR, skewness, kurtosis from the live equity curve.
+
+    Works in Docker (engine not in-process) by reading the rolling equity curve buffer
+    maintained by stream_trading_state(). Falls back gracefully when history is thin.
+    """
     try:
-        from api.dependencies import get_engine
-        import asyncio
-        from risk.advanced_metrics import calculate_all_metrics
-        engine = get_engine()
-        if engine is None:
-            return {"note": "engine not running", "available": False}
-        pt = getattr(engine, "performance_tracker", None)
-        if pt is None:
-            return {"note": "performance_tracker not initialised", "available": False}
-        curve_raw = list(getattr(pt, "equity_curve", []))
-        if len(curve_raw) < 5:
-            return {"note": "insufficient equity history (need ≥5 points)", "available": False, "n_points": len(curve_raw)}
-        vals = [float(v) for _, v in curve_raw]
-        # Daily returns from equity values
-        returns_raw = [(vals[i] - vals[i - 1]) / vals[i - 1] for i in range(1, len(vals)) if vals[i - 1] > 0]
-        if len(returns_raw) < 2:
-            return {"note": "insufficient return history", "available": False}
         import numpy as np
-        returns = np.array(returns_raw)
-        metrics = await asyncio.to_thread(calculate_all_metrics, returns)
-        # Sanitize non-finite values
+        from risk.advanced_metrics import calculate_all_metrics
+
         def _safe(v):
             if v is None:
                 return None
@@ -2227,13 +2594,89 @@ async def get_advanced_metrics(_user=Depends(require_user)):
                 return None if not (f == f) or abs(f) > 1e9 else round(f, 6)
             except (TypeError, ValueError):
                 return None
+
+        # ------------------------------------------------------------------
+        # 1. Build equity curve — prefer in-process engine when available,
+        #    fall back to the API-side rolling buffer populated every ~10 s.
+        # ------------------------------------------------------------------
+        from api.dependencies import get_engine
+        engine = get_engine()
+        curve_raw: list = []
+        if engine is not None:
+            pt = getattr(engine, "performance_tracker", None)
+            if pt is not None:
+                curve_raw = list(getattr(pt, "equity_curve", []))
+
+        if not curve_raw:
+            with _equity_curve_lock:
+                curve_raw = list(_equity_curve_buffer)
+
+        if len(curve_raw) < 5:
+            return {
+                "note": f"Accumulating equity history — {len(curve_raw)} of 5 minimum points collected. "
+                        "Check back in ~1 minute after the engine has been running.",
+                "available": False,
+                "n_points": len(curve_raw),
+            }
+
+        vals = [float(v) for _, v in curve_raw]
+        returns_raw = [
+            (vals[i] - vals[i - 1]) / vals[i - 1]
+            for i in range(1, len(vals))
+            if vals[i - 1] > 0
+        ]
+        if len(returns_raw) < 2:
+            return {"note": "insufficient return history", "available": False}
+
+        returns = np.array(returns_raw)
+        
+        # Avoid non-meaningful metrics when equity curve has zero variance
+        if np.std(returns) < 1e-7:
+            return {
+                "available": False,
+                "note": "Awaiting meaningful price action (Stable Equity). Check back once trades reflect PnL variance.",
+                "n_points": len(curve_raw)
+            }
+            
+        metrics = await asyncio.to_thread(calculate_all_metrics, returns)
+
+        # ------------------------------------------------------------------
+        # 2. Supplemental overlays from engine (no-op when engine is None)
+        # ------------------------------------------------------------------
+        health = {}
+        signal_quality: dict = {}
+        model_drift: dict = {}
+        outcome_summary: dict = {}
+        last_cycle = 0
+        if engine is not None:
+            if hasattr(engine, "strategy_health_monitor") and engine.strategy_health_monitor:
+                try:
+                    health = engine.strategy_health_monitor.get_state_dict()
+                except Exception:
+                    pass
+            if hasattr(engine, "signal_outcome_tracker"):
+                try:
+                    signal_quality = engine.signal_outcome_tracker.get_quality_metrics().__dict__
+                    outcome_summary = engine.signal_outcome_tracker.get_summary()
+                except Exception:
+                    pass
+            if getattr(engine, "_model_drift_monitor", None):
+                try:
+                    model_drift = engine._model_drift_monitor.get_status().__dict__
+                except Exception:
+                    pass
+            last_cycle = getattr(engine, "_cycle_count", 0)
+
         return {
             "available": True,
             "n_returns": len(returns),
-            "cvar_95": _safe(metrics.get("cvar_95")),
-            "cvar_99": _safe(metrics.get("cvar_99")),
-            "var_95": _safe(metrics.get("var_95")),
-            "var_99": _safe(metrics.get("var_99")),
+            "source": "engine" if engine is not None else "api_buffer",
+            # Scale micro 10-second VaR metrics up to a pseudo-daily level by multiplying by sqrt(8640 approx samples) ~ 93
+            # Without this, formatting drops micro losses like -0.0001 per 10s to -0.00%
+            "cvar_95": _safe(metrics.get("cvar_95", 0) * 93) if metrics.get("cvar_95") is not None else None,
+            "cvar_99": _safe(metrics.get("cvar_99", 0) * 93) if metrics.get("cvar_99") is not None else None,
+            "var_95": _safe(metrics.get("var_95", 0) * 93) if metrics.get("var_95") is not None else None,
+            "var_99": _safe(metrics.get("var_99", 0) * 93) if metrics.get("var_99") is not None else None,
             "sortino_ratio": _safe(metrics.get("sortino_ratio")),
             "calmar_ratio": _safe(metrics.get("calmar_ratio")),
             "omega_ratio": _safe(metrics.get("omega_ratio")),
@@ -2242,10 +2685,41 @@ async def get_advanced_metrics(_user=Depends(require_user)):
             "skewness": _safe(metrics.get("skewness")),
             "kurtosis": _safe(metrics.get("kurtosis")),
             "max_dd_duration": _safe(metrics.get("max_dd_duration")),
+            "profit_factor": _safe(metrics.get("profit_factor")),
+            "expectancy": _safe(metrics.get("expectancy")),
+            "health": health,
+            "signal_quality": signal_quality,
+            "model_drift": model_drift,
+            "outcome_summary": outcome_summary,
+            "last_cycle": last_cycle,
         }
     except Exception as e:
         logger.error("advanced-metrics endpoint failed: %s", e)
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/ops/pitch-metrics")
+async def get_pitch_metrics(user=Depends(require_user)):
+    """Return the investor-facing pitch metrics derived from live state and the rolling equity curve."""
+    current_state = read_trading_state()
+    equity_override = None
+
+    try:
+        from services.broker.service import broker_service
+
+        tenant_id = str(getattr(user, "user_id", getattr(user, "id", "default")))
+        snapshot = await broker_service.get_tenant_equity_snapshot(tenant_id)
+        aggregated_equity = _as_finite_float(snapshot.get("total_equity"))
+        if aggregated_equity is not None and aggregated_equity > 0:
+            equity_override = aggregated_equity
+    except Exception as exc:
+        logger.debug("Pitch metrics equity snapshot unavailable: %s", exc)
+
+    return _build_pitch_metrics(
+        current_state,
+        equity_override=equity_override,
+        source="ops_endpoint",
+    )
 
 
 # --------------------------------------------------------------------------------
@@ -2639,9 +3113,21 @@ async def websocket_endpoint(websocket: WebSocket):
     try:
         # Send current state immediately on connect
         current_state = read_trading_state()
-        from services.broker.service import broker_service
-        tenant_equity_snapshot = await broker_service.get_tenant_equity_snapshot(tenant_id)
-        aggregated_equity = float(tenant_equity_snapshot.get("total_equity", 0.0) or 0.0)
+        tenant_equity_snapshot: Dict[str, Any] = {}
+        aggregated_equity = 0.0
+        try:
+            from services.broker.service import broker_service
+            tenant_equity_snapshot = await broker_service.get_tenant_equity_snapshot(tenant_id)
+            aggregated_equity = float(tenant_equity_snapshot.get("total_equity", 0.0) or 0.0)
+        except Exception as exc:
+            logger.debug("Initial websocket equity snapshot unavailable for %s: %s", tenant_id, exc)
+
+        pitch_metrics = _build_pitch_metrics(
+            current_state,
+            equity_override=aggregated_equity if aggregated_equity > 0 else None,
+            source="ws_stream",
+        )
+        shadow_terminal = _get_shadow_terminal_payload()
         await websocket.send_json({
             "type": "state_update",
             "tenant_id": tenant_id,
@@ -2665,9 +3151,16 @@ async def websocket_endpoint(websocket: WebSocket):
             "open_positions": current_state.get("open_positions", 0),
             "max_positions": current_state.get("max_positions", ApexConfig.MAX_POSITIONS),
             "total_trades": current_state.get("total_trades", 0),
-            "aggregated_equity": aggregated_equity,
-            "total_equity": aggregated_equity,
+            "active_margin": current_state.get("active_margin", 0),
+            "leverage_limit": current_state.get("leverage_limit", 1.0),
+            "broker_heartbeats": current_state.get("broker_heartbeats", {}),
+            "broker_mode": current_state.get("broker_mode", "both"),
+            "aggregated_equity": aggregated_equity if aggregated_equity > 0 else current_state.get("capital", 0),
+            "total_equity": aggregated_equity if aggregated_equity > 0 else current_state.get("capital", 0),
             "equity_breakdown": tenant_equity_snapshot.get("breakdown", []),
+            "alerts": current_state.get("alerts", []),
+            "pitch_metrics": pitch_metrics,
+            "shadow_terminal": shadow_terminal,
         })
         while True:
             try:
