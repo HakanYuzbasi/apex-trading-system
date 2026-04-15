@@ -21,6 +21,8 @@ import {
   formatPct,
   normalizeDrawdownPct,
   sortIndicator,
+  formatTechnicalQty,
+  formatMetric,
 } from "@/lib/formatters";
 import { ErrorState } from "@/components/ui/ErrorState";
 import { LoadingSpinner } from "@/components/ui/LoadingSpinner";
@@ -29,15 +31,17 @@ type SortKey = "symbol" | "qty" | "entry" | "current" | "pnl" | "pnl_pct" | "sig
 type SortDir = "asc" | "desc";
 
 function formatMoneyOrDash(value: number | null | undefined): string {
-  return value == null ? "—" : formatCurrencyWithCents(value);
+  if (value == null || !Number.isFinite(Number(value))) return "—";
+  return formatCurrencyWithCents(Number(value));
 }
 
 function formatPctOrDash(value: number | null | undefined): string {
-  return value == null ? "—" : formatPct(value);
+  if (value == null || !Number.isFinite(Number(value))) return "—";
+  return formatPct(Number(value));
 }
 
 function formatFixedOrDash(value: number | null | undefined, digits = 2): string {
-  return value == null ? "—" : Number(value).toFixed(digits);
+  return formatMetric(value, digits);
 }
 
 function MetricTile({
@@ -325,7 +329,7 @@ export default function SessionDashboard({
                       {pos?.symbol ?? "—"}
                     </td>
                     <td className="px-2 py-2 font-mono text-foreground">
-                      {pos?.qty ?? "—"}
+                      {formatTechnicalQty(pos?.qty)}
                     </td>
                     <td className="px-2 py-2 font-mono text-foreground">
                       {formatMoneyOrDash(pos?.entry ?? null)}
@@ -345,7 +349,7 @@ export default function SessionDashboard({
                         (pos?.pnl_pct ?? 0) >= 0 ? "text-positive" : "text-negative"
                       }`}
                     >
-                      {pos?.pnl_pct != null ? `${pos.pnl_pct.toFixed(2)}%` : "—"}
+                      {formatMetric(pos?.pnl_pct)}%
                     </td>
                     <td className="px-2 py-2">
                       <span

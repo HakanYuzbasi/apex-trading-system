@@ -32,12 +32,10 @@ export const metadata: Metadata = {
 const themeInitScript = `
 (() => {
   try {
-    const key = "apex-theme";
-    const stored = localStorage.getItem(key);
-    const isDark = stored ? stored === "dark" : window.matchMedia("(prefers-color-scheme: dark)").matches;
     const root = document.documentElement;
-    root.classList.toggle("dark", isDark);
-    root.setAttribute("data-theme", isDark ? "dark" : "light");
+    root.classList.add("dark");
+    root.setAttribute("data-theme", "dark");
+    localStorage.setItem("apex-theme", "dark");
   } catch (err) {
     void err;
   }

@@ -1,5 +1,5 @@
 const MONEY_ABS_MAX = 1_000_000_000_000;
-const SHARPE_ABS_MAX = 20;
+const SHARPE_ABS_MAX = 200; // raised from 20 — cold-start bootstrapped Sharpe can exceed 50
 const COUNT_MAX = 1_000_000;
 
 export type SessionType = "core" | "crypto" | "unified";

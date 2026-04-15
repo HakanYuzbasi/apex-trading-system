@@ -1,8 +1,13 @@
 "use client";
 
 import { useCallback, useMemo, useState } from "react";
-import { RefreshCw } from "lucide-react";
+import { RefreshCw, ShieldCheck, Zap, Activity, History, Info, AlertCircle, Lock } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import { Badge } from "@/components/ui/badge";
+import { Textarea } from "@/components/ui/textarea";
+import { Select } from "@/components/ui/select";
+import { Input } from "@/components/ui/input";
+import { cn, getToneClass } from "@/lib/utils";
 import { formatSleeveLabel } from "@/lib/formatters";
 
 // ─── Types ──────────────────────────────────────────────────────────────────
@@ -137,17 +142,17 @@ type MonthlyModelRiskReport = {
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
 
-function mandateBandClass(band: string): string {
-  if (band === "green") return "bg-positive/15 text-positive";
-  if (band === "yellow") return "bg-warning/15 text-warning";
-  return "bg-negative/15 text-negative";
+function mandateBandVariant(band: string): "positive" | "warning" | "negative" {
+  if (band === "green") return "positive";
+  if (band === "yellow") return "warning";
+  return "negative";
 }
 
-function workflowStatusClass(status: MandateWorkflowPack["status"]): string {
-  if (status === "paper_live") return "bg-primary/15 text-primary";
-  if (status === "approved") return "bg-positive/15 text-positive";
-  if (status === "retired") return "bg-muted text-muted-foreground";
-  return "bg-warning/15 text-warning";
+function workflowStatusVariant(status: MandateWorkflowPack["status"]): "default" | "positive" | "secondary" | "warning" {
+  if (status === "paper_live") return "default";
+  if (status === "approved") return "positive";
+  if (status === "retired") return "secondary";
+  return "warning";
 }
 
 // ─── Props ──────────────────────────────────────────────────────────────────
@@ -578,23 +583,26 @@ export default function MandateCopilotPanel({ onSessionExpired }: MandateCopilot
   void readinessSummary;
 
   return (
-    <section className="grid grid-cols-1 gap-4">
-      <article className="apex-panel apex-fade-up rounded-2xl p-5">
-        <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+    <section className="grid grid-cols-1 gap-6">
+      <article className="glass-card apex-fade-up rounded-2xl p-6">
+        <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
           <div>
-            <h2 className="text-lg font-semibold text-foreground">AI Mandate Copilot (Plan Activation)</h2>
-            <p className="text-sm text-muted-foreground">
-              Goal-to-policy assessment with DD/CVaR constraints. Approved plans can be applied to paper runtime controls (no live order routing).
+            <div className="flex items-center gap-2 mb-1">
+              <Zap className="h-5 w-5 text-primary" />
+              <h2 className="text-xl font-bold text-foreground">AI Mandate Copilot</h2>
+            </div>
+            <p className="text-sm text-muted-foreground max-w-2xl">
+              Goal-to-policy assessment with <span className="text-foreground font-medium">DD/CVaR constraints</span>. Approved plans can be applied to paper runtime controls.
             </p>
           </div>
-          <div className="flex items-center gap-2">
-            <span className="rounded-full bg-secondary px-3 py-1 text-xs font-semibold text-secondary-foreground">
-              Recommendation Mode: POLICY_ONLY
-            </span>
+          <div className="flex flex-wrap items-center gap-2">
+            <Badge variant="outline" className="bg-primary/5 border-primary/20 text-primary h-8">
+              POLICY_ONLY Mode
+            </Badge>
             <Button
               size="sm"
               variant="outline"
-              className="h-9 rounded-full px-3 text-xs"
+              className="h-8 rounded-full px-4 text-xs font-semibold"
               onClick={() => {
                 setHistoryDrawerOpen((prev) => !prev);
                 if (!historyDrawerOpen) {
@@ -602,499 +610,541 @@ export default function MandateCopilotPanel({ onSessionExpired }: MandateCopilot
                 }
               }}
             >
-              {historyDrawerOpen ? "Hide History" : "History"}
+              <History className="h-3.5 w-3.5 mr-1.5" />
+              {historyDrawerOpen ? "Hide History" : "Assessment History"}
             </Button>
             <Button
               size="sm"
               variant="outline"
-              className="h-9 rounded-full px-3 text-xs"
+              className="h-8 rounded-full px-4 text-xs font-semibold"
               onClick={() => {
                 void fetchMandateCalibration();
               }}
               disabled={calibrationLoading}
             >
-              {calibrationLoading ? <><RefreshCw className="h-3.5 w-3.5 animate-spin" /> Refreshing...</> : "Refresh Calibration"}
+              {calibrationLoading ? <RefreshCw className="h-3.5 w-3.5 animate-spin mr-1.5" /> : <Activity className="h-3.5 w-3.5 mr-1.5" />}
+              {calibrationLoading ? "Syncing..." : "Sync Calibration"}
             </Button>
           </div>
         </div>
 
-        <div className="mt-4 grid gap-3 lg:grid-cols-[1fr_auto_auto_auto] lg:items-end">
-          <label className="space-y-1 text-sm">
-            <span className="text-muted-foreground">Mandate Prompt</span>
-            <textarea
+        <div className="mt-6 grid gap-4 lg:grid-cols-[1fr_220px_220px_auto] lg:items-end">
+          <div className="space-y-2">
+            <label className="text-xs font-bold uppercase tracking-wider text-muted-foreground flex items-center gap-1.5">
+              <ShieldCheck className="h-3.5 w-3.5" /> Mandate Intent Prompt
+            </label>
+            <Textarea
               aria-label="Mandate prompt"
-              className="min-h-[96px] w-full rounded-xl border border-border/80 bg-background/70 px-3 py-2 text-sm text-foreground outline-none ring-0 placeholder:text-muted-foreground focus:border-primary/60"
+              className="min-h-[100px] bg-background/40 backdrop-blur-sm"
               value={mandateIntent}
               onChange={(event) => setMandateIntent(event.target.value)}
-              placeholder="Example: I want to make 10% in two months in energy and tech."
+              placeholder="Example: I want to achieve 15% annualized return with high exposure to AI/SaaS sectors and tight risk limits."
             />
-          </label>
-          <label className="space-y-1 text-sm">
-            <span className="text-muted-foreground">Suitability Profile</span>
-            <select
+          </div>
+          
+          <div className="space-y-2">
+            <label className="text-xs font-bold uppercase tracking-wider text-muted-foreground">Suitability Profile</label>
+            <Select
               aria-label="Suitability profile"
-              className="h-10 w-full rounded-xl border border-border/80 bg-background/70 px-3 text-sm capitalize text-foreground outline-none ring-0 focus:border-primary/60"
+              className="h-10 bg-background/40 backdrop-blur-sm px-4"
               value={mandateSuitability}
               onChange={(event) => setMandateSuitability(event.target.value as SuitabilityProfile)}
             >
               <option value="conservative">Conservative (10% DD)</option>
               <option value="balanced">Balanced (15% DD)</option>
               <option value="aggressive">Aggressive (25% DD)</option>
-            </select>
-          </label>
-          <div className="space-y-2 text-sm">
-            <label className="flex items-center gap-2 text-muted-foreground">
-              <input
-                aria-label="Use profile drawdown default"
-                type="checkbox"
-                checked={useProfileDrawdown}
-                onChange={(event) => setUseProfileDrawdown(event.target.checked)}
-              />
-              Use profile DD default
-            </label>
-            <span className="text-xs text-muted-foreground">
-              {useProfileDrawdown ? "Profile bound DD applied." : "Manual DD override active."}
-            </span>
-            <input
-              aria-label="Max drawdown percent"
-              type="number"
-              min={5}
-              max={50}
-              step={0.5}
-              disabled={useProfileDrawdown}
-              className="h-10 w-full rounded-xl border border-border/80 bg-background/70 px-3 text-sm text-foreground outline-none ring-0 disabled:cursor-not-allowed disabled:opacity-50 focus:border-primary/60"
-              value={mandateDrawdownCap}
-              onChange={(event) => setMandateDrawdownCap(Number(event.target.value))}
-            />
+            </Select>
           </div>
+
+          <div className="space-y-2">
+            <div className="flex items-center justify-between">
+              <label className="text-xs font-bold uppercase tracking-wider text-muted-foreground">Drawdown Constraint</label>
+              <label className="flex items-center gap-1.5 text-[10px] font-semibold text-muted-foreground cursor-pointer">
+                <input
+                  aria-label="Use profile drawdown default"
+                  type="checkbox"
+                  className="rounded border-border bg-background"
+                  checked={useProfileDrawdown}
+                  onChange={(event) => setUseProfileDrawdown(event.target.checked)}
+                />
+                Use Profile Default
+              </label>
+            </div>
+            <div className="relative">
+              <Input
+                aria-label="Max drawdown percent"
+                type="number"
+                min={5}
+                max={50}
+                step={0.5}
+                disabled={useProfileDrawdown}
+                className="h-10 bg-background/40 backdrop-blur-sm pr-10"
+                value={mandateDrawdownCap}
+                onChange={(event) => setMandateDrawdownCap(Number(event.target.value))}
+              />
+              <span className="absolute right-3 top-1/2 -translate-y-1/2 text-xs font-bold text-muted-foreground">%</span>
+            </div>
+          </div>
+
           <Button
-            className="h-10 rounded-xl"
+            className="h-10 px-8 font-bold rounded-xl"
             onClick={() => {
               void evaluateMandate();
             }}
             disabled={mandateLoading}
           >
-            {mandateLoading ? <><RefreshCw className="h-3.5 w-3.5 animate-spin" /> Evaluating...</> : "Evaluate Mandate"}
+            {mandateLoading ? <RefreshCw className="h-4 w-4 animate-spin mr-2" /> : < Zap className="h-4 w-4 mr-2" />}
+            {mandateLoading ? "Evaluating..." : "Generate Policy"}
           </Button>
         </div>
 
-        {mandateError ? (
-          <p className="mt-3 rounded-lg border border-destructive/40 bg-destructive/10 px-3 py-2 text-xs text-destructive">
-            {mandateError}
-          </p>
-        ) : null}
-
-        {historyDrawerOpen ? (
-          <div className="mt-3 rounded-xl border border-border/80 bg-background/60 p-3">
-            <div className="mb-2 flex items-center justify-between">
-              <p className="text-sm font-semibold text-foreground">Recent Mandate Assessments</p>
-              <span className="text-xs text-muted-foreground">{mandateHistory.length} events</span>
-            </div>
-            {mandateHistoryError ? (
-              <p className="rounded-lg border border-destructive/40 bg-destructive/10 px-3 py-2 text-xs text-destructive">
-                {mandateHistoryError}
-              </p>
-            ) : null}
-            <div className="max-h-[30vh] space-y-2 overflow-auto">
-              {mandateHistoryLoading ? (
-                <p className="text-xs text-muted-foreground">Loading history...</p>
-              ) : mandateHistory.length === 0 ? (
-                <p className="text-xs text-muted-foreground">No mandate history yet.</p>
-              ) : (
-                mandateHistory.map((event) => (
-                  <div key={`${event.output_hash}-${event.timestamp}`} className="rounded-lg border border-border/70 bg-background/70 px-3 py-2">
-                    <div className="flex flex-wrap items-center gap-2">
-                      <span className={`rounded-full px-2 py-0.5 text-[11px] font-semibold uppercase ${mandateBandClass(event.response_summary.feasibility_band || "red")}`}>
-                        {event.response_summary.feasibility_band || "unknown"}
-                      </span>
-                      <span className="text-[11px] text-muted-foreground">{new Date(event.timestamp).toLocaleString()}</span>
-                      <span className="text-[11px] text-muted-foreground">{event.response_summary.request_id || "n/a"}</span>
-                    </div>
-                    <p className="mt-1 line-clamp-2 text-xs text-muted-foreground">
-                      {event.request?.intent || "No intent text captured."}
-                    </p>
-                    <p className="mt-1 text-[11px] text-muted-foreground">
-                      P(hit): {(((event.response_summary.probability_target_hit || 0) as number) * 100).toFixed(1)}% | Confidence:{" "}
-                      {(((event.response_summary.confidence || 0) as number) * 100).toFixed(1)}% | Max DD:{" "}
-                      {Number(event.response_summary.expected_max_drawdown_pct || 0).toFixed(1)}%
-                    </p>
-                  </div>
-                ))
-              )}
-            </div>
+        {mandateError && (
+          <div className="mt-4 flex items-center gap-2 rounded-xl border border-destructive/30 bg-destructive/10 px-4 py-3 text-sm text-destructive animate-in shake duration-300">
+            <AlertCircle className="h-4 w-4 shrink-0" />
+            <span className="font-semibold">{mandateError}</span>
           </div>
-        ) : null}
-
-        {mandateResult ? (
-          <div className="mt-4 grid gap-3 lg:grid-cols-4">
-            <div className="rounded-xl border border-border/80 bg-background/70 p-3">
-              <p className="text-xs uppercase tracking-wide text-muted-foreground">Feasibility</p>
-              <div className="mt-2 flex items-center gap-2">
-                <span className={`rounded-full px-2 py-0.5 text-xs font-semibold uppercase ${mandateBandClass(mandateResult.feasibility_band)}`}>
-                  {mandateResult.feasibility_band}
-                </span>
-                <span className="text-xs text-muted-foreground">{mandateResult.feasible ? "Feasible" : "Not Feasible"}</span>
-              </div>
-            </div>
-            <div className="rounded-xl border border-border/80 bg-background/70 p-3">
-              <p className="text-xs uppercase tracking-wide text-muted-foreground">P(target hit)</p>
-              <p className="apex-kpi-value mt-2 text-lg font-semibold text-foreground">
-                {(mandateResult.probability_target_hit * 100).toFixed(1)}%
-              </p>
-              <p className="text-xs text-muted-foreground">Confidence {(mandateResult.confidence * 100).toFixed(1)}%</p>
-            </div>
-            <div className="rounded-xl border border-border/80 bg-background/70 p-3">
-              <p className="text-xs uppercase tracking-wide text-muted-foreground">Risk Projection</p>
-              <p className="apex-kpi-value mt-2 text-sm font-semibold text-foreground">
-                Max DD {mandateResult.expected_max_drawdown_pct.toFixed(1)}%
-              </p>
-              <p className="text-xs text-muted-foreground">CVaR95 {mandateResult.expected_cvar95_pct.toFixed(1)}%</p>
-            </div>
-            <div className="rounded-xl border border-border/80 bg-background/70 p-3">
-              <p className="text-xs uppercase tracking-wide text-muted-foreground">Policy Constraints</p>
-              <ul className="mt-2 space-y-1 text-xs text-muted-foreground">
-                {mandateResult.policy.constraints.slice(0, 3).map((constraint) => (
-                  <li key={constraint}>- {constraint}</li>
-                ))}
-              </ul>
-            </div>
-            <div className="rounded-xl border border-border/80 bg-background/70 p-3">
-              <p className="text-xs uppercase tracking-wide text-muted-foreground">Parsed Mandate</p>
-              <p className="apex-kpi-value mt-2 text-sm font-semibold text-foreground">
-                Target {(Number(mandateResult.parsed_mandate?.target_return_pct ?? 0) || 0).toFixed(1)}%
-              </p>
-              <p className="text-xs text-muted-foreground">
-                Horizon {Math.trunc(Number(mandateResult.parsed_mandate?.horizon_days ?? 0) || 0)}d • DD cap {(Number(mandateResult.parsed_mandate?.max_drawdown_pct ?? 0) || 0).toFixed(1)}%
-              </p>
-            </div>
-
-            <div className="rounded-xl border border-border/80 bg-background/70 p-3 lg:col-span-2">
-              <p className="text-xs uppercase tracking-wide text-muted-foreground">Sleeve Allocation Draft</p>
-              <div className="mt-2 grid grid-cols-2 gap-2 text-xs">
-                {Object.entries(mandateResult.policy.sleeve_allocations).map(([sleeve, weight]) => (
-                  <div key={sleeve} className="rounded-lg border border-border/70 bg-background/60 px-2 py-1.5">
-                    <p className="capitalize text-foreground">{formatSleeveLabel(sleeve)}</p>
-                    <p className="text-muted-foreground">{(Number(weight) * 100).toFixed(1)}%</p>
-                  </div>
-                ))}
-              </div>
-            </div>
-            <div className="rounded-xl border border-border/80 bg-background/70 p-3 lg:col-span-2">
-              <p className="text-xs uppercase tracking-wide text-muted-foreground">Rationale</p>
-              <ul className="mt-2 space-y-1 text-xs text-muted-foreground">
-                {mandateResult.rationale.slice(0, 3).map((item) => (
-                  <li key={item}>- {item}</li>
-                ))}
-              </ul>
-              <p className="mt-2 text-[11px] text-muted-foreground">{mandateResult.disclaimer}</p>
-            </div>
-
-            <div className="rounded-xl border border-border/80 bg-background/70 p-3 lg:col-span-2">
-              <p className="text-xs uppercase tracking-wide text-muted-foreground">Stress Narratives</p>
-              <ul className="mt-2 space-y-1 text-xs text-muted-foreground">
-                {mandateResult.stress_narratives?.slice(0, 3).map((row) => (
-                  <li key={`${row.scenario}-${row.quant_shock}`}>
-                    - {row.scenario}: {row.quant_shock} ({row.projected_impact_pct.toFixed(1)}%) | {row.mitigation}
-                  </li>
-                ))}
-              </ul>
-            </div>
-
-            <div className="rounded-xl border border-border/80 bg-background/70 p-3 lg:col-span-2">
-              <p className="text-xs uppercase tracking-wide text-muted-foreground">Regime Confidence Intervals</p>
-              <div className="mt-2 grid grid-cols-2 gap-2 text-xs">
-                {(mandateResult.confidence_intervals_by_regime || []).slice(0, 4).map((interval) => (
-                  <div key={interval.regime} className="rounded-lg border border-border/70 bg-background/60 px-2 py-1.5">
-                    <p className="uppercase text-foreground">{interval.regime}</p>
-                    <p className="text-muted-foreground">
-                      {(interval.lower * 100).toFixed(1)}% - {(interval.upper * 100).toFixed(1)}%
-                    </p>
-                  </div>
-                ))}
-              </div>
-            </div>
-          </div>
-        ) : (
-          <p className="mt-4 rounded-lg border border-border/70 bg-background/60 px-3 py-2 text-xs text-muted-foreground">
-            Run an evaluation to view feasibility, confidence, and policy constraints.
-          </p>
         )}
 
-        {/* ── Workflow Pack ── */}
-        <div className="mt-4 rounded-xl border border-border/80 bg-background/60 p-3">
-          <div className="flex flex-wrap items-center justify-between gap-2">
-            <p className="text-sm font-semibold text-foreground">Advisor Workflow Pack (PM + Compliance)</p>
-            <div className="flex flex-wrap items-center gap-2">
-              <Button
-                size="sm"
-                className="h-9 rounded-full px-3 text-xs"
-                onClick={() => {
-                  void initiateWorkflowPack();
-                }}
-                disabled={workflowLoading || !mandateResult?.request_id}
-              >
-                {workflowLoading ? "Initiating..." : "Initiate Workflow"}
-              </Button>
-              <Button
-                size="sm"
-                className="h-9 rounded-full px-3 text-xs"
-                onClick={() => {
-                  void activatePlanFlow();
-                }}
-                disabled={workflowLoading || !mandateResult?.request_id}
-              >
-                {workflowLoading ? "Activating..." : "Activate Plan (Auto)"}
-              </Button>
-              <Button
-                size="sm"
-                variant="outline"
-                className="h-9 rounded-full px-3 text-xs"
-                onClick={() => {
-                  void fetchWorkflowList();
-                }}
-                disabled={workflowListLoading}
-              >
-                {workflowListLoading ? "Refreshing..." : "Refresh"}
-              </Button>
+        {historyDrawerOpen && (
+          <div className="mt-6 rounded-2xl border border-border/50 bg-background/40 backdrop-blur-md p-4 animate-in slide-in-from-top-4 duration-300">
+            <div className="mb-4 flex items-center justify-between">
+              <h3 className="text-sm font-bold text-foreground">Assessment Audit Log</h3>
+              <Badge variant="secondary" className="bg-background/50">{mandateHistory.length} events recorded</Badge>
             </div>
-          </div>
-          {workflowError ? (
-            <p className="mt-2 rounded-lg border border-destructive/40 bg-destructive/10 px-3 py-2 text-xs text-destructive">
-              {workflowError}
-            </p>
-          ) : null}
-          {workflowPack ? (
-            <div className="mt-2 space-y-2 rounded-lg border border-border/70 bg-background/70 px-3 py-2 text-xs text-muted-foreground">
-              <div className="flex flex-wrap items-center gap-2">
-                <p>
-                  Workflow <span className="font-semibold text-foreground">{workflowPack.workflow_id}</span>
-                </p>
-                <span className={`rounded-full px-2 py-0.5 text-[11px] font-semibold uppercase ${workflowStatusClass(workflowPack.status)}`}>
-                  {workflowPack.status}
-                </span>
+            
+            {mandateHistoryError && (
+              <div className="mb-4 rounded-lg border border-destructive/20 bg-destructive/5 px-3 py-2 text-xs text-destructive">
+                {mandateHistoryError}
               </div>
-              <p>Runtime action: {workflowPack.execution_enabled ? "policy integrity issue detected" : "paper policy activation enabled (no live routing)"}</p>
-              <div className="flex flex-wrap items-center gap-2">
-                <span className={`rounded-full px-2 py-0.5 text-[11px] font-semibold ${pmSigned ? "bg-positive/15 text-positive" : "bg-warning/15 text-warning"}`}>
-                  PM: {pmSigned ? "signed" : "pending"}
-                </span>
-                <span className={`rounded-full px-2 py-0.5 text-[11px] font-semibold ${complianceSigned ? "bg-positive/15 text-positive" : "bg-warning/15 text-warning"}`}>
-                  Compliance: {complianceSigned ? "signed" : "pending"}
-                </span>
-              </div>
-              <div className="flex flex-wrap gap-2">
-                <Button
-                  size="sm"
-                  variant="outline"
-                  className="h-9 rounded-full px-3 text-xs"
-                  onClick={() => {
-                    void signoffWorkflow(workflowPack.workflow_id, "pm");
-                  }}
-                  disabled={workflowLoading || pmSigned}
-                >
-                  PM Sign-off
-                </Button>
-                <Button
-                  size="sm"
-                  variant="outline"
-                  className="h-9 rounded-full px-3 text-xs"
-                  onClick={() => {
-                    void signoffWorkflow(workflowPack.workflow_id, "compliance");
-                  }}
-                  disabled={workflowLoading || complianceSigned}
-                >
-                  Compliance Sign-off
-                </Button>
-                <Button
-                  size="sm"
-                  variant="outline"
-                  className="h-9 rounded-full px-3 text-xs"
-                  onClick={() => {
-                    void updateWorkflowStatus(
-                      workflowPack.workflow_id,
-                      "paper_live",
-                      "Applied to paper runtime after PM + compliance sign-off.",
-                    );
-                  }}
-                  disabled={workflowLoading || workflowPack.status !== "approved"}
-                >
-                  Apply to Paper Runtime
-                </Button>
-                <Button
-                  size="sm"
-                  variant="outline"
-                  className="h-9 rounded-full px-3 text-xs"
-                  onClick={() => {
-                    void updateWorkflowStatus(
-                      workflowPack.workflow_id,
-                      "retired",
-                      "Retired from cockpit review.",
-                    );
-                  }}
-                  disabled={workflowLoading || workflowPack.status === "retired"}
-                >
-                  Retire
-                </Button>
-              </div>
-            </div>
-          ) : (
-            <p className="mt-2 text-xs text-muted-foreground">
-              Workflow packs remain live-order isolated. Approved packs can apply policy controls to paper runtime.
-            </p>
-          )}
-
-          <div className="mt-3 rounded-lg border border-border/70">
-            <div className="flex items-center justify-between border-b border-border/60 px-3 py-2">
-              <p className="text-xs font-semibold text-foreground">Workflow History</p>
-              <span className="text-[11px] text-muted-foreground">{workflowList.length} packs</span>
-            </div>
-            <div className="max-h-[25vh] overflow-auto">
-              {workflowList.length === 0 ? (
-                <p className="px-3 py-3 text-xs text-muted-foreground">No workflow packs yet or paywall restricted.</p>
+            )}
+            
+            <div className="max-h-[300px] space-y-3 overflow-y-auto pr-2 custom-scrollbar">
+              {mandateHistoryLoading ? (
+                <div className="flex flex-col items-center py-8 gap-2 text-muted-foreground opacity-50">
+                  <RefreshCw className="h-6 w-6 animate-spin" />
+                  <span className="text-xs font-medium">Synchronizing audit log...</span>
+                </div>
+              ) : mandateHistory.length === 0 ? (
+                <div className="text-center py-10 text-xs text-muted-foreground border border-dashed rounded-xl">
+                  No previous mandate assessments found.
+                </div>
               ) : (
-                workflowList.slice(0, 8).map((row) => (
-                  <button
-                    key={row.workflow_id}
-                    type="button"
-                    className="flex w-full items-center justify-between border-t border-border/60 px-3 py-2 text-left text-xs hover:bg-secondary/30"
-                    onClick={() => setWorkflowPack(row)}
-                  >
-                    <span className="text-foreground">{row.workflow_id}</span>
-                    <span className={`rounded-full px-2 py-0.5 text-[11px] font-semibold uppercase ${workflowStatusClass(row.status)}`}>
-                      {row.status}
-                    </span>
-                  </button>
+                mandateHistory.map((event) => (
+                  <div key={`${event.output_hash}-${event.timestamp}`} className="glass-card hover:border-primary/30 rounded-xl px-4 py-3 transition-colors">
+                    <div className="flex flex-wrap items-center justify-between gap-2 mb-2">
+                       <Badge variant={mandateBandVariant(event.response_summary.feasibility_band || "red")}>
+                        {event.response_summary.feasibility_band || "unknown"}
+                      </Badge>
+                      <span className="text-[11px] font-mono text-muted-foreground">{new Date(event.timestamp).toLocaleString()}</span>
+                    </div>
+                    <p className="line-clamp-2 text-xs text-foreground font-medium mb-2">
+                      {event.request?.intent || "No intent text captured."}
+                    </p>
+                    <div className="flex flex-wrap gap-x-4 gap-y-1">
+                      <div className="flex items-center gap-1.5 min-w-[100px]">
+                        <span className="text-[10px] font-bold text-muted-foreground uppercase">P(Hit)</span>
+                        <span className="text-xs font-bold text-foreground">{(((event.response_summary.probability_target_hit || 0) as number) * 100).toFixed(1)}%</span>
+                      </div>
+                      <div className="flex items-center gap-1.5 min-w-[100px]">
+                        <span className="text-[10px] font-bold text-muted-foreground uppercase">Confidence</span>
+                        <span className="text-xs font-bold text-foreground">{(((event.response_summary.confidence || 0) as number) * 100).toFixed(1)}%</span>
+                      </div>
+                       <div className="flex items-center gap-1.5 min-w-[100px]">
+                        <span className="text-[10px] font-bold text-muted-foreground uppercase">Max DD</span>
+                        <span className="text-xs font-bold text-negative">{Number(event.response_summary.expected_max_drawdown_pct || 0).toFixed(1)}%</span>
+                      </div>
+                    </div>
+                  </div>
                 ))
               )}
             </div>
           </div>
-        </div>
+        )}
 
-        {/* ── Calibration Table ── */}
-        <div className="mt-4 rounded-xl border border-border/80 bg-background/60 p-3">
-          <div className="mb-2 flex items-center justify-between">
-            <p className="text-sm font-semibold text-foreground">Calibration (Predicted vs Realized by Sleeve)</p>
-            <span className="text-xs text-muted-foreground">
-              {calibration?.lookback_events ?? 0} mandate events
-            </span>
-          </div>
-          {calibrationError ? (
-            <p className="mb-2 rounded-lg border border-destructive/40 bg-destructive/10 px-3 py-2 text-xs text-destructive">
-              {calibrationError}
-            </p>
-          ) : null}
-          <div className="max-h-[30vh] overflow-auto rounded-lg border border-border/70">
-            <table className="min-w-full text-xs">
-              <thead className="sticky top-0 z-10 bg-background/95">
-                <tr className="text-left text-muted-foreground">
-                  <th className="px-3 py-2 font-semibold">Sleeve</th>
-                  <th className="px-3 py-2 font-semibold">N</th>
-                  <th className="px-3 py-2 font-semibold">Predicted</th>
-                  <th className="px-3 py-2 font-semibold">Realized</th>
-                  <th className="px-3 py-2 font-semibold">Gap</th>
-                  <th className="px-3 py-2 font-semibold">Threshold</th>
-                  <th className="px-3 py-2 font-semibold">Pass</th>
-                  <th className="px-3 py-2 font-semibold">Quality</th>
-                </tr>
-              </thead>
-              <tbody>
-                {calibrationLoading ? (
-                  <tr>
-                    <td colSpan={8} className="px-3 py-5 text-center text-muted-foreground">
-                      Loading calibration...
-                    </td>
-                  </tr>
-                ) : (calibration?.rows?.length || 0) === 0 ? (
-                  <tr>
-                    <td colSpan={8} className="px-3 py-5 text-center text-muted-foreground">
-                      No calibration data yet.
-                    </td>
-                  </tr>
-                ) : (
-                  (calibration?.rows ?? []).map((row) => (
-                    <tr key={row.sleeve} className="border-t border-border/60">
-                      <td className="px-3 py-2 capitalize text-foreground">{formatSleeveLabel(row.sleeve)}</td>
-                      <td className="apex-kpi-value px-3 py-2 text-foreground">{row.predictions}</td>
-                      <td className="apex-kpi-value px-3 py-2 text-foreground">{(row.predicted_hit_rate * 100).toFixed(1)}%</td>
-                      <td className="apex-kpi-value px-3 py-2 text-foreground">{(row.realized_hit_rate * 100).toFixed(1)}%</td>
-                      <td className={`apex-kpi-value px-3 py-2 ${Math.abs(row.calibration_gap) <= row.threshold_abs_gap ? "text-positive" : "text-warning"}`}>
-                        {(row.calibration_gap * 100).toFixed(1)}%
-                      </td>
-                      <td className="apex-kpi-value px-3 py-2 text-foreground">{(row.threshold_abs_gap * 100).toFixed(1)}%</td>
-                      <td className={`px-3 py-2 ${row.within_threshold ? "text-positive" : "text-negative"}`}>
-                        {row.within_threshold ? "pass" : "breach"}
-                      </td>
-                      <td className="px-3 py-2 text-muted-foreground">{row.data_quality}</td>
-                    </tr>
-                  ))
-                )}
-              </tbody>
-            </table>
-          </div>
-          {calibration?.notes?.length ? (
-            <ul className="mt-2 space-y-1 text-[11px] text-muted-foreground">
-              {calibration.notes.slice(0, 2).map((note) => (
-                <li key={note}>- {note}</li>
-              ))}
-            </ul>
-          ) : null}
-        </div>
-
-        {/* ── Monthly Risk Report ── */}
-        <div className="mt-4 rounded-xl border border-border/80 bg-background/60 p-3">
-          <div className="mb-2 flex items-center justify-between">
-            <p className="text-sm font-semibold text-foreground">Monthly Model Risk Report</p>
-            <Button
-              size="sm"
-              variant="outline"
-              className="h-9 rounded-full px-3 text-xs"
-              onClick={() => {
-                void fetchMonthlyRiskReport();
-              }}
-              disabled={riskReportLoading}
-            >
-              {riskReportLoading ? "Refreshing..." : "Refresh"}
-            </Button>
-          </div>
-          {riskReportError ? (
-            <p className="rounded-lg border border-destructive/40 bg-destructive/10 px-3 py-2 text-xs text-destructive">
-              {riskReportError}
-            </p>
-          ) : null}
-          {monthlyRiskReport ? (
-            <div className="space-y-2 text-xs text-muted-foreground">
-              <p>
-                Month: <span className="font-semibold text-foreground">{monthlyRiskReport.month}</span> | Policy changes:{" "}
-                <span className="font-semibold text-foreground">{monthlyRiskReport.policy_changes.length}</span>
-              </p>
-              <p>
-                Miss-reason buckets: <span className="font-semibold text-foreground">{Object.keys(monthlyRiskReport.miss_reasons).length}</span>
-              </p>
-              <p>
-                Drift sleeves tracked: <span className="font-semibold text-foreground">{monthlyRiskReport.drift_rows.length}</span>
-              </p>
-              <div className="rounded-lg border border-border/70 bg-background/70 p-2">
-                <p className="mb-1 font-semibold text-foreground">Top drift sleeves</p>
-                {(monthlyRiskReport.drift_rows || []).slice(0, 3).map((row) => (
-                  <p key={row.sleeve}>
-                    {formatSleeveLabel(row.sleeve)}: mean gap {(row.mean_abs_gap * 100).toFixed(1)}% (thr {(row.threshold_abs_gap * 100).toFixed(1)}%)
-                  </p>
-                ))}
+        {mandateResult && (
+          <div className="mt-8 pt-8 border-t border-border/40 animate-in fade-in duration-500">
+             <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-4">
+              {/* Feasibility Block */}
+              <div className="glass-card rounded-xl p-4 bg-background/20">
+                <p className="text-[10px] font-bold uppercase tracking-wider text-muted-foreground mb-3">Feasibility Status</p>
+                <div className="flex items-center gap-3">
+                  <Badge variant={mandateBandVariant(mandateResult.feasibility_band)} className="h-6 px-3">
+                    {mandateResult.feasibility_band}
+                  </Badge>
+                  <span className="text-xs font-bold text-foreground">{mandateResult.feasible ? "Aligned" : "Violated"}</span>
+                </div>
               </div>
-              <div className="rounded-lg border border-border/70 bg-background/70 p-2">
-                <p className="mb-1 font-semibold text-foreground">Recent policy changes</p>
-                {(monthlyRiskReport.policy_changes || []).slice(0, 3).map((event) => (
-                  <p key={`${event.timestamp}-${event.workflow_id}`}>
-                    {event.workflow_id}: {event.from_status} {"->"} {event.to_status} ({new Date(event.timestamp).toLocaleDateString()})
-                  </p>
-                ))}
+
+              {/* Confidence Block */}
+              <div className="glass-card rounded-xl p-4 bg-background/20">
+                <p className="text-[10px] font-bold uppercase tracking-wider text-muted-foreground mb-2">P(Target Hit)</p>
+                <div className="flex items-baseline gap-2">
+                  <span className="text-2xl font-bold tracking-tight text-foreground">{(mandateResult.probability_target_hit * 100).toFixed(1)}%</span>
+                  <span className="text-[10px] font-bold text-muted-foreground">CONFIDENCE {(mandateResult.confidence * 100).toFixed(1)}%</span>
+                </div>
+              </div>
+
+              {/* Risk Projection Block */}
+              <div className="glass-card rounded-xl p-4 bg-background/20">
+                <p className="text-[10px] font-bold uppercase tracking-wider text-muted-foreground mb-2">Max Risk Projections</p>
+                <div className="flex flex-col">
+                  <span className={cn("text-lg font-bold", getToneClass("negative"))}>DD {mandateResult.expected_max_drawdown_pct.toFixed(1)}%</span>
+                  <span className="text-[10px] font-bold text-muted-foreground">CVAR95 {mandateResult.expected_cvar95_pct.toFixed(1)}%</span>
+                </div>
+              </div>
+
+              {/* Summary Block */}
+              <div className="glass-card rounded-xl p-4 bg-background/20">
+                <p className="text-[10px] font-bold uppercase tracking-wider text-muted-foreground mb-2">Parsed Mandate</p>
+                <div className="space-y-1">
+                   <div className="flex justify-between items-center text-xs">
+                    <span className="text-muted-foreground">Target Ret:</span>
+                    <span className="font-bold text-positive">{(Number(mandateResult.parsed_mandate?.target_return_pct ?? 0) || 0).toFixed(1)}%</span>
+                  </div>
+                  <div className="flex justify-between items-center text-xs">
+                    <span className="text-muted-foreground">Horizon:</span>
+                    <span className="font-bold">{Math.trunc(Number(mandateResult.parsed_mandate?.horizon_days ?? 0) || 0)} days</span>
+                  </div>
+                </div>
               </div>
             </div>
-          ) : (
-            <p className="text-xs text-muted-foreground">
-              Refresh to load monthly drift, miss reasons, and policy-change audit events.
-            </p>
-          )}
+
+            <div className="mt-4 grid gap-4 lg:grid-cols-2">
+              <div className="glass-card rounded-xl p-5">
+                <h4 className="text-xs font-bold uppercase tracking-widest text-muted-foreground mb-4 flex items-center gap-2">
+                  <Activity className="h-4 w-4" /> Recommended Sleeve Allocations
+                </h4>
+                <div className="grid grid-cols-2 gap-3">
+                  {Object.entries(mandateResult.policy.sleeve_allocations).map(([sleeve, weight]) => (
+                    <div key={sleeve} className="flex items-center justify-between p-3 rounded-xl bg-background/40 border border-border/50">
+                      <span className="text-xs font-bold text-foreground capitalize">{formatSleeveLabel(sleeve)}</span>
+                      <Badge variant="outline" className="font-mono text-[11px] bg-primary/5 text-primary border-primary/20">
+                        {(Number(weight) * 100).toFixed(1)}%
+                      </Badge>
+                    </div>
+                  ))}
+                </div>
+              </div>
+
+              <div className="glass-card rounded-xl p-5">
+                <h4 className="text-xs font-bold uppercase tracking-widest text-muted-foreground mb-4 flex items-center gap-2">
+                  <Info className="h-4 w-4" /> Strategy Rationale & Constraints
+                </h4>
+                <div className="space-y-4">
+                  <ul className="space-y-2">
+                    {mandateResult.rationale.slice(0, 3).map((item, idx) => (
+                      <li key={idx} className="text-xs text-foreground flex items-start gap-2 leading-relaxed">
+                        <span className="h-1.5 w-1.5 rounded-full bg-primary mt-1.5 shrink-0" />
+                        {item}
+                      </li>
+                    ))}
+                  </ul>
+                   <div className="pt-4 mt-4 border-t border-border/30">
+                     <p className="text-[10px] font-bold uppercase tracking-widest text-muted-foreground mb-2">Policy Constraints</p>
+                     <div className="flex flex-wrap gap-2">
+                       {mandateResult.policy.constraints.slice(0, 4).map((c, i) => (
+                         <Badge key={i} variant="secondary" className="bg-background/80 text-[10px] rounded-md px-2 py-1">
+                           {c}
+                         </Badge>
+                       ))}
+                     </div>
+                   </div>
+                </div>
+              </div>
+            </div>
+            
+            <div className="mt-4 bg-muted/20 rounded-xl p-3 border border-border/30 text-center">
+              <p className="text-[10px] leading-relaxed italic text-muted-foreground">
+                <span className="font-bold text-muted-foreground/80 tracking-widest uppercase mb-1 block">Institutional Disclaimer</span>
+                {mandateResult.disclaimer}
+              </p>
+            </div>
+          </div>
+        )}
+
+        {/* ── Workflow Pack Section ── */}
+        <div className="mt-8 grid gap-6 lg:grid-cols-[1fr_350px]">
+          <div className="glass-card rounded-2xl p-6">
+            <div className="flex items-center justify-between mb-6">
+               <div className="flex items-center gap-2">
+                 <ShieldCheck className="h-5 w-5 text-primary" />
+                 <h3 className="text-base font-bold text-foreground">Advisor Workflow Control</h3>
+               </div>
+               <div className="flex gap-2">
+                 <Button
+                  size="sm"
+                  variant="outline"
+                  className="h-8 rounded-full text-[11px] font-bold"
+                  onClick={() => void fetchWorkflowList()}
+                  disabled={workflowListLoading}
+                >
+                   <RefreshCw className={cn("h-3 w-3 mr-1.5", workflowListLoading && "animate-spin")} />
+                  Refresh Sync
+                </Button>
+               </div>
+            </div>
+
+            {workflowError && (
+              <div className="mb-4 flex items-center gap-2 rounded-xl border border-destructive/20 bg-destructive/5 px-4 py-3 text-xs text-destructive">
+                <AlertCircle className="h-3.5 w-3.5 shrink-0" />
+                {workflowError}
+              </div>
+            )}
+
+            {workflowPack ? (
+              <div className="space-y-6">
+                <div className="flex items-center justify-between p-4 rounded-xl bg-background/40 border border-border/50">
+                  <div className="space-y-1">
+                    <p className="text-[10px] font-bold text-muted-foreground uppercase tracking-wider">Active Workflow ID</p>
+                    <p className="text-sm font-mono font-bold text-foreground">{workflowPack.workflow_id}</p>
+                  </div>
+                  <Badge variant={workflowStatusVariant(workflowPack.status)} className="h-7 px-4">
+                    {workflowPack.status}
+                  </Badge>
+                </div>
+
+                <div className="grid grid-cols-2 gap-4">
+                  <div className={cn("p-4 rounded-xl border transition-colors", pmSigned ? "bg-positive/5 border-positive/30" : "bg-warning/5 border-warning/30")}>
+                    <p className="text-[10px] font-bold text-muted-foreground uppercase mb-2">PM Sign-off</p>
+                    <div className="flex items-center justify-between">
+                       <span className={cn("text-xs font-bold", pmSigned ? "text-positive" : "text-warning")}>
+                         {pmSigned ? "VERIFIED" : "PENDING"}
+                       </span>
+                       <Button
+                        size="sm"
+                        className="h-7 px-3 text-[10px] font-bold"
+                        onClick={() => void signoffWorkflow(workflowPack.workflow_id, "pm")}
+                        disabled={workflowLoading || pmSigned}
+                      >
+                        {pmSigned ? "Signed" : "Sign as PM"}
+                      </Button>
+                    </div>
+                  </div>
+                  <div className={cn("p-4 rounded-xl border transition-colors", complianceSigned ? "bg-positive/5 border-positive/30" : "bg-warning/5 border-warning/30")}>
+                    <p className="text-[10px] font-bold text-muted-foreground uppercase mb-2">Compliance Review</p>
+                    <div className="flex items-center justify-between">
+                       <span className={cn("text-xs font-bold", complianceSigned ? "text-positive" : "text-warning")}>
+                         {complianceSigned ? "VERIFIED" : "PENDING"}
+                       </span>
+                       <Button
+                        size="sm"
+                        className="h-7 px-3 text-[10px] font-bold"
+                        onClick={() => void signoffWorkflow(workflowPack.workflow_id, "compliance")}
+                        disabled={workflowLoading || complianceSigned}
+                      >
+                        {complianceSigned ? "Signed" : "Sign as L&C"}
+                      </Button>
+                    </div>
+                  </div>
+                </div>
+
+                <div className="flex gap-3">
+                   <Button
+                    className="flex-1 h-10 font-bold"
+                    onClick={() => void updateWorkflowStatus(workflowPack.workflow_id, "paper_live", "Applied to paper runtime.")}
+                    disabled={workflowLoading || workflowPack.status !== "approved"}
+                  >
+                    Deploy to Paper Runtime
+                  </Button>
+                   <Button
+                    variant="outline"
+                    className="h-10 px-6 font-bold text-destructive hover:bg-destructive/5"
+                    onClick={() => void updateWorkflowStatus(workflowPack.workflow_id, "retired", "Retired from review.")}
+                    disabled={workflowLoading || workflowPack.status === "retired"}
+                  >
+                    Retire Pack
+                  </Button>
+                </div>
+              </div>
+            ) : (
+              <div className="py-12 flex flex-col items-center gap-4 text-center border-2 border-dashed border-border/40 rounded-2xl">
+                <div className="h-12 w-12 rounded-full bg-muted/40 flex items-center justify-center">
+                   <Lock className="h-6 w-6 text-muted-foreground" />
+                </div>
+                <div className="max-w-xs space-y-2">
+                  <p className="text-sm font-bold text-foreground">No Active Workflow</p>
+                  <p className="text-xs text-muted-foreground leading-relaxed">
+                    Generate a mandate policy first to initiate an institutional approval workflow.
+                  </p>
+                </div>
+                <div className="flex gap-2">
+                  <Button
+                    size="sm"
+                    className="h-8 rounded-full px-6 font-bold"
+                    onClick={() => void initiateWorkflowPack()}
+                    disabled={workflowLoading || !mandateResult?.request_id}
+                  >
+                    Initiate Workflow
+                  </Button>
+                   <Button
+                    size="sm"
+                    variant="secondary"
+                    className="h-8 rounded-full px-6 font-bold"
+                    onClick={() => void activatePlanFlow()}
+                    disabled={workflowLoading || !mandateResult?.request_id}
+                  >
+                    Auto-Activate
+                  </Button>
+                </div>
+              </div>
+            )}
+          </div>
+
+          <div className="glass-card rounded-2xl border border-border/50 overflow-hidden flex flex-col">
+             <div className="px-4 py-3 border-b border-border/40 bg-background/40 flex items-center justify-between">
+                <h4 className="text-[11px] font-bold uppercase tracking-widest text-muted-foreground">Workflow Audit History</h4>
+                <Badge variant="secondary" className="text-[10px] bg-background/50">{workflowList.length} packs</Badge>
+             </div>
+             <div className="flex-1 overflow-y-auto max-h-[350px] custom-scrollbar">
+                {workflowList.length === 0 ? (
+                  <div className="p-8 text-center text-[11px] text-muted-foreground opacity-50 italic">
+                    No historical workflow data.
+                  </div>
+                ) : (
+                  workflowList.map((row) => (
+                    <button
+                      key={row.workflow_id}
+                      className={cn(
+                        "w-full px-4 py-3 flex flex-col gap-1 text-left border-b border-border/30 hover:bg-primary/5 transition-colors",
+                        workflowPack?.workflow_id === row.workflow_id && "bg-primary/[0.03] border-l-2 border-l-primary"
+                      )}
+                      onClick={() => setWorkflowPack(row)}
+                    >
+                      <div className="flex items-center justify-between">
+                        <span className="text-[11px] font-mono font-bold text-foreground">{row.workflow_id.slice(0, 12)}...</span>
+                        <Badge variant={workflowStatusVariant(row.status)} className="text-[9px] h-4 px-1.5 uppercase">
+                          {row.status}
+                        </Badge>
+                      </div>
+                      <span className="text-[10px] text-muted-foreground">{new Date(row.created_at).toLocaleDateString()} • {row.created_by}</span>
+                    </button>
+                  ))
+                )}
+             </div>
+          </div>
+        </div>
+
+        {/* ── Calibration and Risk Logs ── */}
+        <div className="mt-8 grid gap-6 lg:grid-cols-2">
+           {/* Calibration Table */}
+           <div className="glass-card rounded-2xl p-6">
+              <div className="flex items-center justify-between mb-6">
+                <div className="flex items-center gap-2">
+                   <Activity className="h-5 w-5 text-primary" />
+                   <h3 className="text-base font-bold text-foreground">Sleeve Calibration Analytics</h3>
+                </div>
+                <span className="text-[10px] font-bold text-muted-foreground uppercase bg-muted/30 px-2 py-1 rounded">
+                  {calibration?.lookback_events ?? 0} events
+                </span>
+              </div>
+              
+              <div className="overflow-hidden border border-border/50 rounded-xl bg-background/20 backdrop-blur-sm">
+                <table className="w-full text-[11px]">
+                   <thead className="bg-background/60 text-muted-foreground">
+                      <tr>
+                        <th className="px-3 py-3 font-bold text-left uppercase tracking-tighter">Sleeve</th>
+                        <th className="px-3 py-3 font-bold text-center uppercase tracking-tighter">N</th>
+                        <th className="px-3 py-3 font-bold text-center uppercase tracking-tighter">Predicted</th>
+                        <th className="px-3 py-3 font-bold text-center uppercase tracking-tighter">Realized</th>
+                        <th className="px-3 py-3 font-bold text-center uppercase tracking-tighter">Gap</th>
+                        <th className="px-3 py-3 font-bold text-center uppercase tracking-tighter">Status</th>
+                      </tr>
+                   </thead>
+                   <tbody className="divide-y divide-border/30">
+                     {calibrationLoading ? (
+                       <tr><td colSpan={6} className="py-12 text-center text-muted-foreground animate-pulse">Computing calibration vectors...</td></tr>
+                     ) : (calibration?.rows ?? []).map((row) => (
+                       <tr key={row.sleeve} className="hover:bg-background/30 transition-colors">
+                         <td className="px-3 py-3 font-bold text-foreground capitalize">{formatSleeveLabel(row.sleeve)}</td>
+                         <td className="px-3 py-3 text-center">{row.predictions}</td>
+                         <td className="px-3 py-3 text-center">{(row.predicted_hit_rate * 100).toFixed(1)}%</td>
+                         <td className="px-3 py-3 text-center font-bold">{(row.realized_hit_rate * 100).toFixed(1)}%</td>
+                         <td className={cn("px-3 py-3 text-center font-mono", Math.abs(row.calibration_gap) <= row.threshold_abs_gap ? "text-positive" : "text-warning")}>
+                           {(row.calibration_gap * 100).toFixed(1)}%
+                         </td>
+                         <td className="px-3 py-3 text-center">
+                            <Badge variant={row.within_threshold ? "positive" : "negative"} className="text-[9px] h-4 px-1 rounded">
+                              {row.within_threshold ? "PASS" : "BREACH"}
+                            </Badge>
+                         </td>
+                       </tr>
+                     ))}
+                   </tbody>
+                </table>
+              </div>
+           </div>
+
+           {/* Monthly Risk Report */}
+           <div className="glass-card rounded-2xl p-6">
+              <div className="flex items-center justify-between mb-6">
+                <div className="flex items-center gap-2">
+                   <Info className="h-5 w-5 text-primary" />
+                   <h3 className="text-base font-bold text-foreground">Monthly Risk Audit</h3>
+                </div>
+                <Button
+                  size="sm"
+                  variant="outline"
+                  className="h-8 rounded-full text-[11px] font-bold"
+                  onClick={() => void fetchMonthlyRiskReport()}
+                  disabled={riskReportLoading}
+                >
+                  <RefreshCw className={cn("h-3 w-3 mr-1.5", riskReportLoading && "animate-spin")} />
+                  Audit Refresh
+                </Button>
+              </div>
+
+              {monthlyRiskReport ? (
+                <div className="space-y-4">
+                   <div className="grid grid-cols-3 gap-2">
+                      <div className="bg-background/40 p-3 rounded-xl border border-border/40 text-center">
+                         <p className="text-[9px] font-bold text-muted-foreground uppercase mb-1">Audit Month</p>
+                         <p className="text-sm font-bold text-foreground">{monthlyRiskReport.month}</p>
+                      </div>
+                      <div className="bg-background/40 p-3 rounded-xl border border-border/40 text-center">
+                         <p className="text-[9px] font-bold text-muted-foreground uppercase mb-1">Policy Deltas</p>
+                         <p className="text-sm font-bold text-foreground">{monthlyRiskReport.policy_changes.length}</p>
+                      </div>
+                      <div className="bg-background/40 p-3 rounded-xl border border-border/40 text-center">
+                         <p className="text-[9px] font-bold text-muted-foreground uppercase mb-1">Sleeves Tracked</p>
+                         <p className="text-sm font-bold text-foreground">{monthlyRiskReport.drift_rows.length}</p>
+                      </div>
+                   </div>
+
+                   <div className="p-4 rounded-xl bg-background/20 border border-border/30">
+                      <p className="text-[10px] font-bold text-muted-foreground uppercase mb-3 tracking-widest">High-Drift Vectors</p>
+                      <div className="space-y-2">
+                         {monthlyRiskReport.drift_rows.slice(0, 3).map(row => (
+                           <div key={row.sleeve} className="flex justify-between items-center text-xs">
+                             <span className="font-medium text-foreground capitalize">{formatSleeveLabel(row.sleeve)}</span>
+                             <span className="font-mono text-[11px]">GAP: {(row.mean_abs_gap * 100).toFixed(1)}% <span className="text-muted-foreground">/ THR {(row.threshold_abs_gap * 100).toFixed(1)}%</span></span>
+                           </div>
+                         ))}
+                      </div>
+                   </div>
+
+                   <div className="p-4 rounded-xl bg-background/20 border border-border/30">
+                      <p className="text-[10px] font-bold text-muted-foreground uppercase mb-3 tracking-widest">Policy State Transitions</p>
+                      <div className="space-y-2">
+                         {monthlyRiskReport.policy_changes.slice(0, 3).map(event => (
+                           <div key={`${event.timestamp}-${event.workflow_id}`} className="flex justify-between items-center text-[11px]">
+                             <span className="font-bold text-foreground">{event.workflow_id.slice(0, 8)}</span>
+                             <span className="flex items-center gap-1.5 font-bold">
+                               <Badge variant="secondary" className="text-[9px] h-4">{event.from_status}</Badge>
+                               <span className="opacity-50">→</span>
+                               <Badge variant="positive" className="text-[9px] h-4">{event.to_status}</Badge>
+                             </span>
+                           </div>
+                         ))}
+                      </div>
+                   </div>
+                </div>
+              ) : (
+                <div className="py-20 flex flex-col items-center gap-2 text-center opacity-50 grayscale">
+                   <Info className="h-8 w-8 text-muted-foreground" />
+                   <p className="text-[11px] font-medium max-w-[200px]">Historical drift audit logs require synchronizing with the model risk engine.</p>
+                </div>
+              )}
+           </div>
         </div>
       </article>
     </section>

@@ -293,7 +293,14 @@ def _refresh_shadow_terminal_lines() -> None:
             logger.debug("Shadow terminal tail failed: %s", exc)
 
 
-def _get_shadow_terminal_payload() -> Dict[str, Any]:
+def _get_shadow_terminal_payload(state: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    # Phase 1: Try to extract from real-time state (High-Fidelity)
+    if state and "shadow_terminal" in state:
+        st_state = state["shadow_terminal"]
+        if isinstance(st_state, dict) and "lines" in st_state:
+            return st_state
+
+    # Phase 2: Fallback to log-file tailing (Institutional Robustness)
     _refresh_shadow_terminal_lines()
     with _shadow_terminal_lock:
         last_updated = None
@@ -798,7 +805,7 @@ async def stream_trading_state():
                             "hedge_status": current_state.get("hedge_status", "Inactive"),
                             "broker_heartbeats": current_state.get("broker_heartbeats", {}),
                         })
-                        shadow_terminal = _get_shadow_terminal_payload()
+                        shadow_terminal = _get_shadow_terminal_payload(current_state)
                     else:
                         update.update({
                             "timestamp": datetime.utcnow().isoformat() + "Z",

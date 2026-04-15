@@ -158,3 +158,8 @@ coverage.xml
 
 # Documentation builds
 docs/_build/
+
+# Runtime state and database binaries
+run_state/
+data/*.jsonl
+data/*.json.tmp

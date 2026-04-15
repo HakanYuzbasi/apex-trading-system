@@ -1,7 +1,9 @@
 "use client";
 
 import React from "react";
-import { ShieldAlert, ShieldCheck, Info, AlertTriangle } from "lucide-react";
+import { ShieldAlert, ShieldCheck, Info, AlertTriangle, Eye, Clock } from "lucide-react";
+import { Badge } from "@/components/ui/badge";
+import { cn } from "@/lib/utils";
 
 export interface VetoDetail {
   expires_at: number;
@@ -18,49 +20,75 @@ export default function SentimentHealthPanel({ sentiment_health = {} }: Sentimen
   const isHealthy = vetoedSymbols.length === 0;
 
   return (
-    <div className="bg-card/50 backdrop-blur-md rounded-xl border border-white/10 p-5 h-full overflow-hidden flex flex-col">
-      <div className="flex items-center justify-between mb-4">
-        <div className="flex items-center gap-2">
-          <div className={`p-2 rounded-lg ${isHealthy ? 'bg-positive/10 text-positive' : 'bg-warning/10 text-warning'}`}>
-            {isHealthy ? <ShieldCheck size={20} /> : <ShieldAlert size={20} />}
+    <div className="glass-card rounded-2xl p-6 h-full overflow-hidden flex flex-col animate-in fade-in duration-500">
+      <div className="flex items-center justify-between mb-6 border-b border-border/40 pb-4">
+        <div className="flex items-center gap-3">
+          <div className={cn(
+            "p-2.5 rounded-xl transition-all duration-300 shadow-inner",
+            isHealthy ? 'bg-positive/10 text-positive' : 'bg-warning/10 text-warning ring-1 ring-warning/30'
+          )}>
+            {isHealthy ? <ShieldCheck size={20} /> : <ShieldAlert size={20} className="animate-pulse" />}
           </div>
           <div>
-            <h3 className="text-sm font-bold text-foreground">Warden's Eye</h3>
-            <p className="text-[10px] uppercase tracking-wider text-muted-foreground font-semibold">
-              Sentiment Health
+            <div className="flex items-center gap-2">
+               <Eye size={12} className="text-primary" />
+               <h3 className="text-sm font-black text-foreground uppercase tracking-tight">Warden's Eye</h3>
+            </div>
+            <p className="text-[10px] uppercase tracking-[0.2em] text-muted-foreground font-black">
+              Sentiment Guard
             </p>
           </div>
         </div>
-        <div className="flex gap-1">
-            <span className={`px-2 py-1 rounded text-[10px] font-bold ${isHealthy ? 'bg-positive/20 text-positive' : 'bg-warning/20 text-warning'}`}>
-              {isHealthy ? "OPTIMAL" : "VETO ACTIVE"}
-            </span>
-        </div>
+        <Badge 
+          variant={isHealthy ? "positive" : "warning"} 
+          className="text-[10px] font-black h-6 px-3 tracking-widest"
+        >
+          {isHealthy ? "SYSTEM_OPTIMAL" : "VETO_ACTIVE"}
+        </Badge>
       </div>
 
       <div className="flex-1 overflow-y-auto pr-2 custom-scrollbar">
         {isHealthy ? (
-          <div className="flex flex-col items-center justify-center h-full opacity-40 py-8 text-center">
-            <ShieldCheck size={48} className="mb-3 text-positive" strokeWidth={1} />
-            <p className="text-xs font-medium">No structural threats detected.</p>
-            <p className="text-[10px] mt-1">Active universe is cleared for entry.</p>
+          <div className="flex flex-col items-center justify-center h-full py-12 text-center space-y-4">
+            <div className="relative">
+               <ShieldCheck size={64} className="text-positive opacity-10" strokeWidth={1} />
+               <ShieldCheck size={32} className="text-positive absolute inset-0 m-auto animate-in zoom-in duration-700" strokeWidth={2} />
+            </div>
+            <div className="space-y-1">
+              <p className="text-xs font-bold text-foreground/60 uppercase tracking-widest">No structural threats</p>
+              <p className="text-[10px] text-muted-foreground font-medium">Global universe cleared for deployment.</p>
+            </div>
           </div>
         ) : (
           <div className="space-y-3">
             {Object.entries(sentiment_health).map(([symbol, detail]) => (
-              <div key={symbol} className="p-3 rounded-lg bg-white/5 border border-white/5 hover:border-warning/30 transition-colors group">
-                <div className="flex items-center justify-between mb-2">
-                  <span className="text-sm font-bold text-warning">{symbol}</span>
-                  <span className="text-[10px] text-muted-foreground flex items-center gap-1">
-                    <AlertTriangle size={10} /> 24H VETO
-                  </span>
+              <div key={symbol} className="p-4 rounded-2xl bg-background/30 border border-border/20 hover:border-warning/40 transition-all group relative overflow-hidden">
+                <div className="absolute top-0 right-0 p-1 opacity-5 group-hover:opacity-10 transition-opacity">
+                   <AlertTriangle size={48} className="text-warning" />
                 </div>
-                <p className="text-[11px] leading-relaxed text-foreground/80 italic mb-2 group-hover:text-foreground transition-colors">
+                
+                <div className="flex items-center justify-between mb-3">
+                  <Badge variant="warning" className="font-mono text-[11px] font-black bg-background/60">
+                    {symbol}
+                  </Badge>
+                  <div className="flex items-center gap-1.5 text-[10px] font-bold text-warning uppercase">
+                    <AlertTriangle size={12} className="mb-0.5" />
+                    <span>24H Veto</span>
+                  </div>
+                </div>
+                
+                <p className="text-[11px] leading-relaxed text-foreground font-bold italic mb-4 border-l-2 border-warning/30 pl-3">
                   "{detail.headline}"
                 </p>
-                <div className="flex items-center justify-between text-[9px] text-muted-foreground">
-                  <span>Detected: {new Date(detail.detected_at).toLocaleTimeString()}</span>
-                  <span>Expires in: {Math.max(0, Math.round((detail.expires_at - Date.now()/1000)/3600))}h</span>
+                
+                <div className="flex items-center justify-between text-[10px] font-bold text-muted-foreground font-mono">
+                  <div className="flex items-center gap-1.5">
+                    <Clock size={12} />
+                    <span>{new Date(detail.detected_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</span>
+                  </div>
+                  <Badge variant="outline" className="text-[9px] h-5 bg-background/20 border-border/40">
+                    EXP: {Math.max(0, Math.round((detail.expires_at - Date.now()/1000)/3600))}H
+                  </Badge>
                 </div>
               </div>
             ))}
@@ -68,13 +96,13 @@ export default function SentimentHealthPanel({ sentiment_health = {} }: Sentimen
         )}
       </div>
 
-      <div className="mt-4 pt-3 border-t border-white/5 flex items-center justify-between">
-        <div className="flex items-center gap-1.5 text-[10px] text-muted-foreground font-medium">
-          <Info size={12} />
-          <span>Category B Filter Active</span>
+      <div className="mt-6 pt-4 border-t border-border/30 flex items-center justify-between">
+        <div className="flex items-center gap-2 text-[10px] font-bold text-muted-foreground uppercase tracking-widest bg-muted/20 px-3 py-1.5 rounded-full">
+          <Info size={12} className="text-primary" />
+          <span>Category B Filter</span>
         </div>
-        <div className="text-[10px] text-muted-foreground font-medium">
-          Source: Alpaca + Gemini 3
+        <div className="text-[9px] font-bold text-muted-foreground/60 uppercase text-right">
+          Provider: Neural Engine v4
         </div>
       </div>
     </div>

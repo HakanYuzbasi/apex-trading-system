@@ -1,6 +1,9 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import { Activity, Shield, Zap, TrendingUp, TrendingDown, RefreshCw, AlertCircle, Clock, LayoutGrid, Wifi, WifiOff } from "lucide-react";
+import { Badge } from "@/components/ui/badge";
+import { cn, getToneClass } from "@/lib/utils";
 
 // ── Types ──────────────────────────────────────────────────────────────────────
 
@@ -61,89 +64,91 @@ export default function WssMetricsWidget() {
 
   if (error) {
     return (
-      <div className="rounded-lg border border-gray-200 dark:border-gray-700 p-3 text-xs text-gray-400">
-        WSS Metrics: {error}
+      <div className="glass-card rounded-xl p-4 flex items-center gap-3 animate-in shake duration-300">
+        <AlertCircle className="h-4 w-4 text-negative" />
+        <span className="text-[10px] font-black uppercase text-negative">Telemetery Link Defect: {error}</span>
       </div>
     );
   }
 
   if (!data) return null;
 
-  const hitRateColor =
-    data.hit_rate >= 0.8
-      ? "text-green-600 dark:text-green-400"
-      : data.hit_rate >= 0.5
-      ? "text-amber-600 dark:text-amber-400"
-      : "text-red-500";
-
+  const hitRateTone = data.hit_rate >= 0.8 ? "positive" : data.hit_rate >= 0.5 ? "warning" : "negative";
   const totalReconnects = data.equity_reconnects + data.crypto_reconnects;
 
   return (
-    <div className="rounded-lg border border-gray-200 dark:border-gray-700 p-3 text-xs">
-      <div className="flex items-center justify-between mb-2">
-        <span className="font-semibold text-gray-700 dark:text-gray-300">WSS Health</span>
-        <span className="text-gray-400 text-[10px]">
-          ↑ {uptime(data.session_uptime_seconds)}
-        </span>
+    <div className="glass-card rounded-xl p-4 space-y-4 animate-in fade-in duration-500">
+      <div className="flex items-center justify-between border-b border-border/20 pb-3">
+        <div className="flex items-center gap-2">
+           <Wifi size={14} className="text-primary animate-pulse" />
+           <h3 className="text-[11px] font-black text-foreground uppercase tracking-tight">Data Stream Health</h3>
+        </div>
+        <Badge variant="outline" className="text-[9px] h-4.5 font-bold bg-background/40 font-mono">
+          UP:{uptime(data.session_uptime_seconds)}
+        </Badge>
       </div>
 
-      <div className="grid grid-cols-2 gap-x-4 gap-y-1">
+      <div className="space-y-2.5">
         {/* Hit rate */}
-        <span className="text-gray-500">Cache Hit Rate</span>
-        <span className={`font-semibold text-right ${hitRateColor}`}>
-          {pct(data.hit_rate)}
-        </span>
+        <div className="flex items-center justify-between group">
+          <span className="text-[10px] font-bold text-muted-foreground uppercase tracking-widest group-hover:text-foreground transition-colors">Cache Hit Rate</span>
+          <Badge variant={hitRateTone} className="font-mono text-[10px] font-black min-w-[5ch] justify-center">
+            {pct(data.hit_rate)}
+          </Badge>
+        </div>
 
         {/* Symbols */}
-        <span className="text-gray-500">Cached Symbols</span>
-        <span className="text-right">{data.cached_symbols}</span>
+        <div className="flex items-center justify-between group">
+          <span className="text-[10px] font-bold text-muted-foreground uppercase tracking-widest group-hover:text-foreground transition-colors">Active Subscriptions</span>
+          <span className="text-[11px] font-black font-mono text-foreground">{data.cached_symbols} Syms</span>
+        </div>
 
         {/* Equity */}
-        <span className="text-gray-500">Equity</span>
-        <span className="text-right flex items-center justify-end gap-1">
-          <span
-            className={`inline-block h-2 w-2 rounded-full ${
-              data.equity_connected ? "bg-green-500" : "bg-red-400"
-            }`}
-          />
-          {data.equity_connected ? "live" : "offline"}
-          {data.equity_reconnects > 0 && (
-            <span className="text-amber-500 ml-1">
-              ({data.equity_reconnects}↺)
-            </span>
-          )}
-        </span>
+        <div className="flex items-center justify-between group">
+          <span className="text-[10px] font-bold text-muted-foreground uppercase tracking-widest group-hover:text-foreground transition-colors">Equity Link</span>
+          <div className="flex items-center gap-2">
+            {data.equity_reconnects > 0 && (
+              <Badge variant="warning" className="text-[9px] h-4 px-1 font-bold">
+                {data.equity_reconnects}↺
+              </Badge>
+            )}
+            <Badge variant={data.equity_connected ? "positive" : "negative"} className="text-[9px] h-4.5 px-1.5 font-black uppercase">
+              {data.equity_connected ? "Live" : "No_Sig"}
+            </Badge>
+          </div>
+        </div>
 
         {/* Crypto */}
-        <span className="text-gray-500">Crypto</span>
-        <span className="text-right flex items-center justify-end gap-1">
-          <span
-            className={`inline-block h-2 w-2 rounded-full ${
-              data.crypto_connected ? "bg-green-500" : "bg-red-400"
-            }`}
-          />
-          {data.crypto_connected ? "live" : "offline"}
-          {data.crypto_reconnects > 0 && (
-            <span className="text-amber-500 ml-1">
-              ({data.crypto_reconnects}↺)
-            </span>
-          )}
-        </span>
+        <div className="flex items-center justify-between group">
+          <span className="text-[10px] font-bold text-muted-foreground uppercase tracking-widest group-hover:text-foreground transition-colors">Crypto Link</span>
+          <div className="flex items-center gap-2">
+            {data.crypto_reconnects > 0 && (
+              <Badge variant="warning" className="text-[9px] h-4 px-1 font-bold">
+                {data.crypto_reconnects}↺
+              </Badge>
+            )}
+            <Badge variant={data.crypto_connected ? "positive" : "negative"} className="text-[9px] h-4.5 px-1.5 font-black uppercase">
+              {data.crypto_connected ? "Live" : "No_Sig"}
+            </Badge>
+          </div>
+        </div>
 
         {/* REST fallbacks */}
-        <span className="text-gray-500">REST Fallbacks</span>
-        <span
-          className={`text-right ${
-            data.wss_misses > data.wss_hits * 0.2 ? "text-amber-500" : ""
-          }`}
-        >
-          {data.wss_misses.toLocaleString()}
-        </span>
+        <div className="flex items-center justify-between group">
+          <span className="text-[10px] font-bold text-muted-foreground uppercase tracking-widest group-hover:text-foreground transition-colors">REST Fallbacks</span>
+          <span className={cn(
+            "text-[11px] font-black font-mono tracking-tighter",
+            data.wss_misses > data.wss_hits * 0.2 ? "text-warning" : "text-foreground"
+          )}>
+            {data.wss_misses.toLocaleString()}
+          </span>
+        </div>
       </div>
 
       {totalReconnects > 5 && (
-        <div className="mt-2 text-amber-600 dark:text-amber-400 text-[10px]">
-          ⚠ {totalReconnects} reconnects this session
+        <div className="pt-2 border-t border-border/20 flex items-center gap-2">
+          <AlertCircle size={10} className="text-warning animate-pulse" />
+          <p className="text-[9px] font-black text-warning uppercase">Stability Alert: {totalReconnects} Sessions Interrupted</p>
         </div>
       )}
     </div>

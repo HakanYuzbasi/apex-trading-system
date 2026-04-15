@@ -15516,6 +15516,11 @@ class ApexTradingSystem:
                     ],
                 },
                 'daily_fill_events': list(self._daily_realized_fill_events[-50:]),
+                'shadow_terminal': {
+                    "available": True,
+                    "lines": self.shadow_deployment.get_recent_logs() if self.shadow_deployment else [],
+                    "last_updated": datetime.utcnow().isoformat() + "Z"
+                }
             }
             # Fetch active broker connections once to map sources
             active_sources = {}
@@ -15880,6 +15885,11 @@ class ApexTradingSystem:
                     "snapshots": [],
                     "prediction_verification": [],
                 },
+                'shadow_terminal': {
+                    "available": True,
+                    "lines": self.shadow_deployment.get_recent_logs() if self.shadow_deployment else [],
+                    "last_updated": datetime.utcnow().isoformat() + "Z"
+                }
             }
             self.state_sync.write(state)
             self.live_monitor.update_state(state)

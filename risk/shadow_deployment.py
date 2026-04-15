@@ -10,10 +10,12 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
+from collections import deque
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 from models.model_manifest import load_manifest, verify_manifest
 from risk.governor_policy import GovernorPolicy, GovernorPolicyRepository
@@ -265,7 +267,18 @@ class ShadowDeploymentGate:
         self._candidate: Optional[ShadowCandidateBundle] = None
         self._pending_signals: Dict[str, Dict[str, Any]] = {}
         self.snapshot = self._load_state()
+        self._logs: deque[str] = deque(maxlen=100)
+        self._add_log("📟 [SYSLOG] Shadow PPO Execution Gate initialized and shadowing production")
         self._refresh_candidate()
+
+    def _add_log(self, message: str) -> None:
+        """Add a timestamped log entry to the circular buffer."""
+        ts = _utc_now().strftime("%H:%M:%S.%f")[:-3]
+        self._logs.append(f"[{ts}] {message}")
+
+    def get_recent_logs(self) -> List[str]:
+        """Return the current log buffer for telemetry broadcast."""
+        return list(self._logs)
 
     def _load_state(self) -> ShadowDeploymentSnapshot:
         if not self.state_file.exists():
@@ -407,18 +420,29 @@ class ShadowDeploymentGate:
         self.snapshot.observed_signals += 1
         if stress_halt_active:
             self.snapshot.stress_halt_observations += 1
+            self._add_log(f"⚠️ [STRESS] Market stress detected — evaluating model resilience for {symbol}")
 
         allows = (
             abs(float(signal)) >= float(candidate.decision_profile.signal_threshold)
             and float(confidence) >= float(candidate.decision_profile.confidence_threshold)
             and not (candidate.decision_profile.halt_on_stress and stress_halt_active)
         )
+
+        # Institutional Audit Entry
+        sig_dir = "LONG" if signal > 0 else "SHORT" if signal < 0 else "FLAT"
+        self._add_log(
+            f"🎯 [SIGNAL] Candidate {candidate.candidate_id} suggests {sig_dir} on {symbol} "
+            f"(Conf: {confidence:.2f}, Threshold: {candidate.decision_profile.signal_threshold:.2f})"
+        )
+
         if allows:
             self.snapshot.candidate_allowed_signals += 1
+            self._add_log(f"✅ [AUDIT] Signal PASSED candidate filters for {symbol}")
             if stress_halt_active and not candidate.decision_profile.halt_on_stress:
                 self.snapshot.stress_halt_candidate_breaches += 1
         else:
             self.snapshot.candidate_blocked_signals += 1
+            self._add_log(f"🚫 [AUDIT] Signal BLOCKED by candidate filters for {symbol}")
 
         self._pending_signals[str(symbol)] = {
             "candidate_allows": allows,
@@ -445,12 +469,16 @@ class ShadowDeploymentGate:
         candidate_allows = bool(pending.get("candidate_allows", False))
         if candidate_allows == allows:
             self.snapshot.agreement_count += 1
+            agg_status = "AGREEMENT" if allows else "CO-BLOCK"
+            self._add_log(f"🤝 [SYNC] {agg_status}: Candidate & Production synchronized on {symbol}")
         else:
             self.snapshot.disagreement_count += 1
             if not candidate_allows and allows:
                 self.snapshot.excess_block_signals += 1
+                self._add_log(f"📉 [DELTA] DIVERGENCE: Production ALLOWED {symbol} but Candidate BLOCKED")
             elif candidate_allows and not allows:
                 self.snapshot.extra_aggressive_signals += 1
+                self._add_log(f"🚀 [DELTA] DIVERGENCE: Candidate ALLOWED {symbol} but Production BLOCKED")
         self.snapshot.updated_at = _utc_now().isoformat()
         self._save_state()
 

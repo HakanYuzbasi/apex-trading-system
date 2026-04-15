@@ -1,8 +1,11 @@
 "use client";
 
 import { useState, useTransition } from "react";
-import { RefreshCw, Wifi, Server } from "lucide-react";
+import { RefreshCw, Wifi, Server, Check } from "lucide-react";
 import { useAuthContext } from "@/components/auth/AuthProvider";
+import { Button } from "@/components/ui/button";
+import { Badge } from "@/components/ui/badge";
+import { cn } from "@/lib/utils";
 
 type BrokerMode = "alpaca" | "ibkr" | "both";
 
@@ -43,7 +46,6 @@ export default function BrokerModePanel({ brokerMode }: Props) {
   const [error, setError] = useState<string | null>(null);
   const [success, setSuccess] = useState(false);
 
-
   async function handleApply() {
     if (selected === activeMode) return;
     setError(null);
@@ -76,15 +78,18 @@ export default function BrokerModePanel({ brokerMode }: Props) {
   const isDirty = selected !== activeMode;
 
   return (
-    <div className="rounded-2xl border border-border/70 bg-background/60 p-4">
-      <div className="mb-3 flex items-center justify-between">
-        <h3 className="text-sm font-semibold text-foreground">Broker Routing</h3>
-        <span className="rounded-full bg-primary/15 px-2 py-0.5 text-[11px] font-semibold uppercase text-primary">
-          Active: {activeMode === "both" ? "IBKR Split" : activeMode === "alpaca" ? "Alpaca Native" : activeMode.toUpperCase()}
-        </span>
+    <div className="glass-card rounded-2xl p-5 animate-in fade-in duration-500">
+      <div className="mb-5 flex items-center justify-between">
+        <div className="flex items-center gap-2">
+           <Server className="h-4 w-4 text-primary" />
+           <h3 className="text-sm font-bold text-foreground">Multi-Broker Routing</h3>
+        </div>
+        <Badge variant="secondary" className="bg-background/50 text-[10px] h-6 px-3">
+          ACTIVE: {activeMode === "both" ? "IBKR SPLIT" : activeMode.toUpperCase()}
+        </Badge>
       </div>
 
-      <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
+      <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
         {MODES.map((mode) => {
           const Icon = mode.icon;
           const isActive = activeMode === mode.id;
@@ -94,59 +99,70 @@ export default function BrokerModePanel({ brokerMode }: Props) {
               key={mode.id}
               type="button"
               onClick={() => { setSelected(mode.id); setError(null); setSuccess(false); }}
-              className={[
-                "rounded-xl border p-3 text-left transition",
+              className={cn(
+                "group relative rounded-2xl border p-4 text-left transition-all duration-300",
                 isSelected
-                  ? "border-primary bg-primary/10"
-                  : "border-border/70 bg-background/40 hover:bg-secondary/40",
-              ].join(" ")}
+                  ? "border-primary bg-primary/[0.03] ring-1 ring-primary/40 shadow-lg shadow-primary/5"
+                  : "border-border/40 bg-background/20 hover:border-border/80 hover:bg-background/40"
+              )}
             >
-              <div className="flex items-center gap-2 mb-1">
-                <Icon className={`h-4 w-4 ${isSelected ? "text-primary" : "text-muted-foreground"}`} />
-                <span className={`text-sm font-semibold ${isSelected ? "text-primary" : "text-foreground"}`}>
-                  {mode.label}
-                </span>
-                {isActive && (
-                  <span className="ml-auto rounded-full bg-positive/15 px-1.5 py-0.5 text-[10px] font-semibold text-positive">
-                    LIVE
-                  </span>
-                )}
+              <div className="flex items-center gap-3 mb-3">
+                <div className={cn(
+                  "p-2 rounded-xl transition-colors",
+                  isSelected ? "bg-primary/20 text-primary" : "bg-muted/20 text-muted-foreground"
+                )}>
+                  <Icon className="h-5 w-5" />
+                </div>
+                <div className="flex-1">
+                   <div className="flex items-center gap-2">
+                     <span className={cn("text-sm font-bold", isSelected ? "text-primary" : "text-foreground")}>
+                       {mode.label}
+                     </span>
+                     {isActive && (
+                       <Badge variant="positive" className="text-[9px] h-4 px-1.5 animate-pulse">
+                         LIVE
+                       </Badge>
+                     )}
+                   </div>
+                   <p className="text-[10px] font-bold text-muted-foreground uppercase tracking-tight">{mode.subtitle}</p>
+                </div>
               </div>
-              <p className="text-xs font-medium text-foreground">{mode.subtitle}</p>
-              <p className="mt-0.5 text-[11px] text-muted-foreground">{mode.detail}</p>
+              <p className="text-[11px] text-muted-foreground leading-relaxed pl-12">{mode.detail}</p>
+              
+              {isSelected && !isActive && (
+                <div className="absolute top-4 right-4 text-primary opacity-0 group-hover:opacity-100 transition-opacity">
+                  <Check className="h-4 w-4" />
+                </div>
+              )}
             </button>
           );
         })}
       </div>
 
-      <div className="mt-3 flex items-center gap-3">
-        <button
-          type="button"
+      <div className="mt-5 flex items-center gap-4 border-t border-border/40 pt-5">
+        <Button
           disabled={!isDirty || isPending}
-          onClick={handleApply}
-          className={[
-            "inline-flex items-center gap-2 rounded-xl px-4 py-2 text-sm font-semibold transition",
-            isDirty && !isPending
-              ? "bg-primary text-primary-foreground hover:bg-primary/90"
-              : "cursor-not-allowed bg-secondary text-muted-foreground opacity-50",
-          ].join(" ")}
+          onClick={() => void handleApply()}
+          className="h-10 px-8 font-bold rounded-xl"
         >
-          {isPending && <RefreshCw className="h-3.5 w-3.5 animate-spin" />}
-          {isPending ? "Switching…" : "Apply Change"}
-        </button>
+          {isPending && <RefreshCw className="h-4 w-4 animate-spin mr-2" />}
+          {isPending ? "Switching..." : "Apply Mode Change"}
+        </Button>
 
         {success && (
-          <span className="text-xs font-medium text-positive">
-            Mode updated — takes effect within 5 s.
-          </span>
+          <div className="flex items-center gap-2 text-xs font-bold text-positive animate-in fade-in slide-in-from-left-4">
+            <Check className="h-4 w-4" />
+            <span>Mode updated — Syncing in 5s</span>
+          </div>
+        )}
+
+        {error && (
+          <div className="flex items-center gap-2 text-xs font-bold text-negative animate-in shake duration-300">
+            <Server className="h-4 w-4" />
+            <span>{error}</span>
+          </div>
         )}
       </div>
-
-      {error && (
-        <p className="mt-2 rounded-lg border border-negative/30 bg-negative/10 px-3 py-2 text-xs text-negative">
-          {error}
-        </p>
-      )}
     </div>
   );
 }

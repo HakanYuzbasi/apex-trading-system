@@ -91,6 +91,8 @@ import {
   TRADE_CYCLE_TARGET,
   EDGE_CAPTURE_TARGET,
 } from "@/lib/constants";
+import { cn, getToneClass, type Tone } from "@/lib/utils";
+import { Badge } from "@/components/ui/badge";
 import {
   clampPct,
   formatCurrency,
@@ -139,22 +141,18 @@ type ReplayTarget = {
 
 
 
-function toneClass(tone: LensRow["tone"]): string {
-  if (tone === "positive") return "text-positive";
-  if (tone === "negative") return "text-negative";
-  return "text-foreground";
+function toneClass(tone: Tone | undefined): string {
+  return getToneClass(tone, "text");
 }
 
-function barToneClass(tone: LensBar["tone"]): string {
-  if (tone === "positive") return "bg-positive";
-  if (tone === "negative") return "bg-negative";
-  return "bg-primary";
+function barToneClass(tone: Tone | undefined): string {
+  return getToneClass(tone, "bg");
 }
 
-function severityBadgeClass(severity: CockpitAlert["severity"]): string {
-  if (severity === "critical") return "bg-negative/15 text-negative";
-  if (severity === "warning") return "bg-warning/15 text-warning";
-  return "bg-primary/15 text-primary";
+function severityBadgeVariant(severity: CockpitAlert["severity"]): "destructive" | "warning" | "default" {
+  if (severity === "critical") return "destructive";
+  if (severity === "warning") return "warning";
+  return "default";
 }
 
 function comparePositions(a: CockpitPosition, b: CockpitPosition, key: PositionSortKey): number {
@@ -171,7 +169,6 @@ function positionRowKey(position: CockpitPosition): string {
     || "state";
   const sideRaw = String(position.side ?? (position.qty < 0 ? "SHORT" : "LONG")).trim().toUpperCase();
   const side = sideRaw === "SHORT" ? "SHORT" : "LONG";
-  // Preserve fractional qty for crypto in the hash key (Math.trunc(0.1234) = 0 → wrong dedup key)
   const rawQtyNum = Number.isFinite(Number(position.qty)) ? Number(position.qty) : 0;
   const qtyForHash = String(symbol).includes("/") || String(symbol).toUpperCase().startsWith("CRYPTO:")
     ? rawQtyNum.toFixed(6)
@@ -185,11 +182,10 @@ function positionRowKey(position: CockpitPosition): string {
   return `${symbol}|${source}|${side}|${securityType}|${expiry}|${strike}|${right}|${qtyForHash}`;
 }
 
-
-function readinessClass(state: "ok" | "warn" | "down"): string {
-  if (state === "ok") return "bg-positive/15 text-positive";
-  if (state === "warn") return "bg-warning/15 text-warning";
-  return "bg-negative/15 text-negative";
+function readinessVariant(state: "ok" | "warn" | "down"): "positive" | "warning" | "negative" {
+  if (state === "ok") return "positive";
+  if (state === "warn") return "warning";
+  return "negative";
 }
 
 
@@ -1077,9 +1073,9 @@ export default function Dashboard({ isPublic = false }: { isPublic?: boolean }) 
                     <div key={alert.id} className="flex flex-col gap-2 rounded-lg border border-border/70 bg-background/60 px-3 py-2 sm:flex-row sm:items-start sm:justify-between">
                       <div className="space-y-1">
                         <div className="flex flex-wrap items-center gap-2">
-                          <span className={`rounded-full px-2 py-0.5 text-xs font-semibold uppercase ${severityBadgeClass(alert.severity)}`}>
+                          <Badge variant={severityBadgeVariant(alert.severity)} className="uppercase text-[10px] h-5">
                             {alert.severity}
-                          </span>
+                          </Badge>
                           <span className="text-xs uppercase tracking-wide text-muted-foreground">{alert.source}</span>
                           <p className="text-sm font-semibold text-foreground">{alert.title}</p>
                         </div>
@@ -1219,9 +1215,9 @@ export default function Dashboard({ isPublic = false }: { isPublic?: boolean }) 
               <div key={item.label} className="rounded-xl border border-border/70 bg-background/60 px-3 py-2">
                 <div className="mb-1 flex items-center justify-between gap-2">
                   <p className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">{item.label}</p>
-                  <span className={`rounded-full px-2 py-0.5 text-[11px] font-semibold uppercase ${readinessClass(item.state as "ok" | "warn" | "down")}`}>
+                  <Badge variant={readinessVariant(item.state as "ok" | "warn" | "down")} className="uppercase text-[10px] h-5">
                     {item.state}
-                  </span>
+                  </Badge>
                 </div>
                 <p className="text-xs text-foreground">{item.detail}</p>
               </div>

@@ -39,18 +39,15 @@ function applyTheme(theme: Theme): void {
 }
 
 export function ThemeProvider({ children }: { children: React.ReactNode }) {
-  const [theme, setThemeState] = useState<Theme>(() => readStoredTheme() ?? systemTheme());
+  const [theme] = useState<Theme>("dark");
 
-  const setTheme = useCallback((nextTheme: Theme) => {
-    setThemeState(nextTheme);
-    if (typeof window !== "undefined") {
-      window.localStorage.setItem(STORAGE_KEY, nextTheme);
-    }
+  const setTheme = useCallback((_nextTheme: Theme) => {
+    // Force dark mode — institutional requirement
   }, []);
 
   const toggleTheme = useCallback(() => {
-    setTheme(theme === "dark" ? "light" : "dark");
-  }, [setTheme, theme]);
+    // Force dark mode — institutional requirement
+  }, []);
 
   useEffect(() => {
     applyTheme(theme);
@@ -66,7 +63,7 @@ export function ThemeProvider({ children }: { children: React.ReactNode }) {
         return;
       }
       const nextTheme: Theme = event.matches ? "dark" : "light";
-      setThemeState(nextTheme);
+      setTheme(nextTheme);
     };
     media.addEventListener("change", onChange);
     return () => media.removeEventListener("change", onChange);
