@@ -42,7 +42,19 @@ export async function apiJson<T>(
   options: RequestInit & { token?: string | null } = {}
 ): Promise<T> {
   const res = await apiFetch(path, options);
-  if (!res.ok) throw new Error(`API ${res.status}: ${res.statusText}`);
+  if (!res.ok) {
+    // Try to extract structured error detail from JSON body (FastAPI returns {"detail": "..."}).
+    let detail = res.statusText;
+    try {
+      const body = await res.clone().json() as Record<string, unknown>;
+      if (typeof body?.detail === "string" && body.detail.length > 0) {
+        detail = body.detail;
+      }
+    } catch {
+      // ignore — body may not be JSON
+    }
+    throw new Error(`API ${res.status}: ${detail}`);
+  }
   return res.json() as Promise<T>;
 }
 

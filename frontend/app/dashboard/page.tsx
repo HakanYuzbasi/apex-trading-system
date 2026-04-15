@@ -175,51 +175,65 @@ function SessionCard({
 function BrokerModeControl() {
   const { data: modeData, mutate } = useBrokerMode();
   const [isChanging, setIsChanging] = useState(false);
+  const [modeError, setModeError] = useState<string | null>(null);
 
   const currentMode = modeData?.broker_mode || "both";
 
   const handleModeChange = async (target: string) => {
     if (target === currentMode) return;
     setIsChanging(true);
+    setModeError(null);
     try {
       await changeBrokerMode(target);
       await mutate();
     } catch (err) {
-      console.error("Failed to change broker mode:", err);
+      // apiJson now extracts FastAPI's {"detail": "..."} into the error message.
+      // Strip the leading "API 409: " prefix so the UI just shows the actionable reason.
+      const raw = err instanceof Error ? err.message : String(err);
+      const msg = raw.replace(/^API \d+:\s*/, "");
+      setModeError(msg);
     } finally {
       setIsChanging(false);
     }
   };
 
   return (
-    <div className="flex items-center gap-2 rounded-xl border border-border/60 bg-background/40 p-1.5">
-      <div className="px-2 text-[10px] font-bold uppercase tracking-wider text-muted-foreground">
-        Execution Mode
+    <div className="flex flex-col gap-1">
+      <div className="flex items-center gap-2 rounded-xl border border-border/60 bg-background/40 p-1.5">
+        <div className="px-2 text-[10px] font-bold uppercase tracking-wider text-muted-foreground">
+          Execution Mode
+        </div>
+        <div className="flex gap-1">
+          {[
+            { id: "alpaca", label: "Full Alpaca" },
+            { id: "both", label: "Hybrid (Mix)" },
+            { id: "ibkr", label: "IBKR Only" },
+          ].map((m) => (
+            <button
+              key={m.id}
+              onClick={() => handleModeChange(m.id)}
+              disabled={isChanging}
+              className={`rounded-lg px-3 py-1.5 text-xs font-semibold transition-all ${
+                currentMode === m.id
+                  ? "bg-primary text-primary-foreground shadow-sm"
+                  : "text-muted-foreground hover:bg-muted hover:text-foreground"
+              } ${isChanging ? "opacity-50 cursor-not-allowed" : ""}`}
+            >
+              {isChanging && currentMode === m.id ? (
+                <RefreshCw className="h-3 w-3 animate-spin" />
+              ) : (
+                m.label
+              )}
+            </button>
+          ))}
+        </div>
       </div>
-      <div className="flex gap-1">
-        {[
-          { id: "alpaca", label: "Full Alpaca" },
-          { id: "both", label: "Hybrid (Mix)" },
-          { id: "ibkr", label: "IBKR Only" },
-        ].map((m) => (
-          <button
-            key={m.id}
-            onClick={() => handleModeChange(m.id)}
-            disabled={isChanging}
-            className={`rounded-lg px-3 py-1.5 text-xs font-semibold transition-all ${
-              currentMode === m.id
-                ? "bg-primary text-primary-foreground shadow-sm"
-                : "text-muted-foreground hover:bg-muted hover:text-foreground"
-            } ${isChanging ? "opacity-50 cursor-not-allowed" : ""}`}
-          >
-            {isChanging && currentMode === m.id ? (
-              <RefreshCw className="h-3 w-3 animate-spin" />
-            ) : (
-              m.label
-            )}
-          </button>
-        ))}
-      </div>
+      {modeError && (
+        <p className="flex items-center gap-1.5 px-2 text-[10px] font-medium text-destructive">
+          <AlertTriangle className="h-3 w-3 shrink-0" />
+          {modeError}
+        </p>
+      )}
     </div>
   );
 }
@@ -236,9 +250,12 @@ function PortfolioOverview({
   const cockpit = cockpitResponse ?? null;
   const metrics = sessionMetricsResponse ?? null;
 
-  // Final Aggressive Fallbacks for Data Integrity
+  // Final Aggressive Fallbacks for Data Integrity.
+  // displayDailyPnl = total MTM daily P&L (unrealized + realized) — same source as Dashboard.tsx
+  // so both pages agree on the headline number. daily_pnl_realized is shown as a sub-label only.
   const displayEquity = asNumber(cockpit?.status?.total_equity ?? cockpit?.status?.capital ?? metrics?.capital);
-  const displayDailyPnl = asNumber(cockpit?.status?.daily_pnl_realized ?? cockpit?.status?.daily_pnl ?? metrics?.daily_pnl_realized ?? metrics?.daily_pnl);
+  const displayDailyPnl = asNumber(cockpit?.status?.daily_pnl ?? metrics?.daily_pnl ?? cockpit?.status?.daily_pnl_realized ?? metrics?.daily_pnl_realized);
+  const displayRealizedPnl = asNumber((cockpit?.status as unknown as Record<string, unknown>)?.daily_pnl_realized ?? metrics?.daily_pnl_realized);
   const displayTotalPnl = asNumber(cockpit?.status?.total_pnl ?? metrics?.total_pnl);
   const displayPositions = asNumber(cockpit?.status?.open_positions ?? metrics?.open_positions);
   
@@ -317,14 +334,14 @@ function PortfolioOverview({
               {alertCount} alert{alertCount !== 1 ? "s" : ""} active
             </span>
             <div className="flex flex-col gap-1.5 ml-1">
-              {/* eslint-disable-next-line @typescript-eslint/no-explicit-any */}
-              {(cockpit?.alerts || []).map((alert: any, i: number) => (
-                <div key={i} className={`text-[10px] flex items-center gap-2 ${
-                  alert.severity === "critical" ? "text-negative" : "text-warning"
+              {(cockpit?.alerts || []).map((alert, i: number) => (
+                <div key={alert.id ?? i} className={`text-[10px] flex items-center gap-2 ${
+                  alert.severity === "critical" ? "text-negative" : alert.severity === "info" ? "text-muted-foreground" : "text-warning"
                 }`}>
                   <span className="h-1 w-1 rounded-full bg-current" />
-                  <span className="font-bold uppercase tracking-tight">[{alert.type}]</span>
-                  <span className="text-muted-foreground">{alert.message || alert.data?.error || "Unknown issue"}</span>
+                  <span className="font-bold uppercase tracking-tight">[{alert.source}]</span>
+                  <span>{alert.title}</span>
+                  {alert.detail && <span className="text-muted-foreground truncate max-w-[300px]">— {alert.detail}</span>}
                 </div>
               ))}
             </div>
@@ -348,13 +365,15 @@ function PortfolioOverview({
             {(displayDailyPnl ?? 0) >= 0 ? <TrendingUp className="h-4 w-4 text-positive" /> : <TrendingDown className="h-4 w-4 text-negative" />}
           </div>
           <div>
-            <p className="text-xs text-muted-foreground">Today&apos;s P&L</p>
+            <p className="text-xs text-muted-foreground">Today&apos;s P&L (MTM)</p>
             <p className={`text-lg font-bold ${(displayDailyPnl ?? 0) >= 0 ? "text-positive" : "text-negative"}`}>
               {formatMoneyOrDash(displayDailyPnl)}
             </p>
-            <p className={`text-xs ${(displayTotalPnl ?? 0) >= 0 ? "text-positive/70" : "text-negative/70"}`}>
-              Total: {formatMoneyOrDash(displayTotalPnl)}
-            </p>
+            {displayRealizedPnl !== null && (
+              <p className={`text-xs ${(displayRealizedPnl) >= 0 ? "text-positive/70" : "text-negative/70"}`}>
+                Realized: {formatMoneyOrDash(displayRealizedPnl)}
+              </p>
+            )}
           </div>
         </div>
 

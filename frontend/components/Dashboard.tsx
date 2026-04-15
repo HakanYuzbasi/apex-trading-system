@@ -491,6 +491,10 @@ export default function Dashboard({ isPublic = false }: { isPublic?: boolean }) 
   const openPositions = sanitizedMetrics.open_positions;
   const tradesCount = sanitizedMetrics.trades_count;
   const drawdownPct = normalizeDrawdownPct(sanitizedMetrics.max_drawdown);
+  // Prefer broker-reported max_positions over the static frontend constant so the
+  // Book Utilisation gauge stays in sync with the actual backend limit.
+  const apiMaxPositions = Number((cockpit?.status as unknown as Record<string, unknown>)?.max_positions ?? 0);
+  const maxPositions = apiMaxPositions > 0 ? apiMaxPositions : MAX_POSITIONS;
 
 
   // Parse WS positions to match CockpitPosition interface
@@ -914,8 +918,8 @@ export default function Dashboard({ isPublic = false }: { isPublic?: boolean }) 
           },
           {
             label: "Book Utilization",
-            value: formatPct(openPositions / MAX_POSITIONS),
-            hint: `Using ${MAX_POSITIONS}-slot max book`,
+            value: formatPct(openPositions / maxPositions),
+            hint: `Using ${maxPositions}-slot max book`,
           },
         ],
         bars: [
@@ -927,9 +931,9 @@ export default function Dashboard({ isPublic = false }: { isPublic?: boolean }) 
           },
           {
             label: "Position Dispersion",
-            value: clampPct((openPositions / MAX_POSITIONS) * 100),
+            value: clampPct((openPositions / maxPositions) * 100),
             targetLabel: "Concentration monitor",
-            tone: openPositions <= Math.floor(MAX_POSITIONS * 0.6) ? "positive" : "negative",
+            tone: openPositions <= Math.floor(maxPositions * 0.6) ? "positive" : "negative",
           },
           {
             label: "Edge Capture",
@@ -940,7 +944,7 @@ export default function Dashboard({ isPublic = false }: { isPublic?: boolean }) 
         ],
       },
     };
-  }, [capital, dailyPnl, ibkrDailyPnl, alpacaDailyPnl, drawdownPct, openPositions, pnlPerTrade, returnPct, sharpe, totalPnl, tradesCount, avgPositionSize, winRate]);
+  }, [capital, dailyPnl, ibkrDailyPnl, alpacaDailyPnl, drawdownPct, maxPositions, openPositions, pnlPerTrade, returnPct, sharpe, totalPnl, tradesCount, avgPositionSize, winRate]);
 
   const handleLogout = () => {
     logout();
