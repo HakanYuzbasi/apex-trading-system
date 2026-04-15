@@ -3,7 +3,7 @@
 import React from "react";
 import { ShieldAlert, ShieldCheck, Info, AlertTriangle } from "lucide-react";
 
-interface VetoDetail {
+export interface VetoDetail {
   expires_at: number;
   headline: string;
   detected_at: string;

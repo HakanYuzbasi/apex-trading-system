@@ -42,7 +42,7 @@ XGBOOST_AVAILABLE = False
 LIGHTGBM_AVAILABLE = False
 
 try:
-    from sklearn.ensemble import RandomForestClassifier, GradientBoostingClassifier
+    from sklearn.ensemble import RandomForestClassifier, GradientBoostingClassifier, RandomForestRegressor
     from sklearn.preprocessing import RobustScaler
     from sklearn.impute import SimpleImputer
     from sklearn.metrics import log_loss, accuracy_score, balanced_accuracy_score

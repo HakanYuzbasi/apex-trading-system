@@ -233,10 +233,8 @@ function PortfolioOverview({
   const { data: cockpitResponse, isLoading } = useCockpitData();
   const { data: sessionMetricsResponse } = useSessionMetrics("core");
 
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const cockpit = cockpitResponse as any;
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const metrics = sessionMetricsResponse as any;
+  const cockpit = cockpitResponse ?? null;
+  const metrics = sessionMetricsResponse ?? null;
 
   // Final Aggressive Fallbacks for Data Integrity
   const displayEquity = asNumber(cockpit?.status?.total_equity ?? cockpit?.status?.capital ?? metrics?.capital);
@@ -247,9 +245,9 @@ function PortfolioOverview({
   const status = cockpit?.status;
   const sharpe = asNumber(status?.sharpe_ratio);
   const winRate = asNumber(status?.win_rate ?? metrics?.win_rate);
-  const brokers = (Array.isArray(status?.brokers) ? status.brokers : []) as any[];
+  const brokers = (Array.isArray(status?.brokers) ? status.brokers : []);
   const alertCount = cockpit?.alerts?.length ?? 0;
-  const criticalAlerts = cockpit?.alerts?.filter((a: any) => a.severity === "critical").length ?? 0;
+  const criticalAlerts = cockpit?.alerts?.filter((a) => a.severity === "critical").length ?? 0;
 
   const apiReachable = isConnected || status?.api_reachable;
 
@@ -287,6 +285,7 @@ function PortfolioOverview({
           <div className="flex flex-col">
             <span className="text-[10px] text-muted-foreground uppercase font-bold tracking-tight">Active Brokers</span>
             <div className="flex gap-2 mt-1">
+              {/* eslint-disable-next-line @typescript-eslint/no-explicit-any */}
               {brokers.map((b: any) => (
                 <span
                   key={b.broker}
@@ -310,12 +309,26 @@ function PortfolioOverview({
       </div>
 
         {alertCount > 0 && (
-          <span className={`inline-flex items-center gap-1.5 rounded-full px-2.5 py-1 text-[11px] font-semibold ${
-            criticalAlerts > 0 ? "bg-negative/15 text-negative" : "bg-warning/15 text-warning"
-          }`}>
-            <AlertTriangle className="h-3 w-3" />
-            {alertCount} alert{alertCount !== 1 ? "s" : ""}
-          </span>
+          <div className="space-y-2">
+            <span className={`inline-flex items-center gap-1.5 rounded-full px-2.5 py-1 text-[11px] font-semibold ${
+              criticalAlerts > 0 ? "bg-negative/15 text-negative" : "bg-warning/15 text-warning"
+            }`}>
+              <AlertTriangle className="h-3 w-3" />
+              {alertCount} alert{alertCount !== 1 ? "s" : ""} active
+            </span>
+            <div className="flex flex-col gap-1.5 ml-1">
+              {/* eslint-disable-next-line @typescript-eslint/no-explicit-any */}
+              {(cockpit?.alerts || []).map((alert: any, i: number) => (
+                <div key={i} className={`text-[10px] flex items-center gap-2 ${
+                  alert.severity === "critical" ? "text-negative" : "text-warning"
+                }`}>
+                  <span className="h-1 w-1 rounded-full bg-current" />
+                  <span className="font-bold uppercase tracking-tight">[{alert.type}]</span>
+                  <span className="text-muted-foreground">{alert.message || alert.data?.error || "Unknown issue"}</span>
+                </div>
+              ))}
+            </div>
+          </div>
         )}
 
       {/* KPI Grid */}

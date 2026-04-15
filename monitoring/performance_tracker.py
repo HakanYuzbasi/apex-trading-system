@@ -5,6 +5,7 @@ FIXED: Proper equity curve tracking with float conversion
 
 import logging
 import math
+import pandas as pd
 from datetime import datetime
 from typing import List, Dict, Tuple, Optional
 import numpy as np

@@ -13,6 +13,7 @@ import logging
 import warnings
 import pickle
 from pathlib import Path
+from config import ApexConfig
 
 warnings.filterwarnings('ignore')
 logger = logging.getLogger(__name__)

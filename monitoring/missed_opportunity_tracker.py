@@ -11,6 +11,7 @@ Used to answer: "What high earners is our strategy missing?"
 import json
 import logging
 import os
+import pandas as pd
 from collections import defaultdict
 from dataclasses import asdict, dataclass, field
 from datetime import datetime

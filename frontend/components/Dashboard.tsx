@@ -40,7 +40,7 @@ import PositionsTable from "@/components/dashboard/PositionsTable";
 import ReplayInspectorPanel from "@/components/dashboard/ReplayInspectorPanel";
 import ExplainableAIChart from "@/components/dashboard/ExplainableAIChart";
 import MandateCopilotPanel from "@/components/dashboard/MandateCopilotPanel";
-import SocialGovernorPanel from "@/components/dashboard/SocialGovernorPanel";
+import SocialGovernorPanel, { type SocialGovernorPanelProps } from "@/components/dashboard/SocialGovernorPanel";
 import WalkForwardPanel from "@/components/dashboard/WalkForwardPanel";
 import PortfolioHeatPanel from "@/components/dashboard/PortfolioHeatPanel";
 import RegimeSharpePanel from "@/components/dashboard/RegimeSharpePanel";
@@ -61,7 +61,7 @@ import StressScenariosPanel from "@/components/dashboard/StressScenariosPanel";
 import OrderRejectionsPanel from "@/components/dashboard/OrderRejectionsPanel";
 import FeatureIcPanel from "@/components/dashboard/FeatureIcPanel";
 import AbGatePanel from "@/components/dashboard/AbGatePanel";
-import SentimentHealthPanel from "@/components/dashboard/SentimentHealthPanel";
+import SentimentHealthPanel, { type VetoDetail } from "@/components/dashboard/SentimentHealthPanel";
 import PortfolioWeightsPanel from "@/components/dashboard/PortfolioWeightsPanel";
 import HmmRegimePanel from "@/components/dashboard/HmmRegimePanel";
 import AlertHistoryPanel from "@/components/dashboard/AlertHistoryPanel";
@@ -69,11 +69,11 @@ import PaperAccountPanel from "@/components/dashboard/PaperAccountPanel";
 import ModelRegistryPanel from "@/components/dashboard/ModelRegistryPanel";
 import CrossAssetPairsPanel from "@/components/dashboard/CrossAssetPairsPanel";
 import IVCrushPanel from "@/components/dashboard/IVCrushPanel";
-import StrategyAllocationPanel from "@/components/dashboard/StrategyAllocationPanel";
-import SocialPulsePanel from "@/components/dashboard/SocialPulsePanel";
+import StrategyAllocationPanel, { type StrategyAllocationData } from "@/components/dashboard/StrategyAllocationPanel";
+import SocialPulsePanel, { type SocialPulseData } from "@/components/dashboard/SocialPulsePanel";
 import BriefingArchivePanel from "@/components/dashboard/BriefingArchivePanel";
 import BrokerModePanel from "@/components/dashboard/BrokerModePanel";
-import BrokerReconciliationPanel from "@/components/dashboard/BrokerReconciliationPanel";
+import BrokerReconciliationPanel, { type BrokerPosition } from "@/components/dashboard/BrokerReconciliationPanel";
 import SignalHeatmap from "@/components/SignalHeatmap";
 import { Skeleton } from "@/components/ui/skeleton";
 import { useWebSocket } from "@/hooks/useWebSocket";
@@ -446,7 +446,10 @@ export default function Dashboard({ isPublic = false }: { isPublic?: boolean }) 
 
   // Clean, non-duplicate calculation for options
   const _finalRawDerivs = cockpit?.derivatives || [];
-  const _finalUniqueKeys = new Set(_finalRawDerivs.map((l: any) => `${l.symbol}_${String(l.expiry).replace(/-/g, "")}_${Number(l.strike).toFixed(2)}_${l.right}`));
+  const _finalUniqueKeys = new Set(_finalRawDerivs.map((l: unknown) => {
+    const leg = l as Record<string, unknown>;
+    return `${leg.symbol}_${String(leg.expiry).replace(/-/g, "")}_${Number(leg.strike).toFixed(2)}_${leg.right}`;
+  }));
   const mergedOptionPositions = _finalUniqueKeys.size > 0 ? _finalUniqueKeys.size : sanitizeCount(wsData?.option_positions ?? cockpit?.status?.option_positions, 0);
 
   const mergedOpenPositionsTotal = mergedOpenPositions + mergedOptionPositions;
@@ -464,17 +467,17 @@ export default function Dashboard({ isPublic = false }: { isPublic?: boolean }) 
   const wsAggregatedEquity = sanitizeMoney(wsData?.aggregated_equity ?? wsData?.total_equity, Number.NaN);
   const capital = aggregatedEquity !== null ? aggregatedEquity : (Number.isFinite(wsAggregatedEquity) ? wsAggregatedEquity : sanitizedMetrics.capital);
   const dailyPnl = sanitizedMetrics.daily_pnl;
-  const realizedPnl = Number.isFinite(Number((wsData as any)?.realized_pnl)) ? Number((wsData as any).realized_pnl) : 0;
-  const activeMargin = Number.isFinite(Number((wsData as any)?.active_margin)) ? Number((wsData as any).active_margin) : 0;
-  const leverageLimit = Number.isFinite(Number((wsData as any)?.leverage_limit)) ? Number((wsData as any).leverage_limit) : 1.0;
+  const realizedPnl = Number.isFinite(Number((wsData as unknown as Record<string, unknown>)?.realized_pnl)) ? Number((wsData as unknown as Record<string, unknown>).realized_pnl) : 0;
+  const activeMargin = Number.isFinite(Number((wsData as unknown as Record<string, unknown>)?.active_margin)) ? Number((wsData as unknown as Record<string, unknown>).active_margin) : 0;
+  const leverageLimit = Number.isFinite(Number((wsData as unknown as Record<string, unknown>)?.leverage_limit)) ? Number((wsData as unknown as Record<string, unknown>).leverage_limit) : 1.0;
   const neuralLatencyMicros = useMemo(() => {
-    const heatmap = (wsData as any)?.latency_heatmap as Array<{ name: string; micros: number }> | undefined;
+    const heatmap = (wsData as unknown as Record<string, unknown>)?.latency_heatmap as Array<{ name: string; micros: number }> | undefined;
     if (!heatmap || heatmap.length === 0) return null;
     return Math.max(...heatmap.map((e) => Number(e.micros) || 0));
   }, [wsData]);
-  const dailyPnlByBroker = (cockpit?.status as any)?.daily_pnl_by_broker ?? { ibkr: 0, alpaca: 0 };
-  const stressLiquidation = (cockpit?.status as any)?.stress_liquidation ?? null;
-  const shadowDeployment = (cockpit?.status as any)?.shadow_deployment ?? null;
+  const dailyPnlByBroker = (cockpit?.status as unknown as Record<string, unknown>)?.daily_pnl_by_broker as Record<string, number> ?? { ibkr: 0, alpaca: 0 };
+  const stressLiquidation = (cockpit?.status as unknown as Record<string, unknown>)?.stress_liquidation as Record<string, unknown> | null ?? null;
+  const shadowDeployment = (cockpit?.status as unknown as Record<string, unknown>)?.shadow_deployment as Record<string, unknown> | null ?? null;
   const ibkrDailyPnl = sanitizeMoney(dailyPnlByBroker?.ibkr, 0);
   const alpacaDailyPnl = sanitizeMoney(dailyPnlByBroker?.alpaca, 0);
   // ibkrUnrealizedPnl and alpacaUnrealizedPnl computed from live positions via useMemo below
@@ -662,14 +665,13 @@ export default function Dashboard({ isPublic = false }: { isPublic?: boolean }) 
     return sleevesSnapshot;
   }, [cockpitSleeves, confirmedFlatSleeves, sleevesSnapshot]);
 
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const usp = cockpit?.usp as any;
+  const usp = cockpit?.status?.usp ?? null;
   const brokerRuntime = useMemo(() => {
-    const rows = (Array.isArray(cockpit?.status?.brokers) ? cockpit!.status!.brokers : []) as any[];
-    const byType = new Map(rows.map((row) => [row.broker, row]));
+    const rows = (Array.isArray(cockpit?.status?.brokers) ? cockpit!.status!.brokers : []) as unknown[];
+    const byType = new Map(rows.map((row) => [ (row as Record<string, unknown>).broker, row]));
 
     const checkStatus = (b: any) => {
-      if (!b) return { status: 'offline', mode: 'idle', last_heartbeat: null };
+      if (!b) return { status: 'not_configured' as const, mode: 'idle' as const, source_count: 0, live_source_count: 0, heartbeat_ts: null, stale_age_seconds: null };
       return b;
     };
 
@@ -960,7 +962,7 @@ export default function Dashboard({ isPublic = false }: { isPublic?: boolean }) 
 
   const criticalCount = activeAlerts.filter((a) => a.severity === "critical").length;
   const warningCount = activeAlerts.filter((a) => a.severity === "warning").length;
-  const uspScore = usp?.score ?? 0;
+  const uspScore = Number(usp?.score ?? 0);
 
   const readinessItems = useMemo(
     () => [
@@ -975,26 +977,26 @@ export default function Dashboard({ isPublic = false }: { isPublic?: boolean }) 
         detail: authExpired ? "session expired" : "session active",
       },
       {
-        label: "USP Engine", state: (cockpit?.status?.usp_score || 0) > 70 ? "ok" : "warn",
+        label: "USP Engine", state: Number(cockpit?.status?.usp_score ?? 0) > 70 ? "ok" : "warn",
         detail: !usp?.engine ? "missing scorecard" : `score ${uspScore.toFixed(1)}/100`,
       },
       {
-        label: "Mandate Copilot", state: (cockpit?.status?.mandate_signals || 0) > 0 ? "ok" : "warn",
+        label: "Mandate Copilot", state: Number(cockpit?.status?.mandate_signals ?? 0) > 0 ? "ok" : "warn",
         detail: `${cockpit?.status?.mandate_signals ?? 0} signals`,
       },
       {
-        label: "Workflow Pack", state: (cockpit?.status?.active_workflows || 0) > 0 ? "ok" : "warn",
+        label: "Workflow Pack", state: Number(cockpit?.status?.active_workflows ?? 0) > 0 ? "ok" : "warn",
         detail: `${cockpit?.status?.active_workflows ?? 0} active`,
       },
       {
         label: "Alpaca",
-        state: brokerStateToBadge(brokerRuntime.alpaca?.status, brokerRuntime.alpaca?.mode),
-        detail: brokerDetail(brokerRuntime.alpaca),
+        state: brokerStateToBadge(brokerRuntime.alpaca?.status as any, brokerRuntime.alpaca?.mode as any),
+        detail: brokerDetail(brokerRuntime.alpaca as any),
       },
       {
         label: "IBKR",
-        state: brokerStateToBadge(brokerRuntime.ibkr?.status, brokerRuntime.ibkr?.mode),
-        detail: brokerDetail(brokerRuntime.ibkr),
+        state: brokerStateToBadge(brokerRuntime.ibkr?.status as any, brokerRuntime.ibkr?.mode as any),
+        detail: brokerDetail(brokerRuntime.ibkr as any),
       },
     ],
     [
@@ -1132,7 +1134,7 @@ export default function Dashboard({ isPublic = false }: { isPublic?: boolean }) 
                 }`}
               >
                 <Server className="h-3.5 w-3.5" />
-                {((wsData as any)?.broker_mode ?? "both") === "alpaca" ? "Alpaca Only" : "IBKR Split"}
+                {((wsData as Record<string, unknown>)?.broker_mode ?? "both") === "alpaca" ? "Alpaca Only" : "IBKR Split"}
               </button>
               <Button variant="outline" className="rounded-xl" onClick={() => window.location.reload()}>
                 <RefreshCw className="h-4 w-4" />
@@ -1303,9 +1305,9 @@ export default function Dashboard({ isPublic = false }: { isPublic?: boolean }) 
               <p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">USP Engine</p>
               <ShieldCheck className="h-4 w-4 text-primary" />
             </div>
-            <p className="apex-kpi-value mt-2 text-lg font-semibold text-foreground">{showLoading ? <Skeleton className="h-5 w-16" /> : `${(usp?.score ?? 0).toFixed(1)}/100`}</p>
+            <p className="apex-kpi-value mt-2 text-lg font-semibold text-foreground">{showLoading ? <Skeleton className="h-5 w-16" /> : `${Number(usp?.score ?? 0).toFixed(1)}/100`}</p>
             <p className="mt-1 text-xs capitalize text-muted-foreground">
-              {showLoading ? <Skeleton className="h-3 w-20" /> : (usp?.band ?? "stabilize").replaceAll("_", " ")}
+              {showLoading ? <Skeleton className="h-3 w-20" /> : String(usp?.band ?? "stabilize").replaceAll("_", " ")}
             </p>
           </button>
 
@@ -1586,7 +1588,7 @@ export default function Dashboard({ isPublic = false }: { isPublic?: boolean }) 
         ) : activeTab === "mandate" ? (
           <MandateCopilotPanel onSessionExpired={handleSessionExpired} />
         ) : activeTab === "social" ? (
-          <SocialGovernorPanel socialAudit={cockpit?.social_audit as any} />
+          <SocialGovernorPanel socialAudit={cockpit?.status?.social_audit as SocialGovernorPanelProps["socialAudit"]} />
         ) : activeTab === "walkforward" ? (
           <WalkForwardPanel />
         ) : activeTab === "heat" ? (
@@ -1657,8 +1659,8 @@ export default function Dashboard({ isPublic = false }: { isPublic?: boolean }) 
               </span>
             </div>
             <BrokerReconciliationPanel
-              brokerPositions={(wsData as any)?.broker_positions}
-              lastUpdated={(wsData as any)?.timestamp}
+              brokerPositions={(wsData as unknown as Record<string, unknown>)?.broker_positions as BrokerPosition[]}
+              lastUpdated={(wsData as unknown as Record<string, unknown>)?.timestamp as string}
             />
           </div>
         ) : null}
@@ -1667,7 +1669,7 @@ export default function Dashboard({ isPublic = false }: { isPublic?: boolean }) 
         {activeTab === "trading" ? (
           <>
             {/* Broker Routing — full-width, top of trading tab */}
-            <BrokerModePanel brokerMode={(wsData as any)?.broker_mode ?? "both"} />
+            <BrokerModePanel brokerMode={(wsData as unknown as Record<string, unknown>)?.broker_mode as string ?? "both"} />
 
             <section className="grid grid-cols-1 gap-4 xl:grid-cols-[0.95fr_1.05fr]">
               <article className="apex-panel apex-fade-up rounded-2xl p-5">
@@ -1678,13 +1680,13 @@ export default function Dashboard({ isPublic = false }: { isPublic?: boolean }) 
 
                 <div className="lg:col-span-1">
                   <SentimentHealthPanel
-                    sentiment_health={(wsData as any)?.sentiment_health}
+                    sentiment_health={(wsData as unknown as Record<string, unknown>)?.sentiment_health as Record<string, VetoDetail>}
                   />
                   <div className="mt-4">
-                     <StrategyAllocationPanel allocation={(wsData as any)?.strategy_allocation} />
+                     <StrategyAllocationPanel allocation={(wsData as unknown as Record<string, unknown>)?.strategy_allocation as StrategyAllocationData} />
                   </div>
                   <div className="mt-4">
-                     <SocialPulsePanel pulse={(wsData as any)?.social_pulse} />
+                     <SocialPulsePanel pulse={(wsData as unknown as Record<string, unknown>)?.social_pulse as SocialPulseData} />
                   </div>
                 </div>
                 <div className="lg:col-span-2">
@@ -1769,7 +1771,7 @@ export default function Dashboard({ isPublic = false }: { isPublic?: boolean }) 
                       <div>
                         <p className="text-sm font-semibold text-foreground">Stress Liquidation In Progress</p>
                         <p className="text-xs text-muted-foreground">
-                          {stressLiquidation.completed_count ?? 0} completed · {stressLiquidation.in_progress_count ?? 0} in progress · {stressLiquidation.candidate_count ?? 0} planned
+                          {Number(stressLiquidation.completed_count ?? 0)} completed · {Number(stressLiquidation.in_progress_count ?? 0)} in progress · {Number(stressLiquidation.candidate_count ?? 0)} planned
                         </p>
                         {stressLiquidation.plan_id ? (
                           <p className="mt-1 text-xs text-muted-foreground">
@@ -1803,7 +1805,7 @@ export default function Dashboard({ isPublic = false }: { isPublic?: boolean }) 
                     </div>
                     {Array.isArray(stressLiquidation.candidates) && stressLiquidation.candidates.length > 0 ? (
                       <div className="mt-3 grid gap-2 md:grid-cols-2 xl:grid-cols-3">
-                        {stressLiquidation.candidates.map((candidate: any) => (
+                        {stressLiquidation.candidates.map((candidate) => (
                           <div key={String(candidate.symbol)} className="rounded-lg border border-border/60 bg-background/60 px-3 py-2 text-xs">
                             <div className="flex items-center justify-between gap-2">
                               <span className="font-semibold text-foreground">{String(candidate.symbol)}</span>

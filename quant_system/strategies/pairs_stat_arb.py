@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+import logging
 import math
 from collections import deque
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Deque, Literal
+
+logger = logging.getLogger(__name__)
 
 from quant_system.events import BarEvent, TradeTick
 from quant_system.strategies.base import BaseStrategy

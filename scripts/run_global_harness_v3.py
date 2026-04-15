@@ -144,6 +144,7 @@ class TelemetryLogHandler(logging.Handler):
         return _LOG_BUFFER
 
 _ORDER_BUFFER = collections.deque(maxlen=50)
+from quant_system.events import ExecutionEvent
 
 def _capture_order_execution(event: ExecutionEvent):
     """Intercepts execution fills and stores them for telemetry."""
@@ -408,17 +409,29 @@ async def _seed_existing_positions(
         # Pull broker-truth positions
         positions = await asyncio.to_thread(trading_client.get_all_positions)
         
-        # Zero out current ledger positions that are in the broker universe
-        # to ensure we don't carry 'phantom' state from a stale JSON.
+        # Build set of normalized broker symbols
         seen_normalized = set()
+        for p in positions:
+            seen_normalized.add(normalize_symbol(p.symbol))
+
+        # Step 1: Zero out ghost positions (in ledger but NOT at broker)
+        ghost_count = 0
+        for sym in list(ledger.positions.keys()):
+            if sym not in seen_normalized and abs(ledger.positions[sym].quantity) > 1e-9:
+                logger.info("🧹 Clearing ghost position %s (qty=%.6f, not at broker)", sym, ledger.positions[sym].quantity)
+                ledger.positions[sym].quantity = 0.0
+                ghost_count += 1
+        if ghost_count:
+            logger.warning("🧹 Cleared %d ghost position(s) from recovered ledger state", ghost_count)
+
+        # Step 2: Seed real broker positions
         for p in positions:
             sym = normalize_symbol(p.symbol)
             pos_obj = ledger.get_position(sym)
             pos_obj.quantity = float(p.qty)
             pos_obj.avg_price = float(p.avg_entry_price)
-            seen_normalized.add(sym)
             logger.info("   Seeded position: %s | Qty: %s", sym, p.qty)
-            
+
         logger.info(" Sovereign Position Seed Complete: %d symbols synchronized.", len(seen_normalized))
     except Exception as e:
         logger.error(" Broker seeding failed: %s", e)
@@ -1312,8 +1325,8 @@ async def _run_dashboard_updates(
                         
                     # IBKR positions
                     if ibkr_adapter and ibkr_adapter.is_connected():
-                        # ibkr_adapter.ib is the ib_insync instance
-                        ibkr_positions = ibkr_adapter.ib.positions()
+                        # access the underlying ib_insync instance via the connector
+                        ibkr_positions = ibkr_adapter.connector.ib.positions()
                         # Normalize IBKR simple position objects to Alpaca-like schema for the UI
                         for p in ibkr_positions:
                             # p is Position(account='...', contract=Contract(...), position=10.0, avgCost=150.0)
@@ -1371,7 +1384,7 @@ async def _run_dashboard_updates(
             ibkr_equity = 0.0
             if ibkr_adapter and ibkr_adapter.is_connected():
                 try:
-                    ibkr_equity = await ibkr_adapter.get_net_liquidation()
+                    ibkr_equity = await ibkr_adapter.get_portfolio_value()
                 except Exception as _ib_eq_exc:
                     logger.warning("IBKR equity fetch failed in dashboard loop: %s", _ib_eq_exc)
             
@@ -1433,7 +1446,9 @@ async def _run_dashboard_updates(
                     sym: {
                         "qty": pos.quantity,
                         "avg_price": pos.avg_price,
+                        "current_price": ledger.last_price_by_instrument.get(sym, pos.avg_price),
                         "pnl": ledger.get_unrealized_pnl(sym),
+                        "pnl_pct": (ledger.get_unrealized_pnl(sym) / (pos.avg_price * abs(pos.quantity)) * 100) if (pos.avg_price > 0 and pos.quantity != 0) else 0.0
                     } for sym, pos in ledger.positions.items() if abs(pos.quantity) > 1e-6
                 },
                 "broker_positions": _broker_positions_cache,
@@ -1473,6 +1488,7 @@ async def _winner_refresh_loop(
     equity_protector: EquityProtector,
     rotator: StrategyRotator,
     tail_hedger: TailHedger,
+    risk_manager: RiskManager,
     stop_event: asyncio.Event,
 ) -> None:
     last_refresh_at: datetime | None = None
@@ -1779,32 +1795,9 @@ async def main() -> None:
     # Restore any previously persisted risk state (e.g. today's halt flag).
     await asyncio.to_thread(risk_state_controller.load)
 
-    # MASTER SYNC: Overwrite stale recovered state with actual brokerage truth (Sovereign Equity)
-    try:
-        alpaca_equity = await _bootstrap_cash(trading_client)
-        ibkr_equity = 0.0
-        if ibkr_connector.ib.isConnected():
-            summary = await ibkr_connector.ib.accountSummaryAsync()
-            for item in summary:
-                if item.tag == 'NetLiquidation':
-                    ibkr_equity = float(item.value)
-                    break
-        
-        sovereign_truth = alpaca_equity + ibkr_equity
-        current_equity = ledger.total_equity()
-        drift = abs(current_equity - sovereign_truth)
-        
-        if drift > 10.0: # $10 threshold for multi-venue
-            logger.info(" Master Sync: Aligning ledger to Sovereign Truth ($%.2f -> $%.2f)", current_equity, sovereign_truth)
-            ledger.cash += (sovereign_truth - current_equity)
-            
-        logger.info(" Portfolio synchronized: Sovereign Equity = $%.2f (Alpaca=$%.2f, IBKR=$%.2f)", sovereign_truth, alpaca_equity, ibkr_equity)
-    except Exception as e:
-        logger.error(" Master Sync failed: %s", e)
-
+    # ── Initializing Components ─────────────────────────────────────────────────
     bayesian_vol = BayesianVolatilityAdjuster(event_bus)
     meta_labeler = MetaLabeler()
-
     sentiment_warden = SentimentWarden(
         api_key=api_key,
         secret_key=secret_key,
@@ -1819,8 +1812,78 @@ async def main() -> None:
         equity_protector=equity_protector,
         bayesian_vol=bayesian_vol,
         meta_labeler=meta_labeler,
-        sentiment_warden=sentiment_warden,
+        sentiment_warden=sentiment_warden
     )
+
+    # IBKR Connectivity Monitoring (Dashboard Only for v3)
+    ibkr_connector = IBKRConnector(
+        host=os.getenv("IBKR_HOST", "host.docker.internal"),
+        port=int(os.getenv("IBKR_PORT", 7497)),
+        client_id=int(os.getenv("IBKR_CLIENT_ID", 101)),
+    )
+    ibkr_adapter = IBKRAdapter(ibkr_connector)
+
+    # MASTER SYNC: Overwrite stale recovered state with actual brokerage truth (Sovereign Truth)
+    try:
+        alpaca_equity = await _bootstrap_cash(trading_client)
+        ibkr_equity = 0.0
+        # Fire-and-forget connection attempt
+        asyncio.create_task(ibkr_adapter.connect())
+        
+        # Wait a moment for IBKR to connect if possible
+        await asyncio.sleep(1.0)
+        
+        if ibkr_connector.ib.isConnected():
+            try:
+                summary = await asyncio.wait_for(
+                    ibkr_connector.ib.accountSummaryAsync(), timeout=8.0
+                )
+                for item in summary:
+                    if item.tag == 'NetLiquidation':
+                        ibkr_equity = float(item.value)
+                        break
+            except (asyncio.TimeoutError, Exception) as ibkr_err:
+                logger.warning("IBKR account summary unavailable (%s) — proceeding Alpaca-only", ibkr_err)
+
+            # Seed IBKR equity positions that Alpaca doesn't know about (e.g. COP).
+            # _seed_existing_positions() above only covers Alpaca; IBKR equity positions
+            # must be added here so the ledger (and dashboard) reflects them correctly.
+            try:
+                ibkr_pos_map = await ibkr_connector.get_detailed_positions()
+                ibkr_seeded = 0
+                for sym, pos_data in ibkr_pos_map.items():
+                    qty = float(pos_data.get("qty", 0))
+                    avg_cost = float(pos_data.get("avg_cost", 0))
+                    if abs(qty) < 1e-6:
+                        continue
+                    pos_obj = ledger.get_position(sym)
+                    if abs(pos_obj.quantity) < 1e-6:  # don't overwrite Alpaca positions
+                        pos_obj.quantity = qty
+                        pos_obj.avg_price = avg_cost
+                        ibkr_seeded += 1
+                        logger.info(
+                            "   Seeded IBKR position: %s | Qty: %.4f | AvgCost: %.4f",
+                            sym, qty, avg_cost,
+                        )
+                if ibkr_seeded:
+                    logger.info(
+                        "✅ IBKR Position Seed: %d equity position(s) added to ledger",
+                        ibkr_seeded,
+                    )
+            except Exception as ibkr_pos_err:
+                logger.warning("⚠️ IBKR position seeding failed: %s", ibkr_pos_err)
+
+        sovereign_truth = alpaca_equity + ibkr_equity
+        current_equity = ledger.total_equity()
+        drift = abs(current_equity - sovereign_truth)
+        
+        if drift > 10.0: # $10 threshold for multi-venue
+            logger.info(" Master Sync: Aligning ledger to Sovereign Truth ($%.2f -> $%.2f)", current_equity, sovereign_truth)
+            ledger.cash += (sovereign_truth - current_equity)
+            
+        logger.info(" Portfolio synchronized: Sovereign Equity = $%.2f (Alpaca=$%.2f, IBKR=$%.2f)", sovereign_truth, alpaca_equity, ibkr_equity)
+    except Exception as e:
+        logger.error(" Master Sync failed: %s", e)
 
     #  Execution + EOD 
     neural_sniper = NeuralSniper(
@@ -1833,19 +1896,6 @@ async def main() -> None:
     # Dashboard integration
     monitor = LiveMonitor()
     correlation_manager = CorrelationManager()
-
-    # IBKR Connectivity Monitoring (Dashboard Only for v3)
-    ibkr_connector = IBKRConnector(
-        host=os.getenv("IBKR_HOST", "host.docker.internal"),
-        port=int(os.getenv("IBKR_PORT", 7497)),
-        client_id=int(os.getenv("IBKR_CLIENT_ID", 101)),
-    )
-    ibkr_adapter = IBKRAdapter(ibkr_connector)
-    try:
-        # Fire-and-forget connection attempt
-        asyncio.create_task(ibkr_adapter.connect())
-    except Exception as e:
-        logger.debug(f"IBKR initial connection attempt failed: {e}")
 
     #  Rotator 
     rotator = StrategyRotator(
@@ -1939,6 +1989,7 @@ async def main() -> None:
             equity_protector,
             rotator,
             tail_hedger,
+            risk_manager,
             stop_event,
         ),
         name="winner-refresh-loop-v3",
@@ -1966,7 +2017,7 @@ async def main() -> None:
             tail_hedger,
             stop_event,
             trading_client=trading_client,
-            ibkr_adapter=ibkr_connector,
+            ibkr_adapter=ibkr_adapter,
         ),
         name="dashboard-updates-v3",
     )

@@ -601,6 +601,10 @@ class TradingExcellenceManager:
 
 
 # Convenience function for quick checks
+def quick_mismatch_check(
+    position_side: str,
+    signal: float,
+    confidence: float,
     pnl_pct: float,
     hold_hours: float = 0.0,
     is_crypto: bool = False,

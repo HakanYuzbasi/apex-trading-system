@@ -3,10 +3,9 @@ from __future__ import annotations
 import asyncio
 from abc import ABC, abstractmethod
 from datetime import datetime, timezone
-from typing import Any
-
+from typing import Any, Mapping
 from quant_system.core.bus import InMemoryEventBus, Subscription
-from quant_system.events import BarEvent, SignalEvent, TradeTick
+from quant_system.events import BarEvent, SignalEvent, TradeTick, EventScalar
 
 
 class BaseStrategy(ABC):

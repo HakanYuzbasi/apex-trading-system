@@ -17,6 +17,7 @@ async def generate_daily_briefing() -> None:
     and dispatches the generated summary to Telegram.
     """
     root_dir = Path(__file__).resolve().parents[1]
+    now = datetime.now(timezone.utc)
     
     # Read trace
     trace_path = root_dir / "quant_system" / "logs" / "decision_trace.json"

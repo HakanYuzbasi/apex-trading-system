@@ -55,6 +55,7 @@ services:
       - QUANT_DB_USER=${POSTGRES_USER:-apex}
       - QUANT_DB_PASSWORD=${POSTGRES_PASSWORD}
       - REDIS_URL=redis://redis:6379/0
+      - SECTOR_CONCENTRATION_LIMIT=0.60
     volumes:
       - .:/app
       - ./logs:/app/logs

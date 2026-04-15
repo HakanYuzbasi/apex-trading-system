@@ -3,7 +3,7 @@
 import { useMemo } from "react";
 import { AlertTriangle, CheckCircle2, RefreshCw } from "lucide-react";
 
-interface BrokerPosition {
+export interface BrokerPosition {
   symbol: string;
   normalized_symbol: string;
   qty: number;

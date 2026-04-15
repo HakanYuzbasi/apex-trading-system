@@ -21,6 +21,7 @@ import pandas as pd
 import logging
 from datetime import datetime
 import matplotlib.pyplot as plt
+from typing import Dict
 
 # Connect to core modules
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))

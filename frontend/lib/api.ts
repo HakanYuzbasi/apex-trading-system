@@ -210,6 +210,67 @@ export type SocialAuditEvent = {
   reasons: string[];
 };
 
+export type StressLiquidationCandidate = {
+  symbol: string;
+  status: string;
+  action: string;
+  target_reduction_pct: number;
+};
+
+export type StressLiquidationInfo = {
+  is_active: boolean;
+  plan_id?: string | number | null;
+  plan_epoch?: number | null;
+  plan_audit_url?: string | null;
+  candidates: StressLiquidationCandidate[];
+};
+
+export type ShadowDeploymentInfo = {
+  is_active: boolean;
+  deployment_id?: string;
+  target_node?: string;
+  heartbeat_ts?: string | null;
+};
+
+export type CockpitStatus = {
+  api_reachable: boolean;
+  state_fresh: boolean;
+  timestamp: string | null;
+  capital: number;
+  starting_capital?: number;
+  daily_pnl: number;
+  total_pnl: number;
+  max_drawdown: number;
+  sharpe_ratio: number;
+  sortino_ratio?: number;
+  calmar_ratio?: number;
+  profit_factor?: number;
+  alpha_retention?: number;
+  win_rate: number;
+  open_positions: number;
+  option_positions: number;
+  open_positions_total: number;
+  total_trades: number;
+  active_broker: string;
+  brokers: Array<{
+    broker: string;
+    status: "live" | "stale" | "configured" | "not_configured";
+    mode: "trading" | "idle" | "disabled";
+    source_count: number;
+    live_source_count: number;
+    heartbeat_ts: string | null;
+    stale_age_seconds: number | null;
+  }>;
+  daily_pnl_by_broker?: Record<string, number>;
+  stress_liquidation?: StressLiquidationInfo | null;
+  shadow_deployment?: ShadowDeploymentInfo | null;
+  usp?: Record<string, unknown> | null;
+  usp_score?: number;
+  mandate_signals?: number;
+  active_workflows?: number;
+  [key: string]: unknown;
+};
+
 export type CockpitData = {
   timestamp: string | null;
   positions: CockpitPosition[];
@@ -219,7 +280,7 @@ export type CockpitData = {
     sleeves: SleeveAttribution[];
   };
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  status?: any;
+  status?: CockpitStatus;
   [key: string]: unknown;
 };
 

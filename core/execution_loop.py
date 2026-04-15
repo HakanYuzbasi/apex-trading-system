@@ -18,7 +18,7 @@ import math
 import os
 import random
 import time
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, Optional, List, Tuple
 try:
     import pytz
@@ -40,6 +40,7 @@ from core.trading_control import (
     mark_kill_switch_reset_processed,
     mark_governor_policy_reload_processed,
     mark_equity_reconciliation_latch_processed,
+    get_active_broker_mode,
 )
 from models.advanced_signal_generator import AdvancedSignalGenerator
 from risk.risk_manager import RiskManager
@@ -181,8 +182,8 @@ setup_logging(
     console_output=True,
     max_bytes=ApexConfig.LOG_MAX_BYTES,
     backup_count=ApexConfig.LOG_BACKUP_COUNT,
-    main_log_file="/private/tmp/apex_main.log",
-    debug_log_file="/private/tmp/apex_debug.log",
+    main_log_file="logs/apex_main.log",
+    debug_log_file="logs/apex_debug.log",
 )
 logger = logging.getLogger(__name__)
 options_logger = logging.getLogger("options_audit")
@@ -477,6 +478,13 @@ class ApexTradingSystem:
         self.state_sync = StateSync(self._session_scoped_state_path("trading_state.json"))
         self.event_store = EventStore(self.user_data_dir)
         self._last_terminal_metrics_ts = 0.0
+
+        # Broker mode cache — read from control file every 5 s so dashboard toggles
+        # take effect without restarting the container.
+        self._broker_mode_cache: str = str(getattr(ApexConfig, "BROKER_MODE", "both"))
+        self._broker_mode_cache_ts: float = 0.0
+        self._broker_mode_cache_ttl: float = 5.0
+        self._control_command_file = ApexConfig.DATA_DIR / "trading_control_commands.json"
         
         # Initialize modules (session-scoped parameters)
         self.signal_generator = AdvancedSignalGenerator()
@@ -492,7 +500,7 @@ class ApexTradingSystem:
         self.advanced_executor = None
         if getattr(ApexConfig, "USE_ADVANCED_EXECUTION", True):
             try:
-                from execution.advanced_order_executor import AdvancedOrderExecutor
+                # Redundant local import removed to prevent shadowing
                 self.advanced_executor = AdvancedOrderExecutor(
                     risk_gateway=self.risk_manager, 
                     broker_dispatch=self.broker_dispatch
@@ -2216,20 +2224,58 @@ class ApexTradingSystem:
         logger.info("✅ All modules initialized!")
         logger.info("=" * 80)
 
+    def _ibkr_is_live(self) -> bool:
+        """Return True only when IBKR is connected and not in persistent-down state."""
+        return (
+            self.ibkr is not None
+            and not getattr(self.ibkr, "_persistently_down", False)
+            and self.ibkr.is_connected()
+        )
+
+    def _current_broker_mode(self) -> str:
+        """Return active broker mode, re-reading from the control file every 5 s.
+
+        This allows the dashboard toggle to take effect without a container restart.
+        Falls back to the cached value (seeded from ApexConfig.BROKER_MODE at startup)
+        if the control file cannot be read.
+        """
+        import time as _time
+        now = _time.monotonic()
+        if now - self._broker_mode_cache_ts > self._broker_mode_cache_ttl:
+            try:
+                self._broker_mode_cache = get_active_broker_mode(self._control_command_file)
+            except Exception:
+                pass  # keep cached value on read error
+            self._broker_mode_cache_ts = now
+        return self._broker_mode_cache
+
     def _get_connector_for(self, symbol: str):
-        """Return the appropriate broker connector for a symbol."""
-        broker_mode = getattr(ApexConfig, "BROKER_MODE", "ibkr").lower()
+        """Return the appropriate broker connector for a symbol.
+
+        Routing table (broker_mode == "both"):
+          • Crypto          → always Alpaca
+          • Equity/index/fx → IBKR when TWS is live; Alpaca as fallback when TWS is down
+
+        broker_mode is read from the shared control file (via _current_broker_mode())
+        so that dashboard toggles take effect within the 5 s TTL cache window.
+        """
+        broker_mode = self._current_broker_mode().lower()
         if broker_mode == "both":
             try:
                 parsed = parse_symbol(symbol)
                 if parsed.asset_class == AssetClass.CRYPTO:
                     return self.alpaca
-                # In mixed mode, non-crypto instruments must route via IBKR.
-                # Do not silently fall back to Alpaca, which can cause symbol incompatibility
-                # and fake simulation behavior when IBKR is down.
-                return self.ibkr
+                # Non-crypto: IBKR is preferred; fall back to Alpaca when TWS is offline.
+                if self._ibkr_is_live():
+                    return self.ibkr
+                if self.alpaca:
+                    logger.warning(
+                        "IBKR unavailable — routing %s to Alpaca (TWS-down fallback)", symbol
+                    )
+                    return self.alpaca
+                return self.ibkr  # both None; caller will surface the error
             except ValueError:
-                return self.ibkr
+                return self.ibkr or self.alpaca
         if broker_mode == "alpaca":
             return self.alpaca
         return self.ibkr or self.alpaca
@@ -5429,48 +5475,66 @@ class ApexTradingSystem:
             logger.debug(traceback.format_exc())
 
     async def sync_positions_with_alpaca(self):
-        """Sync crypto positions from Alpaca into self.positions with metadata.
+        """Sync positions from Alpaca into self.positions with metadata.
 
-        Only crypto symbols are synced from Alpaca to avoid overwriting
-        IBKR equity positions (e.g. COP, HAL) with stale Alpaca data.
+        Crypto: always synced from Alpaca (Alpaca is the canonical broker).
+        Equity/index/forex: synced from Alpaca only when IBKR TWS is offline,
+          so that Alpaca-routed equity trades are reflected in position state.
+          When IBKR is live these are skipped to avoid overwriting IBKR data.
         """
         if not self.alpaca:
             return
         try:
             detailed_positions = await self.alpaca.get_detailed_positions()
             actual_positions = {s: d['qty'] for s, d in detailed_positions.items()}
+            ibkr_live = self._ibkr_is_live()
 
-            # Only sync crypto positions — equities are managed by IBKR
             for sym, qty in actual_positions.items():
                 if qty == 0:
                     continue
                 try:
                     parsed = parse_symbol(sym)
-                    if parsed.asset_class != AssetClass.CRYPTO:
-                        continue
+                    is_crypto = parsed.asset_class == AssetClass.CRYPTO
                 except ValueError:
+                    is_crypto = False
+
+                # Crypto: always sync. Equity/fx: only when IBKR is offline.
+                if not is_crypto and ibkr_live:
                     continue
+
                 self.positions[sym] = int(qty) if qty == int(qty) else qty
 
-            # Remove crypto symbols that are no longer held on Alpaca
+            # Remove crypto symbols no longer held on Alpaca.
+            # Also remove equity symbols when IBKR is offline and Alpaca no longer holds them.
             for sym in list(self.positions.keys()):
                 try:
                     parsed = parse_symbol(sym)
-                    if parsed.asset_class == AssetClass.CRYPTO and sym not in actual_positions:
-                        del self.positions[sym]
+                    is_crypto = parsed.asset_class == AssetClass.CRYPTO
                 except ValueError:
-                    pass
-                    
-            # Populate price cache and entry prices for crypto positions
+                    is_crypto = False
+
+                if sym not in actual_positions:
+                    if is_crypto:
+                        del self.positions[sym]
+                    elif not ibkr_live:
+                        # Equity was closed at Alpaca while IBKR was down — remove it.
+                        logger.info(
+                            "Position %s closed at Alpaca (IBKR offline) — removing from state", sym
+                        )
+                        del self.positions[sym]
+
+            # Populate price cache and entry prices for all synced positions.
             for sym, data in detailed_positions.items():
                 qty = data['qty']
                 if qty == 0:
                     continue
                 try:
                     parsed = parse_symbol(sym)
-                    if parsed.asset_class != AssetClass.CRYPTO:
-                        continue
+                    is_crypto = parsed.asset_class == AssetClass.CRYPTO
                 except ValueError:
+                    is_crypto = False
+
+                if not is_crypto and ibkr_live:
                     continue
 
                 if data.get('current_price', 0) > 0:
@@ -5480,8 +5544,11 @@ class ApexTradingSystem:
                     self.position_entry_prices[sym] = data.get('avg_cost', 0)
                     if sym not in self.position_entry_times:
                         self.position_entry_times[sym] = datetime.utcnow()
-            
-            logger.debug("✅ Alpaca position sync complete")
+
+            logger.debug(
+                "✅ Alpaca position sync complete (ibkr_live=%s, synced=%d)",
+                ibkr_live, len(actual_positions),
+            )
             self._mark_broker_heartbeat("alpaca", success=True)
             self._sync_cost_basis_with_positions()
         except Exception as e:
@@ -7571,8 +7638,8 @@ class ApexTradingSystem:
                 and str(asset_class).upper() not in ("FX", "FOREX")
                 and getattr(ApexConfig, "SESSION_AWARE_ENTRY_ENABLED", True)):
             try:
-                import pytz as _pytz_sess
-                _now_et = datetime.now(_pytz_sess.timezone("US/Eastern"))
+                # Use global pytz import to avoid local assignment shadowing
+                _now_et = datetime.now(pytz.timezone("US/Eastern"))
                 _h, _m = _now_et.hour, _now_et.minute
                 _avoid_open_min = int(getattr(ApexConfig, "EQUITY_ENTRY_AVOID_OPEN_MINUTES", 5))
                 _avoid_close_min = int(getattr(ApexConfig, "EQUITY_ENTRY_AVOID_CLOSE_MINUTES", 5))
@@ -8056,9 +8123,56 @@ class ApexTradingSystem:
             except Exception as _pcrge:
                 logger.debug("PCR gate error (non-fatal) for %s: %s", symbol, _pcrge)
 
+        # MASTER PRICE & POSITION SYNC: Fetch current price and authoritative position weight
+        # Move up from later in the method to satisfy ORB and other gates.
+        try:
+            connector = self._get_connector_for(symbol)
+            if connector:
+                _via_ibkr = bool(self.ibkr and connector is self.ibkr)
+                if self._cached_ibkr_positions is not None and _via_ibkr:
+                    current_pos = self._cached_ibkr_positions.get(symbol, 0)
+                else:
+                    current_pos = self.positions.get(symbol, 0)
+                    if current_pos == 0 and not symbol.startswith("CRYPTO:"):
+                        current_pos = self.positions.get(f"CRYPTO:{symbol}", 0)
+
+                price = 0.0
+                if getattr(self, 'websocket_streamer', None):
+                    price = self.websocket_streamer.get_current_price(symbol)
+                
+                if not price or price == 0.0:
+                    price = await connector.get_market_price(symbol)
+                    
+                if not price or price == 0.0:
+                    logger.info(f"⚠️ {symbol}: No price from broker – skipping")
+                    return
+
+                self.price_cache[symbol] = price
+                self._price_cache_ts[symbol] = time.time()
+                self.data_quality_monitor.update_price(symbol, price)
+            else:
+                current_pos = self.positions.get(symbol, 0)
+                if current_pos == 0 and not symbol.startswith("CRYPTO:"):
+                    current_pos = self.positions.get(f"CRYPTO:{symbol}", 0)
+                _hist_data = self.historical_data[symbol]
+                if hasattr(_hist_data, 'get') and 'Close' in _hist_data:
+                    price = float(_hist_data['Close'].iloc[-1])
+                elif hasattr(_hist_data, 'iloc'):
+                    price = float(_hist_data.iloc[-1])
+                else:
+                    price = float(_hist_data[-1])
+                self.price_cache[symbol] = price
+                self._price_cache_ts[symbol] = time.time()
+                self.data_quality_monitor.update_price(symbol, price)
+
+            # Initialise 'capital' for weighting gates
+            capital = float(self._session_config.get('initial_capital', 1_000_000.0))
+
+        except Exception as _e_sync:
+            logger.error("Failed to sync price/position for %s: %s", symbol, _e_sync)
+            return
+
         # Check 2.19b: Opening Range Breakout confirmation gate — equity only, 10:05–15:00 ET
-        # Boost confidence when price confirms an ORB in the same direction as the signal.
-        # Don't block if no ORB data — the signal stands on its own.
         _orb = getattr(self, '_orb_signal', None)
         if (
             _orb is not None
@@ -8194,71 +8308,7 @@ class ApexTradingSystem:
             return
         
         try:
-            # Use cached positions (refreshed at cycle start) to avoid race conditions
-            connector = self._get_connector_for(symbol)
-            if connector:
-                # For IBKR-routed symbols use the cycle-level IBKR position cache.
-                # For Alpaca crypto symbols the IBKR cache is empty — fall back to
-                # self.positions (which is the authoritative cross-broker position dict).
-                _via_ibkr = bool(self.ibkr and connector is self.ibkr)
-                if self._cached_ibkr_positions is not None and _via_ibkr:
-                    current_pos = self._cached_ibkr_positions.get(symbol, 0)
-                else:
-                    current_pos = self.positions.get(symbol, 0)
-                    # Alpaca stores crypto positions as CRYPTO:BTC/USD but runtime
-                    # processes them as BTC/USD — check the prefixed key as fallback.
-                    if current_pos == 0 and not symbol.startswith("CRYPTO:"):
-                        current_pos = self.positions.get(f"CRYPTO:{symbol}", 0)
-
-                # Get current price (PHASE 12: WSS Intercept)
-                price = 0.0
-                if getattr(self, 'websocket_streamer', None):
-                    price = self.websocket_streamer.get_current_price(symbol)
-                
-                # Fallback to legacy REST API if WSS missed the tick
-                if not price or price == 0.0:
-                    price = await connector.get_market_price(symbol)
-                    
-                if not price or price == 0.0:
-                    logger.info(f"⚠️ {symbol}: No price from broker – skipping")
-                    return
-
-                self.price_cache[symbol] = price
-                self._price_cache_ts[symbol] = time.time()  # AD: timestamp for TTL
-                self.data_quality_monitor.update_price(symbol, price)
-                if self.data_watchdog:
-                    self.data_watchdog.feed_heartbeat(symbol)
-                # Record price freshness for decay shield
-                if self.signal_decay_shield:
-                    self.signal_decay_shield.record_data_timestamp(symbol, "price")
-            else:
-                current_pos = self.positions.get(symbol, 0)
-                if current_pos == 0 and not symbol.startswith("CRYPTO:"):
-                    current_pos = self.positions.get(f"CRYPTO:{symbol}", 0)
-                _hist_data = self.historical_data[symbol]
-                if hasattr(_hist_data, 'get') and 'Close' in _hist_data:
-                    price = float(_hist_data['Close'].iloc[-1])
-                elif hasattr(_hist_data, 'iloc'):
-                    price = float(_hist_data.iloc[-1])
-                else:
-                    price = float(_hist_data[-1])
-                self.price_cache[symbol] = price
-                self._price_cache_ts[symbol] = time.time()  # AD: timestamp for TTL
-                self.data_quality_monitor.update_price(symbol, price)
-                if self.data_watchdog:
-                    self.data_watchdog.feed_heartbeat(symbol)
-                if self.signal_decay_shield:
-                    self.signal_decay_shield.record_data_timestamp(symbol, "price")
-
-            # Check data freshness before signal generation
-            if self.signal_decay_shield and not self.signal_decay_shield.is_data_tradeable(symbol):
-                logger.debug(f"🛡️ {symbol}: Data too stale, skipping signal generation")
-                # Clean up any pending entry placeholder to avoid blocking future entries
-                async with self._position_lock:
-                    if symbol in self._pending_entries:
-                        self.positions.pop(symbol, None)
-                        self._pending_entries.discard(symbol)
-                return
+            # Data freshness and signal generation blocks proceed using 'price' and 'capital' fetched earlier.
 
             # Generate signal (use institutional or standard)
             data = self.historical_data[symbol]
@@ -8678,6 +8728,7 @@ class ApexTradingSystem:
                     _src = getattr(self, '_strategy_rotation', None)
                     if _src is not None:
                         _rot_weights = _src.get_blend_weights(_blend_regime)
+                        _DEFAULT_WEIGHT = 0.5
                         _ml_total = _rot_weights.get("ml", _DEFAULT_WEIGHT if False else _ml_w)
                         _tech_total = _rot_weights.get("tech", _DEFAULT_WEIGHT if False else _tech_w)
                         _mt_sum = _ml_total + _tech_total
@@ -10534,7 +10585,7 @@ class ApexTradingSystem:
             # Pre-market Staleness Guard check (equities only — crypto trades 24/7)
             if getattr(ApexConfig, "PRE_MARKET_STALENESS_GUARD", True) and not _symbol_is_crypto(symbol):
                 try:
-                    import pytz
+                    # Local import removed to prevent shadowing
                     now_et = datetime.now(pytz.timezone('US/Eastern'))
                     if now_et.hour == 9 and 0 <= now_et.minute < 30:
                         has_live = False
@@ -12801,7 +12852,7 @@ class ApexTradingSystem:
                                 side=side,
                                 quantity=int(round(float(shares))),
                                 price=float(price),
-                                portfolio_value=float(capital) if capital else 1_000_000.0,
+                                portfolio_value=float(capital) if 'capital' in locals() else 1_000_000.0,
                                 current_positions={str(k): int(v) for k, v in self.positions.items()},
                                 config=_cm_cfg,
                             )
@@ -13396,7 +13447,7 @@ class ApexTradingSystem:
                                     fill_price=float(attribution_entry_price),
                                     qty=float(abs(shares)),
                                     regime=str(self._current_regime),
-                                    broker=str(broker_used) if 'broker_used' in dir() else "unknown",
+                                    broker="unknown",
                                     order_type="market",
                                 )
                             # Record signal for ModelDriftMonitor (awaiting outcome at exit)

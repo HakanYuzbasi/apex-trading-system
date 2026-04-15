@@ -2,7 +2,7 @@
 
 import { Activity } from "lucide-react";
 
-interface SocialPulseData {
+export interface SocialPulseData {
   [symbol: string]: number;
 }
 

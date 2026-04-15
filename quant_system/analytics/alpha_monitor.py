@@ -131,3 +131,17 @@ class AlphaDecayMonitor:
         equity_curve = pd.Series([snapshot.equity for snapshot in filtered], index=index, dtype=float)
         metrics = PerformanceAnalyzer.compute_metrics_from_equity_curve(equity_curve)
         return float(metrics["annualized_sharpe"])
+    def get_current_sortino(self) -> float:
+        """Alias for localized sortino calculation used by v3 dashboard."""
+        if len(self._snapshots) < 3:
+            return 0.0
+        latest_timestamp = self._snapshots[-1].timestamp
+        start_cutoff = latest_timestamp - timedelta(days=self._evaluation_window_days)
+        filtered = [snapshot for snapshot in self._snapshots if snapshot.timestamp >= start_cutoff]
+        if len(filtered) < 3:
+            return 0.0
+            
+        index = pd.DatetimeIndex([snapshot.timestamp for snapshot in filtered], tz="UTC")
+        equity_curve = pd.Series([snapshot.equity for snapshot in filtered], index=index, dtype=float)
+        metrics = PerformanceAnalyzer.compute_metrics_from_equity_curve(equity_curve)
+        return float(metrics.get("annualized_sortino", 0.0))

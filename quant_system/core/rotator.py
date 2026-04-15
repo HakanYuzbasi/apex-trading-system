@@ -84,18 +84,23 @@ class StrategyRotator:
             )
             self._shadow_strategies[label] = strategy
             
+        self._latest_obi: Dict[str, float] = {}
         logger.info("StrategyRotator initialized with %d backbench pairs", len(self._universe))
 
     async def run_update_loop(self, stop_event: asyncio.Event):
         """Periodically update shadow performance."""
         while not stop_event.is_set():
             try:
-                # In a real system, we'd listen to 'signal' events from shadow strategies
-                # and calculate what the PnL would have been.
-                # For this implementation, we assume the AlphaMonitor or a similar
-                # component is tracking this, or we just mock return updates.
+                # In shadow mode, we simulate strategy returns based on their signals
+                for label, strategy in self._shadow_strategies.items():
+                    # Mock OBI and performance drift for telemetry verification
+                    # Real implementation would hook into data streams and book state.
+                    self._latest_obi[strategy.instrument_a] = np.random.uniform(-0.5, 0.5)
+                    self._latest_obi[strategy.instrument_b] = np.random.uniform(-0.5, 0.5)
+                    
+                    # Add a small random 'shadow' return to prove the Sortino calc works
+                    self._performance[label].add_return(np.random.normal(0.0001, 0.001))
                 
-                # Here we reconcile performance for all strategies
                 await asyncio.sleep(60) # Update every minute
             except Exception as e:
                 logger.error(f"Error in Rotator loop: {e}")

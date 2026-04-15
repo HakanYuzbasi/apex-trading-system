@@ -5,7 +5,7 @@ import threading
 import logging
 import asyncio
 from datetime import datetime
-from typing import Optional
+from typing import Any, Optional
 
 logger = logging.getLogger("health_monitor")
 

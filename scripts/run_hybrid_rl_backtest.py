@@ -22,6 +22,7 @@ import pandas as pd
 import logging
 from datetime import datetime
 import matplotlib.pyplot as plt
+from typing import List
 
 # Explicitly add the root project directory to path
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))

@@ -2,7 +2,7 @@
 
 import { PieChart, Pie, Cell, ResponsiveContainer, Tooltip } from "recharts";
 
-interface StrategyAllocationData {
+export interface StrategyAllocationData {
   KalmanPairs?: number;
   BreakoutPod?: number;
 }
