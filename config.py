@@ -1847,6 +1847,82 @@ class ApexConfig:
     VOL_SPIKE_SIGMA: float = float(os.getenv("APEX_VOL_SPIKE_SIGMA", "2.0"))
     VOL_SPIKE_MIN_LOSS_PCT: float = float(os.getenv("APEX_VOL_SPIKE_MIN_LOSS_PCT", "0.005"))
 
+    # ── Signal Aggregator v2 (signals/signal_aggregator.py) ──────────────────
+    # Require the primary signal magnitude to exceed this floor before any
+    # external vote can boost confidence. Without this, a vote aligned with
+    # a near-zero (noise) primary signal adds spurious confidence.
+    SIGNAL_AGGREGATOR_MIN_PRIMARY_ABS: float = float(
+        os.getenv("APEX_SA_MIN_PRIMARY_ABS", "0.15")
+    )
+    # Normalise multi-vote boosts by count^exponent so four weak votes don't
+    # out-boost one strong vote. exponent=1.0 → pure average; 0.5 → sqrt-N
+    # (gives strong votes extra weight while still penalising solo noise).
+    SIGNAL_AGGREGATOR_COUNT_EXPONENT: float = float(
+        os.getenv("APEX_SA_COUNT_EXPONENT", "0.50")
+    )
+    # Absolute ceiling on total boost/penalty — prevents runaway stacking
+    SIGNAL_AGGREGATOR_MAX_BOOST: float = float(
+        os.getenv("APEX_SA_MAX_BOOST", "0.12")
+    )
+    SIGNAL_AGGREGATOR_MAX_PENALTY: float = float(
+        os.getenv("APEX_SA_MAX_PENALTY", "0.25")
+    )
+
+    # ── Pattern Signal v2 (signals/pattern_signal.py) ────────────────────────
+    # "max" = dominant pattern confidence (prevents averaging down),
+    # "mean" = legacy behaviour, "weighted_max" = dominant × agreement bonus.
+    PATTERN_CONFIDENCE_MODE: str = os.getenv("APEX_PATTERN_CONF_MODE", "weighted_max").lower()
+    PATTERN_AGREEMENT_BONUS: float = float(os.getenv("APEX_PATTERN_AGREEMENT_BONUS", "0.10"))
+    PATTERN_CONFLICT_PENALTY: float = float(os.getenv("APEX_PATTERN_CONFLICT_PENALTY", "0.30"))
+
+    # ── ORB Signal v2 (signals/orb_signal.py) ────────────────────────────────
+    ORB_MIN_RVOL: float = float(os.getenv("APEX_ORB_MIN_RVOL", "1.20"))
+    # Minimum breakout extension as fraction of current price — floor only.
+    # The actual breakout threshold scales with the opening range width
+    # (range-relative breakouts are far more robust than fixed percentage).
+    ORB_MIN_BREAKOUT_PCT: float = float(os.getenv("APEX_ORB_MIN_BREAKOUT_PCT", "0.003"))
+    # Breakout must extend at least this fraction of the OR range width
+    # beyond the boundary (e.g. 0.25 → break the range by 25% of its width).
+    ORB_RANGE_EXTENSION_FRACTION: float = float(os.getenv("APEX_ORB_RANGE_EXT_FRAC", "0.25"))
+    ORB_VOL_CONFIDENCE_SCALE: float = float(os.getenv("APEX_ORB_VOL_CONF_SCALE", "1.5"))
+    ORB_DIST_CONFIDENCE_SCALE: float = float(os.getenv("APEX_ORB_DIST_CONF_SCALE", "0.015"))
+    ORB_VOL_CONF_WEIGHT: float = float(os.getenv("APEX_ORB_VOL_CONF_WEIGHT", "0.60"))
+    ORB_DIST_CONF_WEIGHT: float = float(os.getenv("APEX_ORB_DIST_CONF_WEIGHT", "0.40"))
+
+    # ── Fee-Aware Entry Edge Gate (risk/fee_aware_edge_gate.py) ──────────────
+    # Block entries whose expected edge cannot clear round-trip fees +
+    # slippage + half-spread with a safety margin. Directly eliminates
+    # negative-expectancy "paper cuts" that silently erode ROI.
+    FEE_AWARE_EDGE_GATE_ENABLED: bool = (
+        os.getenv("APEX_FEE_AWARE_EDGE_GATE_ENABLED", "true").lower() == "true"
+    )
+    # Required ratio of expected edge to round-trip cost. 1.5 = edge must be
+    # at least 150% of cost. <1.0 guarantees losing money on average.
+    FEE_AWARE_MIN_EDGE_COST_RATIO: float = float(
+        os.getenv("APEX_FEE_AWARE_MIN_EDGE_COST_RATIO", "1.50")
+    )
+    # Default cost assumptions per asset class when the execution-layer
+    # realised-cost history is unavailable (cold start).
+    FEE_AWARE_DEFAULT_EQUITY_BPS: float = float(
+        os.getenv("APEX_FEE_AWARE_DEFAULT_EQUITY_BPS", "8.0")
+    )
+    FEE_AWARE_DEFAULT_CRYPTO_BPS: float = float(
+        os.getenv("APEX_FEE_AWARE_DEFAULT_CRYPTO_BPS", "18.0")
+    )
+    FEE_AWARE_DEFAULT_FX_BPS: float = float(
+        os.getenv("APEX_FEE_AWARE_DEFAULT_FX_BPS", "4.0")
+    )
+
+    # ── Dynamic Exit Manager regime multipliers (per-regime × per-lever) ─────
+    # Encoded as "stop,target,hold,signal" quad for each regime. All four
+    # must parse or the regime falls back to the legacy defaults.
+    EXIT_REGIME_STRONG_BULL: str = os.getenv("APEX_EXIT_REGIME_STRONG_BULL", "1.2,1.5,1.5,0.8")
+    EXIT_REGIME_BULL: str = os.getenv("APEX_EXIT_REGIME_BULL", "1.1,1.3,1.2,0.9")
+    EXIT_REGIME_NEUTRAL: str = os.getenv("APEX_EXIT_REGIME_NEUTRAL", "0.9,0.8,0.7,1.2")
+    EXIT_REGIME_BEAR: str = os.getenv("APEX_EXIT_REGIME_BEAR", "0.8,1.2,0.8,1.1")
+    EXIT_REGIME_STRONG_BEAR: str = os.getenv("APEX_EXIT_REGIME_STRONG_BEAR", "0.7,1.4,0.6,1.3")
+    EXIT_REGIME_HIGH_VOLATILITY: str = os.getenv("APEX_EXIT_REGIME_HIGH_VOL", "0.6,0.7,0.5,1.5")
+
     # ── Adaptive Position Sizer (risk/adaptive_position_sizer.py) ────────────
     # Volatility percentile window (trading days). Was hard-coded 252.
     ADAPTIVE_SIZER_VOL_LOOKBACK: int = int(

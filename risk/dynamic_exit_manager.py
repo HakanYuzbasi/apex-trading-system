@@ -87,6 +87,78 @@ def _safe_elapsed_hours(entry_time: datetime) -> float:
     return max(0.0, float(delta.total_seconds()) / 3600.0)
 
 
+# ── Regime-multiplier parsing (config-driven) ────────────────────────────────
+# Each regime string is "stop,target,hold,signal" (four floats). Invalid or
+# missing strings fall back to the hard-coded defaults below — so the system
+# is always safe even when config is misconfigured.
+_REGIME_DEFAULTS: Dict[str, Dict[str, float]] = {
+    "strong_bull":     {"stop_mult": 1.2, "target_mult": 1.5, "hold_mult": 1.5, "signal_mult": 0.8},
+    "bull":            {"stop_mult": 1.1, "target_mult": 1.3, "hold_mult": 1.2, "signal_mult": 0.9},
+    "neutral":         {"stop_mult": 0.9, "target_mult": 0.8, "hold_mult": 0.7, "signal_mult": 1.2},
+    "bear":            {"stop_mult": 0.8, "target_mult": 1.2, "hold_mult": 0.8, "signal_mult": 1.1},
+    "strong_bear":     {"stop_mult": 0.7, "target_mult": 1.4, "hold_mult": 0.6, "signal_mult": 1.3},
+    "high_volatility": {"stop_mult": 0.6, "target_mult": 0.7, "hold_mult": 0.5, "signal_mult": 1.5},
+}
+
+# Map canonical regime → matching ApexConfig attribute suffix.
+_REGIME_CONFIG_KEYS: Dict[str, str] = {
+    "strong_bull":     "EXIT_REGIME_STRONG_BULL",
+    "bull":            "EXIT_REGIME_BULL",
+    "neutral":         "EXIT_REGIME_NEUTRAL",
+    "bear":            "EXIT_REGIME_BEAR",
+    "strong_bear":     "EXIT_REGIME_STRONG_BEAR",
+    "high_volatility": "EXIT_REGIME_HIGH_VOLATILITY",
+}
+
+
+def _parse_regime_quad(raw: Optional[str]) -> Optional[Dict[str, float]]:
+    """
+    Parse a ``"stop,target,hold,signal"`` string into a regime-multiplier
+    dict. Returns ``None`` if parsing fails so the caller can fall back.
+
+    Args:
+        raw: Comma-separated four-value string sourced from
+            ``ApexConfig.EXIT_REGIME_*``.
+
+    Returns:
+        ``{"stop_mult", "target_mult", "hold_mult", "signal_mult"}``
+        or ``None``.
+    """
+    if not raw:
+        return None
+    try:
+        parts = [p.strip() for p in str(raw).split(",")]
+        if len(parts) != 4:
+            return None
+        stop, target, hold, signal = (float(p) for p in parts)
+        if any(not np.isfinite(v) for v in (stop, target, hold, signal)):
+            return None
+        if stop <= 0 or target <= 0 or hold <= 0 or signal <= 0:
+            return None
+        return {
+            "stop_mult": stop,
+            "target_mult": target,
+            "hold_mult": hold,
+            "signal_mult": signal,
+        }
+    except Exception:
+        return None
+
+
+def _build_regime_adjustments() -> Dict[str, Dict[str, float]]:
+    """
+    Assemble the full ``REGIME_ADJUSTMENTS`` mapping from :class:`ApexConfig`,
+    falling back to :data:`_REGIME_DEFAULTS` for any regime whose config
+    string is missing or malformed.
+    """
+    out: Dict[str, Dict[str, float]] = {}
+    for regime, cfg_attr in _REGIME_CONFIG_KEYS.items():
+        raw = getattr(ApexConfig, cfg_attr, None)
+        parsed = _parse_regime_quad(raw)
+        out[regime] = parsed if parsed is not None else dict(_REGIME_DEFAULTS[regime])
+    return out
+
+
 class ExitUrgency(Enum):
     """Exit urgency levels."""
     IMMEDIATE = "immediate"      # Exit now at market
@@ -131,45 +203,11 @@ class DynamicExitManager:
     BASE_MAX_HOLD_DAYS = int(ApexConfig.EXIT_BASE_MAX_HOLD_DAYS)
     BASE_SIGNAL_EXIT = float(ApexConfig.SIGNAL_EXIT_BASE)
 
-    # Regime multipliers
-    REGIME_ADJUSTMENTS = {
-        'strong_bull': {
-            'stop_mult': 1.2,      # Wider stops in strong trends
-            'target_mult': 1.5,    # Much wider targets
-            'hold_mult': 1.5,      # Hold longer
-            'signal_mult': 0.8     # Higher threshold to exit (less sensitive)
-        },
-        'bull': {
-            'stop_mult': 1.1,
-            'target_mult': 1.3,
-            'hold_mult': 1.2,
-            'signal_mult': 0.9
-        },
-        'neutral': {
-            'stop_mult': 0.9,      # Tighter stops in chop
-            'target_mult': 0.8,    # Lower targets (take what you can)
-            'hold_mult': 0.7,      # Shorter holds
-            'signal_mult': 1.2     # More sensitive to signals
-        },
-        'bear': {
-            'stop_mult': 0.8,      # Tight stops
-            'target_mult': 1.2,    # Good targets on shorts
-            'hold_mult': 0.8,
-            'signal_mult': 1.1
-        },
-        'strong_bear': {
-            'stop_mult': 0.7,      # Very tight stops for longs
-            'target_mult': 1.4,    # Wide targets for shorts
-            'hold_mult': 0.6,
-            'signal_mult': 1.3
-        },
-        'high_volatility': {
-            'stop_mult': 0.6,      # Much tighter stops
-            'target_mult': 0.7,    # Take profits quickly
-            'hold_mult': 0.5,      # Short holds
-            'signal_mult': 1.5     # Very sensitive
-        }
-    }
+    # Regime multipliers — built once from ApexConfig.EXIT_REGIME_* strings,
+    # with fallback to :data:`_REGIME_DEFAULTS` per regime on parse failure.
+    # Exposed as a class attribute for backwards compatibility with callers
+    # that iterate the dict directly.
+    REGIME_ADJUSTMENTS: Dict[str, Dict[str, float]] = _build_regime_adjustments()
 
     # Adaptive multiplier learning: slow learning rate, bounded changes.
     # Nudges regime multipliers toward better values based on real trade outcomes.
