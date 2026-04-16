@@ -21,7 +21,7 @@ import os
 import numpy as np
 from collections import deque
 from typing import Dict, List, Optional, Tuple
-from datetime import datetime
+from datetime import datetime, timezone
 from dataclasses import dataclass
 from enum import Enum
 import logging
@@ -29,6 +29,62 @@ import logging
 from config import ApexConfig
 
 logger = logging.getLogger(__name__)
+
+
+# Regime-name alias map — the broader risk stack uses multiple vocabularies
+# for the volatility regime (``high_volatility`` in this module, ``volatile``
+# in adaptive_atr_stops). Normalise before lookup so regime routing is
+# deterministic regardless of which producer labelled the regime.
+_REGIME_ALIASES: Dict[str, str] = {
+    "volatile": "high_volatility",
+    "high_vol": "high_volatility",
+    "highvol": "high_volatility",
+    "crisis": "high_volatility",
+    "risk_off": "bear",
+    "risk_on": "bull",
+}
+
+
+def _normalize_regime(regime: Optional[str]) -> str:
+    """Return the canonical regime key, falling back to ``'neutral'``."""
+    if not regime:
+        return "neutral"
+    key = str(regime).strip().lower()
+    return _REGIME_ALIASES.get(key, key)
+
+
+def _now_tzaware(ref: Optional[datetime] = None) -> datetime:
+    """
+    Return a timezone-aware ``datetime.now()`` that is *comparison-safe*
+    with ``ref`` (matching naive/aware-ness). Entry times recorded by the
+    execution loop can be either naive UTC or aware UTC depending on
+    code path — comparing the two raises ``TypeError``.
+
+    Args:
+        ref: Reference datetime whose tzinfo drives the result.
+
+    Returns:
+        A ``datetime`` whose ``tzinfo`` matches ``ref`` (naive if ``ref``
+        is naive, UTC-aware if ``ref`` is aware or ``None``).
+    """
+    if ref is not None and ref.tzinfo is None:
+        # Match naive behaviour — strip tz from now()
+        return datetime.utcnow()
+    return datetime.now(timezone.utc)
+
+
+def _safe_elapsed_days(entry_time: datetime) -> int:
+    """Holding-period in whole days, tz-safe; floors negatives at 0."""
+    now = _now_tzaware(entry_time)
+    delta = now - entry_time
+    return max(0, int(delta.days))
+
+
+def _safe_elapsed_hours(entry_time: datetime) -> float:
+    """Holding-period in hours, tz-safe; floors negatives at 0."""
+    now = _now_tzaware(entry_time)
+    delta = now - entry_time
+    return max(0.0, float(delta.total_seconds()) / 3600.0)
 
 
 class ExitUrgency(Enum):
@@ -65,13 +121,15 @@ class DynamicExitManager:
     5. Stale positions = time decay, lower thresholds
     """
 
-    # Base parameters (will be adjusted dynamically)
-    BASE_STOP_LOSS_PCT = 0.03          # 3% stop - cut losers faster
-    BASE_TAKE_PROFIT_PCT = 0.06        # 6% target - lock in profits (2:1 R/R)
-    BASE_TRAILING_ACTIVATION = 0.025  # Activate trailing at 2.5% gain
-    BASE_TRAILING_DISTANCE = 0.02     # 2% trailing distance - tighter protection
-    BASE_MAX_HOLD_DAYS = 14           # 2 weeks max hold - force stale cleanup
-    BASE_SIGNAL_EXIT = 0.15           # More sensitive to signal decay
+    # Base parameters — sourced from ApexConfig so all thresholds are tunable
+    # via env without code changes. Preserved as class attributes for
+    # backwards-compatibility with callers that read ``cls.BASE_*`` directly.
+    BASE_STOP_LOSS_PCT = float(ApexConfig.EXIT_BASE_STOP_LOSS_PCT)
+    BASE_TAKE_PROFIT_PCT = float(ApexConfig.EXIT_BASE_TAKE_PROFIT_PCT)
+    BASE_TRAILING_ACTIVATION = float(ApexConfig.EXIT_BASE_TRAILING_ACTIVATION)
+    BASE_TRAILING_DISTANCE = float(ApexConfig.EXIT_BASE_TRAILING_DISTANCE)
+    BASE_MAX_HOLD_DAYS = int(ApexConfig.EXIT_BASE_MAX_HOLD_DAYS)
+    BASE_SIGNAL_EXIT = float(ApexConfig.SIGNAL_EXIT_BASE)
 
     # Regime multipliers
     REGIME_ADJUSTMENTS = {
@@ -317,27 +375,37 @@ class DynamicExitManager:
         max_hold = self.BASE_MAX_HOLD_DAYS
         signal_exit = self.base_signal_exit
 
-        # Calculate current P&L
+        # Calculate current P&L (entry_price must be positive — validated below)
+        if entry_price <= 0 or not np.isfinite(entry_price):
+            raise ValueError(f"entry_price must be positive finite, got {entry_price!r}")
+        if current_price <= 0 or not np.isfinite(current_price):
+            raise ValueError(f"current_price must be positive finite, got {current_price!r}")
+
         if side == 'LONG':
             pnl_pct = (current_price / entry_price - 1)
         else:
             pnl_pct = (entry_price / current_price - 1)
 
-        holding_days = (datetime.now() - entry_time).days
-        (datetime.now() - entry_time).total_seconds() / 3600
+        # Holding-period — tz-safe. The previous line
+        #   ``(datetime.now() - entry_time).total_seconds() / 3600``
+        # computed a value that was then *discarded* (orphaned expression,
+        # not assigned), and crashed when entry_time was tz-aware while
+        # datetime.now() was naive.
+        holding_days = _safe_elapsed_days(entry_time)
+        holding_hours = _safe_elapsed_hours(entry_time)
 
         # === 1. REGIME ADJUSTMENTS (adaptive — drifts toward better values per trade) ===
+        canonical_regime = _normalize_regime(regime)
         regime_adj = self._adapted_multipliers.get(
-            regime, self._adapted_multipliers.get('neutral', self.REGIME_ADJUSTMENTS['neutral'])
+            canonical_regime,
+            self._adapted_multipliers.get('neutral', self.REGIME_ADJUSTMENTS['neutral']),
         )
 
-        # Adjust for side in bearish regimes
-        if side == 'LONG' and regime in ['bear', 'strong_bear']:
-            # Long in bear market = tighter stops
+        # Adjust for side in bearish/bullish regimes (counter-trend tighter stops)
+        if side == 'LONG' and canonical_regime in ('bear', 'strong_bear'):
             stop_pct *= regime_adj['stop_mult'] * 0.8
             target_pct *= regime_adj['target_mult'] * 0.7
-        elif side == 'SHORT' and regime in ['bull', 'strong_bull']:
-            # Short in bull market = tighter stops
+        elif side == 'SHORT' and canonical_regime in ('bull', 'strong_bull'):
             stop_pct *= regime_adj['stop_mult'] * 0.8
             target_pct *= regime_adj['target_mult'] * 0.7
         else:
@@ -347,36 +415,34 @@ class DynamicExitManager:
         max_hold = int(max_hold * regime_adj['hold_mult'])
         signal_exit *= regime_adj['signal_mult']
 
-        # === 2. VIX ADJUSTMENTS ===
-        if vix_level is not None:
-            if vix_level > 30:
-                # High fear - very tight stops
-                stop_pct *= 0.6
-                target_pct *= 0.6
-                max_hold = min(max_hold, 5)
-                signal_exit *= 1.5
-            elif vix_level > 25:
-                stop_pct *= 0.75
-                target_pct *= 0.75
-                max_hold = min(max_hold, 7)
-                signal_exit *= 1.3
-            elif vix_level > 20:
-                stop_pct *= 0.9
-                target_pct *= 0.9
-                signal_exit *= 1.1
-            elif vix_level < 12:
-                # Complacency - can hold longer
-                stop_pct *= 1.1
-                target_pct *= 1.2
-                max_hold = int(max_hold * 1.3)
+        # === 2. VIX ADJUSTMENTS (all thresholds sourced from ApexConfig) ===
+        if vix_level is not None and np.isfinite(vix_level):
+            vix_val = float(vix_level)
+            if vix_val > ApexConfig.EXIT_VIX_EXTREME:
+                stop_pct *= float(ApexConfig.EXIT_VIX_EXTREME_STOP_MULT)
+                target_pct *= float(ApexConfig.EXIT_VIX_EXTREME_STOP_MULT)
+                max_hold = min(max_hold, int(ApexConfig.EXIT_VIX_EXTREME_MAX_HOLD))
+                signal_exit *= float(ApexConfig.EXIT_VIX_EXTREME_SIGNAL_MULT)
+            elif vix_val > ApexConfig.EXIT_VIX_HIGH:
+                stop_pct *= float(ApexConfig.EXIT_VIX_HIGH_STOP_MULT)
+                target_pct *= float(ApexConfig.EXIT_VIX_HIGH_STOP_MULT)
+                max_hold = min(max_hold, int(ApexConfig.EXIT_VIX_HIGH_MAX_HOLD))
+                signal_exit *= float(ApexConfig.EXIT_VIX_HIGH_SIGNAL_MULT)
+            elif vix_val > ApexConfig.EXIT_VIX_ELEVATED:
+                stop_pct *= float(ApexConfig.EXIT_VIX_ELEVATED_STOP_MULT)
+                target_pct *= float(ApexConfig.EXIT_VIX_ELEVATED_STOP_MULT)
+                signal_exit *= float(ApexConfig.EXIT_VIX_ELEVATED_SIGNAL_MULT)
+            elif vix_val < ApexConfig.EXIT_VIX_COMPLACENCY:
+                stop_pct *= float(ApexConfig.EXIT_VIX_COMPLACENCY_STOP_MULT)
+                target_pct *= float(ApexConfig.EXIT_VIX_COMPLACENCY_TARGET_MULT)
+                max_hold = int(max_hold * float(ApexConfig.EXIT_VIX_COMPLACENCY_HOLD_MULT))
 
         # === 3. ATR-BASED ADJUSTMENTS ===
-        if atr is not None and entry_price > 0:
+        if atr is not None and np.isfinite(atr) and atr > 0 and entry_price > 0:
             atr_pct = atr / entry_price
-            # Use ATR to set more realistic stops
-            stop_pct = max(stop_pct, atr_pct * 2.0)  # At least 2x ATR
-            target_pct = max(target_pct, atr_pct * 2.5)  # At least 2.5x ATR
-            trail_distance = max(trail_distance, atr_pct * 1.5)
+            stop_pct = max(stop_pct, atr_pct * float(ApexConfig.EXIT_ATR_STOP_MULT))
+            target_pct = max(target_pct, atr_pct * float(ApexConfig.EXIT_ATR_TARGET_MULT))
+            trail_distance = max(trail_distance, atr_pct * float(ApexConfig.EXIT_ATR_TRAIL_MULT))
 
         # === 4. SIGNAL STRENGTH ADJUSTMENTS ===
         # Strong entry signal = more conviction = can hold longer
@@ -475,14 +541,38 @@ class DynamicExitManager:
             reason = f"Approaching stop ({pnl_pct*100:+.1f}%)"
 
         return DynamicExitLevels(
-            stop_loss_pct=float(np.clip(stop_pct, 0.02, 0.15)),  # 2-15%
-            take_profit_pct=float(np.clip(target_pct, 0.03, 0.25)),  # 3-25%
-            trailing_activation_pct=float(np.clip(trail_activation, 0.01, 0.15)), # Allow up to 15% to match stops
-            trailing_distance_pct=float(np.clip(trail_distance, 0.01, 0.15)), # Allow up to 15% to match stops
-            max_hold_days=int(np.clip(max_hold, 3, 30)),  # 3-30 days
-            signal_exit_threshold=float(np.clip(signal_exit, 0.15, 0.60)),
+            stop_loss_pct=float(np.clip(
+                stop_pct,
+                ApexConfig.EXIT_STOP_CLAMP_MIN,
+                ApexConfig.EXIT_STOP_CLAMP_MAX,
+            )),
+            take_profit_pct=float(np.clip(
+                target_pct,
+                ApexConfig.EXIT_TARGET_CLAMP_MIN,
+                ApexConfig.EXIT_TARGET_CLAMP_MAX,
+            )),
+            trailing_activation_pct=float(np.clip(
+                trail_activation,
+                ApexConfig.EXIT_STOP_CLAMP_MIN / 2.0,
+                ApexConfig.EXIT_STOP_CLAMP_MAX,
+            )),
+            trailing_distance_pct=float(np.clip(
+                trail_distance,
+                ApexConfig.EXIT_STOP_CLAMP_MIN / 2.0,
+                ApexConfig.EXIT_STOP_CLAMP_MAX,
+            )),
+            max_hold_days=int(np.clip(
+                max_hold,
+                int(ApexConfig.EXIT_MAX_HOLD_CLAMP_MIN),
+                int(ApexConfig.EXIT_MAX_HOLD_CLAMP_MAX),
+            )),
+            signal_exit_threshold=float(np.clip(
+                signal_exit,
+                ApexConfig.EXIT_SIGNAL_EXIT_CLAMP_MIN,
+                ApexConfig.EXIT_SIGNAL_EXIT_CLAMP_MAX,
+            )),
             urgency=urgency,
-            reason=reason
+            reason=reason,
         )
 
     def should_exit(
@@ -518,7 +608,7 @@ class DynamicExitManager:
         else:
             pnl_pct = (entry_price / current_price - 1)
 
-        holding_days = (datetime.now() - entry_time).days
+        holding_days = _safe_elapsed_days(entry_time)
 
         # === HARD EXITS ===
 
@@ -605,7 +695,7 @@ class DynamicExitManager:
             stop_price = entry_price * (1 + levels.stop_loss_pct)
             target_price = entry_price * (1 - levels.take_profit_pct)
 
-        holding_days = (datetime.now() - entry_time).days
+        holding_days = _safe_elapsed_days(entry_time)
 
         return {
             'symbol': symbol,

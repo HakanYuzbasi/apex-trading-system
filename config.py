@@ -1847,6 +1847,113 @@ class ApexConfig:
     VOL_SPIKE_SIGMA: float = float(os.getenv("APEX_VOL_SPIKE_SIGMA", "2.0"))
     VOL_SPIKE_MIN_LOSS_PCT: float = float(os.getenv("APEX_VOL_SPIKE_MIN_LOSS_PCT", "0.005"))
 
+    # ── Adaptive Position Sizer (risk/adaptive_position_sizer.py) ────────────
+    # Volatility percentile window (trading days). Was hard-coded 252.
+    ADAPTIVE_SIZER_VOL_LOOKBACK: int = int(
+        os.getenv("APEX_ADAPTIVE_SIZER_VOL_LOOKBACK", "252")
+    )
+    ADAPTIVE_SIZER_VOL_MIN_HISTORY: int = int(
+        os.getenv("APEX_ADAPTIVE_SIZER_VOL_MIN_HISTORY", "10")
+    )
+    # Signal-confidence weight: size_mult = FLOOR + WEIGHT * signal_confidence
+    ADAPTIVE_SIZER_CONF_FLOOR: float = float(
+        os.getenv("APEX_ADAPTIVE_SIZER_CONF_FLOOR", "0.50")
+    )
+    ADAPTIVE_SIZER_CONF_WEIGHT: float = float(
+        os.getenv("APEX_ADAPTIVE_SIZER_CONF_WEIGHT", "0.50")
+    )
+    # Inverse-vol scaling bounds: mult = clip(2 - vol_percentile, MIN, MAX)
+    ADAPTIVE_SIZER_VOL_MULT_MIN: float = float(
+        os.getenv("APEX_ADAPTIVE_SIZER_VOL_MULT_MIN", "0.50")
+    )
+    ADAPTIVE_SIZER_VOL_MULT_MAX: float = float(
+        os.getenv("APEX_ADAPTIVE_SIZER_VOL_MULT_MAX", "1.50")
+    )
+    # Sharpe tiers (sharpe_ratio thresholds → size multiplier)
+    ADAPTIVE_SIZER_SHARPE_EXCELLENT: float = float(os.getenv("APEX_ADAPTIVE_SIZER_SHARPE_EXCELLENT", "1.5"))
+    ADAPTIVE_SIZER_SHARPE_GOOD: float = float(os.getenv("APEX_ADAPTIVE_SIZER_SHARPE_GOOD", "1.0"))
+    ADAPTIVE_SIZER_SHARPE_OK: float = float(os.getenv("APEX_ADAPTIVE_SIZER_SHARPE_OK", "0.5"))
+    ADAPTIVE_SIZER_SHARPE_MULT_EXCELLENT: float = float(os.getenv("APEX_ADAPTIVE_SIZER_SHARPE_MULT_EXCELLENT", "1.30"))
+    ADAPTIVE_SIZER_SHARPE_MULT_GOOD: float = float(os.getenv("APEX_ADAPTIVE_SIZER_SHARPE_MULT_GOOD", "1.15"))
+    ADAPTIVE_SIZER_SHARPE_MULT_OK: float = float(os.getenv("APEX_ADAPTIVE_SIZER_SHARPE_MULT_OK", "1.00"))
+    ADAPTIVE_SIZER_SHARPE_MULT_WEAK: float = float(os.getenv("APEX_ADAPTIVE_SIZER_SHARPE_MULT_WEAK", "0.85"))
+    ADAPTIVE_SIZER_SHARPE_MULT_NEG: float = float(os.getenv("APEX_ADAPTIVE_SIZER_SHARPE_MULT_NEG", "0.60"))
+    # Drawdown protection tiers
+    ADAPTIVE_SIZER_DD_SEVERE: float = float(os.getenv("APEX_ADAPTIVE_SIZER_DD_SEVERE", "0.10"))
+    ADAPTIVE_SIZER_DD_HIGH: float = float(os.getenv("APEX_ADAPTIVE_SIZER_DD_HIGH", "0.08"))
+    ADAPTIVE_SIZER_DD_MODERATE: float = float(os.getenv("APEX_ADAPTIVE_SIZER_DD_MODERATE", "0.05"))
+    ADAPTIVE_SIZER_DD_MULT_SEVERE: float = float(os.getenv("APEX_ADAPTIVE_SIZER_DD_MULT_SEVERE", "0.30"))
+    ADAPTIVE_SIZER_DD_MULT_HIGH: float = float(os.getenv("APEX_ADAPTIVE_SIZER_DD_MULT_HIGH", "0.50"))
+    ADAPTIVE_SIZER_DD_MULT_MODERATE: float = float(os.getenv("APEX_ADAPTIVE_SIZER_DD_MULT_MODERATE", "0.70"))
+    # Win-rate adjustment: mult = FLOOR + WEIGHT * win_rate
+    ADAPTIVE_SIZER_WR_FLOOR: float = float(os.getenv("APEX_ADAPTIVE_SIZER_WR_FLOOR", "0.50"))
+    ADAPTIVE_SIZER_WR_WEIGHT: float = float(os.getenv("APEX_ADAPTIVE_SIZER_WR_WEIGHT", "1.00"))
+    # Final clamp applied to the combined multiplier
+    ADAPTIVE_SIZER_CLIP_MIN: float = float(os.getenv("APEX_ADAPTIVE_SIZER_CLIP_MIN", "0.20"))
+    ADAPTIVE_SIZER_CLIP_MAX: float = float(os.getenv("APEX_ADAPTIVE_SIZER_CLIP_MAX", "2.50"))
+    # Geometric normalization exponent — shrinks multi-factor compounding so
+    # additive factors don't cascade to the clip floor (1.0 = classic multiplication,
+    # 0.5 = geometric mean of two factors, 0.167 = 6th-root when all 6 factors stack).
+    ADAPTIVE_SIZER_STACK_EXPONENT: float = float(
+        os.getenv("APEX_ADAPTIVE_SIZER_STACK_EXPONENT", "0.65")
+    )
+
+    # ── Adaptive ATR Stops (risk/adaptive_atr_stops.py) ──────────────────────
+    ATR_STOP_PERIOD: int = int(os.getenv("APEX_ATR_STOP_PERIOD", "14"))
+    ATR_MIN_STOP_PCT: float = float(os.getenv("APEX_ATR_MIN_STOP_PCT", "0.006"))
+    ATR_MAX_STOP_PCT: float = float(os.getenv("APEX_ATR_MAX_STOP_PCT", "0.15"))
+    ATR_FALLBACK_PCT: float = float(os.getenv("APEX_ATR_FALLBACK_PCT", "0.02"))
+    ATR_REGIME_MULT_STRONG_BULL: float = float(os.getenv("APEX_ATR_REGIME_MULT_STRONG_BULL", "2.20"))
+    ATR_REGIME_MULT_BULL: float = float(os.getenv("APEX_ATR_REGIME_MULT_BULL", "2.00"))
+    ATR_REGIME_MULT_NEUTRAL: float = float(os.getenv("APEX_ATR_REGIME_MULT_NEUTRAL", "2.00"))
+    ATR_REGIME_MULT_BEAR: float = float(os.getenv("APEX_ATR_REGIME_MULT_BEAR", "2.00"))
+    ATR_REGIME_MULT_STRONG_BEAR: float = float(os.getenv("APEX_ATR_REGIME_MULT_STRONG_BEAR", "2.20"))
+    ATR_REGIME_MULT_VOLATILE: float = float(os.getenv("APEX_ATR_REGIME_MULT_VOLATILE", "2.60"))
+    ATR_REGIME_MULT_CRISIS: float = float(os.getenv("APEX_ATR_REGIME_MULT_CRISIS", "3.00"))
+    ATR_REGIME_MULT_DEFAULT: float = float(os.getenv("APEX_ATR_REGIME_MULT_DEFAULT", "2.00"))
+    ATR_VIX_BASELINE: float = float(os.getenv("APEX_ATR_VIX_BASELINE", "20.0"))
+    ATR_VIX_SCALE: float = float(os.getenv("APEX_ATR_VIX_SCALE", "40.0"))
+    ATR_VIX_FACTOR_MAX: float = float(os.getenv("APEX_ATR_VIX_FACTOR_MAX", "2.0"))
+    # Profit-tier pairs encoded as "threshold:tighten_factor" list
+    # pnl >= threshold → trailing distance = base * tighten_factor (lock gains)
+    ATR_PROFIT_TIERS: str = os.getenv(
+        "APEX_ATR_PROFIT_TIERS",
+        "0.12:0.40,0.08:0.50,0.05:0.70,0.03:0.85",
+    )
+
+    # ── Dynamic Exit Manager (risk/dynamic_exit_manager.py) ──────────────────
+    EXIT_BASE_STOP_LOSS_PCT: float = float(os.getenv("APEX_EXIT_BASE_STOP_LOSS_PCT", "0.03"))
+    EXIT_BASE_TAKE_PROFIT_PCT: float = float(os.getenv("APEX_EXIT_BASE_TAKE_PROFIT_PCT", "0.06"))
+    EXIT_BASE_TRAILING_ACTIVATION: float = float(os.getenv("APEX_EXIT_BASE_TRAILING_ACTIVATION", "0.025"))
+    EXIT_BASE_TRAILING_DISTANCE: float = float(os.getenv("APEX_EXIT_BASE_TRAILING_DISTANCE", "0.02"))
+    EXIT_BASE_MAX_HOLD_DAYS: int = int(os.getenv("APEX_EXIT_BASE_MAX_HOLD_DAYS", "14"))
+    EXIT_VIX_EXTREME: float = float(os.getenv("APEX_EXIT_VIX_EXTREME", "30.0"))
+    EXIT_VIX_HIGH: float = float(os.getenv("APEX_EXIT_VIX_HIGH", "25.0"))
+    EXIT_VIX_ELEVATED: float = float(os.getenv("APEX_EXIT_VIX_ELEVATED", "20.0"))
+    EXIT_VIX_COMPLACENCY: float = float(os.getenv("APEX_EXIT_VIX_COMPLACENCY", "12.0"))
+    EXIT_VIX_EXTREME_STOP_MULT: float = float(os.getenv("APEX_EXIT_VIX_EXTREME_STOP_MULT", "0.60"))
+    EXIT_VIX_HIGH_STOP_MULT: float = float(os.getenv("APEX_EXIT_VIX_HIGH_STOP_MULT", "0.75"))
+    EXIT_VIX_ELEVATED_STOP_MULT: float = float(os.getenv("APEX_EXIT_VIX_ELEVATED_STOP_MULT", "0.90"))
+    EXIT_VIX_COMPLACENCY_STOP_MULT: float = float(os.getenv("APEX_EXIT_VIX_COMPLACENCY_STOP_MULT", "1.10"))
+    EXIT_VIX_COMPLACENCY_TARGET_MULT: float = float(os.getenv("APEX_EXIT_VIX_COMPLACENCY_TARGET_MULT", "1.20"))
+    EXIT_VIX_COMPLACENCY_HOLD_MULT: float = float(os.getenv("APEX_EXIT_VIX_COMPLACENCY_HOLD_MULT", "1.30"))
+    EXIT_VIX_EXTREME_MAX_HOLD: int = int(os.getenv("APEX_EXIT_VIX_EXTREME_MAX_HOLD", "5"))
+    EXIT_VIX_HIGH_MAX_HOLD: int = int(os.getenv("APEX_EXIT_VIX_HIGH_MAX_HOLD", "7"))
+    EXIT_VIX_EXTREME_SIGNAL_MULT: float = float(os.getenv("APEX_EXIT_VIX_EXTREME_SIGNAL_MULT", "1.50"))
+    EXIT_VIX_HIGH_SIGNAL_MULT: float = float(os.getenv("APEX_EXIT_VIX_HIGH_SIGNAL_MULT", "1.30"))
+    EXIT_VIX_ELEVATED_SIGNAL_MULT: float = float(os.getenv("APEX_EXIT_VIX_ELEVATED_SIGNAL_MULT", "1.10"))
+    EXIT_ATR_STOP_MULT: float = float(os.getenv("APEX_EXIT_ATR_STOP_MULT", "2.0"))
+    EXIT_ATR_TARGET_MULT: float = float(os.getenv("APEX_EXIT_ATR_TARGET_MULT", "2.5"))
+    EXIT_ATR_TRAIL_MULT: float = float(os.getenv("APEX_EXIT_ATR_TRAIL_MULT", "1.5"))
+    EXIT_STOP_CLAMP_MIN: float = float(os.getenv("APEX_EXIT_STOP_CLAMP_MIN", "0.02"))
+    EXIT_STOP_CLAMP_MAX: float = float(os.getenv("APEX_EXIT_STOP_CLAMP_MAX", "0.15"))
+    EXIT_TARGET_CLAMP_MIN: float = float(os.getenv("APEX_EXIT_TARGET_CLAMP_MIN", "0.03"))
+    EXIT_TARGET_CLAMP_MAX: float = float(os.getenv("APEX_EXIT_TARGET_CLAMP_MAX", "0.25"))
+    EXIT_SIGNAL_EXIT_CLAMP_MIN: float = float(os.getenv("APEX_EXIT_SIGNAL_EXIT_CLAMP_MIN", "0.15"))
+    EXIT_SIGNAL_EXIT_CLAMP_MAX: float = float(os.getenv("APEX_EXIT_SIGNAL_EXIT_CLAMP_MAX", "0.60"))
+    EXIT_MAX_HOLD_CLAMP_MIN: int = int(os.getenv("APEX_EXIT_MAX_HOLD_CLAMP_MIN", "3"))
+    EXIT_MAX_HOLD_CLAMP_MAX: int = int(os.getenv("APEX_EXIT_MAX_HOLD_CLAMP_MAX", "30"))
+
     # ── Composite Signal Quality Gate ─────────────────────────────────────────
     # Blocks entries where signal × confidence < this floor, preventing borderline
     # signal + borderline confidence combinations that have no real edge.
