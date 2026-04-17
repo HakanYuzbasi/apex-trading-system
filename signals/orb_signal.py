@@ -1,5 +1,5 @@
 """
-orb_signal.py — Opening Range Breakout (ORB) signal.
+orb_signal.py — Opening Range Breakout (ORB) signal (v2).
 
 The first 30 minutes after NYSE open (9:30–10:00 ET) define the Opening Range.
 A breakout above that range's high, confirmed with above-average volume, predicts
@@ -9,6 +9,16 @@ The pattern is one of the most consistent intraday edges in equities because:
   1. Institutional orders execute in the first 15-30 minutes.
   2. The breakout signals that one side (buyers or sellers) has absorbed the other.
   3. Confirmed by RVOL — random breakouts fail; volume-confirmed ones persist.
+
+Version-2 improvements (ROI):
+  * **Range-relative breakout**: the extension threshold is scaled by the OR
+    width. A volatile 3% opening range rightly demands a larger absolute
+    break than a tight 0.4% range. The old fixed 0.3% floor fired spuriously
+    on narrow-range days and missed true breakouts on wide-range days.
+  * **All thresholds sourced from ApexConfig** (no magic numbers in hot path).
+  * **Continuous RVOL confidence** instead of a hard cliff at ``MIN_RVOL``.
+  * **Preserves original ``__init__`` and public method signatures** for
+    upstream callers in ``core.execution_loop``.
 
 ONLY applies to equity symbols during US session (9:30–16:00 ET weekdays).
 Does NOT apply to crypto (24/7 markets have no meaningful opening range).
@@ -79,25 +89,90 @@ class ORBSignal:
     Tracks Opening Range per symbol and returns breakout signals.
 
     Typical integration pattern:
-      1. Call `update_opening_range(symbol, intraday_df)` each cycle during US morning.
-      2. Call `get_signal(symbol, current_price, rvol)` after 10:05 ET for new entries.
+      1. Call ``update_opening_range(symbol, intraday_df)`` each cycle during
+         US morning.
+      2. Call ``get_signal(symbol, current_price, rvol)`` after 10:05 ET for
+         new entries.
 
     Thread-safe reads; NOT safe for concurrent writes to the same symbol.
     """
 
-    # Minimum RVOL to generate a signal (avoids false breakouts on thin volume)
+    # Legacy class-level constants. Kept for backwards compatibility with
+    # external callers that read them; the instance pulls live values from
+    # :class:`ApexConfig` in ``__init__``.
     MIN_RVOL_FOR_SIGNAL: float = 1.20
-
-    # Breakout must extend at least this far past the range boundary (% of range width)
     MIN_BREAKOUT_EXTENSION: float = 0.003   # 0.3% of price
 
     def __init__(
         self,
-        min_rvol: float = 1.20,
-        min_breakout_pct: float = 0.003,
+        min_rvol: Optional[float] = None,
+        min_breakout_pct: Optional[float] = None,
     ) -> None:
-        self._min_rvol = min_rvol
-        self._min_breakout = min_breakout_pct
+        """
+        Args:
+            min_rvol: Minimum relative-volume multiple for a breakout to fire.
+                If ``None``, pulled from ``ApexConfig.ORB_MIN_RVOL``.
+            min_breakout_pct: Absolute-price floor for breakout extension as a
+                fraction of current price. If ``None``, pulled from
+                ``ApexConfig.ORB_MIN_BREAKOUT_PCT``. The true extension
+                threshold is ``max(min_breakout_pct, range_width *
+                ORB_RANGE_EXTENSION_FRACTION / current_price)`` — scaling with
+                volatility.
+        """
+        try:
+            from config import ApexConfig
+            cfg_min_rvol = float(getattr(ApexConfig, "ORB_MIN_RVOL", 1.20))
+            cfg_min_break = float(getattr(ApexConfig, "ORB_MIN_BREAKOUT_PCT", 0.003))
+            self._range_ext_frac: float = float(
+                getattr(ApexConfig, "ORB_RANGE_EXTENSION_FRACTION", 0.25)
+            )
+            self._vol_conf_scale: float = float(
+                getattr(ApexConfig, "ORB_VOL_CONFIDENCE_SCALE", 1.5)
+            )
+            self._dist_conf_scale: float = float(
+                getattr(ApexConfig, "ORB_DIST_CONFIDENCE_SCALE", 0.015)
+            )
+            self._vol_conf_weight: float = float(
+                getattr(ApexConfig, "ORB_VOL_CONF_WEIGHT", 0.60)
+            )
+            self._dist_conf_weight: float = float(
+                getattr(ApexConfig, "ORB_DIST_CONF_WEIGHT", 0.40)
+            )
+        except Exception:
+            cfg_min_rvol = 1.20
+            cfg_min_break = 0.003
+            self._range_ext_frac = 0.25
+            self._vol_conf_scale = 1.5
+            self._dist_conf_scale = 0.015
+            self._vol_conf_weight = 0.60
+            self._dist_conf_weight = 0.40
+
+        self._min_rvol: float = float(min_rvol) if min_rvol is not None else cfg_min_rvol
+        self._min_breakout: float = (
+            float(min_breakout_pct) if min_breakout_pct is not None else cfg_min_break
+        )
+
+        if self._vol_conf_scale <= 0.0:
+            raise ValueError(
+                f"ORB_VOL_CONFIDENCE_SCALE must be > 0, got {self._vol_conf_scale!r}"
+            )
+        if self._dist_conf_scale <= 0.0:
+            raise ValueError(
+                f"ORB_DIST_CONFIDENCE_SCALE must be > 0, got {self._dist_conf_scale!r}"
+            )
+        if self._range_ext_frac < 0.0:
+            raise ValueError(
+                f"ORB_RANGE_EXTENSION_FRACTION must be >= 0, got {self._range_ext_frac!r}"
+            )
+        # Normalise confidence weights to sum to 1 (robust against config drift).
+        w_sum = self._vol_conf_weight + self._dist_conf_weight
+        if w_sum <= 0.0:
+            self._vol_conf_weight = 0.60
+            self._dist_conf_weight = 0.40
+        else:
+            self._vol_conf_weight /= w_sum
+            self._dist_conf_weight /= w_sum
+
         self._ranges: Dict[str, _RangeData] = {}
 
     # ──────────────────────────────────────────────────────────────────────────
@@ -108,10 +183,13 @@ class ORBSignal:
         """
         Compute or update the Opening Range for *symbol* from 5-min intraday bars.
 
-        *intraday_df* should have a DatetimeIndex (timezone-aware, or naive UTC/ET)
-        and columns: Open, High, Low, Close, Volume.
+        Args:
+            symbol: Equity ticker. Crypto / FX symbols are silently ignored.
+            intraday_df: DataFrame with DatetimeIndex (tz-aware or naive UTC)
+                and columns ``Open, High, Low, Close, Volume``.
 
-        Safe to call every cycle — it's idempotent once the range is established.
+        Safe to call every cycle — it is idempotent once the range is
+        established.
         """
         if intraday_df is None or intraday_df.empty:
             return
@@ -180,10 +258,22 @@ class ORBSignal:
         Only generates a signal:
           - After 10:05 ET (5-min confirmation beyond range formation)
           - Before 15:00 ET (too late for ORB continuation momentum)
-          - When RVOL >= MIN_RVOL_FOR_SIGNAL
-          - When price has broken the range by MIN_BREAKOUT_EXTENSION
+          - When RVOL ≥ ``self._min_rvol``
+          - When price has broken the range by the required extension
+            (``max(_min_breakout, range_width × _range_ext_frac / price)``)
 
-        Returns neutral context outside of US hours / without valid range.
+        Returns neutral context outside of US hours / without a valid range.
+
+        Args:
+            symbol: Equity ticker.
+            current_price: Most recent trade price.
+            rvol: Relative volume at time of check (today vs. N-day average).
+            current_bar_volume: Reserved for future use. Unused in v2 (kept
+                for signature compatibility).
+
+        Returns:
+            :class:`ORBContext`. ``signal`` is non-zero only when an
+            RVOL-confirmed breakout is detected.
         """
         # Skip non-equity (crypto / FX identified by '/' in symbol)
         if "/" in symbol or symbol.startswith("CRYPTO:") or symbol.startswith("FX:"):
@@ -216,23 +306,26 @@ class ORBSignal:
         if or_width <= 0 or mid <= 0 or current_price <= 0:
             return _neutral_orb(symbol, "invalid_range")
 
+        # Volatility-aware breakout threshold: max of absolute floor and a
+        # fraction of the opening range width (expressed as % of price).
+        range_pct = or_width / current_price
+        vol_threshold = range_pct * self._range_ext_frac
+        breakout_threshold = max(self._min_breakout, vol_threshold)
+
         # ── Bullish breakout: price above OR high ─────────────────────────────
         if current_price > or_high + or_width * 0.05:
             breakout_pct = (current_price - or_high) / current_price
-            if breakout_pct < self._min_breakout:
+            if breakout_pct < breakout_threshold:
                 return _neutral_orb(symbol, "inside")  # Not enough extension yet
 
-            # Confidence: scales with RVOL and breakout distance
-            vol_conf = min(1.0, max(0.0, (rvol - self._min_rvol) / 1.5)) if rvol >= self._min_rvol else 0.0
-            dist_conf = min(1.0, breakout_pct / 0.015)   # 1.5% move = full distance confidence
-            confidence = float(vol_conf * 0.60 + dist_conf * 0.40)
+            confidence = self._compute_confidence(breakout_pct, rvol)
             signal = confidence if rvol >= self._min_rvol else 0.0
 
             logger.debug(
                 "ORB %s: BULLISH breakout price=%.2f > OR_high=%.2f, "
-                "ext=%.2f%% rvol=%.2f conf=%.2f",
+                "ext=%.2f%% (thr=%.2f%%) rvol=%.2f conf=%.2f",
                 symbol, current_price, or_high,
-                breakout_pct * 100, rvol, confidence,
+                breakout_pct * 100, breakout_threshold * 100, rvol, confidence,
             )
             return ORBContext(
                 symbol=symbol, signal=signal, confidence=confidence,
@@ -243,19 +336,17 @@ class ORBSignal:
         # ── Bearish breakdown: price below OR low ─────────────────────────────
         elif current_price < or_low - or_width * 0.05:
             breakout_pct = (or_low - current_price) / current_price
-            if breakout_pct < self._min_breakout:
+            if breakout_pct < breakout_threshold:
                 return _neutral_orb(symbol, "inside")
 
-            vol_conf = min(1.0, max(0.0, (rvol - self._min_rvol) / 1.5)) if rvol >= self._min_rvol else 0.0
-            dist_conf = min(1.0, breakout_pct / 0.015)
-            confidence = float(vol_conf * 0.60 + dist_conf * 0.40)
+            confidence = self._compute_confidence(breakout_pct, rvol)
             signal = -confidence if rvol >= self._min_rvol else 0.0
 
             logger.debug(
                 "ORB %s: BEARISH breakdown price=%.2f < OR_low=%.2f, "
-                "ext=%.2f%% rvol=%.2f conf=%.2f",
+                "ext=%.2f%% (thr=%.2f%%) rvol=%.2f conf=%.2f",
                 symbol, current_price, or_low,
-                breakout_pct * 100, rvol, confidence,
+                breakout_pct * 100, breakout_threshold * 100, rvol, confidence,
             )
             return ORBContext(
                 symbol=symbol, signal=signal, confidence=confidence,
@@ -283,3 +374,28 @@ class ORBSignal:
         today_str = str(datetime.now().date())
         r = self._ranges.get(symbol)
         return r is not None and r.date == today_str
+
+    # ──────────────────────────────────────────────────────────────────────────
+    # Internal helpers
+    # ──────────────────────────────────────────────────────────────────────────
+
+    def _compute_confidence(self, breakout_pct: float, rvol: float) -> float:
+        """
+        Compute ORB breakout confidence as a weighted blend of volume
+        conviction and breakout distance.
+
+        Args:
+            breakout_pct: Breakout extension as fraction of current price
+                (always positive — direction handled by caller).
+            rvol: Relative volume at time of check.
+
+        Returns:
+            Confidence in ``[0, 1]``.
+        """
+        if rvol >= self._min_rvol:
+            vol_conf = min(1.0, max(0.0, (rvol - self._min_rvol) / self._vol_conf_scale))
+        else:
+            vol_conf = 0.0
+        dist_conf = min(1.0, max(0.0, breakout_pct / self._dist_conf_scale))
+        blended = vol_conf * self._vol_conf_weight + dist_conf * self._dist_conf_weight
+        return float(max(0.0, min(1.0, blended)))

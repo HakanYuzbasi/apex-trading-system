@@ -260,8 +260,23 @@ class PatternSignal:
             self._trend_window: int = int(
                 getattr(ApexConfig, "PATTERN_TREND_WINDOW", 5)
             )
+            mode = str(
+                getattr(ApexConfig, "PATTERN_CONFIDENCE_MODE", "weighted_max")
+            ).lower()
+            if mode not in {"max", "mean", "weighted_max"}:
+                mode = "weighted_max"
+            self._conf_mode: str = mode
+            self._agreement_bonus: float = float(
+                getattr(ApexConfig, "PATTERN_AGREEMENT_BONUS", 0.10)
+            )
+            self._conflict_penalty: float = float(
+                getattr(ApexConfig, "PATTERN_CONFLICT_PENALTY", 0.30)
+            )
         except Exception:
             self._trend_window = 5
+            self._conf_mode = "weighted_max"
+            self._agreement_bonus = 0.10
+            self._conflict_penalty = 0.30
 
     def get_signal(self, symbol: str, data: pd.DataFrame) -> PatternResult:
         """
@@ -339,24 +354,50 @@ class PatternSignal:
             return _neutral_pattern(symbol)
 
         # --- Aggregate ---
-        # Weighted average by confidence; conflicting directions partially cancel
+        # Weighted direction (agreement yields same direction; conflict cancels).
         total_conf = sum(cf for _, _, cf in found)
         if total_conf == 0:
             return _neutral_pattern(symbol)
 
         weighted_signal = sum(s * cf for _, s, cf in found) / total_conf
-        # Final confidence = total_conf / len(found), capped at 1
-        avg_conf = float(min(total_conf / len(found), 1.0))
 
         # Dominant pattern = highest confidence
         dominant_entry = max(found, key=lambda x: x[2])
+        dominant_conf = float(dominant_entry[2])
+        dominant_dir = float(dominant_entry[1])
+
+        # Count agreeing vs. conflicting patterns relative to the dominant one.
+        agreeing = [e for e in found if e[1] * dominant_dir > 0.0 and e is not dominant_entry]
+        conflicting = [e for e in found if e[1] * dominant_dir < 0.0]
+
+        if self._conf_mode == "mean":
+            # Legacy behaviour: averages DOWN as more patterns fire (suboptimal
+            # but retained for A/B testing via env override).
+            aggregated_conf = total_conf / len(found)
+        elif self._conf_mode == "max":
+            # Pure max: ignore extras — dominant-pattern confidence drives it.
+            aggregated_conf = dominant_conf
+        else:
+            # weighted_max (default): start from the dominant confidence, add a
+            # bonus per additional agreeing pattern (capped), subtract a penalty
+            # scaled by conflicting-pattern confidence share.
+            bonus = self._agreement_bonus * float(len(agreeing))
+            if conflicting:
+                confl_conf_sum = sum(cf for _, _, cf in conflicting)
+                confl_share = confl_conf_sum / max(total_conf, 1e-8)
+                penalty = self._conflict_penalty * float(confl_share)
+            else:
+                penalty = 0.0
+            aggregated_conf = dominant_conf + bonus - penalty
+
+        aggregated_conf = max(0.0, min(1.0, float(aggregated_conf)))
 
         direction_votes = {name: float(s) for name, s, _ in found}
 
         return PatternResult(
             symbol=symbol,
             signal=float(np.clip(weighted_signal, -1.0, 1.0)),
-            confidence=float(np.clip(avg_conf, 0.0, 1.0)),
+            confidence=float(np.clip(aggregated_conf, 0.0, 1.0)),
             patterns_found=[name for name, _, _ in found],
             dominant=dominant_entry[0],
             direction_votes=direction_votes,
