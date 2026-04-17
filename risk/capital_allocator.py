@@ -30,15 +30,18 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import os
 import time
 from collections import deque
 from dataclasses import dataclass, field, asdict
 from datetime import date, datetime
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Mapping, Optional, Sequence, Tuple
 
 import numpy as np
+
+from config import ApexConfig
 
 logger = logging.getLogger(__name__)
 
@@ -50,6 +53,216 @@ _CORR_DAMPEN = float(os.getenv("APEX_ALLOC_CORR_DAMPEN", "0.50"))
 _LOOKBACK    = int(os.getenv("APEX_ALLOC_LOOKBACK_DAYS", "20"))
 _REBAL_THRESH = float(os.getenv("APEX_ALLOC_REBALANCE_THRESH", "0.03"))
 _MIN_DAYS    = 5    # minimum history days before deviating from equal-weight
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Per-position correlation haircut (GAP-9A)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def correlation_haircut(
+    candidate_returns: Sequence[float],
+    portfolio_returns: Sequence[float],
+    lookback_bars: Optional[int] = None,
+) -> float:
+    """
+    Return a multiplicative size haircut in ``[CORR_HAIRCUT_FLOOR, 1.0]``
+    for a new position based on its historical correlation with the
+    current portfolio return stream.
+
+    The haircut kicks in above :attr:`ApexConfig.CORR_HAIRCUT_THRESHOLD`
+    and scales linearly toward the floor as ``ρ → 1.0``. Uncorrelated or
+    negatively-correlated candidates pass through at ``1.0`` (no haircut).
+
+    Formula:
+        excess      = max(0, |ρ| - CORR_HAIRCUT_THRESHOLD)
+        unfloored   = 1.0 - CORR_HAIRCUT_MULT × excess / (1.0 - threshold)
+        haircut     = max(CORR_HAIRCUT_FLOOR, unfloored)
+
+    Args:
+        candidate_returns: Per-bar returns of the symbol under consideration
+            (most recent last). Short sequences fall back to ``1.0``.
+        portfolio_returns: Per-bar returns of the current book (same
+            alignment / frequency as ``candidate_returns``).
+        lookback_bars: Optional override for how many trailing bars to use
+            when computing ρ. Defaults to
+            :attr:`ApexConfig.CORR_LOOKBACK_BARS`.
+
+    Returns:
+        Multiplicative haircut as a float in
+        ``[CORR_HAIRCUT_FLOOR, 1.0]``. Multiply the candidate's intended
+        position size by this value before submitting.
+
+    Raises:
+        TypeError: If either returns arg is not a sequence of numbers.
+    """
+    try:
+        cand = np.asarray(list(candidate_returns), dtype=float)
+        port = np.asarray(list(portfolio_returns), dtype=float)
+    except (TypeError, ValueError) as exc:
+        raise TypeError(
+            f"candidate/portfolio returns must be numeric sequences, "
+            f"got {exc}"
+        ) from None
+
+    lb = int(lookback_bars) if lookback_bars is not None else int(
+        ApexConfig.CORR_LOOKBACK_BARS
+    )
+    if lb <= 0:
+        return 1.0
+
+    n = min(len(cand), len(port), lb)
+    if n < 3:
+        return 1.0
+
+    cand = cand[-n:]
+    port = port[-n:]
+
+    # Guard against zero-variance series (e.g. an empty book).
+    if not (np.isfinite(cand).all() and np.isfinite(port).all()):
+        return 1.0
+    if cand.std() <= 0.0 or port.std() <= 0.0:
+        return 1.0
+
+    rho = float(np.corrcoef(cand, port)[0, 1])
+    if not np.isfinite(rho):
+        return 1.0
+
+    threshold = float(ApexConfig.CORR_HAIRCUT_THRESHOLD)
+    excess = abs(rho) - threshold
+    if excess <= 0.0:
+        return 1.0
+
+    denom = max(1e-6, 1.0 - threshold)
+    unfloored = 1.0 - float(ApexConfig.CORR_HAIRCUT_MULT) * excess / denom
+    floor = float(ApexConfig.CORR_HAIRCUT_FLOOR)
+    return float(max(floor, min(1.0, unfloored)))
+
+
+def portfolio_heat_usd(
+    positions: Mapping[str, float],
+    prices: Mapping[str, float],
+    stop_distances_pct: Mapping[str, float],
+) -> float:
+    """
+    Aggregate dollar-at-risk across the open book.
+
+    ``heat = Σ |qty_i × price_i| × stop_distance_pct_i``
+
+    Each position's contribution is the USD notional times its stop-distance
+    as a fraction of entry price. This is a simple, well-understood measure
+    of how much the book will lose if *every* stop triggers at once — a
+    useful upper bound on per-bar drawdown exposure.
+
+    Args:
+        positions: ``{symbol: signed_qty}`` (negative qty = short; the
+            absolute notional is what contributes to heat either way).
+        prices: ``{symbol: current_price_usd}``. Symbols absent here are
+            skipped.
+        stop_distances_pct: ``{symbol: stop_distance}`` where
+            ``stop_distance`` is a non-negative fraction of entry price
+            (e.g. ``0.03`` = 3% stop). Missing or negative values are
+            treated as zero (the position contributes nothing to heat).
+
+    Returns:
+        Total portfolio heat in USD. Always non-negative.
+
+    Raises:
+        TypeError: If any mapping value is non-numeric.
+    """
+    total = 0.0
+    for sym, qty in positions.items():
+        try:
+            q = float(qty)
+            px = float(prices.get(sym, 0.0))
+            sd = float(stop_distances_pct.get(sym, 0.0))
+        except (TypeError, ValueError) as exc:
+            raise TypeError(
+                f"portfolio_heat_usd: non-numeric input for {sym!r}: {exc}"
+            ) from None
+        if not (math.isfinite(q) and math.isfinite(px) and math.isfinite(sd)):
+            continue
+        if q == 0.0 or px <= 0.0 or sd <= 0.0:
+            continue
+        total += abs(q * px) * sd
+    return float(total)
+
+
+def portfolio_heat_breach(
+    positions: Mapping[str, float],
+    prices: Mapping[str, float],
+    stop_distances_pct: Mapping[str, float],
+) -> Tuple[bool, float, float]:
+    """
+    Check whether portfolio heat exceeds :attr:`ApexConfig.MAX_PORTFOLIO_HEAT_USD`.
+
+    Args:
+        positions: See :func:`portfolio_heat_usd`.
+        prices: See :func:`portfolio_heat_usd`.
+        stop_distances_pct: See :func:`portfolio_heat_usd`.
+
+    Returns:
+        Tuple ``(breached, heat_usd, cap_usd)``. ``breached`` is always
+        ``False`` when the cap is zero or negative (gate disabled).
+    """
+    heat = portfolio_heat_usd(positions, prices, stop_distances_pct)
+    cap = float(ApexConfig.MAX_PORTFOLIO_HEAT_USD)
+    if cap <= 0.0:
+        return False, heat, cap
+    return heat > cap, heat, cap
+
+
+def portfolio_return_series(
+    positions_value: Mapping[str, float],
+    per_symbol_returns: Mapping[str, Sequence[float]],
+    lookback_bars: Optional[int] = None,
+) -> np.ndarray:
+    """
+    Aggregate per-symbol return series into a single portfolio-level
+    return series weighted by current position USD value.
+
+    Args:
+        positions_value: ``{symbol: abs_usd_notional}`` for open positions.
+            Negative values (shorts) are taken as absolute notionals; the
+            contribution to portfolio returns uses ``sign × return``.
+        per_symbol_returns: ``{symbol: returns}`` aligned on a common time
+            axis (most recent last). Symbols missing here are skipped.
+        lookback_bars: Bars to retain. Defaults to
+            :attr:`ApexConfig.CORR_LOOKBACK_BARS`.
+
+    Returns:
+        A 1-D numpy array of portfolio returns. Empty if no positions
+        provide any overlap.
+    """
+    lb = int(lookback_bars) if lookback_bars is not None else int(
+        ApexConfig.CORR_LOOKBACK_BARS
+    )
+    if lb <= 0 or not positions_value or not per_symbol_returns:
+        return np.array([], dtype=float)
+
+    # Align on shortest series; caller supplies aligned indexes.
+    common_len = min(
+        (len(per_symbol_returns[s]) for s in positions_value if s in per_symbol_returns),
+        default=0,
+    )
+    if common_len < 3:
+        return np.array([], dtype=float)
+    common_len = min(common_len, lb)
+
+    total_abs = sum(abs(float(v)) for v in positions_value.values())
+    if total_abs <= 0.0:
+        return np.array([], dtype=float)
+
+    agg = np.zeros(common_len, dtype=float)
+    for sym, notional in positions_value.items():
+        rets = per_symbol_returns.get(sym)
+        if rets is None:
+            continue
+        arr = np.asarray(list(rets)[-common_len:], dtype=float)
+        if arr.shape[0] != common_len:
+            continue
+        weight = float(notional) / total_abs
+        agg += weight * arr
+    return agg
 
 
 @dataclass

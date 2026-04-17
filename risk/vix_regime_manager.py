@@ -23,6 +23,8 @@ from dataclasses import dataclass
 from enum import Enum
 import logging
 
+from config import ApexConfig
+
 logger = logging.getLogger(__name__)
 
 # Try to import yfinance for free VIX data
@@ -95,13 +97,20 @@ class VIXRegimeManager:
         VIXRegime.PANIC: (3.5, float('inf'))
     }
 
-    # Fallback static thresholds
+    # Fallback static thresholds — sourced from ApexConfig so every module in
+    # the risk stack classifies VIX against the same boundaries.
+    # Buckets:
+    #   COMPLACENCY : vix <  VIX_REGIME_LOW
+    #   NORMAL      : VIX_REGIME_LOW  <= vix < VIX_REGIME_MID
+    #   ELEVATED    : VIX_REGIME_MID  <= vix < VIX_REGIME_HIGH
+    #   FEAR        : VIX_REGIME_HIGH <= vix < VIX_REGIME_CRISIS
+    #   PANIC       : vix >= VIX_REGIME_CRISIS
     STATIC_THRESHOLDS = {
-        VIXRegime.COMPLACENCY: (0, 12),
-        VIXRegime.NORMAL: (12, 20),
-        VIXRegime.ELEVATED: (20, 30),
-        VIXRegime.FEAR: (30, 40),
-        VIXRegime.PANIC: (40, float('inf'))
+        VIXRegime.COMPLACENCY: (0.0, float(ApexConfig.VIX_REGIME_LOW)),
+        VIXRegime.NORMAL:      (float(ApexConfig.VIX_REGIME_LOW),   float(ApexConfig.VIX_REGIME_MID)),
+        VIXRegime.ELEVATED:    (float(ApexConfig.VIX_REGIME_MID),   float(ApexConfig.VIX_REGIME_HIGH)),
+        VIXRegime.FEAR:        (float(ApexConfig.VIX_REGIME_HIGH),  float(ApexConfig.VIX_REGIME_CRISIS)),
+        VIXRegime.PANIC:       (float(ApexConfig.VIX_REGIME_CRISIS), float('inf')),
     }
     
     # Risk multipliers by regime — tuned 2026-03-11
