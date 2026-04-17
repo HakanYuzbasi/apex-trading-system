@@ -493,27 +493,67 @@ class DynamicExitManager:
             target_pct *= 0.85
             max_hold = int(max_hold * 0.8)
 
-        # === 5. P&L TRAJECTORY ADJUSTMENTS ===
-        if pnl_pct > 0.06:
-            # Winning 6%+ - protect with tight trailing
-            trail_activation = 0.02
-            trail_distance *= 0.7
-            # IMPORTANT: Don't exit winners on signal decay
-            signal_exit = 0.0  # Disable signal-based exit for big winners
-        elif pnl_pct > 0.03:
-            # Winning 3%+ - activate trailing but give room
-            trail_activation = 0.02
-            trail_distance *= 0.85
-            signal_exit *= 0.5  # Much less sensitive to signal decay on winners
-        elif pnl_pct > 0.015:
-            # Small winner - be patient, let it grow
-            signal_exit *= 0.7  # Less sensitive
-        elif pnl_pct < -0.02:
-            # Losing more than 2% - tighten
-            signal_exit *= 1.3
-            max_hold = min(max_hold, 7)
+        # === 5. P&L TRAJECTORY ADJUSTMENTS (v3 — config-driven tiers) ===
+        # All thresholds and multipliers sourced from ApexConfig.EXIT_PNL_*
+        # so bands can be tuned without code changes.
+        pnl_big_winner = float(ApexConfig.EXIT_PNL_BIG_WINNER_PCT)
+        pnl_winner = float(ApexConfig.EXIT_PNL_WINNER_PCT)
+        pnl_small_winner = float(ApexConfig.EXIT_PNL_SMALL_WINNER_PCT)
+        pnl_loser = float(ApexConfig.EXIT_PNL_LOSER_PCT)
+        trail_activation_pnl = float(ApexConfig.EXIT_PNL_TRAIL_ACTIVATION_PCT)
+        big_win_trail_mult = float(ApexConfig.EXIT_BIG_WINNER_TRAIL_MULT)
+        win_trail_mult = float(ApexConfig.EXIT_WINNER_TRAIL_MULT)
+        win_signal_mult = float(ApexConfig.EXIT_WINNER_SIGNAL_MULT)
+        small_win_signal_mult = float(ApexConfig.EXIT_SMALL_WINNER_SIGNAL_MULT)
+        loser_signal_mult = float(ApexConfig.EXIT_LOSER_SIGNAL_MULT)
+        loser_max_hold = int(ApexConfig.EXIT_LOSER_MAX_HOLD_DAYS)
+        big_win_mode = str(ApexConfig.EXIT_BIG_WINNER_SIGNAL_MODE).lower()
+        big_win_chop_mult = float(ApexConfig.EXIT_BIG_WINNER_CHOP_SIGNAL_MULT)
+
+        if pnl_pct > pnl_big_winner:
+            # Big winner — tight trail + disciplined signal-exit policy.
+            # Legacy behaviour (mode="disable") zeroed signal_exit outright,
+            # which causes winners to ride through a full regime flip in
+            # choppy / high-volatility markets. Mode="regime" (default) keeps
+            # signal_exit active in chop/high_vol and only fully disables it
+            # in trending regimes where signal reversals are less frequent.
+            trail_activation = trail_activation_pnl
+            trail_distance *= big_win_trail_mult
+            if big_win_mode == "disable":
+                signal_exit = 0.0
+            elif canonical_regime in ("high_volatility", "neutral"):
+                signal_exit *= big_win_chop_mult
+            else:
+                signal_exit = 0.0
+        elif pnl_pct > pnl_winner:
+            # Winning — activate trailing with breathing room.
+            trail_activation = trail_activation_pnl
+            trail_distance *= win_trail_mult
+            signal_exit *= win_signal_mult
+        elif pnl_pct > pnl_small_winner:
+            # Small winner — be patient, let it grow.
+            signal_exit *= small_win_signal_mult
+        elif pnl_pct < pnl_loser:
+            # Losing beyond the loser band — tighten and cap hold.
+            signal_exit *= loser_signal_mult
+            max_hold = min(max_hold, loser_max_hold)
 
         # === 6. TIME DECAY ADJUSTMENTS ===
+        # Intra-day adverse tightening — a position underwater by
+        # EXIT_INTRADAY_ADVERSE_FRAC × base_stop within the first 24h is almost
+        # certainly wrong. Pull the stop in and raise signal-exit sensitivity.
+        base_stop_ref = float(ApexConfig.EXIT_BASE_STOP_LOSS_PCT)
+        adverse_frac = float(ApexConfig.EXIT_INTRADAY_ADVERSE_FRAC)
+        intraday_stop_mult = float(ApexConfig.EXIT_INTRADAY_STOP_MULT)
+        intraday_signal_mult = float(ApexConfig.EXIT_INTRADAY_SIGNAL_MULT)
+        if holding_hours < 24.0 and pnl_pct < -(base_stop_ref * adverse_frac):
+            stop_pct *= intraday_stop_mult
+            signal_exit *= intraday_signal_mult
+            logger.debug(
+                "Intra-day adverse tightening: holding_hours=%.1f pnl=%.2f%%",
+                holding_hours, pnl_pct * 100.0,
+            )
+
         # Only apply time decay to LOSING positions
         if holding_days >= 7 and pnl_pct < -0.01:
             # Stale losing position - start tightening

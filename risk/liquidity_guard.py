@@ -81,23 +81,81 @@ class LiquidityGuard:
 
     def __init__(
         self,
-        thin_spread_threshold: float = 0.001,      # 0.1%
-        stressed_spread_threshold: float = 0.003,  # 0.3%
-        crisis_spread_threshold: float = 0.005,    # 0.5%
-        thin_volume_threshold: float = 0.80,       # 80% of avg
-        stressed_volume_threshold: float = 0.50,   # 50% of avg
-        crisis_volume_threshold: float = 0.30,     # 30% of avg
-        spread_history_size: int = 100,
-        min_dollar_volume: float = 1_000_000,      # $1M min daily volume
+        thin_spread_threshold: Optional[float] = None,
+        stressed_spread_threshold: Optional[float] = None,
+        crisis_spread_threshold: Optional[float] = None,
+        thin_volume_threshold: Optional[float] = None,
+        stressed_volume_threshold: Optional[float] = None,
+        crisis_volume_threshold: Optional[float] = None,
+        spread_history_size: Optional[int] = None,
+        min_dollar_volume: Optional[float] = None,
     ):
-        self.thin_spread = thin_spread_threshold
-        self.stressed_spread = stressed_spread_threshold
-        self.crisis_spread = crisis_spread_threshold
-        self.thin_volume = thin_volume_threshold
-        self.stressed_volume = stressed_volume_threshold
-        self.crisis_volume = crisis_volume_threshold
-        self.spread_history_size = spread_history_size
-        self.min_dollar_volume = min_dollar_volume
+        """
+        Initialize the liquidity guard.
+
+        All thresholds default to :class:`ApexConfig.LIQ_GUARD_*` so the
+        guard can be tuned via environment variables without code changes.
+        An explicit caller-supplied value always overrides the config
+        default — preserving backwards compatibility with the legacy
+        positional-arg call pattern.
+
+        Args:
+            thin_spread_threshold: Spread % above which liquidity is "thin".
+            stressed_spread_threshold: Spread % above which liquidity is
+                "stressed".
+            crisis_spread_threshold: Spread % above which liquidity is
+                "crisis" (no new entries).
+            thin_volume_threshold: Volume ratio (today / 20d-avg) below which
+                liquidity is "thin".
+            stressed_volume_threshold: Volume ratio below which liquidity is
+                "stressed".
+            crisis_volume_threshold: Volume ratio below which liquidity is
+                "crisis".
+            spread_history_size: Rolling-window length for per-symbol spread
+                history.
+            min_dollar_volume: Minimum daily dollar volume for a symbol to
+                be considered tradable.
+        """
+        try:
+            from config import ApexConfig
+            cfg_thin_s = float(getattr(ApexConfig, "LIQ_GUARD_THIN_SPREAD", 0.001))
+            cfg_str_s = float(getattr(ApexConfig, "LIQ_GUARD_STRESSED_SPREAD", 0.003))
+            cfg_cri_s = float(getattr(ApexConfig, "LIQ_GUARD_CRISIS_SPREAD", 0.005))
+            cfg_thin_v = float(getattr(ApexConfig, "LIQ_GUARD_THIN_VOLUME", 0.80))
+            cfg_str_v = float(getattr(ApexConfig, "LIQ_GUARD_STRESSED_VOLUME", 0.50))
+            cfg_cri_v = float(getattr(ApexConfig, "LIQ_GUARD_CRISIS_VOLUME", 0.30))
+            cfg_hist = int(getattr(ApexConfig, "LIQ_GUARD_SPREAD_HISTORY_SIZE", 100))
+            cfg_mindv = float(getattr(ApexConfig, "LIQ_GUARD_MIN_DOLLAR_VOLUME", 1_000_000))
+        except Exception:
+            cfg_thin_s, cfg_str_s, cfg_cri_s = 0.001, 0.003, 0.005
+            cfg_thin_v, cfg_str_v, cfg_cri_v = 0.80, 0.50, 0.30
+            cfg_hist = 100
+            cfg_mindv = 1_000_000.0
+
+        self.thin_spread = float(
+            thin_spread_threshold if thin_spread_threshold is not None else cfg_thin_s
+        )
+        self.stressed_spread = float(
+            stressed_spread_threshold if stressed_spread_threshold is not None else cfg_str_s
+        )
+        self.crisis_spread = float(
+            crisis_spread_threshold if crisis_spread_threshold is not None else cfg_cri_s
+        )
+        self.thin_volume = float(
+            thin_volume_threshold if thin_volume_threshold is not None else cfg_thin_v
+        )
+        self.stressed_volume = float(
+            stressed_volume_threshold if stressed_volume_threshold is not None else cfg_str_v
+        )
+        self.crisis_volume = float(
+            crisis_volume_threshold if crisis_volume_threshold is not None else cfg_cri_v
+        )
+        self.spread_history_size = int(
+            spread_history_size if spread_history_size is not None else cfg_hist
+        )
+        self.min_dollar_volume = float(
+            min_dollar_volume if min_dollar_volume is not None else cfg_mindv
+        )
 
         # Per-symbol tracking
         self._spread_history: Dict[str, deque] = {}
@@ -111,8 +169,8 @@ class LiquidityGuard:
 
         logger.info(
             f"LiquidityGuard initialized: "
-            f"crisis_spread={crisis_spread_threshold:.2%}, "
-            f"crisis_volume={crisis_volume_threshold:.0%}"
+            f"crisis_spread={self.crisis_spread:.2%}, "
+            f"crisis_volume={self.crisis_volume:.0%}"
         )
 
     def update_quote(

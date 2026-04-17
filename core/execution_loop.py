@@ -158,6 +158,7 @@ from risk.shadow_deployment import ShadowDeploymentGate
 from risk.pretrade_risk_gateway import PreTradeLimitConfig, PreTradeRiskGateway
 from risk.hedge_manager import HedgeManager
 from risk.adaptive_entry_gate import AdaptiveEntryGate
+from risk.fee_aware_edge_gate import get_fee_aware_edge_gate
 from risk.equity_outlier_guard import EquityOutlierGuard
 from risk.social_risk_factor import SocialRiskConfig, SocialRiskFactor, SocialRiskSnapshot
 from risk.social_shock_governor import (
@@ -10975,6 +10976,66 @@ class ApexTradingSystem:
                         symbol, signal, effective_signal_threshold,
                         self._current_regime, perf_snapshot.tier.value,
                     )
+                return
+
+            # ── Fee-aware edge gate ──────────────────────────────────────────────
+            # Block entries whose confidence-discounted expected edge cannot
+            # clear round-trip transaction costs (fees + slippage + half-spread)
+            # with the safety margin configured by
+            # ``ApexConfig.FEE_AWARE_MIN_EDGE_COST_RATIO``. This eliminates the
+            # "paper-cut" negative-expectancy trades that individually look
+            # fine on the ML signal but bleed ROI in aggregate.
+            try:
+                _fee_gate = get_fee_aware_edge_gate()
+                _gate_ac = (
+                    "crypto" if _is_crypto_asset
+                    else "fx" if _is_fx_asset
+                    else "equity"
+                )
+                _gate_expected = float(
+                    ApexConfig.EXIT_BASE_TAKE_PROFIT_PCT
+                ) * abs(float(signal))
+                _fee_decision = _fee_gate.evaluate(
+                    expected_return_pct=_gate_expected,
+                    confidence=float(min(max(confidence, 0.0), 1.0)),
+                    asset_class=_gate_ac,
+                )
+            except Exception as _fge_exc:
+                logger.debug("FeeAwareEdgeGate evaluation error: %s", _fge_exc)
+                _fee_decision = None
+
+            if _fee_decision is not None and not _fee_decision.allowed:
+                self._record_gate_rejection("fee_aware_edge")
+                self._journal_risk_decision(
+                    symbol=symbol,
+                    asset_class=asset_class,
+                    decision="blocked",
+                    stage="entry_gate",
+                    reason="fee_aware_edge",
+                    signal=float(signal),
+                    confidence=float(confidence),
+                    price=float(price),
+                    current_position=float(current_pos),
+                    metadata={
+                        "adjusted_edge_pct": float(_fee_decision.adjusted_edge_pct),
+                        "round_trip_cost_pct": float(_fee_decision.round_trip_cost_pct),
+                        "required_edge_pct": float(_fee_decision.required_edge_pct),
+                        "gate_reason": str(_fee_decision.reason),
+                    },
+                )
+                if self.prometheus_metrics:
+                    try:
+                        self.prometheus_metrics.record_governor_blocked_entry(
+                            asset_class=asset_class,
+                            regime=governor_regime_key,
+                            reason="fee_aware_edge",
+                        )
+                    except Exception:
+                        pass
+                logger.info(
+                    "💸 %s: Entry blocked by FeeAwareEdgeGate (%s)",
+                    symbol, _fee_decision.reason,
+                )
                 return
 
             # ── Directional guard ─────────────────────────────────────────────────

@@ -46,6 +46,16 @@ _DEF = {
     "ASYM_HOLD_SIGNAL_THRESH_HIGH":     -0.25,  # high-conf: need signal < -0.25 to exit
     "ASYM_HOLD_SIGNAL_THRESH_BASE":     -0.10,  # base: need signal < -0.10 to exit
     "ASYM_HIGH_CONF_THRESHOLD":         0.68,   # confidence above this = "high conviction"
+    # Stop / TP distance clamps (fraction of entry price). These used to be
+    # inlined magic numbers — now exposed so illiquid / wide-ATR symbols can
+    # be tuned without touching the code.
+    "ASYM_STOP_DIST_MIN":               0.005,
+    "ASYM_STOP_DIST_MAX":               0.08,
+    "ASYM_TP_DIST_MIN":                 0.02,
+    "ASYM_TP_DIST_MAX":                 0.30,
+    # Extra TP tightening applied on SHORT entries. Shorts revert faster than
+    # longs in counter-trend regimes, so give them their own dial.
+    "ASYM_SHORT_REGIME_TP_MULT":        0.85,
     # Regime TP multipliers (bear regimes = tighter targets)
     "ASYM_REGIME_TP_MULT": {
         "strong_bull": 1.20,
@@ -93,15 +103,24 @@ def compute_asymmetric_levels(
     if entry_price <= 0 or atr <= 0:
         return {}
 
-    # 1. Stop distance (ATR-based, clamped 0.5%–8%)
+    # 1. Stop distance (ATR-based, clamped to config bounds)
     atr_mult = _cfg("ASYM_ATR_STOP_MULT_CRYPTO") if is_crypto else _cfg("ASYM_ATR_STOP_MULT")
-    stop_dist_pct = min(max(atr / entry_price * atr_mult, 0.005), 0.08)
+    stop_floor = float(_cfg("ASYM_STOP_DIST_MIN"))
+    stop_ceil = float(_cfg("ASYM_STOP_DIST_MAX"))
+    stop_dist_pct = min(max(atr / entry_price * atr_mult, stop_floor), stop_ceil)
 
-    # 2. TP distance: confidence-scaled R:R, regime-adjusted
+    # 2. TP distance: confidence-scaled R:R, regime-adjusted + short-side bias.
     rr = _cfg("ASYM_RR_BASE") + confidence * _cfg("ASYM_RR_CONF_SCALE")
     regime_mult = _cfg("ASYM_REGIME_TP_MULT").get(regime.lower(), 1.0)
+    if not is_long:
+        # Shorts mean-revert faster than longs in counter-trend regimes — apply
+        # an additional tightening so TP is achievable within the shorter half-
+        # life of a short-side move.
+        regime_mult *= float(_cfg("ASYM_SHORT_REGIME_TP_MULT"))
     tp_dist_pct = stop_dist_pct * rr * regime_mult
-    tp_dist_pct = min(max(tp_dist_pct, 0.02), 0.30)  # 2%–30%
+    tp_floor = float(_cfg("ASYM_TP_DIST_MIN"))
+    tp_ceil = float(_cfg("ASYM_TP_DIST_MAX"))
+    tp_dist_pct = min(max(tp_dist_pct, tp_floor), tp_ceil)
     rr_actual = tp_dist_pct / stop_dist_pct
 
     # 3. Trailing activation: only once we're > 55% of the way to TP

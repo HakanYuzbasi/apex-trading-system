@@ -246,6 +246,20 @@ class PerformanceGovernor:
         return GovernorTier.GREEN, reasons
 
     def _apply_hysteresis(self, suggested_tier: GovernorTier) -> None:
+        """
+        Apply tier transitions with asymmetric hysteresis.
+
+        Deterioration is applied immediately. Improvements are gated by a
+        consecutive-recovery streak to avoid flapping at tier boundaries.
+        When ``GOVERNOR_FAST_RECOVERY_ENABLED`` and the suggested tier is
+        at least ``GOVERNOR_FAST_RECOVERY_GAP`` steps below the current
+        tier, a single streak-completion can descend all the way to the
+        suggested tier — preventing capital from being stranded at
+        YELLOW/ORANGE multipliers after metrics have fully healed.
+
+        Args:
+            suggested_tier: Raw tier implied by the latest metrics window.
+        """
         current = self._SEVERITY[self._tier]
         suggested = self._SEVERITY[suggested_tier]
 
@@ -262,11 +276,28 @@ class PerformanceGovernor:
         # Improvement: require consecutive recoveries to avoid flapping.
         self._recovery_streak += 1
         if self._recovery_streak >= self.recovery_points:
-            next_tier = self._TIER_ORDER[current - 1]
-            # Never jump below suggested tier in one step.
-            if self._SEVERITY[next_tier] < suggested:
-                next_tier = suggested_tier
-            self._tier = next_tier
+            try:
+                from config import ApexConfig
+                fast_recovery_enabled = bool(
+                    getattr(ApexConfig, "GOVERNOR_FAST_RECOVERY_ENABLED", True)
+                )
+                fast_recovery_gap = int(
+                    getattr(ApexConfig, "GOVERNOR_FAST_RECOVERY_GAP", 2)
+                )
+            except Exception:
+                fast_recovery_enabled = True
+                fast_recovery_gap = 2
+
+            gap = current - suggested
+            if fast_recovery_enabled and gap >= max(1, fast_recovery_gap):
+                # Fast-recovery path: collapse directly to the suggested tier.
+                self._tier = suggested_tier
+            else:
+                # Default: step down one tier, bounded by suggested.
+                next_tier = self._TIER_ORDER[current - 1]
+                if self._SEVERITY[next_tier] < suggested:
+                    next_tier = suggested_tier
+                self._tier = next_tier
             self._recovery_streak = 0
 
     def _build_snapshot(
