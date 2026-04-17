@@ -252,17 +252,45 @@ class AdvancedBacktester:
             self._execute_order(symbol, side, qty, price, date, "Universe exit (delisting)")
             logger.warning("DELISTING: Force-closed %s %s @ %.2f", qty, symbol, price)
 
-    def _calculate_commission(self, symbol: str, notional: float) -> float:
+    def _calculate_commission(
+        self,
+        symbol: str,
+        notional: float,
+        is_maker: bool = False,
+    ) -> float:
+        """
+        Compute commission for a simulated fill.
+
+        Routes through :func:`execution.cost_model.fee_bps` so the backtester
+        and live connectors share the same taker/maker split. Equities still
+        pay the flat ``commission_per_trade`` floor on top of the bps fee to
+        match retail brokers' per-ticket minimum.
+
+        Args:
+            symbol: Instrument symbol (used for asset-class routing).
+            notional: Order notional in USD.
+            is_maker: True for passive limit fills, False for aggressive.
+                Defaults to False since backtests fill at Open / Close.
+
+        Returns:
+            Commission in USD.
+        """
+        from execution.cost_model import fee_bps as _fee_bps
         try:
             parsed = parse_symbol(symbol)
+            asset_key = (
+                "equity" if parsed.asset_class == AssetClass.EQUITY
+                else "fx" if parsed.asset_class == AssetClass.FOREX
+                else "crypto"
+            )
         except ValueError:
-            return self.commission_per_trade
+            asset_key = "equity"
 
-        if parsed.asset_class == AssetClass.EQUITY:
-            return self.commission_per_trade
-        if parsed.asset_class == AssetClass.FOREX:
-            return notional * (self.fx_commission_bps / 10000.0)
-        return notional * (self.crypto_commission_bps / 10000.0)
+        bps = _fee_bps(asset_key, is_maker=is_maker)
+        bps_cost = abs(float(notional)) * (bps / 10_000.0)
+        if asset_key == "equity":
+            return float(self.commission_per_trade) + bps_cost
+        return bps_cost
     
     def run_backtest(
         self,
@@ -306,6 +334,18 @@ class AdvancedBacktester:
         for w in validation["info"]:
             logger.info("DATA: %s", w)
 
+        # GAP-7A: survivorship bias guard. Without a point-in-time universe
+        # the backtester blindly trades whatever symbols are in `data`, which
+        # typically reflects a *current* universe (survivors). Log once so
+        # the run is not silently over-optimistic.
+        if not universe_schedule:
+            logger.warning(
+                "SURVIVORSHIP: run_backtest called without universe_schedule — "
+                "results may overstate returns because delisted/replaced symbols "
+                "are not represented. Pass universe_schedule={date: [symbols]} "
+                "to enforce a point-in-time universe."
+            )
+
         # Pre-process universe schedule into sorted list for fast lookup
         universe_timeline = None
         if universe_schedule:
@@ -316,11 +356,22 @@ class AdvancedBacktester:
         # Get date range
         dates = pd.date_range(start_date, end_date, freq='D')
 
+        # GAP-7C: indicator warm-up. Skip the first MAX_INDICATOR_LOOKBACK
+        # bars so no signal is generated on a data tail shorter than the
+        # deepest indicator window. Portfolio bookkeeping still runs so
+        # equity is continuous across the warm-up window.
+        warmup_bars = int(getattr(ApexConfig, "MAX_INDICATOR_LOOKBACK", 0))
+        if warmup_bars > 0 and warmup_bars < len(dates):
+            logger.info(
+                "Warm-up: suppressing signals for the first %d bars", warmup_bars,
+            )
+
         # Track metrics
         peak_equity = self.initial_capital
 
-        for date in dates:
+        for idx, date in enumerate(dates):
             self.current_date = date
+            in_warmup = idx < warmup_bars
 
             # Resolve current point-in-time universe
             tradeable = None
@@ -354,16 +405,19 @@ class AdvancedBacktester:
             if portfolio_value > peak_equity:
                 peak_equity = portfolio_value
 
-            # Generate signals and execute trades
-            self._process_trading_day(
-                data,
-                date,
-                signal_generator,
-                position_size_usd,
-                max_positions,
-                portfolio_value,
-                tradeable
-            )
+            # Generate signals and execute trades. During warm-up we still
+            # track portfolio value but skip signal generation to prevent
+            # indicator look-ahead bias on undersized windows.
+            if not in_warmup:
+                self._process_trading_day(
+                    data,
+                    date,
+                    signal_generator,
+                    position_size_usd,
+                    max_positions,
+                    portfolio_value,
+                    tradeable
+                )
         
         # Calculate final metrics
         results = self._calculate_metrics()
@@ -382,6 +436,123 @@ class AdvancedBacktester:
         
         return results
     
+    def run_walk_forward(
+        self,
+        data: Dict[str, pd.DataFrame],
+        signal_generator,
+        start_date: str,
+        end_date: str,
+        position_size_usd: float = 5000,
+        max_positions: int = 15,
+        universe_schedule: Optional[Dict[str, List[str]]] = None,
+        is_bars: Optional[int] = None,
+        oos_bars: Optional[int] = None,
+        step_bars: Optional[int] = None,
+    ) -> Dict:
+        """
+        Run an anchored walk-forward backtest and aggregate per-fold OOS metrics.
+
+        At each fold the IS window ends, the OOS window begins, and signals
+        inside the OOS window are scored on IS-unseen bars. The backtester
+        itself is stateless across folds — each fold spins up a fresh
+        equity curve so the OOS metrics are not contaminated by IS PnL.
+
+        Args:
+            data: ``{symbol: DataFrame with OHLCV}``. Must cover the full
+                ``start_date..end_date`` range.
+            signal_generator: Signal generator instance passed through to
+                :meth:`run_backtest`.
+            start_date: Inclusive start of the walk-forward span.
+            end_date: Inclusive end of the walk-forward span.
+            position_size_usd: Position size passed to each fold.
+            max_positions: Cap on concurrent positions per fold.
+            universe_schedule: Optional point-in-time universe; applied to
+                each OOS fold identically.
+            is_bars: In-sample bars per fold. Fallback: ``ApexConfig.WF_IS_BARS``.
+            oos_bars: Out-of-sample bars per fold. Fallback: ``ApexConfig.WF_OOS_BARS``.
+            step_bars: Step size between fold starts. Fallback: ``ApexConfig.WF_STEP_BARS``.
+
+        Returns:
+            Dict with keys:
+                ``folds``: list of per-fold result dicts
+                    (``{"oos_start", "oos_end", "sharpe_ratio", "total_return",
+                    "max_drawdown", "win_rate", "profit_factor", "total_trades"}``)
+                ``aggregate``: aggregated OOS metrics
+                    (``mean_sharpe``, ``median_sharpe``, ``compounded_return``,
+                    ``worst_fold_drawdown``, ``folds_run``, ``positive_folds``).
+        """
+        is_n = int(is_bars if is_bars is not None else ApexConfig.WF_IS_BARS)
+        oos_n = int(oos_bars if oos_bars is not None else ApexConfig.WF_OOS_BARS)
+        step_n = int(step_bars if step_bars is not None else ApexConfig.WF_STEP_BARS)
+        if min(is_n, oos_n, step_n) < 1:
+            raise ValueError(
+                f"walk-forward requires positive is/oos/step bar counts; "
+                f"got is={is_n} oos={oos_n} step={step_n}"
+            )
+
+        full_dates = pd.date_range(start_date, end_date, freq='D')
+        if len(full_dates) < is_n + oos_n:
+            raise ValueError(
+                f"walk-forward range {start_date}..{end_date} is too short "
+                f"({len(full_dates)} bars) for is={is_n} + oos={oos_n}"
+            )
+
+        fold_results: List[Dict] = []
+        fold_start = 0
+        while fold_start + is_n + oos_n <= len(full_dates):
+            oos_from = full_dates[fold_start + is_n]
+            oos_to = full_dates[min(fold_start + is_n + oos_n - 1, len(full_dates) - 1)]
+            logger.info(
+                "WF fold #%d — OOS %s → %s",
+                len(fold_results) + 1,
+                oos_from.date(),
+                oos_to.date(),
+            )
+            fold_metrics = self.run_backtest(
+                data=data,
+                signal_generator=signal_generator,
+                start_date=str(oos_from.date()),
+                end_date=str(oos_to.date()),
+                position_size_usd=position_size_usd,
+                max_positions=max_positions,
+                universe_schedule=universe_schedule,
+                n_sharpe_trials=1,
+            )
+            fold_results.append({
+                "oos_start": str(oos_from.date()),
+                "oos_end": str(oos_to.date()),
+                "sharpe_ratio": float(fold_metrics.get("sharpe_ratio", 0.0) or 0.0),
+                "total_return": float(fold_metrics.get("total_return", 0.0) or 0.0),
+                "max_drawdown": float(fold_metrics.get("max_drawdown", 0.0) or 0.0),
+                "win_rate": float(fold_metrics.get("win_rate", 0.0) or 0.0),
+                "profit_factor": float(fold_metrics.get("profit_factor", 0.0) or 0.0),
+                "total_trades": int(fold_metrics.get("total_trades", 0) or 0),
+            })
+            fold_start += step_n
+
+        if not fold_results:
+            return {"folds": [], "aggregate": {"folds_run": 0}}
+
+        sharpes = [f["sharpe_ratio"] for f in fold_results]
+        compounded = 1.0
+        for f in fold_results:
+            compounded *= 1.0 + f["total_return"]
+        compounded -= 1.0
+        worst_dd = min((f["max_drawdown"] for f in fold_results), default=0.0)
+        positive = sum(1 for f in fold_results if f["total_return"] > 0)
+
+        return {
+            "folds": fold_results,
+            "aggregate": {
+                "folds_run": len(fold_results),
+                "mean_sharpe": float(np.mean(sharpes)) if sharpes else 0.0,
+                "median_sharpe": float(np.median(sharpes)) if sharpes else 0.0,
+                "compounded_return": float(compounded),
+                "worst_fold_drawdown": float(worst_dd),
+                "positive_folds": int(positive),
+            },
+        }
+
     def _process_trading_day(
         self,
         data: Dict[str, pd.DataFrame],

@@ -1995,6 +1995,84 @@ class ApexConfig:
         os.getenv("APEX_GOVERNOR_FAST_RECOVERY_GAP", "2")
     )
 
+    # ── Round-4: Profit Ratchet tier thresholds (risk/profit_ratchet.py) ────
+    # Each "step" is a PnL boundary; once crossed, "lock" fraction of the
+    # unrealised gain is guaranteed and trailing distance tightens to "trail".
+    RATCHET_STEP_1_PCT: float = float(os.getenv("APEX_RATCHET_STEP_1_PCT", "0.02"))
+    RATCHET_STEP_2_PCT: float = float(os.getenv("APEX_RATCHET_STEP_2_PCT", "0.05"))
+    RATCHET_STEP_3_PCT: float = float(os.getenv("APEX_RATCHET_STEP_3_PCT", "0.10"))
+    RATCHET_STEP_4_PCT: float = float(os.getenv("APEX_RATCHET_STEP_4_PCT", "0.20"))
+    RATCHET_LOCK_1_PCT: float = float(os.getenv("APEX_RATCHET_LOCK_1_PCT", "0.50"))
+    RATCHET_LOCK_2_PCT: float = float(os.getenv("APEX_RATCHET_LOCK_2_PCT", "0.70"))
+    RATCHET_LOCK_3_PCT: float = float(os.getenv("APEX_RATCHET_LOCK_3_PCT", "0.80"))
+    RATCHET_LOCK_4_PCT: float = float(os.getenv("APEX_RATCHET_LOCK_4_PCT", "0.85"))
+    RATCHET_TRAIL_INITIAL_PCT: float = float(os.getenv("APEX_RATCHET_TRAIL_INITIAL_PCT", "0.030"))
+    RATCHET_TRAIL_1_PCT: float = float(os.getenv("APEX_RATCHET_TRAIL_1_PCT", "0.025"))
+    RATCHET_TRAIL_2_PCT: float = float(os.getenv("APEX_RATCHET_TRAIL_2_PCT", "0.020"))
+    RATCHET_TRAIL_3_PCT: float = float(os.getenv("APEX_RATCHET_TRAIL_3_PCT", "0.018"))
+    RATCHET_TRAIL_4_PCT: float = float(os.getenv("APEX_RATCHET_TRAIL_4_PCT", "0.015"))
+    RATCHET_PARTIAL_TIER_2_PCT: float = float(os.getenv("APEX_RATCHET_PARTIAL_TIER_2_PCT", "0.25"))
+    RATCHET_PARTIAL_TIER_3_PCT: float = float(os.getenv("APEX_RATCHET_PARTIAL_TIER_3_PCT", "0.25"))
+    RATCHET_TIME_TIGHTEN_DAYS: int = int(os.getenv("APEX_RATCHET_TIME_TIGHTEN_DAYS", "5"))
+    RATCHET_TIME_TIGHTEN_FACTOR: float = float(os.getenv("APEX_RATCHET_TIME_TIGHTEN_FACTOR", "0.75"))
+    # Multiplier applied to ATR stop distance per ratchet tier (0=initial, 4=deepest).
+    # Deeper tier → tighter stop. Keys pulled by adaptive_atr_stops.compute_stop_distance
+    # so the ratchet tier can override ATR_PROFIT_TIERS when explicitly provided.
+    RATCHET_ATR_TIGHTEN_T0: float = float(os.getenv("APEX_RATCHET_ATR_TIGHTEN_T0", "1.00"))
+    RATCHET_ATR_TIGHTEN_T1: float = float(os.getenv("APEX_RATCHET_ATR_TIGHTEN_T1", "0.80"))
+    RATCHET_ATR_TIGHTEN_T2: float = float(os.getenv("APEX_RATCHET_ATR_TIGHTEN_T2", "0.65"))
+    RATCHET_ATR_TIGHTEN_T3: float = float(os.getenv("APEX_RATCHET_ATR_TIGHTEN_T3", "0.50"))
+    RATCHET_ATR_TIGHTEN_T4: float = float(os.getenv("APEX_RATCHET_ATR_TIGHTEN_T4", "0.40"))
+
+    # ── Round-4: Cascade breaker auto-reset (risk/drawdown_cascade_breaker.py) ──
+    # Recovery buffer: DD must fall this far BELOW the current tier's entry
+    # threshold before de-escalation is allowed.
+    CASCADE_RESET_BUFFER_PCT: float = float(os.getenv("APEX_CASCADE_RESET_BUFFER_PCT", "0.010"))
+    # After this many bars inside NORMAL with a positive velocity, peak is
+    # re-anchored to the current equity so a previous drawdown cannot indefinitely
+    # suppress sizing once performance has recovered.
+    CASCADE_RESET_NORMAL_BARS: int = int(os.getenv("APEX_CASCADE_RESET_NORMAL_BARS", "10"))
+    # Absolute drawdown floor at which the breaker auto-resets peak once
+    # CASCADE_RESET_NORMAL_BARS of consecutive NORMAL time has elapsed.
+    CASCADE_RESET_DD_FLOOR_PCT: float = float(os.getenv("APEX_CASCADE_RESET_DD_FLOOR_PCT", "0.005"))
+
+    # ── Round-4: Maker / Taker fee split (execution/ + backtesting/) ────────
+    # Half-bp equivalents; defaults mirror typical Coinbase/Binance tiered fees.
+    CRYPTO_TAKER_FEE_BPS: float = float(os.getenv("APEX_CRYPTO_TAKER_FEE_BPS", "8.0"))
+    CRYPTO_MAKER_FEE_BPS: float = float(os.getenv("APEX_CRYPTO_MAKER_FEE_BPS", "2.0"))
+    FX_TAKER_FEE_BPS: float = float(os.getenv("APEX_FX_TAKER_FEE_BPS", "0.20"))
+    FX_MAKER_FEE_BPS: float = float(os.getenv("APEX_FX_MAKER_FEE_BPS", "0.10"))
+    # Equity maker rebate expressed as *negative* fee bps. Zero by default;
+    # venues like IEX or some MMs provide positive rebates that effectively
+    # reduce cost.
+    EQUITY_TAKER_FEE_BPS: float = float(os.getenv("APEX_EQUITY_TAKER_FEE_BPS", "0.30"))
+    EQUITY_MAKER_FEE_BPS: float = float(os.getenv("APEX_EQUITY_MAKER_FEE_BPS", "0.00"))
+
+    # ── Round-4: Volume-adjusted slippage model ─────────────────────────────
+    # slippage_bps = BASE_SLIPPAGE_BPS * (notional_usd / adv_usd) ** SLIPPAGE_EXPONENT
+    # Clamped to [SLIPPAGE_MIN_BPS, SLIPPAGE_MAX_BPS].
+    BASE_SLIPPAGE_BPS: float = float(os.getenv("APEX_BASE_SLIPPAGE_BPS", "2.0"))
+    SLIPPAGE_EXPONENT: float = float(os.getenv("APEX_SLIPPAGE_EXPONENT", "0.5"))
+    SLIPPAGE_MIN_BPS: float = float(os.getenv("APEX_SLIPPAGE_MIN_BPS", "0.5"))
+    SLIPPAGE_MAX_BPS: float = float(os.getenv("APEX_SLIPPAGE_MAX_BPS", "50.0"))
+    # Fallback ADV when market-data cache has no entry for a symbol — large enough
+    # that small orders see ≈ BASE_SLIPPAGE_BPS and not a ratio explosion.
+    SLIPPAGE_ADV_FALLBACK_USD: float = float(
+        os.getenv("APEX_SLIPPAGE_ADV_FALLBACK_USD", "10_000_000").replace("_", "")
+    )
+
+    # ── Round-4: Backtest indicator warm-up ─────────────────────────────────
+    # Bars skipped at the start of a backtest before any strategy signals are
+    # forwarded to the engine. Stops look-ahead leakage from indicators that
+    # have not seen their full lookback window yet.
+    MAX_INDICATOR_LOOKBACK: int = int(os.getenv("APEX_MAX_INDICATOR_LOOKBACK", "60"))
+
+    # ── Round-4: Walk-forward validation (backtesting/) ─────────────────────
+    # Defaults chosen for daily-bar runs: 18 months IS / 3 months OOS / 3 months step.
+    WF_IS_BARS: int = int(os.getenv("APEX_WF_IS_BARS", "378"))
+    WF_OOS_BARS: int = int(os.getenv("APEX_WF_OOS_BARS", "63"))
+    WF_STEP_BARS: int = int(os.getenv("APEX_WF_STEP_BARS", "63"))
+
     # ── Adaptive Position Sizer (risk/adaptive_position_sizer.py) ────────────
     # Volatility percentile window (trading days). Was hard-coded 252.
     ADAPTIVE_SIZER_VOL_LOOKBACK: int = int(

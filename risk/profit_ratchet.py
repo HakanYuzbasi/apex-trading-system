@@ -25,6 +25,8 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import IntEnum
 
+from config import ApexConfig
+
 logger = logging.getLogger(__name__)
 
 
@@ -73,40 +75,96 @@ class ProfitRatchet:
 
     def __init__(
         self,
-        tier_1_threshold: float = 0.02,   # 2%
-        tier_2_threshold: float = 0.05,   # 5%
-        tier_3_threshold: float = 0.10,   # 10%
-        tier_4_threshold: float = 0.20,   # 20%
-        initial_trailing_pct: float = 0.03,  # 3% initial stop
-        lock_pct_tier_1: float = 0.50,
-        lock_pct_tier_2: float = 0.70,
-        lock_pct_tier_3: float = 0.80,
-        lock_pct_tier_4: float = 0.85,
-        partial_take_tier_2: float = 0.25,  # Take 25% at tier 2
-        partial_take_tier_3: float = 0.25,  # Take another 25% at tier 3
-        time_tightening_days: int = 5,
-        time_tightening_factor: float = 0.75,  # 25% tighter after 5 days
-    ):
-        self.tier_thresholds = {
-            ProfitTier.TIER_1: tier_1_threshold,
-            ProfitTier.TIER_2: tier_2_threshold,
-            ProfitTier.TIER_3: tier_3_threshold,
-            ProfitTier.TIER_4: tier_4_threshold,
+        tier_1_threshold: Optional[float] = None,
+        tier_2_threshold: Optional[float] = None,
+        tier_3_threshold: Optional[float] = None,
+        tier_4_threshold: Optional[float] = None,
+        initial_trailing_pct: Optional[float] = None,
+        lock_pct_tier_1: Optional[float] = None,
+        lock_pct_tier_2: Optional[float] = None,
+        lock_pct_tier_3: Optional[float] = None,
+        lock_pct_tier_4: Optional[float] = None,
+        partial_take_tier_2: Optional[float] = None,
+        partial_take_tier_3: Optional[float] = None,
+        time_tightening_days: Optional[int] = None,
+        time_tightening_factor: Optional[float] = None,
+        trail_pct_tier_1: Optional[float] = None,
+        trail_pct_tier_2: Optional[float] = None,
+        trail_pct_tier_3: Optional[float] = None,
+        trail_pct_tier_4: Optional[float] = None,
+    ) -> None:
+        """
+        Initialize the profit ratchet with config-sourced defaults.
+
+        Every threshold falls back to ``ApexConfig.RATCHET_*`` so the whole
+        tier grid can be retuned through env without editing code.
+
+        Args:
+            tier_1_threshold..tier_4_threshold: PnL boundaries for each tier.
+                Fallback: ApexConfig.RATCHET_STEP_{1..4}_PCT.
+            initial_trailing_pct: Trail distance before TIER_1 is reached.
+                Fallback: ApexConfig.RATCHET_TRAIL_INITIAL_PCT.
+            lock_pct_tier_{1..4}: Fraction of the high-water-mark gain that
+                becomes the locked-in floor once each tier is reached.
+                Fallback: ApexConfig.RATCHET_LOCK_{1..4}_PCT.
+            partial_take_tier_{2,3}: Fraction of the position to take as
+                partial profits when that tier is first reached.
+                Fallback: ApexConfig.RATCHET_PARTIAL_TIER_{2,3}_PCT.
+            time_tightening_days: Days after which the trail tightens by
+                ``time_tightening_factor`` regardless of tier.
+                Fallback: ApexConfig.RATCHET_TIME_TIGHTEN_DAYS.
+            time_tightening_factor: Multiplier applied to trail distance
+                once ``time_tightening_days`` have elapsed (``<1.0`` tightens).
+                Fallback: ApexConfig.RATCHET_TIME_TIGHTEN_FACTOR.
+            trail_pct_tier_{1..4}: Tier-specific trail distances.
+                Fallback: ApexConfig.RATCHET_TRAIL_{1..4}_PCT.
+
+        Raises:
+            ValueError: If tier thresholds are not monotonically increasing.
+        """
+        def _pick(explicit: Optional[float], cfg_key: str) -> float:
+            return float(explicit if explicit is not None else getattr(ApexConfig, cfg_key))
+
+        def _pick_int(explicit: Optional[int], cfg_key: str) -> int:
+            return int(explicit if explicit is not None else getattr(ApexConfig, cfg_key))
+
+        t1 = _pick(tier_1_threshold, "RATCHET_STEP_1_PCT")
+        t2 = _pick(tier_2_threshold, "RATCHET_STEP_2_PCT")
+        t3 = _pick(tier_3_threshold, "RATCHET_STEP_3_PCT")
+        t4 = _pick(tier_4_threshold, "RATCHET_STEP_4_PCT")
+        if not (0.0 < t1 < t2 < t3 < t4 < 1.0):
+            raise ValueError(
+                f"ProfitRatchet tiers must be strictly increasing in (0,1); "
+                f"got {t1}, {t2}, {t3}, {t4}"
+            )
+
+        self.tier_thresholds: Dict[ProfitTier, float] = {
+            ProfitTier.TIER_1: t1,
+            ProfitTier.TIER_2: t2,
+            ProfitTier.TIER_3: t3,
+            ProfitTier.TIER_4: t4,
         }
-        self.initial_trailing = initial_trailing_pct
-        self.lock_percentages = {
+        self.initial_trailing: float = _pick(initial_trailing_pct, "RATCHET_TRAIL_INITIAL_PCT")
+        self.lock_percentages: Dict[ProfitTier, float] = {
             ProfitTier.INITIAL: 0.0,
-            ProfitTier.TIER_1: lock_pct_tier_1,
-            ProfitTier.TIER_2: lock_pct_tier_2,
-            ProfitTier.TIER_3: lock_pct_tier_3,
-            ProfitTier.TIER_4: lock_pct_tier_4,
+            ProfitTier.TIER_1: _pick(lock_pct_tier_1, "RATCHET_LOCK_1_PCT"),
+            ProfitTier.TIER_2: _pick(lock_pct_tier_2, "RATCHET_LOCK_2_PCT"),
+            ProfitTier.TIER_3: _pick(lock_pct_tier_3, "RATCHET_LOCK_3_PCT"),
+            ProfitTier.TIER_4: _pick(lock_pct_tier_4, "RATCHET_LOCK_4_PCT"),
         }
-        self.partial_takes = {
-            ProfitTier.TIER_2: partial_take_tier_2,
-            ProfitTier.TIER_3: partial_take_tier_3,
+        self.partial_takes: Dict[ProfitTier, float] = {
+            ProfitTier.TIER_2: _pick(partial_take_tier_2, "RATCHET_PARTIAL_TIER_2_PCT"),
+            ProfitTier.TIER_3: _pick(partial_take_tier_3, "RATCHET_PARTIAL_TIER_3_PCT"),
         }
-        self.time_tightening_days = time_tightening_days
-        self.time_tightening_factor = time_tightening_factor
+        self._tier_trailing: Dict[ProfitTier, float] = {
+            ProfitTier.INITIAL: self.initial_trailing,
+            ProfitTier.TIER_1: _pick(trail_pct_tier_1, "RATCHET_TRAIL_1_PCT"),
+            ProfitTier.TIER_2: _pick(trail_pct_tier_2, "RATCHET_TRAIL_2_PCT"),
+            ProfitTier.TIER_3: _pick(trail_pct_tier_3, "RATCHET_TRAIL_3_PCT"),
+            ProfitTier.TIER_4: _pick(trail_pct_tier_4, "RATCHET_TRAIL_4_PCT"),
+        }
+        self.time_tightening_days: int = _pick_int(time_tightening_days, "RATCHET_TIME_TIGHTEN_DAYS")
+        self.time_tightening_factor: float = _pick(time_tightening_factor, "RATCHET_TIME_TIGHTEN_FACTOR")
 
         # State: symbol -> (high_water_mark, entry_price, entry_time, partials_taken)
         self._positions: Dict[str, Dict] = {}
@@ -245,17 +303,18 @@ class ProfitRatchet:
             return ProfitTier.INITIAL
 
     def _get_trailing_pct(self, tier: ProfitTier, pos: Dict) -> float:
-        """Get trailing stop percentage for tier with time adjustment."""
-        # Base trailing by tier
-        base_trailing = {
-            ProfitTier.INITIAL: self.initial_trailing,
-            ProfitTier.TIER_1: 0.025,  # 2.5%
-            ProfitTier.TIER_2: 0.02,   # 2%
-            ProfitTier.TIER_3: 0.018,  # 1.8%
-            ProfitTier.TIER_4: 0.015,  # 1.5%
-        }[tier]
+        """
+        Get trailing stop percentage for tier with time adjustment.
 
-        # Time-based tightening
+        Args:
+            tier: Current profit tier.
+            pos: Internal position dict (must contain ``entry_time``).
+
+        Returns:
+            Trailing distance as a fraction of price.
+        """
+        base_trailing = self._tier_trailing[tier]
+
         _entry_time = pos["entry_time"]
         if _entry_time.tzinfo is None:
             _entry_time = _entry_time.replace(tzinfo=timezone.utc)
@@ -263,7 +322,26 @@ class ProfitRatchet:
         if days_held >= self.time_tightening_days:
             base_trailing *= self.time_tightening_factor
 
-        return base_trailing
+        return float(base_trailing)
+
+    def get_current_tier(self, symbol: str) -> ProfitTier:
+        """
+        Return the highest tier a position has reached so far.
+
+        Callers (e.g. the ATR stop manager) use this to tighten their own
+        distance in lockstep with the ratchet milestones.
+
+        Args:
+            symbol: Tracked position symbol.
+
+        Returns:
+            Highest ``ProfitTier`` reached. ``ProfitTier.INITIAL`` when the
+            symbol is not tracked.
+        """
+        pos = self._positions.get(symbol)
+        if pos is None:
+            return ProfitTier.INITIAL
+        return pos["highest_tier_reached"]
 
     def mark_partial_taken(self, symbol: str, tier: ProfitTier):
         """Mark that a partial profit was taken at a tier."""

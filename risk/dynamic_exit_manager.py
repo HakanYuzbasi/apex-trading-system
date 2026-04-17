@@ -168,6 +168,41 @@ class ExitUrgency(Enum):
     HOLD = "hold"                # Keep position
 
 
+def urgency_to_order_mode(urgency: "ExitUrgency") -> Dict[str, bool]:
+    """
+    Translate an :class:`ExitUrgency` value into connector order-mode kwargs.
+
+    All connectors share the ``force_market`` (taker market order) and
+    ``is_maker`` (rest-on-book limit) conventions. Instead of every caller
+    re-deriving the mapping, this helper returns a dict that can be
+    spread directly into ``connector.execute_order(**mode, ...)``.
+
+        IMMEDIATE → force_market=True,  is_maker=False (cross the book now)
+        HIGH      → force_market=False, is_maker=False (aggressive limit at touch)
+        MODERATE  → force_market=False, is_maker=False (limit at touch, no rush)
+        LOW       → force_market=False, is_maker=True  (passive post-only at mid)
+        HOLD      → force_market=False, is_maker=True  (no order; kept for parity)
+
+    Args:
+        urgency: Exit urgency level from :meth:`DynamicExitManager.should_exit`.
+
+    Returns:
+        Dict with keys ``force_market`` (bool) and ``is_maker`` (bool).
+
+    Raises:
+        TypeError: If ``urgency`` is not an :class:`ExitUrgency`.
+    """
+    if not isinstance(urgency, ExitUrgency):
+        raise TypeError(
+            f"urgency must be ExitUrgency, got {type(urgency).__name__}"
+        )
+    if urgency is ExitUrgency.IMMEDIATE:
+        return {"force_market": True, "is_maker": False}
+    if urgency is ExitUrgency.LOW or urgency is ExitUrgency.HOLD:
+        return {"force_market": False, "is_maker": True}
+    return {"force_market": False, "is_maker": False}
+
+
 @dataclass
 class DynamicExitLevels:
     """Dynamic exit levels for a position."""

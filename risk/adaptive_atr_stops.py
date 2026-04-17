@@ -154,6 +154,7 @@ class AdaptiveATRStops:
         regime: str,
         vix: float,
         pnl_pct: float = 0.0,
+        ratchet_tier: Optional[int] = None,
     ) -> float:
         """
         Compute the adaptive stop distance as a fraction of current price.
@@ -165,6 +166,12 @@ class AdaptiveATRStops:
                 Unknown regimes fall back to ``ATR_REGIME_MULT_DEFAULT``.
             vix:     Current VIX level. Negative values are treated as 0.
             pnl_pct: Current P&L as a fraction of entry price (positive=profit).
+            ratchet_tier: Optional explicit ratchet tier ``0..4`` from
+                ``ProfitRatchet.get_current_tier``. When provided, the ATR
+                tightening factor is read from ``ApexConfig.RATCHET_ATR_TIGHTEN_T{tier}``
+                so the ATR stop tightens in lockstep with the ratchet
+                milestones. When omitted, falls back to the PnL-driven
+                ``ATR_PROFIT_TIERS`` parsing.
 
         Returns:
             Stop distance fraction in ``[min_stop_pct, max_stop_pct]``.
@@ -182,17 +189,28 @@ class AdaptiveATRStops:
         vix_factor = 1.0 + max(0.0, (safe_vix - baseline) / max(scale, 1e-8))
         vix_factor = min(vix_factor, cap)
 
-        # Profit tightening: lock in gains by trailing closer
+        # Profit tightening: prefer explicit ratchet tier when the caller
+        # has it (coordinates ATR stop with ProfitRatchet milestones). Else
+        # fall back to the PnL-keyed ATR_PROFIT_TIERS string.
         profit_factor = 1.0
-        try:
-            tiers = _parse_profit_tiers(str(ApexConfig.ATR_PROFIT_TIERS))
-        except ValueError as exc:
-            logger.warning("ATR_PROFIT_TIERS malformed (%s) — using flat 1.0", exc)
-            tiers = []
-        for threshold, factor in tiers:
-            if pnl_pct >= threshold:
-                profit_factor = factor
-                break
+        if ratchet_tier is not None:
+            tier_clamped = int(max(0, min(4, int(ratchet_tier))))
+            cfg_key = f"RATCHET_ATR_TIGHTEN_T{tier_clamped}"
+            try:
+                profit_factor = float(getattr(ApexConfig, cfg_key))
+            except (AttributeError, TypeError, ValueError) as exc:
+                logger.warning("Missing/invalid %s (%s) — profit_factor=1.0", cfg_key, exc)
+                profit_factor = 1.0
+        else:
+            try:
+                tiers = _parse_profit_tiers(str(ApexConfig.ATR_PROFIT_TIERS))
+            except ValueError as exc:
+                logger.warning("ATR_PROFIT_TIERS malformed (%s) — using flat 1.0", exc)
+                tiers = []
+            for threshold, factor in tiers:
+                if pnl_pct >= threshold:
+                    profit_factor = factor
+                    break
 
         raw = _atr_pct * base_mult * vix_factor * profit_factor
         return float(np.clip(raw, self._min_stop_pct, self._max_stop_pct))
@@ -207,6 +225,7 @@ class AdaptiveATRStops:
         vix: float,
         pnl_pct: float,
         is_long: bool = True,
+        ratchet_tier: Optional[int] = None,
     ) -> Dict:
         """
         Recompute and update stops for one open position.
@@ -238,7 +257,9 @@ class AdaptiveATRStops:
             else float(ApexConfig.ATR_FALLBACK_PCT)
         )
 
-        stop_distance = self.compute_stop_distance(atr_pct, regime, vix, pnl_pct)
+        stop_distance = self.compute_stop_distance(
+            atr_pct, regime, vix, pnl_pct, ratchet_tier=ratchet_tier,
+        )
 
         updated = dict(pos_stops)   # shallow copy — never mutate caller's dict
         updated["atr"] = round(float(atr), 6)
@@ -281,10 +302,25 @@ class AdaptiveATRStops:
         historical_data: Dict,
         regime: str,
         vix: float,
+        ratchet_tiers: Optional[Dict[str, int]] = None,
     ) -> Dict[str, Dict]:
         """
         Convenience batch updater — returns a dict of symbol → updated stops.
         Only processes symbols that already have existing stops.
+
+        Args:
+            positions: symbol → signed quantity.
+            position_stops: symbol → existing stops dict.
+            entry_prices: symbol → entry price.
+            historical_data: symbol → OHLC DataFrame or ``{'Close': Series}``.
+            regime: Current market regime label.
+            vix: Current VIX level.
+            ratchet_tiers: Optional symbol → profit ratchet tier (0..4).
+                When provided for a symbol, its ATR stop tightens using
+                ``ApexConfig.RATCHET_ATR_TIGHTEN_T*`` factors.
+
+        Returns:
+            Mapping ``symbol → updated stops dict``.
         """
         updated_stops: Dict[str, Dict] = {}
         for symbol, qty in positions.items():
@@ -323,6 +359,12 @@ class AdaptiveATRStops:
             pnl_pct = (cp - ep) / ep if ep > 0 else 0.0
             if qty < 0:
                 pnl_pct = -pnl_pct
+            rt: Optional[int] = None
+            if ratchet_tiers is not None and symbol in ratchet_tiers:
+                try:
+                    rt = int(ratchet_tiers[symbol])
+                except (TypeError, ValueError):
+                    rt = None
             updated_stops[symbol] = self.update_stop(
                 symbol=symbol,
                 pos_stops=ps,
@@ -332,6 +374,7 @@ class AdaptiveATRStops:
                 vix=vix,
                 pnl_pct=pnl_pct,
                 is_long=qty > 0,
+                ratchet_tier=rt,
             )
         return updated_stops
 
