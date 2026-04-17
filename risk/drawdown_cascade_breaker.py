@@ -21,6 +21,8 @@ from enum import IntEnum
 from collections import deque
 import logging
 
+from config import ApexConfig
+
 logger = logging.getLogger(__name__)
 
 
@@ -102,6 +104,12 @@ class DrawdownCascadeBreaker:
         # Velocity tracking
         self._capital_history: deque = deque(maxlen=30)  # 30-day history
 
+        # Auto-reset bookkeeping: consecutive bars observed in NORMAL since
+        # the last non-NORMAL excursion. Used to gate peak re-anchoring so a
+        # stale high-water mark cannot indefinitely starve sizing after
+        # recovery.
+        self._normal_bars: int = 0
+
         logger.info(
             f"DrawdownCascadeBreaker initialized: "
             f"tiers={list(self.tier_thresholds.values())}"
@@ -144,8 +152,12 @@ class DrawdownCascadeBreaker:
         # Determine tier based on drawdown and velocity
         new_tier = self._determine_tier(drawdown, velocity)
 
-        # Handle tier transitions
-        self._handle_tier_transition(new_tier, now)
+        # Handle tier transitions (enforces recovery buffer + cooldown)
+        self._handle_tier_transition(new_tier, now, drawdown)
+
+        # After the transition settles, consider whether we can re-anchor
+        # the peak. Only fires once the tier actually sits at NORMAL.
+        self._auto_reset_peak_if_recovered(current_capital, drawdown)
 
         # Compute days in tier
         days_in_tier = 0
@@ -306,29 +318,95 @@ class DrawdownCascadeBreaker:
 
         return base_tier
 
-    def _handle_tier_transition(self, new_tier: DrawdownTier, now: datetime):
-        """Handle transitions between tiers with cooldowns."""
+    def _handle_tier_transition(
+        self,
+        new_tier: DrawdownTier,
+        now: datetime,
+        drawdown: float,
+    ) -> None:
+        """
+        Handle transitions between tiers with cooldowns and recovery buffer.
+
+        Escalation is always allowed. De-escalation requires:
+          1. The tier's cooldown hours have elapsed since entry.
+          2. Drawdown is below the *candidate* tier's upper band minus
+             ``CASCADE_RESET_BUFFER_PCT`` — this prevents oscillation at the
+             boundary.
+
+        Args:
+            new_tier: Candidate tier for this update.
+            now: Current timestamp.
+            drawdown: Current portfolio drawdown fraction (positive = DD).
+        """
         if new_tier == self._current_tier:
             return
 
         if new_tier > self._current_tier:
-            # Escalating — always allowed
             self._current_tier = new_tier
             self._tier_entry_time = now
+            return
 
+        # De-escalating
+        cooldown_hours = self.cooldown_hours.get(self._current_tier, 0)
+        if self._tier_entry_time and cooldown_hours > 0:
+            time_in_tier = (now - self._tier_entry_time).total_seconds() / 3600
+            if time_in_tier < cooldown_hours:
+                return
+
+        # Recovery buffer — DD must be at least `buffer` below the edge of
+        # the tier we're dropping *into*. For NORMAL we compare against the
+        # CAUTION boundary (first non-NORMAL threshold).
+        buffer = float(getattr(ApexConfig, "CASCADE_RESET_BUFFER_PCT", 0.010))
+        if new_tier == DrawdownTier.NORMAL:
+            ref_threshold = self.tier_thresholds[DrawdownTier.CAUTION]
         else:
-            # De-escalating — check cooldown
-            cooldown_hours = self.cooldown_hours.get(self._current_tier, 0)
-            if self._tier_entry_time and cooldown_hours > 0:
-                time_in_tier = (now - self._tier_entry_time).total_seconds() / 3600
-                if time_in_tier < cooldown_hours:
-                    # Still in cooldown, don't de-escalate
-                    return
+            # Dropping INTO `new_tier` means DD must be well under the next
+            # tier up (the boundary we just crossed back over).
+            next_up = DrawdownTier(min(int(new_tier) + 1, int(DrawdownTier.EMERGENCY)))
+            ref_threshold = self.tier_thresholds.get(next_up, self.tier_thresholds[DrawdownTier.CAUTION])
+        if drawdown > max(0.0, ref_threshold - buffer):
+            # Still inside the oscillation band — hold current tier.
+            return
 
-            # Check recovery buffer: only de-escalate if DD is sufficiently below threshold
-            # (prevents oscillation at boundaries)
-            self._current_tier = new_tier
-            self._tier_entry_time = now
+        self._current_tier = new_tier
+        self._tier_entry_time = now
+
+    def _auto_reset_peak_if_recovered(
+        self,
+        current_capital: float,
+        drawdown: float,
+    ) -> None:
+        """
+        Re-anchor peak capital to the current level after a sustained stay
+        in NORMAL with a very small live drawdown.
+
+        Without this, a single deep drawdown's peak could starve sizing
+        months after the strategy has recovered.
+
+        Args:
+            current_capital: Latest portfolio value.
+            drawdown: Current drawdown fraction.
+        """
+        if self._current_tier != DrawdownTier.NORMAL:
+            self._normal_bars = 0
+            return
+
+        self._normal_bars += 1
+
+        required_bars = int(getattr(ApexConfig, "CASCADE_RESET_NORMAL_BARS", 10))
+        dd_floor = float(getattr(ApexConfig, "CASCADE_RESET_DD_FLOOR_PCT", 0.005))
+        if self._normal_bars >= required_bars and drawdown <= dd_floor:
+            old_peak = self._peak_capital
+            self._peak_capital = max(self._peak_capital, current_capital)
+            # Only log + reset bookkeeping when we actually moved peak up.
+            if current_capital >= old_peak:
+                logger.warning(
+                    "CascadeBreaker auto-reset: %d NORMAL bars, DD=%.3f%% ≤ floor=%.3f%% "
+                    "→ peak re-anchored from %.2f to %.2f",
+                    self._normal_bars, drawdown * 100, dd_floor * 100,
+                    old_peak, self._peak_capital,
+                )
+            self._normal_bars = 0
 
     def _get_max_positions(self) -> int:
         """Get maximum allowed positions for current tier."""
