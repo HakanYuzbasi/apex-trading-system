@@ -1923,6 +1923,78 @@ class ApexConfig:
     EXIT_REGIME_STRONG_BEAR: str = os.getenv("APEX_EXIT_REGIME_STRONG_BEAR", "0.7,1.4,0.6,1.3")
     EXIT_REGIME_HIGH_VOLATILITY: str = os.getenv("APEX_EXIT_REGIME_HIGH_VOL", "0.6,0.7,0.5,1.5")
 
+    # ── Dynamic Exit Manager P&L tier thresholds (v3 — no magic numbers) ─────
+    # Config-driven profit/loss tiers drive trailing activation, trail tightness,
+    # signal-exit sensitivity and max-hold overrides inside calculate_exit_levels.
+    EXIT_PNL_BIG_WINNER_PCT: float = float(os.getenv("APEX_EXIT_PNL_BIG_WINNER_PCT", "0.06"))
+    EXIT_PNL_WINNER_PCT: float = float(os.getenv("APEX_EXIT_PNL_WINNER_PCT", "0.03"))
+    EXIT_PNL_SMALL_WINNER_PCT: float = float(os.getenv("APEX_EXIT_PNL_SMALL_WINNER_PCT", "0.015"))
+    EXIT_PNL_LOSER_PCT: float = float(os.getenv("APEX_EXIT_PNL_LOSER_PCT", "-0.02"))
+    # Trailing-activation floor applied once the winner/big-winner band is hit.
+    EXIT_PNL_TRAIL_ACTIVATION_PCT: float = float(
+        os.getenv("APEX_EXIT_PNL_TRAIL_ACTIVATION_PCT", "0.02")
+    )
+    # Multipliers applied to trail distance and signal-exit when the position
+    # crosses each band (big_win → tightest trail, weakest signal exit).
+    EXIT_BIG_WINNER_TRAIL_MULT: float = float(os.getenv("APEX_EXIT_BIG_WIN_TRAIL_MULT", "0.70"))
+    EXIT_WINNER_TRAIL_MULT: float = float(os.getenv("APEX_EXIT_WIN_TRAIL_MULT", "0.85"))
+    EXIT_WINNER_SIGNAL_MULT: float = float(os.getenv("APEX_EXIT_WIN_SIGNAL_MULT", "0.50"))
+    EXIT_SMALL_WINNER_SIGNAL_MULT: float = float(os.getenv("APEX_EXIT_SMALL_WIN_SIGNAL_MULT", "0.70"))
+    EXIT_LOSER_SIGNAL_MULT: float = float(os.getenv("APEX_EXIT_LOSER_SIGNAL_MULT", "1.30"))
+    EXIT_LOSER_MAX_HOLD_DAYS: int = int(os.getenv("APEX_EXIT_LOSER_MAX_HOLD_DAYS", "7"))
+    # Big-winner signal-exit behaviour:
+    #  - "disable"  → signal_exit=0 (legacy behaviour; vulnerable to regime flips)
+    #  - "regime"   → zero only in trending regimes; reduce (not zero) in chop/high_vol
+    EXIT_BIG_WINNER_SIGNAL_MODE: str = os.getenv(
+        "APEX_EXIT_BIG_WIN_SIGNAL_MODE", "regime"
+    ).lower()
+    # When mode=="regime", fallback multiplier applied in chop/high_volatility regimes.
+    EXIT_BIG_WINNER_CHOP_SIGNAL_MULT: float = float(
+        os.getenv("APEX_EXIT_BIG_WIN_CHOP_SIGNAL_MULT", "0.35")
+    )
+    # Intra-day tightening tuning (applied within first 24h on adverse moves).
+    EXIT_INTRADAY_STOP_MULT: float = float(os.getenv("APEX_EXIT_INTRADAY_STOP_MULT", "0.70"))
+    EXIT_INTRADAY_SIGNAL_MULT: float = float(os.getenv("APEX_EXIT_INTRADAY_SIGNAL_MULT", "1.40"))
+    EXIT_INTRADAY_ADVERSE_FRAC: float = float(
+        os.getenv("APEX_EXIT_INTRADAY_ADVERSE_FRAC", "0.50")
+    )
+
+    # ── Asymmetric Sizing clamps (risk/asymmetric_sizing.py) ─────────────────
+    # Floor / ceiling for ATR-derived stop distance, as fraction of entry.
+    ASYM_STOP_DIST_MIN: float = float(os.getenv("APEX_ASYM_STOP_DIST_MIN", "0.005"))
+    ASYM_STOP_DIST_MAX: float = float(os.getenv("APEX_ASYM_STOP_DIST_MAX", "0.08"))
+    ASYM_TP_DIST_MIN: float = float(os.getenv("APEX_ASYM_TP_DIST_MIN", "0.02"))
+    ASYM_TP_DIST_MAX: float = float(os.getenv("APEX_ASYM_TP_DIST_MAX", "0.30"))
+    # Long vs short TP tightening multiplier. Short-side targets collapse faster
+    # in counter-trend regimes, so give them their own dial.
+    ASYM_SHORT_REGIME_TP_MULT: float = float(
+        os.getenv("APEX_ASYM_SHORT_REGIME_TP_MULT", "0.85")
+    )
+
+    # ── Liquidity Guard thresholds (risk/liquidity_guard.py) ─────────────────
+    LIQ_GUARD_THIN_SPREAD: float = float(os.getenv("APEX_LIQ_GUARD_THIN_SPREAD", "0.001"))
+    LIQ_GUARD_STRESSED_SPREAD: float = float(os.getenv("APEX_LIQ_GUARD_STRESSED_SPREAD", "0.003"))
+    LIQ_GUARD_CRISIS_SPREAD: float = float(os.getenv("APEX_LIQ_GUARD_CRISIS_SPREAD", "0.005"))
+    LIQ_GUARD_THIN_VOLUME: float = float(os.getenv("APEX_LIQ_GUARD_THIN_VOLUME", "0.80"))
+    LIQ_GUARD_STRESSED_VOLUME: float = float(os.getenv("APEX_LIQ_GUARD_STRESSED_VOLUME", "0.50"))
+    LIQ_GUARD_CRISIS_VOLUME: float = float(os.getenv("APEX_LIQ_GUARD_CRISIS_VOLUME", "0.30"))
+    LIQ_GUARD_SPREAD_HISTORY_SIZE: int = int(os.getenv("APEX_LIQ_GUARD_SPREAD_HIST", "100"))
+    LIQ_GUARD_MIN_DOLLAR_VOLUME: float = float(
+        os.getenv("APEX_LIQ_GUARD_MIN_DOLLAR_VOLUME", "1000000")
+    )
+
+    # ── Performance Governor recovery speed (risk/performance_governor.py) ──
+    # When suggested tier is ≥ 2 steps below current, allow the fast-recovery
+    # path to descend >1 tier in a single update (still requires the hysteresis
+    # streak to elapse). Protects against capital being stranded in YELLOW/
+    # ORANGE after metrics fully heal.
+    GOVERNOR_FAST_RECOVERY_ENABLED: bool = (
+        os.getenv("APEX_GOVERNOR_FAST_RECOVERY_ENABLED", "true").lower() == "true"
+    )
+    GOVERNOR_FAST_RECOVERY_GAP: int = int(
+        os.getenv("APEX_GOVERNOR_FAST_RECOVERY_GAP", "2")
+    )
+
     # ── Adaptive Position Sizer (risk/adaptive_position_sizer.py) ────────────
     # Volatility percentile window (trading days). Was hard-coded 252.
     ADAPTIVE_SIZER_VOL_LOOKBACK: int = int(
