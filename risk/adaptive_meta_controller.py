@@ -22,9 +22,12 @@ import logging
 import os
 from collections import deque
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional
+from datetime import datetime, timezone
+from typing import Any, Dict, List, Optional
 
 import numpy as np
+
+from config import ApexConfig
 
 logger = logging.getLogger(__name__)
 
@@ -136,17 +139,85 @@ class AdaptiveMetaController:
     _SIZE_CEIL    = 1.25    # max size multiplier
     _RIDGE_ALPHA  = 0.10    # L2 regularisation for ridge regression
 
-    def __init__(self, persist_path: str = "data/meta_controller_state.json") -> None:
-        self._persist_path = persist_path
+    def __init__(self, persist_path: Optional[str] = None) -> None:
+        """
+        Construct the controller.
+
+        Args:
+            persist_path: Override for the on-disk state file. When ``None``
+                (the default), the path is sourced from
+                :attr:`ApexConfig.META_CONTROLLER_STATE_PATH` so deployment
+                locations can be changed by env without code edits.
+        """
+        self._persist_path: str = str(
+            persist_path
+            if persist_path is not None
+            else ApexConfig.META_CONTROLLER_STATE_PATH
+        )
         self._buffers: Dict[str, deque]       = {}
         self._weights: Dict[str, np.ndarray]  = {}
         self._n_obs:   Dict[str, int]         = {}
+        # Latest market-context snapshot — persisted alongside the learned
+        # state so a cold-started controller can diagnose / recover what
+        # regime the last decision ran under. Populated via
+        # :meth:`record_context_snapshot`.
+        self._last_context: Dict[str, Any] = {}
         self._load_state()
         logger.info(
             "AdaptiveMetaController ready — %d learned buckets, "
             "min_outcomes=%d before learned model activates",
             len(self._weights), self._MIN_OUTCOMES,
         )
+
+    # ── Context snapshot (for recovery & diagnostics) ────────────────────────
+
+    def record_context_snapshot(
+        self,
+        regime: str,
+        vix_level: Optional[float],
+        severity: float,
+    ) -> None:
+        """
+        Persist the most-recent market-context snapshot atomically.
+
+        This stores ``{regime, vix_level, timestamp, severity}`` into the
+        state file so an operator or a freshly-started process can inspect
+        which regime / stress level the controller saw last.
+
+        Args:
+            regime: Canonical regime label (e.g. ``"bull"``, ``"high_volatility"``).
+            vix_level: Most-recent VIX reading. ``None`` when unavailable.
+            severity: Composite stress score in ``[0, 1]`` (callers typically
+                use ``1 - context_score`` clipped to that range).
+
+        Raises:
+            TypeError: If ``regime`` is not a string.
+        """
+        if not isinstance(regime, str):
+            raise TypeError(f"regime must be str, got {type(regime).__name__}")
+        vix_out: Optional[float] = None
+        if vix_level is not None:
+            try:
+                v = float(vix_level)
+                if np.isfinite(v):
+                    vix_out = v
+            except (TypeError, ValueError):
+                vix_out = None
+        try:
+            sev = float(severity)
+            if not np.isfinite(sev):
+                sev = 0.0
+        except (TypeError, ValueError):
+            sev = 0.0
+        sev = float(np.clip(sev, 0.0, 1.0))
+
+        self._last_context = {
+            "regime": regime,
+            "vix_level": vix_out,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "severity": sev,
+        }
+        self._save_state()
 
     # ── Public API ────────────────────────────────────────────────────────────
 
@@ -325,6 +396,11 @@ class AdaptiveMetaController:
     # ── Persistence ──────────────────────────────────────────────────────────
 
     def _load_state(self) -> None:
+        """
+        Load learned weights, observation counts and the last context
+        snapshot from :attr:`_persist_path`. Missing / malformed files are
+        tolerated — the controller will simply start from a cold state.
+        """
         try:
             if not os.path.exists(self._persist_path):
                 return
@@ -334,6 +410,14 @@ class AdaptiveMetaController:
                 self._weights[bucket] = np.array(w, dtype=np.float64)
             for bucket, n in state.get("n_obs", {}).items():
                 self._n_obs[bucket] = int(n)
+            last_ctx = state.get("last_context")
+            if isinstance(last_ctx, dict):
+                self._last_context = {
+                    "regime":    str(last_ctx.get("regime", "")),
+                    "vix_level": last_ctx.get("vix_level"),
+                    "timestamp": str(last_ctx.get("timestamp", "")),
+                    "severity":  float(last_ctx.get("severity", 0.0) or 0.0),
+                }
             logger.info(
                 "MetaController: loaded state — %d learned buckets",
                 len(self._weights),
@@ -342,14 +426,32 @@ class AdaptiveMetaController:
             logger.warning("MetaController: failed to load state: %s", e)
 
     def _save_state(self) -> None:
+        """
+        Persist the full controller state atomically.
+
+        Writes to ``<persist_path>.tmp`` then ``os.replace`` onto the target.
+        This prevents readers from observing a half-written file if the
+        process crashes mid-write — a critical property for a file that is
+        re-read on every cold start.
+        """
         try:
-            os.makedirs(os.path.dirname(self._persist_path) or ".", exist_ok=True)
+            directory = os.path.dirname(self._persist_path) or "."
+            os.makedirs(directory, exist_ok=True)
             state = {
-                "weights":      {k: v.tolist() for k, v in self._weights.items()},
-                "n_obs":        self._n_obs,
-                "buffer_sizes": {k: len(v) for k, v in self._buffers.items()},
+                "weights":       {k: v.tolist() for k, v in self._weights.items()},
+                "n_obs":         self._n_obs,
+                "buffer_sizes":  {k: len(v) for k, v in self._buffers.items()},
+                "last_context":  dict(self._last_context) if self._last_context else None,
             }
-            with open(self._persist_path, "w") as f:
+            tmp_path = f"{self._persist_path}.tmp"
+            with open(tmp_path, "w") as f:
                 json.dump(state, f, indent=2)
+                f.flush()
+                try:
+                    os.fsync(f.fileno())
+                except OSError:
+                    # fsync unsupported on some filesystems (e.g. some tmpfs)
+                    pass
+            os.replace(tmp_path, self._persist_path)
         except Exception as e:
             logger.debug("MetaController: save failed: %s", e)

@@ -1840,6 +1840,10 @@ class ApexConfig:
     BL_VIEW_SCALE: float = float(os.getenv("APEX_BL_VIEW_SCALE", "0.002"))
     BL_MIN_SCALE: float = float(os.getenv("APEX_BL_MIN_SCALE", "0.40"))
     BL_MAX_SCALE: float = float(os.getenv("APEX_BL_MAX_SCALE", "2.00"))
+    # Base uncertainty (Ω_ii) for a Black-Litterman view at confidence=1.0.
+    # Actual Ω_ii = BL_UNCERTAINTY_BASE / confidence² so weak signals receive
+    # proportionally higher uncertainty and pull the posterior less.
+    BL_UNCERTAINTY_BASE: float = float(os.getenv("APEX_BL_UNCERTAINTY_BASE", "0.0025"))
 
     # ── Volatility-Spike Exit ──────────────────────────────────────────────────
     VOL_SPIKE_EXIT_ENABLED: bool = os.getenv("APEX_VOL_SPIKE_EXIT", "true").lower() == "true"
@@ -2157,6 +2161,23 @@ class ApexConfig:
     EXIT_VIX_HIGH: float = float(os.getenv("APEX_EXIT_VIX_HIGH", "25.0"))
     EXIT_VIX_ELEVATED: float = float(os.getenv("APEX_EXIT_VIX_ELEVATED", "20.0"))
     EXIT_VIX_COMPLACENCY: float = float(os.getenv("APEX_EXIT_VIX_COMPLACENCY", "12.0"))
+
+    # ── Canonical VIX regime boundaries (shared across risk stack) ────────────
+    # Used by ``risk/vix_regime_manager.py`` for regime classification and by
+    # any other module that needs a VIX-regime label. These are boundary
+    # values (VIX levels), not multipliers. Buckets:
+    #     COMPLACENCY: vix <  LOW
+    #     NORMAL     : LOW  <= vix < MID
+    #     ELEVATED   : MID  <= vix < HIGH
+    #     FEAR       : HIGH <= vix < CRISIS
+    #     PANIC      : vix >= CRISIS
+    # The exit-policy thresholds (``EXIT_VIX_*`` above) are a *separate* set
+    # of tuning knobs — they control how exits react at each VIX level and
+    # are allowed to differ from regime boundaries.
+    VIX_REGIME_LOW: float = float(os.getenv("APEX_VIX_REGIME_LOW", "12.0"))
+    VIX_REGIME_MID: float = float(os.getenv("APEX_VIX_REGIME_MID", "20.0"))
+    VIX_REGIME_HIGH: float = float(os.getenv("APEX_VIX_REGIME_HIGH", "30.0"))
+    VIX_REGIME_CRISIS: float = float(os.getenv("APEX_VIX_REGIME_CRISIS", "40.0"))
     EXIT_VIX_EXTREME_STOP_MULT: float = float(os.getenv("APEX_EXIT_VIX_EXTREME_STOP_MULT", "0.60"))
     EXIT_VIX_HIGH_STOP_MULT: float = float(os.getenv("APEX_EXIT_VIX_HIGH_STOP_MULT", "0.75"))
     EXIT_VIX_ELEVATED_STOP_MULT: float = float(os.getenv("APEX_EXIT_VIX_ELEVATED_STOP_MULT", "0.90"))
@@ -2179,6 +2200,63 @@ class ApexConfig:
     EXIT_SIGNAL_EXIT_CLAMP_MAX: float = float(os.getenv("APEX_EXIT_SIGNAL_EXIT_CLAMP_MAX", "0.60"))
     EXIT_MAX_HOLD_CLAMP_MIN: int = int(os.getenv("APEX_EXIT_MAX_HOLD_CLAMP_MIN", "3"))
     EXIT_MAX_HOLD_CLAMP_MAX: int = int(os.getenv("APEX_EXIT_MAX_HOLD_CLAMP_MAX", "30"))
+
+    # ── ML inference quality (models/advanced_signal_generator.py) ───────────
+    # Maximum permitted age (seconds) of the feature timestamp at inference.
+    # Stale features trigger a confidence haircut so exits don't fire on a
+    # signal produced from bars that are already several minutes behind the
+    # market. Negative / zero disables the guard.
+    ML_FEATURE_MAX_AGE_SECONDS: float = float(
+        os.getenv("APEX_ML_FEATURE_MAX_AGE_SECONDS", "600.0")
+    )
+    # Rolling window (bars) over which prediction-distribution drift is
+    # detected. Set to zero to disable output-drift tracking.
+    ML_DRIFT_WINDOW_BARS: int = int(os.getenv("APEX_ML_DRIFT_WINDOW_BARS", "200"))
+    # Drift fires if |rolling mean| exceeds this threshold (abs units of
+    # signal, which are normalised to [-1, 1]).
+    ML_DRIFT_MEAN_THRESHOLD: float = float(
+        os.getenv("APEX_ML_DRIFT_MEAN_THRESHOLD", "0.35")
+    )
+    # Drift fires if rolling std exceeds the historical baseline std × this
+    # multiplier, indicating the model's output distribution has exploded.
+    ML_DRIFT_STD_MULT: float = float(os.getenv("APEX_ML_DRIFT_STD_MULT", "1.75"))
+    # Confidence multiplier applied when drift is active. 0.0 = fully mute
+    # signal, 1.0 = no haircut.
+    ML_DRIFT_CONF_PENALTY: float = float(
+        os.getenv("APEX_ML_DRIFT_CONF_PENALTY", "0.50")
+    )
+    # ── Dynamic signal-aggregator weights (signals/signal_aggregator.py) ─────
+    # Softmax temperature for converting per-source rolling PnL into weights.
+    # Higher temperature → flatter weights; 0 → hard-max (winner takes all).
+    ML_WEIGHT_TEMPERATURE: float = float(os.getenv("APEX_ML_WEIGHT_TEMPERATURE", "2.0"))
+    # Refit weights every N outcomes (per source). Zero disables learning.
+    ML_WEIGHT_UPDATE_BARS: int = int(os.getenv("APEX_ML_WEIGHT_UPDATE_BARS", "25"))
+    # Per-source weight floor — prevents total exclusion while the system
+    # accumulates evidence. Applied before renormalisation.
+    ML_WEIGHT_FLOOR: float = float(os.getenv("APEX_ML_WEIGHT_FLOOR", "0.05"))
+    # ── Correlation-adjusted position sizing (risk/capital_allocator.py) ─────
+    # Multiplicative haircut applied to new-position size as correlation to
+    # the existing book approaches 1.0.  Final multiplier is
+    # ``max(FLOOR, 1 - CORR_HAIRCUT_MULT × max(0, rho - CORR_THRESHOLD))``.
+    CORR_HAIRCUT_MULT: float = float(os.getenv("APEX_CORR_HAIRCUT_MULT", "0.60"))
+    # Pearson correlation threshold above which the haircut activates.
+    CORR_HAIRCUT_THRESHOLD: float = float(
+        os.getenv("APEX_CORR_HAIRCUT_THRESHOLD", "0.50")
+    )
+    # Floor on the haircut multiplier — never drop a new position below this
+    # fraction of its uncorrelated size (guards against completely blocking
+    # a correlated entry that still has edge).
+    CORR_HAIRCUT_FLOOR: float = float(
+        os.getenv("APEX_CORR_HAIRCUT_FLOOR", "0.30")
+    )
+    # Bars of historical returns used to compute the correlation matrix.
+    CORR_LOOKBACK_BARS: int = int(os.getenv("APEX_CORR_LOOKBACK_BARS", "60"))
+    # ── Portfolio heat (max aggregate $ at risk across open positions) ───────
+    # ``heat = Σ |qty_i × price_i × stop_distance_pct_i|``. New entries are
+    # blocked when heat exceeds this cap. 0 or negative disables the gate.
+    MAX_PORTFOLIO_HEAT_USD: float = float(
+        os.getenv("APEX_MAX_PORTFOLIO_HEAT_USD", "0.0")
+    )
 
     # ── Composite Signal Quality Gate ─────────────────────────────────────────
     # Blocks entries where signal × confidence < this floor, preventing borderline
@@ -2277,6 +2355,15 @@ class ApexConfig:
     DATA_DIR: Path = Path(os.getenv("APEX_DATA_DIR", str(Path(__file__).parent / "data")))
     CORE_STATE_FILE: str = str(DATA_DIR / "core_trading_state.json")
     CRYPTO_STATE_FILE: str = str(DATA_DIR / "crypto_trading_state.json")
+
+    # ── Adaptive Meta-Controller persistence (risk/adaptive_meta_controller.py)
+    # State file persists learned ridge weights, observation counts, and the
+    # most-recent market-context snapshot (regime, vix_level, timestamp,
+    # severity). Writes are atomic via tmp.rename.
+    META_CONTROLLER_STATE_PATH: str = os.getenv(
+        "APEX_META_CONTROLLER_STATE_PATH",
+        str(DATA_DIR / "meta_controller_state.json"),
+    )
 
     # High-conviction assets (get 2x position sizing in Core session)
     # Top performers by risk-adjusted returns from backtest analysis

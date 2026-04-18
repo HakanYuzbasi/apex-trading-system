@@ -43,6 +43,11 @@ from typing import Dict, List, Optional, Tuple
 import numpy as np
 import pandas as pd
 
+try:
+    from config import ApexConfig
+except Exception:  # pragma: no cover — defensive for isolated imports
+    ApexConfig = None  # type: ignore[assignment]
+
 logger = logging.getLogger(__name__)
 
 _DEF: Dict = {
@@ -184,17 +189,27 @@ class BlackLittermanAllocator:
         symbols: List[str],
         price_data: Dict[str, pd.DataFrame],
         ic_tracker=None,
+        live_signals: Optional[Dict[str, Dict[str, float]]] = None,
     ) -> BLResult:
         """
-        Compute BL weights for `symbols`.
+        Compute BL weights for ``symbols``.
 
         Args:
-            symbols: List of tradeable symbols
-            price_data: {symbol: OHLCV DataFrame}
-            ic_tracker: FactorICTracker instance (or None → equal-weight prior)
+            symbols: List of tradeable symbols.
+            price_data: ``{symbol: OHLCV DataFrame}``.
+            ic_tracker: FactorICTracker instance (or ``None`` → equal-weight
+                prior for macro views).
+            live_signals: Optional per-symbol live ML signal views:
+                ``{symbol: {"signal": float in [-1,1], "confidence": float in [0,1]}}``.
+                Each ``(signal × BL_VIEW_SCALE)`` is injected as an absolute
+                view on that symbol's return, with uncertainty
+                ``BL_UNCERTAINTY_BASE / max(confidence², eps)`` so low-
+                confidence signals pull the posterior less. When ``None`` or
+                empty, the allocator falls back to IC-tracker views only
+                (legacy behaviour).
 
         Returns:
-            BLResult with weights and multipliers
+            BLResult with weights and multipliers.
         """
         if not _cfg("BL_ENABLED") or len(symbols) < 2:
             return self._equal_weight(symbols)
@@ -222,8 +237,8 @@ class BlackLittermanAllocator:
         # ── 2. Reverse optimise equilibrium returns ───────────────────────────
         pi = _reverse_optimize(sigma, eq_w, delta)
 
-        # ── 3. Build IC views ─────────────────────────────────────────────────
-        P, Q, omega = self._build_views(actual_syms, ic_tracker)
+        # ── 3. Build IC views + live-signal views ─────────────────────────────
+        P, Q, omega = self._build_views(actual_syms, ic_tracker, live_signals)
         n_views = len(Q) if Q is not None else 0
 
         # ── 4. BL posterior ───────────────────────────────────────────────────
@@ -271,12 +286,17 @@ class BlackLittermanAllocator:
         symbols: List[str],
         price_data: Dict[str, pd.DataFrame],
         ic_tracker=None,
+        live_signals: Optional[Dict[str, Dict[str, float]]] = None,
     ) -> Optional[BLResult]:
-        """Call in main loop; only recomputes every BL_REFRESH_INTERVAL cycles."""
+        """
+        Call in main loop; only recomputes every ``BL_REFRESH_INTERVAL``
+        cycles. ``live_signals`` is forwarded to :meth:`get_weights` so each
+        refresh picks up the most recent model outputs.
+        """
         interval = int(_cfg("BL_REFRESH_INTERVAL"))
         if cycle % interval != 0:
             return self._last_result
-        return self.get_weights(symbols, price_data, ic_tracker)
+        return self.get_weights(symbols, price_data, ic_tracker, live_signals)
 
     def get_multiplier(self, symbol: str, default: float = 1.0) -> float:
         """Return the BL sizing multiplier for a symbol (1.0 = equal weight)."""
@@ -328,62 +348,104 @@ class BlackLittermanAllocator:
         self,
         symbols: List[str],
         ic_tracker,
+        live_signals: Optional[Dict[str, Dict[str, float]]] = None,
     ) -> Tuple[Optional[np.ndarray], Optional[np.ndarray], Optional[np.ndarray]]:
         """
-        Build the BL view matrix P, view returns Q, and uncertainty Ω from IC tracker.
+        Build the BL view matrix ``P``, view returns ``Q`` and uncertainty
+        ``Ω`` from two sources:
 
-        Each reliable factor generates one absolute view per symbol it covers.
-        View return = IC × sign(mean_signal) × 0.01 (scaled to daily return units).
-        View confidence is proportional to IC strength.
+        1. **Macro IC views** — one uniform-weight row per reliable factor
+           in ``ic_tracker.get_report().signals``. View return is
+           ``factor.ic × BL_VIEW_SCALE``; uncertainty scales with IC magnitude.
+        2. **Live per-symbol views** — one identity-style row per symbol in
+           ``live_signals`` for which ``|signal| > 0``. View return is
+           ``signal × BL_VIEW_SCALE``; uncertainty is
+           ``BL_UNCERTAINTY_BASE / max(confidence², eps)``.
+
+        Either branch may be empty; only when *both* are empty does the
+        method return ``(None, None, None)``.
+
+        Args:
+            symbols: Ordered list of symbols defining the column space of
+                ``P`` (row width ``n = len(symbols)``).
+            ic_tracker: FactorICTracker instance (may be ``None``).
+            live_signals: Per-symbol live-signal dict (see
+                :meth:`get_weights` docstring).
+
+        Returns:
+            Tuple ``(P, Q, omega)`` or ``(None, None, None)`` when no views
+            could be constructed.
         """
-        if ic_tracker is None:
-            return None, None, None
+        n = len(symbols)
+        sym_index = {s: i for i, s in enumerate(symbols)}
+        views_P: List[np.ndarray] = []
+        views_Q: List[float] = []
+        views_var: List[float] = []
 
-        try:
-            report = ic_tracker.get_report()
-        except Exception:
-            return None, None, None
-
-        min_ic = float(_cfg("BL_MIN_IC_FOR_VIEW"))
-        min_obs = int(_cfg("BL_MIN_OBS_FOR_VIEW"))
+        view_scale = float(_cfg("BL_VIEW_SCALE"))
         view_conf = float(_cfg("BL_VIEW_CONFIDENCE"))
 
-        # Only use active, reliable factors with sufficient IC
-        active = [
-            r for r in report.signals
-            if r.is_reliable
-            and r.obs >= min_obs
-            and abs(r.ic) >= min_ic
-            and r.status == "active"
-        ]
+        # ── 1. Macro IC views ────────────────────────────────────────────
+        if ic_tracker is not None:
+            try:
+                report = ic_tracker.get_report()
+            except Exception:
+                report = None
 
-        if not active:
-            return None, None, None
+            if report is not None:
+                min_ic = float(_cfg("BL_MIN_IC_FOR_VIEW"))
+                min_obs = int(_cfg("BL_MIN_OBS_FOR_VIEW"))
+                active = [
+                    r for r in getattr(report, "signals", [])
+                    if getattr(r, "is_reliable", False)
+                    and getattr(r, "obs", 0) >= min_obs
+                    and abs(getattr(r, "ic", 0.0)) >= min_ic
+                    and getattr(r, "status", "") == "active"
+                ]
+                for factor in active:
+                    # A positive IC factor → positive view across all symbols.
+                    view_return = float(factor.ic) * view_scale
+                    ic_conf = min(abs(factor.ic) / 0.30, 1.0) * view_conf
+                    view_var = (1.0 - ic_conf) ** 2 * 0.01
+                    views_P.append(np.ones(n) / n)
+                    views_Q.append(view_return)
+                    views_var.append(view_var)
 
-        n = len(symbols)
-        views_P = []
-        views_Q = []
-        views_var = []
+        # ── 2. Live per-symbol views ─────────────────────────────────────
+        if live_signals:
+            if ApexConfig is not None and hasattr(ApexConfig, "BL_UNCERTAINTY_BASE"):
+                uncertainty_base = float(ApexConfig.BL_UNCERTAINTY_BASE)
+            else:
+                # Fallback for stripped-down test shims without the attribute.
+                uncertainty_base = 0.0025
+            eps = 1e-4
+            for sym, payload in live_signals.items():
+                if sym not in sym_index or not isinstance(payload, dict):
+                    continue
+                try:
+                    signal = float(payload.get("signal", 0.0))
+                    conf = float(payload.get("confidence", 0.0))
+                except (TypeError, ValueError):
+                    continue
+                if not np.isfinite(signal) or not np.isfinite(conf):
+                    continue
+                if abs(signal) <= 0.0:
+                    continue
+                signal = max(-1.0, min(1.0, signal))
+                conf = max(0.0, min(1.0, conf))
 
-        for factor in active:
-            # Create a uniform view across all symbols (macro view on signal quality)
-            # A positive IC factor → positive view on all symbols (the factor is predictive)
-            view_return = float(factor.ic) * 0.005  # 0.5% daily return per IC unit
-            ic_conf = min(abs(factor.ic) / 0.30, 1.0) * view_conf
-            view_var = (1.0 - ic_conf) ** 2 * 0.01  # uncertainty
-
-            p_row = np.ones(n) / n  # equal-weight view across all symbols
-            views_P.append(p_row)
-            views_Q.append(view_return)
-            views_var.append(view_var)
+                row = np.zeros(n, dtype=float)
+                row[sym_index[sym]] = 1.0
+                views_P.append(row)
+                views_Q.append(signal * view_scale)
+                views_var.append(uncertainty_base / max(conf * conf, eps))
 
         if not views_P:
             return None, None, None
 
-        P = np.array(views_P)   # k × n
-        Q = np.array(views_Q)   # k
-        omega = np.diag(views_var)  # k × k
-
+        P = np.array(views_P)
+        Q = np.array(views_Q)
+        omega = np.diag(views_var)
         return P, Q, omega
 
     def _equal_weight(self, symbols: List[str]) -> BLResult:
