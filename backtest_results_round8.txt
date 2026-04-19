@@ -1,0 +1,99 @@
+═══════════════════════════════════════════════════════════════════════════
+ Apex Trading System — Round 8 Backtest Report
+   generated : 2026-04-19 17:25:14 UTC
+   branch    : claude/optimize-apex-roi-QetPP
+   commit    : 751460e6196d07b84a6cd9e684fa641032d47773
+═══════════════════════════════════════════════════════════════════════════
+
+───────────────────────────────────────────────────────────────────────────
+ 1. tests/test_integration_smoke.py  (pytest -v --no-cov)
+───────────────────────────────────────────────────────────────────────────
+============================= test session starts ==============================
+platform linux -- Python 3.11.15, pytest-9.0.3, pluggy-1.6.0 -- /usr/local/bin/python
+cachedir: .pytest_cache
+rootdir: /home/user/apex-trading-system
+configfile: pytest.ini
+plugins: anyio-4.13.0, cov-7.1.0
+collecting ... collected 7 items
+
+tests/test_integration_smoke.py::test_config_load_and_schema_validator PASSED [ 14%]
+tests/test_integration_smoke.py::test_adaptive_meta_controller_persist_and_reload PASSED [ 28%]
+tests/test_integration_smoke.py::test_signal_aggregator_records_and_refits_weights PASSED [ 42%]
+tests/test_integration_smoke.py::test_expected_cost_bps_positive_float_for_equity_taker PASSED [ 57%]
+tests/test_integration_smoke.py::test_run_walk_forward_returns_folds_and_aggregate PASSED [ 71%]
+tests/test_integration_smoke.py::test_circuit_breaker_trips_after_consecutive_losses 
+-------------------------------- live log call ---------------------------------
+17:23:13 [   ERROR] risk.risk_session: 🚨 CIRCUIT BREAKER TRIPPED: Consecutive losses: 5
+17:23:13 [   ERROR] risk.risk_session:    Trading halted at 2026-04-19 17:23:13.939093
+17:23:13 [   ERROR] risk.risk_session:    Cooldown: 24 hours
+17:23:13 [   ERROR] risk.risk_session:    Bar cooldown: 240 bars
+PASSED                                                                   [ 85%]
+tests/test_integration_smoke.py::test_leakage_check_raises_on_forward_shifted_feature 
+-------------------------------- live log call ---------------------------------
+17:23:16 [ WARNING] models.ml_validator: leakage_check FAILED (1 issue(s)): feature 'leak' equals label.shift(-1) — direct forward leakage — historical accuracy metrics computed without this audit are INFLATED and must be re-run on leakage-free features.
+17:23:16 [ WARNING] models.ml_validator: leakage_check FAILED (1 issue(s)): feature 'leak' equals label.shift(-1) — direct forward leakage — historical accuracy metrics computed without this audit are INFLATED and must be re-run on leakage-free features.
+PASSED                                                                   [100%]
+
+=============================== warnings summary ===============================
+../../../usr/local/lib/python3.11/dist-packages/_pytest/config/__init__.py:1434
+  /usr/local/lib/python3.11/dist-packages/_pytest/config/__init__.py:1434: PytestConfigWarning: Unknown config option: asyncio_mode
+  
+    self._warn_or_fail_if_strict(f"Unknown config option: {key}\n")
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+========================= 7 passed, 1 warning in 6.31s =========================
+
+───────────────────────────────────────────────────────────────────────────
+ 2. Default-config backtest + run_walk_forward (config defaults)
+───────────────────────────────────────────────────────────────────────────
+════════════════════════════════════════════════════════════════════════
+ Round 8 — Default-config backtest (run_backtest)
+════════════════════════════════════════════════════════════════════════
+ Symbols               : ['AAPL', 'MSFT', 'GOOGL']
+ Initial capital       : $100,000
+ Position size         : $5,000
+ Max concurrent pos.   : 3
+ Date range            : 2023-01-01 → 2023-12-31
+
+2026-04-19 17:25:03 WARN [backtesting.advanced_backtester] SURVIVORSHIP: run_backtest called without universe_schedule — results may overstate returns because delisted/replaced symbols are not represented. Pass universe_schedule={date: [symbols]} to enforce a point-in-time universe.
+ Total Return          : -0.9919%
+ Sharpe Ratio          : -3.384936
+ Max Drawdown          : -1.9930%
+ Win Rate              : 46.6667%
+ Profit Factor         : 0.795307
+ Total Trades          : 211
+ Final Value           : $99,008.08
+
+════════════════════════════════════════════════════════════════════════
+ Round 8 — Walk-forward (run_walk_forward, defaults from config)
+════════════════════════════════════════════════════════════════════════
+ WF_IS_BARS            : 378
+ WF_OOS_BARS           : 63
+ WF_STEP_BARS          : 63
+ Date range            : 2020-01-01 → 2021-09-26  (635 days)
+
+2026-04-19 17:25:03 WARN [backtesting.advanced_backtester] SURVIVORSHIP: run_backtest called without universe_schedule — results may overstate returns because delisted/replaced symbols are not represented. Pass universe_schedule={date: [symbols]} to enforce a point-in-time universe.
+2026-04-19 17:25:03 WARN [backtesting.advanced_backtester] SURVIVORSHIP: run_backtest called without universe_schedule — results may overstate returns because delisted/replaced symbols are not represented. Pass universe_schedule={date: [symbols]} to enforce a point-in-time universe.
+2026-04-19 17:25:03 WARN [backtesting.advanced_backtester] SURVIVORSHIP: run_backtest called without universe_schedule — results may overstate returns because delisted/replaced symbols are not represented. Pass universe_schedule={date: [symbols]} to enforce a point-in-time universe.
+2026-04-19 17:25:03 WARN [backtesting.advanced_backtester] SURVIVORSHIP: run_backtest called without universe_schedule — results may overstate returns because delisted/replaced symbols are not represented. Pass universe_schedule={date: [symbols]} to enforce a point-in-time universe.
+ Folds produced        : 4
+
+ Per-fold OOS Sharpe
+ ────────────────────────────────────────────────────────────────────
+   #  OOS start    OOS end          Sharpe     TotRet      MaxDD     Win%       PF  Trades
+ ────────────────────────────────────────────────────────────────────
+   1  2021-01-13   2021-03-16       0.0000     0.000%     0.000%    0.00%    0.000       1
+   2  2021-03-17   2021-05-18       0.0000     0.000%     0.000%    0.00%    0.000       0
+   3  2021-05-19   2021-07-20       0.0000     0.000%     0.000%    0.00%    0.000       2
+   4  2021-07-21   2021-09-21       0.0000     0.000%     0.000%    0.00%    0.000       0
+
+ Walk-forward aggregate
+ ────────────────────────────────────────────────────────────────────
+ Folds run             : 4
+ Mean Sharpe           : 0.000000
+ Median Sharpe         : 0.000000
+ Compounded Return     : 0.0000%
+ Worst Fold Drawdown   : 0.0000%
+ Positive Folds        : 0 / 4
+
+
