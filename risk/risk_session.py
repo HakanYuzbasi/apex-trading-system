@@ -31,6 +31,10 @@ class CircuitBreaker:
         self.trip_time = None
         self.consecutive_losses = 0
         self.recent_trades: collections.deque = collections.deque(maxlen=20)
+        # Round 8 / GAP-12C: bar-based cooldown counter.
+        # Incremented once per execution-loop cycle via ``tick_bar()`` when the
+        # breaker is tripped. Zeroed on every trip and on every reset.
+        self.bars_since_trip: int = 0
 
     def record_trade(self, pnl: float):
         """Record a trade for consecutive loss tracking."""
@@ -61,10 +65,52 @@ class CircuitBreaker:
             self.is_tripped = True
             self.trip_reason = reason
             self.trip_time = datetime.now()
+            self.bars_since_trip = 0
             logger.error(f"🚨 CIRCUIT BREAKER TRIPPED: {reason}")
             logger.error(f"   Trading halted at {self.trip_time}")
             logger.error(f"   Cooldown: {ApexConfig.CIRCUIT_BREAKER_COOLDOWN_HOURS} hours")
+            logger.error(
+                f"   Bar cooldown: {ApexConfig.CIRCUIT_BREAKER_COOLDOWN_BARS} bars"
+            )
             fire_alert("circuit_breaker", f"Circuit breaker TRIPPED: {reason}", AlertSev.CRITICAL)
+
+    def tick_bar(self) -> bool:
+        """
+        Advance the bar-cooldown counter by one execution cycle
+        (Round 8 / GAP-12C).
+
+        The caller invokes this once per execution-loop cycle *regardless*
+        of whether the breaker is tripped. When the breaker is tripped and
+        ``CIRCUIT_BREAKER_COOLDOWN_BARS > 0``, this method auto-resets the
+        breaker once ``bars_since_trip >= CIRCUIT_BREAKER_COOLDOWN_BARS``.
+        This is ORed with the hours-based cooldown in
+        :meth:`check_and_reset` — whichever expires first clears the halt.
+
+        Returns:
+            ``True`` if the breaker is now clear (either it was never
+            tripped, or this tick triggered the auto-reset). ``False``
+            while the breaker remains tripped.
+        """
+        if not self.is_tripped:
+            return True
+        self.bars_since_trip += 1
+        cooldown_bars = int(
+            getattr(ApexConfig, "CIRCUIT_BREAKER_COOLDOWN_BARS", 0) or 0
+        )
+        if cooldown_bars > 0 and self.bars_since_trip >= cooldown_bars:
+            logger.info(
+                "✅ Circuit breaker bar cooldown complete (%d/%d bars) — trading resumed",
+                self.bars_since_trip, cooldown_bars,
+            )
+            self.reset()
+            fire_alert(
+                "circuit_breaker",
+                f"Circuit breaker bar cooldown complete "
+                f"({self.bars_since_trip}/{cooldown_bars} bars) — trading resumed",
+                AlertSev.INFO,
+            )
+            return True
+        return False
 
     def check_and_reset(self) -> bool:
         """
@@ -138,6 +184,7 @@ class CircuitBreaker:
         self.trip_reason = None
         self.trip_time = None
         self.consecutive_losses = 0
+        self.bars_since_trip = 0
         logger.info("🔄 Circuit breaker reset")
 
     def get_status(self) -> Dict:
@@ -147,7 +194,8 @@ class CircuitBreaker:
             'reason': self.trip_reason,
             'trip_time': self.trip_time.isoformat() if self.trip_time else None,
             'consecutive_losses': self.consecutive_losses,
-            'recent_trades': len(self.recent_trades)
+            'recent_trades': len(self.recent_trades),
+            'bars_since_trip': int(self.bars_since_trip),
         }
 
 

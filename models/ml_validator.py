@@ -4,12 +4,15 @@ WALK-FORWARD VALIDATION & HYPERPARAMETER OPTIMIZATION
 - Time-series proper validation
 - Overfitting detection
 - Bayesian hyperparameter optimization
+- Label-leakage audit (Round 8 / GAP-8E)
 """
+
+from __future__ import annotations
 
 import numpy as np
 import pandas as pd
 import logging
-from typing import Dict, List, Any
+from typing import Dict, Iterable, List, Optional, Sequence
 from sklearn.model_selection import TimeSeriesSplit
 from sklearn.ensemble import RandomForestClassifier
 import optuna
@@ -18,6 +21,208 @@ from optuna.samplers import TPESampler
 from core.logging_config import setup_logging
 
 logger = logging.getLogger(__name__)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Label-leakage audit (Round 8 / GAP-8E)
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class LabelLeakageError(ValueError):
+    """Raised when a feature DataFrame fails the label-leakage audit."""
+
+
+def _has_monotonic_time_index(df: pd.DataFrame) -> bool:
+    """Return True iff ``df.index`` is a strictly increasing time index."""
+    idx = df.index
+    if isinstance(idx, pd.MultiIndex):
+        time_level = idx.get_level_values(0)
+    else:
+        time_level = idx
+    if not isinstance(time_level, (pd.DatetimeIndex, pd.RangeIndex, pd.Index)):
+        return False
+    return bool(pd.Index(time_level).is_monotonic_increasing)
+
+
+def _feature_correlates_with_future(
+    series: pd.Series,
+    reference: pd.Series,
+    max_shift: int,
+    threshold: float,
+) -> Optional[int]:
+    """
+    Return the first lead (``k > 0``) at which ``series`` correlates with
+    ``reference.shift(-k)`` above ``threshold``, or ``None``. A feature that
+    matches future reference values within tolerance indicates leakage.
+
+    Args:
+        series: Candidate feature series (already aligned to ``reference``).
+        reference: Baseline series (typically the label or raw price).
+        max_shift: Maximum forward shift (in rows) to probe.
+        threshold: Absolute Pearson correlation threshold that triggers a
+            leakage flag.
+
+    Returns:
+        The smallest ``k`` in ``[1, max_shift]`` whose absolute correlation
+        exceeds ``threshold``, or ``None`` when no shift qualifies.
+    """
+    if series.std(skipna=True) == 0 or reference.std(skipna=True) == 0:
+        return None
+    for k in range(1, max_shift + 1):
+        shifted = reference.shift(-k)
+        both = pd.concat([series, shifted], axis=1).dropna()
+        if len(both) < 30:
+            continue
+        corr = both.iloc[:, 0].corr(both.iloc[:, 1])
+        if corr is None or not np.isfinite(corr):
+            continue
+        if abs(float(corr)) >= threshold:
+            return k
+    return None
+
+
+def leakage_check(
+    df: pd.DataFrame,
+    label_col: str,
+    *,
+    feature_cols: Optional[Sequence[str]] = None,
+    reference_col: Optional[str] = None,
+    max_future_shift: int = 5,
+    leak_corr_threshold: float = 0.98,
+    raise_on_fail: bool = True,
+) -> Dict[str, object]:
+    """
+    Audit a training DataFrame for label / feature leakage before model.fit().
+
+    Four checks are performed:
+
+    1. ``df.index`` must be strictly monotonic increasing (time-ordered).
+    2. ``label_col`` must exist and contain at least two non-null values.
+    3. Feature columns must not be identical to (or a forward-shift of) the
+       label — any column whose correlation with ``label_col.shift(-k)``
+       for ``k ∈ [1, max_future_shift]`` exceeds ``leak_corr_threshold`` is
+       flagged.
+    4. If ``reference_col`` is provided (typically raw close price), the
+       same forward-shift correlation audit is re-run against it so that
+       features derived from future prices (e.g. ``price.shift(-1)``) are
+       also caught even when the label itself is derived separately.
+
+    Args:
+        df: Feature DataFrame. Must have a time-ordered index.
+        label_col: Name of the target / label column in ``df``.
+        feature_cols: Optional explicit feature column whitelist. When
+            ``None``, every column other than ``label_col`` (and
+            ``reference_col`` if provided) is audited.
+        reference_col: Optional raw reference series name (e.g. ``"Close"``)
+            used for the redundant forward-shift audit.
+        max_future_shift: Maximum forward shift (rows) probed in the
+            correlation audit.
+        leak_corr_threshold: Absolute Pearson correlation at which a feature
+            is declared leaky.
+        raise_on_fail: When ``True`` (default) and any check fails, raise
+            :class:`LabelLeakageError`. When ``False`` the function returns
+            the audit report without raising.
+
+    Returns:
+        A dict with keys:
+
+        - ``"ok"`` — ``True`` iff every check passed.
+        - ``"errors"`` — list of error strings.
+        - ``"leaky_features"`` — ``{column: leading_shift}`` for each
+          feature flagged by the forward-shift audit.
+
+    Raises:
+        LabelLeakageError: When ``raise_on_fail`` is ``True`` and the audit
+            detects leakage or a non-monotonic index. The caller should
+            treat this as a STOP signal — any historical accuracy metric
+            computed without the audit is inflated.
+    """
+    errors: List[str] = []
+    leaky: Dict[str, int] = {}
+
+    if not isinstance(df, pd.DataFrame):
+        errors.append(f"df must be a DataFrame, got {type(df).__name__}")
+    elif df.empty:
+        errors.append("df is empty — nothing to audit")
+    else:
+        if not _has_monotonic_time_index(df):
+            errors.append(
+                "df.index is not monotonic increasing — training must be "
+                "strictly time-ordered (no random shuffle)"
+            )
+        if label_col not in df.columns:
+            errors.append(f"label_col={label_col!r} not found in df.columns")
+        else:
+            label = df[label_col]
+            if label.dropna().shape[0] < 2:
+                errors.append(
+                    f"label_col={label_col!r} has fewer than 2 non-null values"
+                )
+            else:
+                if feature_cols is None:
+                    candidates: Iterable[str] = [
+                        c for c in df.columns
+                        if c != label_col and c != reference_col
+                    ]
+                else:
+                    candidates = [c for c in feature_cols if c in df.columns]
+
+                for col in candidates:
+                    series = df[col]
+                    if not pd.api.types.is_numeric_dtype(series):
+                        continue
+                    # Direct label identity — column IS the label shifted
+                    for k in range(1, max_future_shift + 1):
+                        if series.equals(label.shift(-k)):
+                            leaky[col] = k
+                            errors.append(
+                                f"feature {col!r} equals label.shift(-{k}) — "
+                                f"direct forward leakage"
+                            )
+                            break
+                    if col in leaky:
+                        continue
+                    lead = _feature_correlates_with_future(
+                        series, label,
+                        max_shift=max_future_shift,
+                        threshold=leak_corr_threshold,
+                    )
+                    if lead is not None:
+                        leaky[col] = lead
+                        errors.append(
+                            f"feature {col!r} correlates ≥ "
+                            f"{leak_corr_threshold:.2f} with "
+                            f"{label_col}.shift(-{lead}) — suspected leakage"
+                        )
+                        continue
+                    if reference_col and reference_col in df.columns:
+                        ref_lead = _feature_correlates_with_future(
+                            series, df[reference_col],
+                            max_shift=max_future_shift,
+                            threshold=leak_corr_threshold,
+                        )
+                        if ref_lead is not None:
+                            leaky[col] = ref_lead
+                            errors.append(
+                                f"feature {col!r} correlates ≥ "
+                                f"{leak_corr_threshold:.2f} with "
+                                f"{reference_col}.shift(-{ref_lead}) — "
+                                f"suspected leakage via reference"
+                            )
+
+    ok = not errors
+    if not ok:
+        logger.warning(
+            "leakage_check FAILED (%d issue(s)): %s — historical accuracy "
+            "metrics computed without this audit are INFLATED and must be "
+            "re-run on leakage-free features.",
+            len(errors),
+            "; ".join(errors),
+        )
+        if raise_on_fail:
+            raise LabelLeakageError("; ".join(errors))
+
+    return {"ok": ok, "errors": errors, "leaky_features": leaky}
 
 
 class MLValidator:

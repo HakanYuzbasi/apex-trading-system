@@ -767,12 +767,32 @@ class ApexConfig:
     # ═══════════════════════════════════════════════════════════════
     # CIRCUIT BREAKER (Automatic Trading Halt)
     # ═══════════════════════════════════════════════════════════════
-    CIRCUIT_BREAKER_ENABLED = True  # Enable automatic trading halt
-    CIRCUIT_BREAKER_DAILY_LOSS = 0.03  # Halt if daily loss exceeds 3% (Moderate)
-    CIRCUIT_BREAKER_WARNING = 0.015  # Warning at 1.5% - reduce position sizes by 50%
-    CIRCUIT_BREAKER_DRAWDOWN = 0.08  # Halt if drawdown exceeds 8%
-    CIRCUIT_BREAKER_CONSECUTIVE_LOSSES = 5  # Halt after 5 consecutive losing trades
-    CIRCUIT_BREAKER_COOLDOWN_HOURS = 24  # Hours before trading resumes after halt
+    CIRCUIT_BREAKER_ENABLED: bool = (
+        os.getenv("APEX_CIRCUIT_BREAKER_ENABLED", "true").lower() == "true"
+    )  # Enable automatic trading halt
+    CIRCUIT_BREAKER_DAILY_LOSS: float = float(
+        os.getenv("APEX_CIRCUIT_BREAKER_DAILY_LOSS", "0.03")
+    )  # Halt if daily loss exceeds 3% (Moderate)
+    CIRCUIT_BREAKER_WARNING: float = float(
+        os.getenv("APEX_CIRCUIT_BREAKER_WARNING", "0.015")
+    )  # Warning at 1.5% - reduce position sizes by 50%
+    CIRCUIT_BREAKER_DRAWDOWN: float = float(
+        os.getenv("APEX_CIRCUIT_BREAKER_DRAWDOWN", "0.08")
+    )  # Halt if drawdown exceeds 8%
+    CIRCUIT_BREAKER_CONSECUTIVE_LOSSES: int = int(
+        os.getenv("APEX_CIRCUIT_BREAKER_CONSECUTIVE_LOSSES", "5")
+    )  # Halt after N consecutive losing trades (GAP-12C)
+    CIRCUIT_BREAKER_COOLDOWN_HOURS: int = int(
+        os.getenv("APEX_CIRCUIT_BREAKER_COOLDOWN_HOURS", "24")
+    )  # Hours before trading resumes after halt
+    # Round 8 / GAP-12C: bar-based cooldown for the consecutive-loss breaker.
+    # When the breaker is tripped the caller invokes ``tick_bar()`` every
+    # execution cycle; once ``bars_since_trip >= CIRCUIT_BREAKER_COOLDOWN_BARS``
+    # the breaker auto-resets (ORed with the hours cooldown — whichever
+    # expires first). Set to 0 to disable bar-based cooldown.
+    CIRCUIT_BREAKER_COOLDOWN_BARS: int = int(
+        os.getenv("APEX_CIRCUIT_BREAKER_COOLDOWN_BARS", "240")
+    )
     # Minimum absolute loss (USD) for a trade to count as a "loss" in the consecutive
     # loss counter. Prevents micro-losses from partial fills (e.g., 10 TWAP tranches each
     # losing $5) from falsely tripping the circuit breaker.
@@ -1433,7 +1453,11 @@ class ApexConfig:
     # ═══════════════════════════════════════════════════════════════
     # CIRCUIT BREAKER AUTO-RESET (E)
     # ═══════════════════════════════════════════════════════════════
-    CIRCUIT_BREAKER_AUTO_RESET: bool = True     # Auto-reset circuit breaker after cooldown
+    # Round 8 / GAP-13A: env-override so deployments can disable the
+    # automatic bar/hour cooldown reset (requires manual admin reset).
+    CIRCUIT_BREAKER_AUTO_RESET: bool = (
+        os.getenv("APEX_CIRCUIT_BREAKER_AUTO_RESET", "true").lower() == "true"
+    )
 
     # ═══════════════════════════════════════════════════════════════
     # ASYMMETRIC EXIT SIZING (2:1+ R:R, let winners run)
@@ -2368,6 +2392,18 @@ class ApexConfig:
         os.getenv("APEX_ML_CRISIS_BLOCK_ENABLED", "true").lower() == "true"
     )
 
+    # ── Label-Leakage Audit (Round 8 / GAP-8E) ───────────────────────────────
+    # Maximum forward-shift horizon probed by ``models.ml_validator.leakage_check``.
+    # Any feature whose absolute Pearson correlation with ``label.shift(-k)``
+    # for ``k ∈ [1, LEAKAGE_MAX_FUTURE_SHIFT]`` exceeds
+    # ``LEAKAGE_CORR_THRESHOLD`` is declared leaky and aborts training.
+    LEAKAGE_MAX_FUTURE_SHIFT: int = int(
+        os.getenv("APEX_LEAKAGE_MAX_FUTURE_SHIFT", "5")
+    )
+    LEAKAGE_CORR_THRESHOLD: float = float(
+        os.getenv("APEX_LEAKAGE_CORR_THRESHOLD", "0.98")
+    )
+
     # ── Portfolio Rebalancing (Round 7 / GAP-9D) ─────────────────────────────
     # Time-based trigger: rebalance every ``REBAL_INTERVAL_BARS`` trade-loop
     # cycles. 0 disables the bar-based trigger. Threshold trigger fires when
@@ -3002,8 +3038,19 @@ CONFIG_BOUNDS: Dict[str, _BoundSpec] = {
     "ML_FEATURE_MAX_AGE_SECONDS": (float, (0.0, 86400.0)),
 
     # Circuit breaker
+    "CIRCUIT_BREAKER_ENABLED": (bool, None),
     "CIRCUIT_BREAKER_CONSECUTIVE_LOSSES": (int, (1, 1000)),
     "CIRCUIT_BREAKER_COOLDOWN_HOURS": (int, (0, 720)),
+    "CIRCUIT_BREAKER_COOLDOWN_BARS": (int, (0, 100_000)),
+    "CIRCUIT_BREAKER_DAILY_LOSS": (float, (0.0, 1.0)),
+    "CIRCUIT_BREAKER_DRAWDOWN": (float, (0.0, 1.0)),
+    "CIRCUIT_BREAKER_WARNING": (float, (0.0, 1.0)),
+    "CIRCUIT_BREAKER_MIN_LOSS_USD": (float, (0.0, 1_000_000.0)),
+    "CIRCUIT_BREAKER_AUTO_RESET": (bool, None),
+
+    # Leakage audit (Round 8 / GAP-8E)
+    "LEAKAGE_MAX_FUTURE_SHIFT": (int, (1, 100)),
+    "LEAKAGE_CORR_THRESHOLD": (float, (0.5, 1.0)),
 }
 
 
