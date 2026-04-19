@@ -426,7 +426,18 @@ class AlpacaConnector:
         url = f"{base_url or self.base_url}{path}"
         await self._throttle()
 
-        max_retries = 3
+        # Round 7 / GAP-10D: jittered exponential backoff on HTTP 429/5xx with
+        # ApexConfig-driven retry budget. Exceeding the budget flips the
+        # process-wide order-submission halt flag (see
+        # ``execution.rate_limit_backoff``) — callers must probe
+        # ``submission_halted()`` before issuing new orders.
+        from execution.rate_limit_backoff import (
+            compute_backoff_seconds as _rl_backoff,
+            halt_submission as _rl_halt,
+            max_retries as _rl_max_retries,
+            reset_submission_halt as _rl_reset,
+        )
+        max_retries = _rl_max_retries()
         for attempt in range(max_retries + 1):
             try:
                 resp = await self._client.request(
@@ -439,12 +450,23 @@ class AlpacaConnector:
                 )
 
                 if resp.status_code in (200, 201, 204):
+                    _rl_reset(reason=f"alpaca 2xx on {path}")
                     if resp.status_code == 204:
                         return {}
                     return resp.json()
                 elif resp.status_code == 429:
-                    wait = 2 ** attempt
-                    logger.warning(f"Rate limited by Alpaca, waiting {wait}s")
+                    if attempt >= max_retries:
+                        _rl_halt(
+                            f"alpaca 429 on {method} {path} after "
+                            f"{attempt + 1} attempts"
+                        )
+                        return {}
+                    wait = _rl_backoff(attempt)
+                    logger.warning(
+                        "Alpaca 429 on %s %s — backing off %.2fs "
+                        "(attempt %d/%d)",
+                        method, path, wait, attempt + 1, max_retries + 1,
+                    )
                     await asyncio.sleep(wait)
                     continue
                 elif resp.status_code == 404:
@@ -453,7 +475,13 @@ class AlpacaConnector:
                     text = resp.text
                     logger.error(f"Alpaca API error {resp.status_code}: {text}")
                     if resp.status_code >= 500 and attempt < max_retries:
-                        await asyncio.sleep(2 ** attempt)
+                        wait = _rl_backoff(attempt)
+                        logger.warning(
+                            "Alpaca %d on %s %s — retrying in %.2fs (attempt %d/%d)",
+                            resp.status_code, method, path, wait,
+                            attempt + 1, max_retries + 1,
+                        )
+                        await asyncio.sleep(wait)
                         continue
                     return {}
             except (httpx.RequestError, asyncio.TimeoutError, RuntimeError) as e:

@@ -17,7 +17,7 @@ Environment variables can override defaults:
 import os
 import logging
 from pathlib import Path
-from typing import Dict, List
+from typing import Dict, List, Optional, Tuple
 
 # Load .env file automatically (allows overriding any setting without shell exports)
 try:
@@ -2355,6 +2355,47 @@ class ApexConfig:
         os.getenv("APEX_CALIB_RESPECT_ENV_OVERRIDES", "true").lower() == "true"
     )
 
+    # ── Regime-Conditional ML Model Routing (Round 7 / GAP-8D) ───────────────
+    # Explicit overrides for the per-regime model artefact directories. When a
+    # path is blank, the signal generator falls back to its built-in
+    # ``models/saved_advanced/<asset_class>/<regime>/`` layout.
+    ML_MODEL_PATH_TRENDING: str = os.getenv("APEX_ML_MODEL_PATH_TRENDING", "")
+    ML_MODEL_PATH_MEAN_REV: str = os.getenv("APEX_ML_MODEL_PATH_MEAN_REV", "")
+    ML_MODEL_PATH_VOLATILE: str = os.getenv("APEX_ML_MODEL_PATH_VOLATILE", "")
+    # When VIX regime is PANIC (== crisis-equivalent) we suppress ML signals
+    # entirely; this switch lets operators disable the suppression for research.
+    ML_CRISIS_BLOCK_ENABLED: bool = (
+        os.getenv("APEX_ML_CRISIS_BLOCK_ENABLED", "true").lower() == "true"
+    )
+
+    # ── Portfolio Rebalancing (Round 7 / GAP-9D) ─────────────────────────────
+    # Time-based trigger: rebalance every ``REBAL_INTERVAL_BARS`` trade-loop
+    # cycles. 0 disables the bar-based trigger. Threshold trigger fires when
+    # any position weight drifts by more than ``REBAL_DRIFT_THRESHOLD`` (as a
+    # fractional share of the target weight).
+    REBAL_INTERVAL_BARS: int = int(
+        os.getenv("APEX_REBAL_INTERVAL_BARS", "240")
+    )
+    REBAL_DRIFT_THRESHOLD: float = float(
+        os.getenv("APEX_REBAL_DRIFT_THRESHOLD", "0.10")
+    )
+
+    # ── Startup Position Reconciliation (Round 7 / GAP-12B) ──────────────────
+    # When true, the reconciler updates local state to match broker positions
+    # on boot (broker is source of truth). When false, a hard halt forces the
+    # operator to resolve the mismatch manually before trading begins.
+    RECONCILE_AUTO_SYNC: bool = (
+        os.getenv("APEX_RECONCILE_AUTO_SYNC", "true").lower() == "true"
+    )
+
+    # ── Dead Man's Switch / Max Idle Bars (Round 7 / GAP-12D) ────────────────
+    # During market hours, if no entry attempt has occurred for this many
+    # trade-loop cycles, a WARNING is emitted as an early-warning canary for
+    # silent failures (signal drought, feed issue, misconfig). 0 disables.
+    MAX_IDLE_BARS: int = int(
+        os.getenv("APEX_MAX_IDLE_BARS", "120")
+    )
+
     # ── Composite Signal Quality Gate ─────────────────────────────────────────
     # Blocks entries where signal × confidence < this floor, preventing borderline
     # signal + borderline confidence combinations that have no real edge.
@@ -2879,6 +2920,175 @@ def assert_live_trading_confirmation() -> None:
             "Unsafe startup blocked: APEX_LIVE_TRADING=true requires "
             "APEX_LIVE_TRADING_CONFIRMED=true."
         )
+
+
+# ═══════════════════════════════════════════════════════════════
+# STARTUP SCHEMA VALIDATION  (Round 7 / GAP-12A)
+# ═══════════════════════════════════════════════════════════════
+#
+# ``CONFIG_BOUNDS`` declares the expected Python type and inclusive numeric
+# bounds for every config key the trading runtime depends on at startup. Keys
+# mapped to ``None`` bounds are type-only checks (booleans, string paths).
+#
+# The validator is invoked from ``main.py`` before any trading begins. On any
+# breach it logs CRITICAL and calls ``sys.exit(1)`` — we cannot trade with a
+# broken configuration.
+
+_NumBounds = Tuple[float, float]
+_BoundSpec = Tuple[type, Optional[_NumBounds]]
+
+CONFIG_BOUNDS: Dict[str, _BoundSpec] = {
+    # Capital & sizing
+    "INITIAL_CAPITAL": (float, (1.0, 1e10)),
+    "POSITION_SIZE_USD": (float, (1.0, 1e9)),
+    "MAX_POSITIONS": (int, (1, 1000)),
+    "MAX_DRAWDOWN": (float, (0.001, 0.9)),
+
+    # Signal thresholds
+    "MIN_SIGNAL_THRESHOLD": (float, (0.0, 1.0)),
+    "MIN_SIGNAL_QUALITY_COMPOSITE": (float, (0.0, 1.0)),
+    "REGIME_VOLATILE_QUALITY_FLOOR": (float, (0.0, 1.0)),
+
+    # Cooldown / loop cadence
+    "TRADE_COOLDOWN_SECONDS": (int, (0, 86400)),
+    "CHECK_INTERVAL_SECONDS": (float, (0.1, 3600.0)),
+
+    # Order idempotency
+    "ORDER_DEDUP_TTL_SECONDS": (float, (0.0, 3600.0)),
+    "ORDER_DEDUP_MAX_ENTRIES": (int, (1, 1_000_000)),
+
+    # Feed watchdog
+    "FEED_WATCHDOG_INTERVAL_SECONDS": (float, (1.0, 600.0)),
+    "FEED_STALE_THRESHOLD_SECONDS": (float, (5.0, 3600.0)),
+    "FEED_MAX_RECONNECT_ATTEMPTS": (int, (1, 100)),
+
+    # HTTP rate-limit backoff
+    "API_RATE_LIMIT_MAX_RETRIES": (int, (0, 20)),
+    "API_RATE_LIMIT_BASE_DELAY_SECONDS": (float, (0.05, 60.0)),
+    "API_RATE_LIMIT_MAX_DELAY_SECONDS": (float, (0.1, 600.0)),
+
+    # Shutdown
+    "SHUTDOWN_TIMEOUT_SECONDS": (float, (1.0, 600.0)),
+    "SHUTDOWN_FLATTEN_POSITIONS": (bool, None),
+
+    # Slippage tracker
+    "SLIPPAGE_TRACK_WINDOW": (int, (1, 10_000)),
+    "SLIPPAGE_ALERT_MULT": (float, (0.1, 100.0)),
+    "SLIPPAGE_MIN_MODEL_BPS": (float, (0.01, 100.0)),
+
+    # Rolling Sharpe
+    "ROLLING_SHARPE_DAYS": (int, (0, 3650)),
+    "ROLLING_SHARPE_MIN_TRADES": (int, (1, 10_000)),
+
+    # Calibrator writeback
+    "CALIB_MIN_CHANGE_PCT": (float, (0.0, 1.0)),
+    "CALIB_RESPECT_ENV_OVERRIDES": (bool, None),
+
+    # Rebalancing
+    "REBAL_INTERVAL_BARS": (int, (0, 100_000)),
+    "REBAL_DRIFT_THRESHOLD": (float, (0.0, 1.0)),
+
+    # Reconciliation
+    "RECONCILE_AUTO_SYNC": (bool, None),
+
+    # Dead man's switch
+    "MAX_IDLE_BARS": (int, (0, 100_000)),
+
+    # ML safety switches
+    "ML_CRISIS_BLOCK_ENABLED": (bool, None),
+    "ML_MODEL_PATH_TRENDING": (str, None),
+    "ML_MODEL_PATH_MEAN_REV": (str, None),
+    "ML_MODEL_PATH_VOLATILE": (str, None),
+    "ML_FEATURE_MAX_AGE_SECONDS": (float, (0.0, 86400.0)),
+
+    # Circuit breaker
+    "CIRCUIT_BREAKER_CONSECUTIVE_LOSSES": (int, (1, 1000)),
+    "CIRCUIT_BREAKER_COOLDOWN_HOURS": (int, (0, 720)),
+}
+
+
+def validate_startup_schema(
+    bounds: Optional[Dict[str, _BoundSpec]] = None,
+) -> List[str]:
+    """
+    Validate every key in ``CONFIG_BOUNDS`` against the live ``ApexConfig``.
+
+    Args:
+        bounds: Optional override bounds dict. Defaults to ``CONFIG_BOUNDS``.
+
+    Returns:
+        A list of error strings. An empty list means every key passed.
+
+    Raises:
+        SystemExit: Never directly — callers (see ``main.py``) are responsible
+            for converting a non-empty error list into ``SystemExit(1)``.
+    """
+    spec = bounds if bounds is not None else CONFIG_BOUNDS
+    errors: List[str] = []
+    for key, (expected_type, numeric_bounds) in spec.items():
+        if not hasattr(ApexConfig, key):
+            errors.append(f"{key}: missing from ApexConfig")
+            continue
+        value = getattr(ApexConfig, key)
+        # ``bool`` is a subclass of ``int``; check it first to avoid false passes.
+        if expected_type is bool:
+            if not isinstance(value, bool):
+                errors.append(
+                    f"{key}: expected bool, got {type(value).__name__}={value!r}"
+                )
+            continue
+        if expected_type is int:
+            if isinstance(value, bool) or not isinstance(value, int):
+                errors.append(
+                    f"{key}: expected int, got {type(value).__name__}={value!r}"
+                )
+                continue
+        elif expected_type is float:
+            if isinstance(value, bool) or not isinstance(value, (int, float)):
+                errors.append(
+                    f"{key}: expected float, got {type(value).__name__}={value!r}"
+                )
+                continue
+            value = float(value)
+        elif expected_type is str:
+            if not isinstance(value, str):
+                errors.append(
+                    f"{key}: expected str, got {type(value).__name__}={value!r}"
+                )
+            continue
+        else:
+            if not isinstance(value, expected_type):
+                errors.append(
+                    f"{key}: expected {expected_type.__name__}, "
+                    f"got {type(value).__name__}={value!r}"
+                )
+                continue
+        if numeric_bounds is not None:
+            lo, hi = numeric_bounds
+            if not (lo <= value <= hi):
+                errors.append(
+                    f"{key}={value} out of bounds [{lo}, {hi}]"
+                )
+    return errors
+
+
+def enforce_startup_schema() -> None:
+    """
+    Run ``validate_startup_schema`` and terminate the process on any failure.
+
+    Logs every offending key at CRITICAL severity before exiting so the
+    operator sees the full list rather than chasing one failure at a time.
+    """
+    errors = validate_startup_schema()
+    if not errors:
+        return
+    for err in errors:
+        _config_logger.critical("CONFIG VALIDATION FAILED: %s", err)
+    _config_logger.critical(
+        "Startup schema validation failed (%d issues) — aborting.",
+        len(errors),
+    )
+    raise SystemExit(1)
 
 
 if __name__ == "__main__":
