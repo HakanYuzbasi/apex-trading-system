@@ -4,16 +4,35 @@ risk/threshold_calibrator.py - Automatic Threshold Calibration
 Calibrates exit thresholds and builds slippage blacklists from live trade history.
 Runs at startup (loads persisted values) and periodically every 6h (recalibrates).
 Results are pushed to trading_excellence._ACTIVE_PARAMS and execution loop blacklist.
+
+The :meth:`publish_to_runtime` hook applies a calibrated threshold only when:
+
+- the absolute fractional change exceeds :attr:`ApexConfig.CALIB_MIN_CHANGE_PCT`
+  (guards against thrash on micro-refinements);
+- the operator has **not** pinned the key with an
+  ``APEX_WEAK_SIGNAL_LOSS_THRESHOLD_PCT`` env override and
+  :attr:`ApexConfig.CALIB_RESPECT_ENV_OVERRIDES` is true.
 """
 import json
 import logging
+import os
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, List, Tuple
+from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 
+from config import ApexConfig
+
 logger = logging.getLogger(__name__)
+
+# Keys eligible for runtime write-back. Mapping: calibrator-key → env-var name.
+# Env-override semantics match ``ApexConfig`` conventions so operators can pin
+# a value just by setting the same variable they'd use in config.py defaults.
+_WRITEBACK_KEYS: Dict[str, str] = {
+    "weak_signal_loss_threshold_pct": "APEX_WEAK_SIGNAL_LOSS_THRESHOLD_PCT",
+    "no_signal_loss_threshold_pct": "APEX_NO_SIGNAL_LOSS_THRESHOLD_PCT",
+}
 
 # ── Defaults (used when insufficient trade history) ───────────────────────────
 DEFAULTS: Dict = {
@@ -125,12 +144,91 @@ class ThresholdCalibrator:
         except Exception as e:
             logger.warning(f"ThresholdCalibrator: failed to persist calibration: {e}")
 
+        # Push qualifying keys into the runtime excellence params. Gated by
+        # CALIB_MIN_CHANGE_PCT and CALIB_RESPECT_ENV_OVERRIDES so the operator
+        # keeps final say.
+        try:
+            self.publish_to_runtime(result, previous)
+        except Exception as e:
+            logger.warning(
+                f"ThresholdCalibrator: runtime publish failed (non-fatal): {e}"
+            )
+
         logger.info(
             f"ThresholdCalibrator: exit_thresh={result['weak_signal_loss_threshold_pct']:.3f}% "
             f"({'reverted' if validation['reverted'] else 'applied'}), "
             f"blacklist={result['slippage_blacklist']}"
         )
         return result
+
+    # ── Runtime write-back ────────────────────────────────────────────────────
+
+    def publish_to_runtime(
+        self,
+        calibrated: Dict,
+        previous: Optional[Dict] = None,
+    ) -> Dict[str, float]:
+        """
+        Push newly calibrated thresholds into
+        :mod:`risk.trading_excellence._ACTIVE_PARAMS`.
+
+        Args:
+            calibrated: Output of :meth:`run_calibration`. Only keys listed in
+                :data:`_WRITEBACK_KEYS` are considered.
+            previous: Previously-persisted calibration (used to compute the
+                fractional delta). Defaults to the current on-disk file.
+
+        Returns:
+            Mapping of key → value for every key actually applied. Empty when
+            every key was skipped by the change-gate or env-override.
+        """
+        if previous is None:
+            previous = self.load_or_defaults(self.data_dir)
+        min_change = float(getattr(ApexConfig, "CALIB_MIN_CHANGE_PCT", 0.0))
+        respect_env = bool(getattr(ApexConfig, "CALIB_RESPECT_ENV_OVERRIDES", True))
+
+        to_apply: Dict[str, float] = {}
+        for key, env_var in _WRITEBACK_KEYS.items():
+            if key not in calibrated or calibrated[key] is None:
+                continue
+            if respect_env and os.getenv(env_var) is not None:
+                logger.info(
+                    "ThresholdCalibrator: %s pinned by %s=%s — skipping apply",
+                    key, env_var, os.getenv(env_var),
+                )
+                continue
+            try:
+                new_val = float(calibrated[key])
+                prev_val = float(previous.get(key, DEFAULTS[key]))
+            except (TypeError, ValueError):
+                continue
+            if min_change > 0.0 and abs(prev_val) > 1e-9:
+                change = abs(new_val - prev_val) / abs(prev_val)
+                if change < min_change:
+                    logger.info(
+                        "ThresholdCalibrator: %s change %.2f%% < %.2f%% gate — skipping",
+                        key, change * 100, min_change * 100,
+                    )
+                    continue
+            to_apply[key] = new_val
+
+        if not to_apply:
+            return {}
+
+        try:
+            from risk.trading_excellence import update_excellence_params
+            update_excellence_params(to_apply)
+        except Exception as e:
+            logger.warning(
+                f"ThresholdCalibrator: could not push runtime params: {e}"
+            )
+            return {}
+
+        for key, val in to_apply.items():
+            logger.info(
+                "ThresholdCalibrator: APPLIED %s=%s to runtime", key, val
+            )
+        return to_apply
 
     @staticmethod
     def load_or_defaults(data_dir: Path) -> Dict:

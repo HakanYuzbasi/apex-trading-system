@@ -1,4 +1,5 @@
 import asyncio
+import logging
 from datetime import datetime
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect, Request
@@ -6,6 +7,32 @@ from fastapi import APIRouter, WebSocket, WebSocketDisconnect, Request
 from config import ApexConfig
 from api.dependencies import _state_is_fresh, read_trading_state, sanitize_execution_metrics
 from api.auth import rate_limit
+from monitoring.rolling_sharpe import (
+    compute_rolling_sharpe_from_file,
+    default_attribution_path,
+)
+
+_logger = logging.getLogger(__name__)
+
+
+def _resolve_rolling_sharpe(state: dict) -> float:
+    """
+    Prefer the rolling realised-trade Sharpe computed from the attribution
+    ledger; fall back to whatever the engine persisted when the ledger is
+    missing or too young.
+    """
+    try:
+        sharpe = compute_rolling_sharpe_from_file(default_attribution_path())
+    except Exception as exc:
+        _logger.debug("rolling_sharpe failed: %s", exc)
+        sharpe = 0.0
+    if sharpe == 0.0:
+        fallback = state.get("sharpe_ratio", 0)
+        try:
+            return float(fallback)
+        except (TypeError, ValueError):
+            return 0.0
+    return sharpe
 
 router = APIRouter(prefix="/public", tags=["Public"])
 
@@ -42,7 +69,7 @@ async def get_public_cockpit(request: Request = None):
             "daily_pnl": state.get("daily_pnl", 0),
             "total_pnl": state.get("total_pnl", 0),
             "max_drawdown": state.get("max_drawdown", 0),
-            "sharpe_ratio": state.get("sharpe_ratio", 0),
+            "sharpe_ratio": _resolve_rolling_sharpe(state),
             "win_rate": state.get("win_rate", 0),
             "open_positions": state.get("open_positions", 0),
             "max_positions": state.get("max_positions", 5),
@@ -95,7 +122,7 @@ async def public_websocket_endpoint(websocket: WebSocket):
                         "daily_pnl": current_state.get("daily_pnl", 0),
                         "total_pnl": current_state.get("total_pnl", 0),
                         "max_drawdown": current_state.get("max_drawdown", 0),
-                        "sharpe_ratio": current_state.get("sharpe_ratio", 0),
+                        "sharpe_ratio": _resolve_rolling_sharpe(current_state),
                         "win_rate": current_state.get("win_rate", 0),
                         "open_positions": current_state.get("open_positions", 0),
                         "total_trades": current_state.get("total_trades", 0)
