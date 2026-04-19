@@ -2258,6 +2258,103 @@ class ApexConfig:
         os.getenv("APEX_MAX_PORTFOLIO_HEAT_USD", "0.0")
     )
 
+    # ── ML output-distribution baseline (models/advanced_signal_generator.py) ─
+    # Training-time mean and std of the *raw* ensemble prediction. Populated
+    # during training; used at inference to detect prediction-distribution
+    # drift. When unset (NaN) the drift check is skipped.
+    ML_BASELINE_PRED_MEAN: float = float(
+        os.getenv("APEX_ML_BASELINE_PRED_MEAN", "0.0")
+    )
+    ML_BASELINE_PRED_STD: float = float(
+        os.getenv("APEX_ML_BASELINE_PRED_STD", "0.08")
+    )
+
+    # ── Order idempotency (execution/order_idempotency.py) ───────────────────
+    # Window in which a repeat (symbol, side, rounded-quantity) submission is
+    # considered a duplicate and suppressed. Prevents double-fills on broker
+    # reconnect / retry. 0 disables the guard entirely.
+    ORDER_DEDUP_TTL_SECONDS: float = float(
+        os.getenv("APEX_ORDER_DEDUP_TTL_SECONDS", "30.0")
+    )
+    # Max unique orders tracked in memory before evicting the oldest. Trade-off
+    # between memory and false-negative rate on burst activity.
+    ORDER_DEDUP_MAX_ENTRIES: int = int(
+        os.getenv("APEX_ORDER_DEDUP_MAX_ENTRIES", "512")
+    )
+
+    # ── Market-data feed watchdog (execution/*_connector.py) ─────────────────
+    FEED_WATCHDOG_INTERVAL_SECONDS: float = float(
+        os.getenv("APEX_FEED_WATCHDOG_INTERVAL_SECONDS", "15.0")
+    )
+    FEED_STALE_THRESHOLD_SECONDS: float = float(
+        os.getenv("APEX_FEED_STALE_THRESHOLD_SECONDS", "60.0")
+    )
+    FEED_MAX_RECONNECT_ATTEMPTS: int = int(
+        os.getenv("APEX_FEED_MAX_RECONNECT_ATTEMPTS", "10")
+    )
+
+    # ── Graceful shutdown (execution/shutdown_manager.py) ────────────────────
+    # When true, the shutdown manager flattens every open position before
+    # exiting. Useful in paper/live deployments where leaving positions open
+    # across a restart risks drift. Disable for stateful restart flows.
+    SHUTDOWN_FLATTEN_POSITIONS: bool = (
+        os.getenv("APEX_SHUTDOWN_FLATTEN_POSITIONS", "true").lower() == "true"
+    )
+    SHUTDOWN_TIMEOUT_SECONDS: float = float(
+        os.getenv("APEX_SHUTDOWN_TIMEOUT_SECONDS", "30.0")
+    )
+
+    # ── Generic HTTP rate-limit backoff (broker 429 handling) ────────────────
+    API_RATE_LIMIT_MAX_RETRIES: int = int(
+        os.getenv("APEX_API_RATE_LIMIT_MAX_RETRIES", "5")
+    )
+    API_RATE_LIMIT_BASE_DELAY_SECONDS: float = float(
+        os.getenv("APEX_API_RATE_LIMIT_BASE_DELAY_SECONDS", "1.0")
+    )
+    API_RATE_LIMIT_MAX_DELAY_SECONDS: float = float(
+        os.getenv("APEX_API_RATE_LIMIT_MAX_DELAY_SECONDS", "30.0")
+    )
+
+    # ── Realised-vs-modelled slippage tracker (execution/slippage_tracker.py)
+    # Rolling window of fill observations used to detect slippage regime
+    # changes relative to the cost-model projection. WARNING logged when the
+    # mean realised/model ratio exceeds SLIPPAGE_ALERT_MULT.
+    SLIPPAGE_TRACK_WINDOW: int = int(
+        os.getenv("APEX_SLIPPAGE_TRACK_WINDOW", "50")
+    )
+    SLIPPAGE_ALERT_MULT: float = float(
+        os.getenv("APEX_SLIPPAGE_ALERT_MULT", "2.0")
+    )
+    SLIPPAGE_MIN_MODEL_BPS: float = float(
+        os.getenv("APEX_SLIPPAGE_MIN_MODEL_BPS", "1.0")
+    )
+
+    # ── Rolling Sharpe (monitoring/rolling_sharpe.py) ────────────────────────
+    # Window, in days, over which realised trade PnL is annualised into a
+    # Sharpe ratio for the live dashboard. 0 disables the computation.
+    ROLLING_SHARPE_DAYS: int = int(
+        os.getenv("APEX_ROLLING_SHARPE_DAYS", "30")
+    )
+    # Minimum closed-trade count required before the rolling Sharpe is
+    # considered statistically meaningful; below this, 0.0 is returned.
+    ROLLING_SHARPE_MIN_TRADES: int = int(
+        os.getenv("APEX_ROLLING_SHARPE_MIN_TRADES", "10")
+    )
+
+    # ── Calibrator write-back gate (risk/threshold_calibrator.py) ────────────
+    # A calibrated threshold is only pushed to the runtime excellence params if
+    # its absolute change relative to the prior value is ≥ this fraction. Avoids
+    # thrashing on micro-refinements. 0.0 disables the gate.
+    CALIB_MIN_CHANGE_PCT: float = float(
+        os.getenv("APEX_CALIB_MIN_CHANGE_PCT", "0.05")
+    )
+    # When true, an explicit env-override (APEX_WEAK_SIGNAL_LOSS_THRESHOLD_PCT
+    # etc.) pins the threshold and the calibrator becomes read-only for those
+    # keys. Prevents automated learning from overriding an operator override.
+    CALIB_RESPECT_ENV_OVERRIDES: bool = (
+        os.getenv("APEX_CALIB_RESPECT_ENV_OVERRIDES", "true").lower() == "true"
+    )
+
     # ── Composite Signal Quality Gate ─────────────────────────────────────────
     # Blocks entries where signal × confidence < this floor, preventing borderline
     # signal + borderline confidence combinations that have no real edge.

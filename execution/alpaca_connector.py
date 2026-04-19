@@ -23,6 +23,7 @@ import httpx
 
 from config import ApexConfig
 from core.symbols import AssetClass, parse_symbol, normalize_symbol
+from execution.order_idempotency import get_order_guard as _get_order_guard
 from monitoring.prometheus_metrics import PrometheusMetrics
 
 logger = logging.getLogger(__name__)
@@ -863,6 +864,12 @@ class AlpacaConnector:
                 logger.error(f"Invalid quantity: {quantity}")
                 return None
 
+            # Dedup token allocated later once quantity is final (may be
+            # reduced by the buying-power scaling below). Sentinel ensures
+            # finally-block cleanup is always safe.
+            _guard = _get_order_guard()
+            _dedup_token: Optional[str] = None
+
             expected_price = await self.get_market_price(symbol)
             if expected_price <= 0:
                 logger.error(f"Cannot execute: no price for {symbol}")
@@ -944,6 +951,22 @@ class AlpacaConnector:
                     logger.debug("Buying power check failed (non-fatal): %s", bp_err)
 
 
+            # Idempotency guard — now that ``quantity`` is final, reserve the
+            # dedup slot. Suppresses identical (symbol, side, qty) retries
+            # still inside the dedup window.
+            try:
+                _dedup_token, _is_new = _guard.register(symbol, side, quantity)
+            except ValueError as _dedup_exc:
+                logger.error("AlpacaConnector: dedup guard rejected order: %s", _dedup_exc)
+                return None
+            if not _is_new:
+                logger.warning(
+                    "AlpacaConnector: duplicate order suppressed symbol=%s side=%s qty=%s",
+                    symbol, side, quantity,
+                )
+                _dedup_token = None
+                return None
+
             # ── Exit limit order: try limit first, fall back to market ────────────
             # Data: P75 exit slippage = 29.2 bps. A sell-limit at -30 bps captures
             # ~75% of exits at reduced slippage; 25% fall back to market.
@@ -987,6 +1010,8 @@ class AlpacaConnector:
                 logger.error(f"Order rejected by Alpaca: {data}")
                 self.write_dead_letter(symbol, side, quantity, "alpaca_rejected",
                                       {"response": str(data)[:200]})
+                if _dedup_token:
+                    _guard.forget(_dedup_token)
                 return None
 
             order_id = data["id"]
@@ -1068,6 +1093,8 @@ class AlpacaConnector:
                     f"slippage: {slippage:+.1f} bps)"
                 )
 
+                if _dedup_token:
+                    _guard.mark_submitted(_dedup_token, str(order_id))
                 return {
                     "symbol": symbol,
                     "side": side,
@@ -1077,10 +1104,14 @@ class AlpacaConnector:
                     "slippage_bps": slippage,
                     "commission": commission,
                     "status": "FILLED",
+                    "order_id": order_id,
+                    "client_order_id": _dedup_token,
                 }
 
             if status in ("cancelled", "canceled", "expired", "rejected"):
                 self._pending_orders.pop(symbol, None)
+                if _dedup_token:
+                    _guard.forget(_dedup_token)
                 logger.warning(
                     "AlpacaConnector: order %s for %s closed without a fill (status=%s)",
                     order_id,
@@ -1091,6 +1122,8 @@ class AlpacaConnector:
 
             # Order pending
             self._pending_orders[symbol] = order_id
+            if _dedup_token:
+                _guard.mark_submitted(_dedup_token, str(order_id))
             logger.info(f"{side} {quantity} {symbol} order pending (id: {order_id})")
 
             return {
@@ -1103,9 +1136,15 @@ class AlpacaConnector:
                 "commission": 0,
                 "status": "PENDING",
                 "order_id": order_id,
+                "client_order_id": _dedup_token,
             }
 
         except Exception as e:
+            if _dedup_token:
+                try:
+                    _guard.forget(_dedup_token)
+                except Exception:
+                    pass
             logger.error(f"Error executing {side} {quantity} {symbol}: {e}")
             self.write_dead_letter(symbol, side, quantity, f"exception:{type(e).__name__}:{e}")
             return None

@@ -30,6 +30,7 @@ import pandas as pd
 
 from config import ApexConfig
 from execution.metrics_store import ExecutionMetricsStore
+from execution.order_idempotency import get_order_guard as _get_order_guard
 from core.symbols import AssetClass, parse_symbol, normalize_symbol, is_market_open
 from monitoring.prometheus_metrics import PrometheusMetrics
 
@@ -1537,9 +1538,25 @@ class IBKRConnector:
                 logger.error(f"❌ Cannot execute: no price for {symbol}")
                 logger.warning("event=order_rejected symbol=%s reason=no_price", symbol)
                 return None
-            
+
             # Determine if market is open (delegates to core/market_hours.py)
             is_market_hours = is_market_open(symbol, datetime.now())
+
+            # Idempotency guard — suppress a retry of the *same* (symbol, side,
+            # qty) order that is still inside its dedup window. Protects
+            # against double-fills on reconnect and retry storms.
+            _guard = _get_order_guard()
+            try:
+                _dedup_token, _is_new = _guard.register(symbol, side, quantity)
+            except ValueError as _dedup_exc:
+                logger.error("Idempotency guard rejected order: %s", _dedup_exc)
+                return None
+            if not _is_new:
+                logger.warning(
+                    "event=order_rejected symbol=%s reason=duplicate_in_dedup_window side=%s qty=%s",
+                    symbol, side, quantity,
+                )
+                return None
 
             # Decision logic — three tiers:
             #  1. force_market → immediate market sweep
@@ -1552,16 +1569,33 @@ class IBKRConnector:
                 and getattr(ApexConfig, "PASSIVE_LIMIT_ENABLED", True)
             )
 
-            if force_market:
-                logger.info("   📈 Market order (force_market=True)")
-                return await self._execute_market_order(symbol, side, quantity, expected_price=price)
-            elif passive_enabled:
-                logger.info("   🎯 Passive limit order (SOR mid-peg, Pillar 1B)")
-                return await self._execute_passive_limit_order(symbol, side, quantity, price)
+            result: Optional[dict]
+            try:
+                if force_market:
+                    logger.info("   📈 Market order (force_market=True)")
+                    result = await self._execute_market_order(symbol, side, quantity, expected_price=price)
+                elif passive_enabled:
+                    logger.info("   🎯 Passive limit order (SOR mid-peg, Pillar 1B)")
+                    result = await self._execute_passive_limit_order(symbol, side, quantity, price)
+                else:
+                    # Pre/post-market: confidence-based limit
+                    result = await self._execute_limit_order(symbol, side, quantity, price, confidence)
+            except Exception:
+                _guard.forget(_dedup_token)
+                raise
+
+            if not result:
+                # Broker rejected / timed out — free the slot so a deliberate
+                # retry by the caller isn't blocked.
+                _guard.forget(_dedup_token)
             else:
-                # Pre/post-market: confidence-based limit
-                return await self._execute_limit_order(symbol, side, quantity, price, confidence)
-                
+                broker_id = str(result.get("order_id") or result.get("perm_id") or "")
+                if broker_id:
+                    _guard.mark_submitted(_dedup_token, broker_id)
+                if isinstance(result, dict):
+                    result.setdefault("client_order_id", _dedup_token)
+            return result
+
         except Exception as e:
             logger.error(f"❌ Error executing order {side} {quantity} {symbol}: {e}")
             return None

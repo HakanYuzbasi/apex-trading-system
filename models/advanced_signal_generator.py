@@ -13,7 +13,7 @@ Features:
 
 import pandas as pd
 import numpy as np
-from typing import Dict, List, Optional, Tuple, Union
+from typing import Deque, Dict, List, Optional, Tuple, Union
 from datetime import datetime, timedelta
 import logging
 import os
@@ -111,6 +111,22 @@ class AdvancedSignalGenerator:
         self.outcome_history = deque(maxlen=100)
         self.performance_baseline = 0.52
         self.retrain_interval_days = 30
+
+        # Prediction-distribution drift: rolling buffer of *raw* model outputs
+        # (pre-clip, pre-EMA) sampled at inference. Compared against the
+        # training-time baseline (mean, std) persisted in model metadata to
+        # catch silent distribution shifts. Training code populates
+        # ``self.pred_baseline_mean/std``; absence disables the check.
+        self._drift_window: int = max(
+            0, int(getattr(ApexConfig, "ML_DRIFT_WINDOW_BARS", 0))
+        )
+        self._drift_buffer: Deque[float] = deque(maxlen=self._drift_window or 1)
+        self.pred_baseline_mean: float = float(
+            getattr(ApexConfig, "ML_BASELINE_PRED_MEAN", 0.0)
+        )
+        self.pred_baseline_std: float = float(
+            getattr(ApexConfig, "ML_BASELINE_PRED_STD", 0.0)
+        )
         self.signal_ema: Dict[str, float] = {}
         self.signal_ema_alpha = 0.35  # Smoothing to reduce noise for better Sharpe
 
@@ -765,6 +781,31 @@ class AdvancedSignalGenerator:
         except Exception as _fi_err:
             logger.debug("Feature importance summary skipped: %s", _fi_err)
 
+        # Aggregate prediction-distribution baseline across all deployed
+        # regime models. Mean-of-means and pooled std give a single reference
+        # against which the live output drift can be measured.
+        try:
+            _baseline_means: List[float] = []
+            _baseline_stds: List[float] = []
+            for _ac_models in self.asset_class_models.values():
+                for _regime_models in _ac_models.values():
+                    if 'baseline_pred_mean' in _regime_models:
+                        _baseline_means.append(float(_regime_models['baseline_pred_mean']))
+                    if 'baseline_pred_std' in _regime_models:
+                        _baseline_stds.append(float(_regime_models['baseline_pred_std']))
+            if _baseline_means:
+                self.pred_baseline_mean = float(np.mean(_baseline_means))
+            if _baseline_stds:
+                self.pred_baseline_std = float(
+                    np.sqrt(np.mean(np.square(_baseline_stds)))
+                )
+            logger.info(
+                "ML prediction baseline: mean=%.4f std=%.4f",
+                self.pred_baseline_mean, self.pred_baseline_std,
+            )
+        except Exception as _base_err:
+            logger.debug("Baseline aggregation skipped: %s", _base_err)
+
         # Finalize
         self.is_trained = True
         self.training_date = datetime.now()
@@ -845,6 +886,13 @@ class AdvancedSignalGenerator:
             models['r2_score'] = r2
             models['dir_acc'] = float(np.mean(np.sign(ensemble_pred) == np.sign(y_test)))
 
+            # Capture the baseline distribution of the *inference-space*
+            # output — matches the squashed signal used at runtime so the
+            # drift comparison uses like-for-like units.
+            squashed = np.tanh(ensemble_pred * 25.0)
+            models['baseline_pred_mean'] = float(np.mean(squashed))
+            models['baseline_pred_std'] = float(np.std(squashed))
+
         # Extract feature importances (from tree-based models) for post-training audit.
         # Aggregated across all available models; stored for logging and dropout decisions.
         try:
@@ -889,6 +937,25 @@ class AdvancedSignalGenerator:
                 asset_class = parsed.asset_class.value
             except ValueError:
                 asset_class = AssetClass.EQUITY.value
+
+            # Feature-staleness guard: if the latest feature bar is older than
+            # ``ML_FEATURE_MAX_AGE_SECONDS``, the model is predicting from
+            # outdated data. Returning a zero-confidence empty signal prevents
+            # acting on ghost information after a data-feed hiccup.
+            max_age = float(getattr(ApexConfig, "ML_FEATURE_MAX_AGE_SECONDS", 0.0))
+            if max_age > 0.0 and len(data) > 0:
+                last_ts = self._resolve_feature_timestamp(data)
+                if last_ts is not None:
+                    now_ts = datetime.now(last_ts.tzinfo) if last_ts.tzinfo else datetime.now()
+                    age_seconds = (now_ts - last_ts).total_seconds()
+                    if age_seconds > max_age:
+                        logger.warning(
+                            "ML feature staleness blocked %s: feature_bar_ts=%s "
+                            "now_ts=%s age=%.1fs max=%.1fs",
+                            symbol, last_ts.isoformat(),
+                            now_ts.isoformat(), age_seconds, max_age,
+                        )
+                        return self._empty_signal()
 
             # Extract prices for regime detection
             if isinstance(data, pd.DataFrame):
@@ -983,6 +1050,10 @@ class AdvancedSignalGenerator:
             else:
                 avg_signal = float(np.mean(predictions))
 
+            # Record raw (pre-EMA, pre-clip) ensemble output for drift tracking.
+            if self._drift_window > 0:
+                self._drift_buffer.append(avg_signal)
+
             std_signal = float(np.std(predictions))
             confidence = max(0, 1.0 - (std_signal * 2))
 
@@ -1043,34 +1114,90 @@ class AdvancedSignalGenerator:
         self.outcome_history.append(actual_return)
     
     def check_drift(self) -> Dict:
-        """Check drift."""
-        if len(self.prediction_history) < 30 or len(self.outcome_history) < 30:
-            return {'drift_detected': False, 'reason': 'insufficient_data'}
-        
-        min_len = min(len(self.prediction_history), len(self.outcome_history))
-        
-        # Directional accuracy
-        correct = sum(
-            (self.prediction_history[i]['signal'] > 0) == (self.outcome_history[i] > 0)
-            for i in range(-min_len, 0)
-        )
-        accuracy = correct / min_len
-        
-        # Sharpe
-        returns = [
-            self.prediction_history[i]['signal'] * self.outcome_history[i]
-            for i in range(-min_len, 0)
-        ]
-        sharpe = (np.mean(returns) / np.std(returns) * np.sqrt(252)) if np.std(returns) > 0 else 0
-        
-        drift = (accuracy < self.performance_baseline) or (sharpe < 1.0)
-        
-        return {
-            'drift_detected': drift,
-            'accuracy': accuracy,
-            'sharpe': sharpe,
-            'recommendation': 'RETRAIN' if drift else 'OK'
+        """
+        Detect ML drift across two axes:
+
+        1. *Performance drift* — directional accuracy and trade Sharpe measured
+           from ``prediction_history`` vs ``outcome_history``.
+        2. *Output-distribution drift* — rolling mean/std of the raw ensemble
+           prediction compared to the baseline captured at training time. A
+           blown-out mean indicates prediction bias; a blown-out std indicates
+           the model is reacting to features it never saw during training.
+
+        Returns:
+            Dict with keys ``drift_detected`` (bool), ``accuracy``, ``sharpe``,
+            ``rolling_mean`` / ``rolling_std`` (when output drift is
+            computable), and ``recommendation`` ∈ ``{"OK", "RETRAIN"}``.
+        """
+        result: Dict[str, object] = {
+            'drift_detected': False,
+            'accuracy': 0.0,
+            'sharpe': 0.0,
+            'rolling_mean': 0.0,
+            'rolling_std': 0.0,
+            'recommendation': 'OK',
+            'reason': None,
         }
+
+        perf_drift = False
+        if len(self.prediction_history) >= 30 and len(self.outcome_history) >= 30:
+            min_len = min(len(self.prediction_history), len(self.outcome_history))
+            correct = sum(
+                (self.prediction_history[i]['signal'] > 0) == (self.outcome_history[i] > 0)
+                for i in range(-min_len, 0)
+            )
+            accuracy = correct / min_len
+            returns = [
+                self.prediction_history[i]['signal'] * self.outcome_history[i]
+                for i in range(-min_len, 0)
+            ]
+            std_ret = float(np.std(returns))
+            sharpe = float(np.mean(returns) / std_ret * np.sqrt(252)) if std_ret > 0 else 0.0
+            perf_drift = (accuracy < self.performance_baseline) or (sharpe < 1.0)
+            result.update({'accuracy': float(accuracy), 'sharpe': sharpe})
+        else:
+            result['reason'] = 'insufficient_performance_data'
+
+        # Output-distribution drift
+        dist_drift = False
+        min_drift_samples = max(30, self._drift_window // 2) if self._drift_window else 30
+        if self._drift_window > 0 and len(self._drift_buffer) >= min_drift_samples:
+            samples = np.asarray(self._drift_buffer, dtype=float)
+            roll_mean = float(np.mean(samples))
+            roll_std = float(np.std(samples))
+            result['rolling_mean'] = roll_mean
+            result['rolling_std'] = roll_std
+
+            mean_threshold = float(
+                getattr(ApexConfig, "ML_DRIFT_MEAN_THRESHOLD", 0.35)
+            )
+            std_mult = float(getattr(ApexConfig, "ML_DRIFT_STD_MULT", 1.75))
+            baseline_mean = self.pred_baseline_mean
+            baseline_std = self.pred_baseline_std
+
+            mean_breach = abs(roll_mean - baseline_mean) > mean_threshold
+            std_breach = (
+                baseline_std > 0.0
+                and roll_std > baseline_std * std_mult
+            )
+            dist_drift = mean_breach or std_breach
+            if dist_drift:
+                logger.warning(
+                    "ML output drift: roll_mean=%.4f (baseline=%.4f, |Δ|>%.2f=%s) "
+                    "roll_std=%.4f (baseline=%.4f × %.2f=%s)",
+                    roll_mean, baseline_mean, mean_threshold, mean_breach,
+                    roll_std, baseline_std, std_mult, std_breach,
+                )
+
+        drift = perf_drift or dist_drift
+        result['drift_detected'] = drift
+        result['recommendation'] = 'RETRAIN' if drift else 'OK'
+        if drift and result['reason'] is None:
+            result['reason'] = (
+                'output_distribution_shift' if dist_drift and not perf_drift
+                else 'performance_degraded'
+            )
+        return result
     
     def _should_retrain(self) -> bool:
         """Check if retrain needed."""
@@ -1086,6 +1213,44 @@ class AdvancedSignalGenerator:
     
     def _empty_signal(self):
         return {'signal': 0.0, 'confidence': 0.0, 'regime': 'unknown', 'timestamp': datetime.now().isoformat()}
+
+    @staticmethod
+    def _resolve_feature_timestamp(
+        data: Union[pd.Series, pd.DataFrame]
+    ) -> Optional[datetime]:
+        """
+        Extract the timestamp of the most-recent feature bar.
+
+        Supports DatetimeIndex and integer-index DataFrames/Series that carry a
+        ``timestamp`` or ``Datetime`` column.
+
+        Args:
+            data: Feature bar set (rows = time).
+
+        Returns:
+            The last bar timestamp as a naive or tz-aware ``datetime``, or
+            ``None`` when no interpretable timestamp is present.
+        """
+        try:
+            idx = data.index
+            if isinstance(idx, pd.DatetimeIndex) and len(idx) > 0:
+                ts = idx[-1]
+                if isinstance(ts, pd.Timestamp):
+                    return ts.to_pydatetime()
+                if isinstance(ts, datetime):
+                    return ts
+        except Exception:
+            pass
+        if isinstance(data, pd.DataFrame):
+            for col in ("timestamp", "Datetime", "datetime", "Date", "date"):
+                if col in data.columns and len(data[col]) > 0:
+                    try:
+                        val = pd.to_datetime(data[col].iloc[-1])
+                        if isinstance(val, pd.Timestamp):
+                            return val.to_pydatetime()
+                    except Exception:
+                        continue
+        return None
 
     # ─────────────────────────────────────────────────────────────────────────
     # Incremental Online Learning
@@ -1213,7 +1378,9 @@ class AdvancedSignalGenerator:
                 'last_retrain_date': self.last_retrain_date.isoformat() if self.last_retrain_date else None,
                 'prediction_history': list(self.prediction_history),
                 'outcome_history': list(self.outcome_history),
-                'model_layout': 'asset_class_regime' if has_asset_models else 'legacy'
+                'model_layout': 'asset_class_regime' if has_asset_models else 'legacy',
+                'pred_baseline_mean': float(self.pred_baseline_mean),
+                'pred_baseline_std': float(self.pred_baseline_std),
             }
             
             with open(f"{self.model_dir}/metadata.pkl", 'wb') as f:
@@ -1235,9 +1402,16 @@ class AdvancedSignalGenerator:
             self.feature_names = metadata['feature_names']
             if metadata.get('last_retrain_date'):
                 self.last_retrain_date = datetime.fromisoformat(metadata['last_retrain_date'])
-            
+
             self.prediction_history = deque(metadata.get('prediction_history', []), maxlen=100)
             self.outcome_history = deque(metadata.get('outcome_history', []), maxlen=100)
+
+            # Restore prediction-distribution baseline if present in metadata;
+            # otherwise keep the config defaults seeded in ``__init__``.
+            if 'pred_baseline_mean' in metadata:
+                self.pred_baseline_mean = float(metadata['pred_baseline_mean'])
+            if 'pred_baseline_std' in metadata:
+                self.pred_baseline_std = float(metadata['pred_baseline_std'])
             
             layout = metadata.get('model_layout', 'legacy')
             if layout == 'asset_class_regime':
