@@ -16488,6 +16488,16 @@ class ApexTradingSystem:
                     # starvation, universe misconfiguration, stuck gate).
                     self._check_dead_mans_switch(cycle, now)
 
+                    # Round 8 / GAP-12C: advance the circuit-breaker
+                    # bar-cooldown counter once per cycle. tick_bar() is a
+                    # no-op while the breaker is untripped and auto-resets
+                    # trading when CIRCUIT_BREAKER_COOLDOWN_BARS has elapsed.
+                    try:
+                        if getattr(self, "risk_session", None) is not None:
+                            self.risk_session.circuit_breaker.tick_bar()
+                    except Exception as _tick_exc:
+                        logger.debug("circuit_breaker.tick_bar raised: %s", _tick_exc)
+
                     # Process operator commands (e.g., kill-switch reset) each cycle.
                     await self._process_external_control_commands()
 

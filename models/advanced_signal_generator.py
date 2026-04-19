@@ -618,6 +618,37 @@ class AdvancedSignalGenerator:
 
         self.feature_names = feature_names
 
+        # Round 8 / GAP-8E: hard leakage audit before any ``.fit()`` call.
+        # A panel with a forward-shifted feature or a non-monotonic index
+        # would silently inflate OOS accuracy — we refuse to train on it.
+        try:
+            from models.ml_validator import leakage_check, LabelLeakageError
+            _audit_df = panel[feature_names + ["target"]].reset_index(level="symbol", drop=True)
+            leakage_check(
+                _audit_df,
+                label_col="target",
+                feature_cols=feature_names,
+                max_future_shift=int(getattr(ApexConfig, "LEAKAGE_MAX_FUTURE_SHIFT", 5)),
+                leak_corr_threshold=float(
+                    getattr(ApexConfig, "LEAKAGE_CORR_THRESHOLD", 0.98)
+                ),
+                raise_on_fail=True,
+            )
+        except LabelLeakageError as _leak_exc:
+            logger.error(
+                "🚨 Label-leakage audit FAILED — aborting training. "
+                "Historical metrics are inflated; re-run with corrected "
+                "features. Detail: %s", _leak_exc,
+            )
+            return
+        except Exception as _audit_exc:
+            # Auditor crashed — log but don't block training on an unrelated
+            # exception (e.g. missing pandas dep in a minimal env).
+            logger.warning(
+                "Leakage audit skipped (auditor raised non-leakage error): %s",
+                _audit_exc,
+            )
+
         # Time-sorted panel to prevent leakage
         times = panel.index.get_level_values(0).unique().sort_values()
         if len(times) < 50:
