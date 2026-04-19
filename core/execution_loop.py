@@ -1132,10 +1132,11 @@ class ApexTradingSystem:
         # SIGNAL FORTRESS PHASE 4 - Data Watchdog
         # ═══════════════════════════════════════════════════════════════════════
         if ApexConfig.DATA_WATCHDOG_ENABLED:
-            self.data_watchdog = DataWatchdog(
-                max_silence_seconds=300,  # 5 minutes without ANY data = CRITICAL
-                active_symbol_timeout=30  # 30s without update for active pos = WARNING
-            )
+            # Round 7 / GAP-10B: thresholds resolved from ApexConfig
+            # (FEED_STALE_THRESHOLD_SECONDS, FEED_WATCHDOG_INTERVAL_SECONDS,
+            # FEED_MAX_RECONNECT_ATTEMPTS) so env-overrides actually take
+            # effect — no hardcoded magic numbers.
+            self.data_watchdog = DataWatchdog()
         else:
             self.data_watchdog = None
             logger.info("🐕 Data Watchdog disabled via config")
@@ -1614,6 +1615,9 @@ class ApexTradingSystem:
         self._equity_baseline_brokers: set[str] = set()
         self.positions: Dict[str, int] = {}  # symbol -> quantity (positive=long, negative=short)
         self.is_running = False
+        # Round 7 / GAP-12D: dead-man's switch state
+        self._last_entry_cycle: int = 0
+        self._idle_warning_cycle: int = 0
         self._cached_ibkr_positions: Optional[Dict[str, int]] = None  # Cycle-level cache
         self._broker_equity_cache: Dict[str, Tuple[float, datetime]] = {}
         self._broker_cash_cache: Dict[str, Tuple[float, datetime]] = {}
@@ -5111,6 +5115,16 @@ class ApexTradingSystem:
 
         self._sync_cost_basis_with_positions()
 
+        # ── Round 7 / GAP-12B: Startup position reconciliation barrier ─────
+        # Brokers are the source of truth; sync_positions_with_{ibkr,alpaca}
+        # has already replaced ``self.positions`` with broker state. The
+        # remaining risk is stale attribution metadata from a prior session
+        # that believes it owns positions the broker no longer holds (or
+        # vice-versa). When ``RECONCILE_AUTO_SYNC`` is True we drop the
+        # phantom entries in place; when False we refuse to start trading
+        # and raise ``SystemExit(1)`` so an operator can inspect the drift.
+        await self._startup_position_reconciliation()
+
         # ⏳ Wait for all brokers to finish connecting before reading equity.
         # Alpaca's connect() returns before account data is fully cached; a brief
         # sleep ensures non_marginable_buying_power and portfolio value are ready,
@@ -5642,6 +5656,135 @@ class ApexTradingSystem:
         except Exception as _e:
             logger.warning("Kill switch state load failed: %s", _e)
 
+    def _check_dead_mans_switch(self, cycle: int, now: datetime) -> None:
+        """
+        Fire a CRITICAL alert when the engine has gone ``MAX_IDLE_BARS``
+        cycles without recording a new entry while the market is open
+        (Round 7 / GAP-12D).
+
+        Silent failures — a stuck gate, a broken signal generator, a risk
+        veto jammed on — can leave the runtime "alive" but unable to trade
+        for hours. This hook detects the silence early. It is intentionally
+        cheap: a counter comparison plus an ``is_market_open`` call, executed
+        once per cycle.
+
+        Args:
+            cycle: Current monotonic cycle counter from the run loop.
+            now: Current UTC datetime used for market-hours gating.
+        """
+        max_idle = int(getattr(ApexConfig, "MAX_IDLE_BARS", 120))
+        if max_idle <= 0:
+            return
+
+        # Only arm the switch once we've banked ``max_idle`` cycles of runtime;
+        # a cold-started engine has ``_last_entry_cycle == 0`` which would
+        # otherwise fire immediately on cycle 1.
+        if self._last_entry_cycle <= 0:
+            self._last_entry_cycle = cycle
+            return
+
+        idle_bars = cycle - self._last_entry_cycle
+        if idle_bars < max_idle:
+            return
+
+        try:
+            market_open_now = is_market_open("SPY", now)
+        except Exception:
+            market_open_now = True  # fail-open: assume market is live
+
+        if not market_open_now:
+            return
+
+        # Rate-limit warnings: one alert per ``max_idle`` window.
+        if cycle - self._idle_warning_cycle < max_idle:
+            return
+        self._idle_warning_cycle = cycle
+
+        msg = (
+            f"Dead-man's switch: no entries for {idle_bars} cycles "
+            f"(MAX_IDLE_BARS={max_idle}); pipeline may be stuck"
+        )
+        logger.critical("🛑 %s", msg)
+        try:
+            fire_alert("dead_mans_switch", msg, AlertSev.CRITICAL)
+        except Exception as _alert_exc:
+            logger.debug("Dead-man's switch alert dispatch failed: %s", _alert_exc)
+
+    async def _startup_position_reconciliation(self) -> None:
+        """
+        One-shot reconciliation run at startup (Round 7 / GAP-12B).
+
+        Compares the broker-provided ``self.positions`` (already populated by
+        ``sync_positions_with_ibkr`` / ``sync_positions_with_alpaca``) against
+        the persisted ``performance_attribution.open_positions`` metadata from
+        the previous session. Divergences mean the previous process either
+        missed a fill, crashed mid-exit, or the position was touched manually.
+
+        Behaviour is controlled by ``ApexConfig.RECONCILE_AUTO_SYNC``:
+
+        - **True** (default): delegate to :meth:`_reconcile_position_state`,
+          which drops phantom entries and updates tracked quantities to
+          match the broker. Trading proceeds.
+        - **False**: if any discrepancy is detected, log CRITICAL and raise
+          ``SystemExit(1)`` *before* any order-submission loop starts, so
+          an operator must investigate before the system trades.
+
+        Raises:
+            SystemExit: When ``RECONCILE_AUTO_SYNC`` is False and the local
+                attribution state disagrees with the broker.
+        """
+        auto_sync = bool(getattr(ApexConfig, "RECONCILE_AUTO_SYNC", True))
+        tracker = getattr(self, "performance_attribution", None)
+
+        pa_positions: dict = {}
+        if tracker is not None:
+            pa_positions = dict(getattr(tracker, "open_positions", {}) or {})
+
+        broker_positions: dict[str, float] = {}
+        for raw_symbol, qty in self.positions.items():
+            qty_f = float(qty or 0.0)
+            if math.isclose(qty_f, 0.0, abs_tol=1e-12):
+                continue
+            normalized_symbol = normalize_symbol(raw_symbol)
+            broker_positions[normalized_symbol] = (
+                broker_positions.get(normalized_symbol, 0.0) + qty_f
+            )
+
+        phantom_syms = [s for s in pa_positions if s not in broker_positions]
+        orphan_syms = [s for s in broker_positions if s not in pa_positions]
+
+        qty_drifts: list[str] = []
+        for sym, broker_qty in broker_positions.items():
+            entry = pa_positions.get(sym) or {}
+            current_qty = float(entry.get("quantity", 0.0) or 0.0)
+            desired_qty = abs(float(broker_qty or 0.0))
+            if not math.isclose(current_qty, desired_qty, rel_tol=1e-9, abs_tol=1e-9):
+                qty_drifts.append(f"{sym}:local={current_qty},broker={desired_qty}")
+
+        has_drift = bool(phantom_syms or orphan_syms or qty_drifts)
+        if not has_drift:
+            logger.info("📊 Startup reconciliation OK (no position drift)")
+            return
+
+        summary = (
+            f"phantom={phantom_syms} orphan={orphan_syms} qty_drift={qty_drifts}"
+        )
+        if auto_sync:
+            logger.warning(
+                "📊 Startup reconciliation drift detected — RECONCILE_AUTO_SYNC "
+                "enabled, auto-syncing: %s",
+                summary,
+            )
+            await self._reconcile_position_state()
+            return
+
+        logger.critical(
+            "🛑 Startup reconciliation drift detected AND RECONCILE_AUTO_SYNC=False — "
+            "refusing to start trading runtime. %s",
+            summary,
+        )
+        raise SystemExit(1)
+
     async def _reconcile_position_state(self) -> None:
         """
         Reconcile internal position state against broker truth every 5 min.
@@ -5965,6 +6108,10 @@ class ApexTradingSystem:
                 dominant_generator=select_dominant_generator(generator_signals),
                 generator_signals=dict(generator_signals or {}),
             )
+            # Round 7 / GAP-12D: reset dead-man's idle counter on a confirmed
+            # entry — any successful attribution write proves the pipeline is
+            # still producing trades, so the idle warning timer restarts.
+            self._last_entry_cycle = int(getattr(self, "_cycle_count", 0))
         except Exception as exc:
             logger.debug("Attribution entry record skipped for %s: %s", symbol, exc)
 
@@ -16333,6 +16480,13 @@ class ApexTradingSystem:
                             )
 
                     self._roll_daily_realized_if_needed(now)
+
+                    # Round 7 / GAP-12D: dead-man's switch — if the pipeline
+                    # has not produced an entry for MAX_IDLE_BARS cycles while
+                    # the market is open, surface a CRITICAL alert so an
+                    # operator can investigate silent failures (signal
+                    # starvation, universe misconfiguration, stuck gate).
+                    self._check_dead_mans_switch(cycle, now)
 
                     # Process operator commands (e.g., kill-switch reset) each cycle.
                     await self._process_external_control_commands()

@@ -456,8 +456,53 @@ class VIXRegimeManager:
             recs.append("Minimize new trades")
             recs.append("Focus on capital preservation")
             recs.append("Watch for mean reversion opportunities")
-            
+
         if state.vix_change_1d > 0.15:
             recs.append("VIX spike detected - extra caution")
-        
+
         return recs
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Process-wide singleton access (Round 7 / GAP-8D)
+# ─────────────────────────────────────────────────────────────────────────────
+#
+# ``VIXRegimeManager`` is stateful (cache + optional yfinance handles), so
+# multiple instances would duplicate network calls and diverge on regime
+# detection. Expose a thread-safe singleton for callers — chiefly the ML
+# signal generator — that only need read-only regime information.
+
+import threading as _threading  # noqa: E402 — late import keeps header tidy
+
+_GLOBAL_VIX_MANAGER: Optional["VIXRegimeManager"] = None
+_GLOBAL_VIX_LOCK = _threading.Lock()
+
+
+def get_global_vix_manager() -> "VIXRegimeManager":
+    """
+    Return the process-wide :class:`VIXRegimeManager` singleton.
+
+    The instance uses the default cache window (5 minutes) and re-uses
+    whichever data source is available. Safe to call from any thread.
+    """
+    global _GLOBAL_VIX_MANAGER
+    if _GLOBAL_VIX_MANAGER is None:
+        with _GLOBAL_VIX_LOCK:
+            if _GLOBAL_VIX_MANAGER is None:
+                _GLOBAL_VIX_MANAGER = VIXRegimeManager()
+    return _GLOBAL_VIX_MANAGER
+
+
+def is_crisis_regime() -> bool:
+    """
+    Return ``True`` when the current VIX state is classified as PANIC.
+
+    Catches every exception — a crisis check must never take down a caller.
+    In the failure path we return ``False`` (fail-open) so a transient data
+    outage does not silently halt all ML-driven trading.
+    """
+    try:
+        state = get_global_vix_manager().get_current_state()
+    except Exception:  # pragma: no cover — defensive: yfinance etc. failures
+        return False
+    return state.regime is VIXRegime.PANIC

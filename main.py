@@ -17,7 +17,7 @@ try:
 except ImportError:  # pragma: no cover
     fcntl = None  # type: ignore[assignment]
 
-from config import ApexConfig, assert_live_trading_confirmation
+from config import ApexConfig, assert_live_trading_confirmation, enforce_startup_schema
 from core.startup_trust import enforce_startup_trust
 from scripts.check_secrets import validate_secrets
 
@@ -46,8 +46,16 @@ def _acquire_singleton_lock() -> None:
 
 
 def run_startup_guards() -> None:
-    """Run hard startup guards before any trading runtime initialization."""
+    """Run hard startup guards before any trading runtime initialization.
+
+    Raises:
+        SystemExit: If the config schema validator (Round 7 / GAP-12A) reports
+            any bounds/type violation. We exit with status 1 *before* any
+            broker or data-feed handle is allocated so a mis-configured env
+            can never start trading in a half-valid state.
+    """
     validate_secrets()
+    enforce_startup_schema()
     assert_live_trading_confirmation()
     enforce_startup_trust(ApexConfig)
 

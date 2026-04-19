@@ -931,6 +931,22 @@ class AdvancedSignalGenerator:
         if self._should_retrain():
             logger.warning("⚠️ Retrain recommended")
 
+        # CRISIS regime circuit-breaker (Round 7 / GAP-8D):
+        # When the VIX manager reports PANIC we suppress ML signals entirely.
+        # Predictions trained on non-crisis distributions have poor calibration
+        # in tail regimes — better to sit flat than to trade a stale edge.
+        if bool(getattr(ApexConfig, "ML_CRISIS_BLOCK_ENABLED", True)):
+            try:
+                from risk.vix_regime_manager import is_crisis_regime
+                if is_crisis_regime():
+                    logger.warning(
+                        "ML signal suppressed for %s: VIX regime PANIC — crisis block active",
+                        symbol,
+                    )
+                    return self._empty_signal()
+            except Exception as _crisis_exc:  # pragma: no cover — defensive
+                logger.debug("Crisis-regime probe failed: %s", _crisis_exc)
+
         try:
             try:
                 parsed = parse_symbol(symbol)

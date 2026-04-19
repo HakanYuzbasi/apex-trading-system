@@ -349,11 +349,147 @@ class PortfolioRebalancer:
             'num_trades': len(trades),
             'trades': trades
         }
-        
+
         self.rebalance_history.append(event)
         self.last_rebalance_date = datetime.now()
-        
+
         logger.info(f"📝 Rebalance recorded: {len(trades)} trades")
+
+    # ─────────────────────────────────────────────────────────────────────
+    # Bar-based + drift-based trigger (Round 7 / GAP-9D)
+    # ─────────────────────────────────────────────────────────────────────
+
+    def _compute_current_weights(
+        self,
+        current_positions: Dict[str, int],
+        current_prices: Dict[str, float],
+    ) -> Tuple[Dict[str, float], float]:
+        """
+        Compute the live weight vector from positions and prices.
+
+        Args:
+            current_positions: Mapping of symbol → signed quantity.
+            current_prices: Mapping of symbol → last price.
+
+        Returns:
+            Tuple ``(weights, total_value)``. When the live portfolio is flat
+            (``total_value == 0``) weights are all 0.0 and callers should skip
+            drift-based rebalance logic.
+        """
+        values: Dict[str, float] = {}
+        for sym, qty in current_positions.items():
+            price = float(current_prices.get(sym, 0.0) or 0.0)
+            qty_f = float(qty or 0.0)
+            if price <= 0.0 or qty_f == 0.0:
+                continue
+            values[sym] = abs(qty_f) * price
+        total = float(sum(values.values()))
+        if total <= 0.0:
+            return {sym: 0.0 for sym in current_positions}, 0.0
+        return {sym: v / total for sym, v in values.items()}, total
+
+    def should_rebalance_bar(
+        self,
+        bar_index: int,
+        *,
+        last_rebalance_bar: int,
+        current_positions: Dict[str, int],
+        current_prices: Dict[str, float],
+        target_weights: Dict[str, float],
+        interval_bars: int,
+        drift_threshold: float,
+    ) -> Tuple[bool, str, Dict[str, float]]:
+        """
+        Decide whether to rebalance on the current loop cycle.
+
+        Combines the two triggers the ROI audit spec calls for:
+
+        1. **Time-based** — fire every ``interval_bars`` cycles since the last
+           rebalance. ``interval_bars <= 0`` disables this leg.
+        2. **Threshold-based** — fire when *any* position weight drifts by
+           more than ``drift_threshold`` from its target. ``drift_threshold
+           <= 0`` disables this leg.
+
+        Args:
+            bar_index: Current execution-loop bar counter (monotonic).
+            last_rebalance_bar: Bar index of the previous rebalance.
+            current_positions: Mapping of symbol → quantity.
+            current_prices: Mapping of symbol → price.
+            target_weights: Mapping of symbol → desired weight (sum ≈ 1.0).
+            interval_bars: Time-trigger period in bars.
+            drift_threshold: Maximum tolerated |target − current| weight gap.
+
+        Returns:
+            Tuple ``(should_rebalance, reason, live_weights)``. ``reason`` is a
+            human-readable explanation suitable for logging. ``live_weights``
+            holds the current weight vector and is useful for the INFO log
+            the spec requires before/after a rebalance.
+
+        Raises:
+            ValueError: If ``bar_index`` or ``last_rebalance_bar`` is negative.
+        """
+        if bar_index < 0 or last_rebalance_bar < 0:
+            raise ValueError(
+                f"bar indices must be non-negative (got bar_index={bar_index}, "
+                f"last_rebalance_bar={last_rebalance_bar})"
+            )
+
+        live_weights, total_value = self._compute_current_weights(
+            current_positions, current_prices
+        )
+
+        # Time-based trigger
+        if interval_bars > 0:
+            bars_since = bar_index - last_rebalance_bar
+            if bars_since >= interval_bars:
+                return (
+                    True,
+                    f"time-trigger: {bars_since} bars since last rebalance "
+                    f"(interval={interval_bars})",
+                    live_weights,
+                )
+
+        # Threshold-based trigger — only meaningful when we hold positions
+        if drift_threshold > 0.0 and total_value > 0.0 and target_weights:
+            max_drift_sym = ""
+            max_drift = 0.0
+            for sym, target_w in target_weights.items():
+                current_w = live_weights.get(sym, 0.0)
+                drift = abs(float(target_w) - float(current_w))
+                if drift > max_drift:
+                    max_drift = drift
+                    max_drift_sym = sym
+            if max_drift > drift_threshold:
+                return (
+                    True,
+                    f"drift-trigger: {max_drift_sym} drift={max_drift:.3f} "
+                    f"> threshold={drift_threshold:.3f}",
+                    live_weights,
+                )
+
+        return False, "no trigger", live_weights
+
+    def log_rebalance_event(
+        self,
+        before: Dict[str, float],
+        after: Dict[str, float],
+        reason: str,
+    ) -> None:
+        """
+        Emit a structured INFO log of a rebalance event as the spec requires.
+
+        Args:
+            before: Weight vector prior to trading.
+            after: Target (post-rebalance) weight vector.
+            reason: Human-readable trigger reason (from ``should_rebalance_bar``).
+        """
+        fmt = lambda vec: {k: round(float(v), 4) for k, v in vec.items()}
+        logger.info(
+            "🔄 rebalance event=%s before=%s after=%s",
+            reason,
+            fmt(before),
+            fmt(after),
+        )
 
 
 if __name__ == "__main__":
