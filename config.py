@@ -2098,7 +2098,11 @@ class ApexConfig:
     # ── Round-4: Walk-forward validation (backtesting/) ─────────────────────
     # Defaults chosen for daily-bar runs: 18 months IS / 3 months OOS / 3 months step.
     WF_IS_BARS: int = int(os.getenv("APEX_WF_IS_BARS", "378"))
-    WF_OOS_BARS: int = int(os.getenv("APEX_WF_OOS_BARS", "63"))
+    # Round 10 / PROBLEM 3: 126-bar (6-month) OOS window by default so each
+    # fold accumulates enough daily returns for a meaningful Sharpe. The
+    # prior 63-bar default produced < 5 trades per fold and Sharpe = NaN
+    # for every fold across 2020-2024.
+    WF_OOS_BARS: int = int(os.getenv("APEX_WF_OOS_BARS", "126"))
     WF_STEP_BARS: int = int(os.getenv("APEX_WF_STEP_BARS", "63"))
 
     # ── Adaptive Position Sizer (risk/adaptive_position_sizer.py) ────────────
@@ -2390,6 +2394,19 @@ class ApexConfig:
     # entirely; this switch lets operators disable the suppression for research.
     ML_CRISIS_BLOCK_ENABLED: bool = (
         os.getenv("APEX_ML_CRISIS_BLOCK_ENABLED", "true").lower() == "true"
+    )
+
+    # ── ML entry-gate threshold (Round 10 / PROBLEM 1) ───────────────────────
+    # Minimum ``|primary_signal|`` magnitude required before an ML-driven
+    # entry is taken. The default 0.19 is the P40 of the 2023 AAPL/MSFT/GOOGL
+    # |primary_signal| distribution produced by
+    # ``scripts.calibrate_ml_threshold``; with the previous static 0.30 gate
+    # roughly 80% of valid signals were filtered, producing only 13 trades
+    # over the 2023 window. Lowering to the P40 of the observed distribution
+    # lets ~60% of above-noise signals through while still rejecting the
+    # bottom quartile.
+    ML_CONFIDENCE_THRESHOLD: float = float(
+        os.getenv("APEX_ML_CONFIDENCE_THRESHOLD", "0.19")
     )
 
     # ── Label-Leakage Audit (Round 8 / GAP-8E) ───────────────────────────────
@@ -3035,6 +3052,7 @@ CONFIG_BOUNDS: Dict[str, _BoundSpec] = {
     "ML_MODEL_PATH_TRENDING": (str, None),
     "ML_MODEL_PATH_MEAN_REV": (str, None),
     "ML_MODEL_PATH_VOLATILE": (str, None),
+    "ML_CONFIDENCE_THRESHOLD": (float, (0.0, 1.0)),
     "ML_FEATURE_MAX_AGE_SECONDS": (float, (0.0, 86400.0)),
 
     # Circuit breaker

@@ -1,48 +1,54 @@
 """
 scripts/train_baseline_models.py
 
-Train a single baseline gradient-boosting classifier on real OHLCV data
-from yfinance and save it under the three per-regime paths the backtester
-and live trader route through
-(:attr:`config.ApexConfig.ML_MODEL_PATH_TRENDING` / ``MEAN_REV`` /
-``VOLATILE``). Using the same model across all three regime slots is a
-deliberate starting point; per-regime tuning is a later optimisation and
-out of scope for the Round 9 gap fix.
+Round 10 — Regime-specialised baseline ML training pipeline.
 
-Pipeline:
+Three gradient-boosting classifiers are trained from the same feature
+matrix (AAPL + MSFT + GOOGL OHLCV, 2018-01-01 → 2022-12-31) but on
+three disjoint regime subsets so the
+:class:`backtesting.real_signal_adapter.RealSignalAdapter` can route
+each production bar to the model most relevant for that market regime:
 
-1. Download daily OHLCV for ``AAPL`` + ``MSFT`` + ``GOOGL`` spanning
-   ``2018-01-01 → 2022-12-31`` through ``yfinance``.
-2. Build the 8-column feature matrix defined by
-   :func:`backtesting.real_signal_adapter.compute_ml_features` — RSI(14),
-   MACD(12/26/9), ATR(14), volume_ratio, price_vs_sma20 and
-   price_vs_sma50.
-3. Label each row ``+1`` when the forward-5-bar log return is positive
-   and ``-1`` otherwise. Neutral bars (zero forward return) are dropped.
-4. Concatenate across symbols, sort by timestamp, and run
-   :func:`models.ml_validator.leakage_check` **before** ``fit()``. If the
-   audit fails the script aborts with a non-zero exit code.
-5. Train a :class:`sklearn.ensemble.GradientBoostingClassifier` on the
-   first 80 % of the time-ordered data, evaluate on the held-out 20 %.
-6. Save the fitted model plus training-baseline stats (mean + std of the
-   training-set probability output) as a pickled dict to all three
-   ``ApexConfig.ML_MODEL_PATH_*`` targets. The backtester's adapter
-   (:class:`backtesting.real_signal_adapter.RealSignalAdapter`) expects
-   the payload shape ``{"model": estimator, "baseline_stats": {...}}``
-   for GAP-8B drift detection.
+* ``TRENDING``  : rows where ADX(14) > ``REGIME_ADX_TRENDING_MIN`` (default 25).
+* ``MEAN_REV``  : rows where ADX(14) < ``REGIME_ADX_MEAN_REV_MAX`` (default 20)
+                  AND ATR(14) / close < ``REGIME_VOL_MAX`` (default 0.015).
+* ``VOLATILE``  : rows where ATR(14) / close >= ``REGIME_VOL_MAX``.
 
-The script prints a reproducibility banner (random seed, data hash,
-feature counts, class balance, metrics, saved paths) so the Round 9
-report can inline the output verbatim.
+Any regime subset with fewer than
+:data:`MIN_REGIME_SAMPLES` (default 200) rows falls back to the
+full-dataset model and a WARNING is emitted so the operator can inspect
+the regime balance.
+
+For each regime the pipeline:
+
+1. Computes ADX(14) and ATR(14) on the per-symbol OHLCV.
+2. Joins the pre-existing 8-feature matrix
+   (``backtesting.real_signal_adapter.compute_ml_features``) with the
+   label (``sign(forward 5-bar log-return)``) and the regime tag.
+3. Sorts strictly by timestamp (no random shuffle).
+4. Runs :func:`models.ml_validator.leakage_check` with
+   ``raise_on_fail=True`` on the regime subset **before** ``fit()``.
+5. Trains
+   :class:`sklearn.ensemble.GradientBoostingClassifier` with a fixed
+   seed and an 80 % / 20 % time-ordered train/test split.
+6. Saves ``{"model", "baseline_stats", "feature_names",
+   "training_metadata"}`` to the corresponding
+   ``ApexConfig.ML_MODEL_PATH_*`` target (or the per-regime default
+   path under ``models/saved_advanced/``).
+
+All regime-boundary thresholds are tunable via the
+``APEX_REGIME_*`` environment variables so the Round 10 regime
+definitions are not hard-coded magic numbers.
 """
 from __future__ import annotations
 
 import hashlib
+import logging
 import os
 import pickle
 import sys
 from pathlib import Path
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 import pandas as pd
@@ -50,7 +56,6 @@ import yfinance as yf
 from sklearn.ensemble import GradientBoostingClassifier
 from sklearn.metrics import accuracy_score, log_loss
 
-# Make the project root importable regardless of CWD.
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from backtesting.real_signal_adapter import ML_FEATURE_NAMES, compute_ml_features
@@ -58,6 +63,11 @@ from config import ApexConfig
 from core.logging_config import setup_logging
 from models.ml_validator import leakage_check
 
+logger = logging.getLogger(__name__)
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Configuration constants — overridable via env.
+# ─────────────────────────────────────────────────────────────────────────────
 
 SYMBOLS: Tuple[str, ...] = ("AAPL", "MSFT", "GOOGL")
 TRAIN_START: str = "2018-01-01"
@@ -65,23 +75,47 @@ TRAIN_END: str = "2023-01-01"  # yfinance end is exclusive
 FORWARD_HORIZON: int = 5
 RANDOM_STATE: int = 42
 TRAIN_FRACTION: float = 0.80
+ADX_PERIOD: int = int(os.getenv("APEX_REGIME_ADX_PERIOD", "14"))
+ATR_PERIOD: int = int(os.getenv("APEX_REGIME_ATR_PERIOD", "14"))
+ADX_TRENDING_MIN: float = float(os.getenv("APEX_REGIME_ADX_TRENDING_MIN", "25.0"))
+ADX_MEAN_REV_MAX: float = float(os.getenv("APEX_REGIME_ADX_MEAN_REV_MAX", "20.0"))
+VOL_MAX: float = float(os.getenv("APEX_REGIME_VOL_MAX", "0.015"))
+MIN_REGIME_SAMPLES: int = int(os.getenv("APEX_MIN_REGIME_SAMPLES", "200"))
 
+REGIME_TRENDING: str = "TRENDING"
+REGIME_MEAN_REV: str = "MEAN_REV"
+REGIME_VOLATILE: str = "VOLATILE"
+
+REGIME_TO_PATH_ATTR: Dict[str, str] = {
+    REGIME_TRENDING: "ML_MODEL_PATH_TRENDING",
+    REGIME_MEAN_REV: "ML_MODEL_PATH_MEAN_REV",
+    REGIME_VOLATILE: "ML_MODEL_PATH_VOLATILE",
+}
+REGIME_TO_DEFAULT_BASENAME: Dict[str, str] = {
+    REGIME_TRENDING: "baseline_trending.pkl",
+    REGIME_MEAN_REV: "baseline_mean_rev.pkl",
+    REGIME_VOLATILE: "baseline_volatile.pkl",
+}
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Data ingest + feature engineering
+# ─────────────────────────────────────────────────────────────────────────────
 
 def fetch_yf_ohlcv(symbols: Tuple[str, ...], start: str, end: str) -> Dict[str, pd.DataFrame]:
     """
     Download daily OHLCV bars via yfinance.
 
     Args:
-        symbols: Tickers to download.
+        symbols: Tickers.
         start: Inclusive start date (YYYY-MM-DD).
         end: Exclusive end date (YYYY-MM-DD).
 
     Returns:
-        ``{symbol: DataFrame}``. Each frame has columns ``Open``, ``High``,
-        ``Low``, ``Close``, ``Volume`` indexed by a tz-naive DatetimeIndex.
+        ``{symbol: DataFrame}`` with columns ``Open``/``High``/``Low``/``Close``/``Volume``.
 
     Raises:
-        RuntimeError: If every symbol returned zero bars.
+        RuntimeError: If every symbol returns zero bars.
     """
     panel: Dict[str, pd.DataFrame] = {}
     for sym in symbols:
@@ -98,31 +132,130 @@ def fetch_yf_ohlcv(symbols: Tuple[str, ...], start: str, end: str) -> Dict[str, 
     return panel
 
 
+def compute_adx(
+    high: pd.Series, low: pd.Series, close: pd.Series, period: int,
+) -> pd.Series:
+    """
+    Classic Wilder ADX implementation — same convention as
+    :meth:`models.base_signal_generator.BaseSignalGenerator.calculate_adx`.
+
+    Args:
+        high: High series.
+        low: Low series.
+        close: Close series.
+        period: Smoothing period (default 14).
+
+    Returns:
+        ADX series, indexed like ``close``. Warm-up rows remain NaN until
+        the rolling window is fully populated.
+    """
+    high = high.astype(float)
+    low = low.astype(float)
+    close = close.astype(float)
+
+    plus_dm = high.diff().copy()
+    minus_dm = (-low.diff()).copy()
+    plus_dm[plus_dm < 0.0] = 0.0
+    minus_dm[minus_dm < 0.0] = 0.0
+
+    prev_close = close.shift(1)
+    tr = pd.concat(
+        [(high - low).abs(), (high - prev_close).abs(), (low - prev_close).abs()],
+        axis=1,
+    ).max(axis=1)
+
+    tr_sum = tr.rolling(window=period, min_periods=period).sum()
+    plus_di = 100.0 * (plus_dm.rolling(window=period, min_periods=period).sum() / tr_sum)
+    minus_di = 100.0 * (minus_dm.rolling(window=period, min_periods=period).sum() / tr_sum)
+    dx = 100.0 * (plus_di - minus_di).abs() / (plus_di + minus_di + 1e-10)
+    return dx.rolling(window=period, min_periods=period).mean()
+
+
+def compute_atr(
+    high: pd.Series, low: pd.Series, close: pd.Series, period: int,
+) -> pd.Series:
+    """Wilder ATR — EMA of the true-range."""
+    high = high.astype(float)
+    low = low.astype(float)
+    close = close.astype(float)
+    prev_close = close.shift(1)
+    tr = pd.concat(
+        [(high - low).abs(), (high - prev_close).abs(), (low - prev_close).abs()],
+        axis=1,
+    ).max(axis=1)
+    return tr.ewm(alpha=1.0 / period, adjust=False).mean()
+
+
+def classify_regime(adx: float, vol_ratio: float) -> str:
+    """
+    Map ``(ADX, ATR/price)`` to one of the three regime labels.
+
+    Args:
+        adx: ADX(14) value at the bar.
+        vol_ratio: ATR(14) / close at the bar.
+
+    Returns:
+        ``"TRENDING"``, ``"MEAN_REV"`` or ``"VOLATILE"``. Bars that do
+        not satisfy any rule (e.g. ADX between 20 and 25 with low
+        volatility) fall back to ``"TRENDING"`` because that is the
+        closest non-degenerate regime.
+    """
+    if vol_ratio is None or not np.isfinite(vol_ratio):
+        return REGIME_TRENDING
+    if vol_ratio >= VOL_MAX:
+        return REGIME_VOLATILE
+    if adx is None or not np.isfinite(adx):
+        return REGIME_TRENDING
+    if adx > ADX_TRENDING_MIN:
+        return REGIME_TRENDING
+    if adx < ADX_MEAN_REV_MAX and vol_ratio < VOL_MAX:
+        return REGIME_MEAN_REV
+    return REGIME_TRENDING
+
+
 def build_training_frame(
-    panel: Dict[str, pd.DataFrame],
-    *,
-    horizon: int,
+    panel: Dict[str, pd.DataFrame], *, horizon: int,
 ) -> pd.DataFrame:
     """
-    Stitch per-symbol feature + label rows into a single time-ordered frame.
+    Stitch per-symbol features + labels + regime tags into one time-ordered
+    frame.
 
     Args:
         panel: ``{symbol: OHLCV DataFrame}``.
-        horizon: Forward return horizon in bars.
+        horizon: Forward-return horizon (bars).
 
     Returns:
-        DataFrame indexed by timestamp with columns
-        ``[*ML_FEATURE_NAMES, "label", "symbol"]``. Sorted by index so
-        :func:`leakage_check` can validate monotonic time ordering.
+        DataFrame with ``[*ML_FEATURE_NAMES, "label", "symbol", "regime",
+        "adx", "vol_ratio"]`` sorted by index.
     """
     frames: List[pd.DataFrame] = []
     for sym, ohlcv in panel.items():
         feats = compute_ml_features(ohlcv)
         close = ohlcv["Close"].astype(float)
+        high = ohlcv["High"].astype(float)
+        low = ohlcv["Low"].astype(float)
+
+        adx = compute_adx(high, low, close, ADX_PERIOD).rename("adx")
+        atr = compute_atr(high, low, close, ATR_PERIOD)
+        vol_ratio = (atr / close).rename("vol_ratio")
+
         fwd_return = np.log(close.shift(-horizon) / close)
-        label = np.sign(fwd_return).replace(0.0, np.nan)
-        joined = feats.join(label.rename("label"), how="inner").dropna()
-        joined = joined.assign(symbol=sym)
+        label = np.sign(fwd_return).replace(0.0, np.nan).rename("label")
+
+        joined = (
+            feats
+            .join(adx, how="inner")
+            .join(vol_ratio, how="inner")
+            .join(label, how="inner")
+            .dropna()
+        )
+        joined = joined.assign(
+            symbol=sym,
+            regime=[
+                classify_regime(a, v) for a, v in
+                zip(joined["adx"].tolist(), joined["vol_ratio"].tolist())
+            ],
+        )
         frames.append(joined)
     combined = pd.concat(frames, axis=0).sort_index()
     combined["label"] = combined["label"].astype(int)
@@ -130,34 +263,25 @@ def build_training_frame(
 
 
 def digest_panel(panel: Dict[str, pd.DataFrame]) -> str:
-    """Deterministic SHA256 of the concatenated Close series (for audit)."""
+    """Deterministic SHA256 of the concatenated Close series."""
     hasher = hashlib.sha256()
     for sym in sorted(panel.keys()):
-        arr = panel[sym]["Close"].to_numpy().tobytes()
         hasher.update(sym.encode("utf-8"))
-        hasher.update(arr)
+        hasher.update(panel[sym]["Close"].to_numpy().tobytes())
     return hasher.hexdigest()[:16]
 
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Training
+# ─────────────────────────────────────────────────────────────────────────────
 
 def train_model(
     X_train: pd.DataFrame, y_train: pd.Series,
 ) -> GradientBoostingClassifier:
-    """
-    Fit a scikit-learn GradientBoostingClassifier.
-
-    Args:
-        X_train: Training feature frame (columns == :data:`ML_FEATURE_NAMES`).
-        y_train: Training label Series in ``{-1, +1}``.
-
-    Returns:
-        Fitted :class:`GradientBoostingClassifier`.
-    """
+    """Fit a ``GradientBoostingClassifier`` with fixed seed."""
     model = GradientBoostingClassifier(
-        n_estimators=200,
-        max_depth=3,
-        learning_rate=0.05,
-        subsample=0.8,
-        random_state=RANDOM_STATE,
+        n_estimators=200, max_depth=3, learning_rate=0.05,
+        subsample=0.8, random_state=RANDOM_STATE,
     )
     model.fit(X_train.to_numpy(), y_train.to_numpy())
     return model
@@ -166,22 +290,7 @@ def train_model(
 def baseline_stats_from(
     model: GradientBoostingClassifier, X_train: pd.DataFrame,
 ) -> Dict[str, float]:
-    """
-    Record mean/std of the adapter's signed score on the training set.
-
-    The adapter converts ``predict_proba`` into a ``[-1, +1]`` score via
-    ``(p_up - 0.5) * 2``. Tracking its training distribution lets
-    :class:`~backtesting.real_signal_adapter.RealSignalAdapter` reject
-    production scores that drift too far from calibration (GAP-8B).
-
-    Args:
-        model: Fitted classifier.
-        X_train: Training feature frame.
-
-    Returns:
-        Dict with ``mean`` and ``std`` of the signed score on the training
-        set.
-    """
+    """Record mean/std of the signed score on the training set."""
     proba = model.predict_proba(X_train.to_numpy())
     classes = list(model.classes_)
     up_idx = classes.index(1) if 1 in classes else len(classes) - 1
@@ -194,23 +303,113 @@ def baseline_stats_from(
     }
 
 
-def resolve_save_paths() -> List[str]:
+def _evaluate(
+    model: GradientBoostingClassifier,
+    X: pd.DataFrame, y: pd.Series,
+) -> Tuple[float, float]:
+    """Return ``(accuracy, log_loss)`` for ``(X, y)``."""
+    if len(X) == 0:
+        return float("nan"), float("nan")
+    pred = model.predict(X.to_numpy())
+    proba = model.predict_proba(X.to_numpy())
+    acc = float(accuracy_score(y, pred))
+    ll = float(log_loss(y, proba, labels=list(model.classes_)))
+    return acc, ll
+
+
+def train_on_subset(
+    subset: pd.DataFrame,
+    feature_cols: List[str],
+    *,
+    label_name: str,
+    fallback_model: Optional[GradientBoostingClassifier],
+    fallback_stats: Optional[Dict[str, float]],
+) -> Dict[str, Any]:
     """
-    Resolve the three per-regime save paths, using sensible defaults when
-    the corresponding ApexConfig fields are empty.
+    Train a GBM on ``subset`` or defer to ``fallback_model`` when the
+    subset is below :data:`MIN_REGIME_SAMPLES`. Returns the persisted
+    payload shape.
     """
+    n = len(subset)
+    if n < MIN_REGIME_SAMPLES:
+        logger.warning(
+            "Regime %s has only %d samples (< %d). Falling back to full-dataset model.",
+            label_name, n, MIN_REGIME_SAMPLES,
+        )
+        if fallback_model is None or fallback_stats is None:
+            raise RuntimeError(
+                f"Fallback model required for regime {label_name!r} but not provided"
+            )
+        return {
+            "model": fallback_model,
+            "baseline_stats": fallback_stats,
+            "feature_names": feature_cols,
+            "training_metadata": {
+                "regime": label_name,
+                "fell_back_to_full_dataset": True,
+                "subset_rows": n,
+                "min_regime_samples": MIN_REGIME_SAMPLES,
+            },
+        }
+
+    ordered = subset.sort_index()
+    leakage_check(
+        ordered[feature_cols + ["label"]],
+        label_col="label",
+        feature_cols=feature_cols,
+        reference_col=None,
+        max_future_shift=FORWARD_HORIZON,
+        leak_corr_threshold=0.98,
+        raise_on_fail=True,
+    )
+
+    split_idx = int(len(ordered) * TRAIN_FRACTION)
+    train_df = ordered.iloc[:split_idx]
+    test_df = ordered.iloc[split_idx:]
+    X_train = train_df[feature_cols]
+    y_train = train_df["label"]
+    X_test = test_df[feature_cols]
+    y_test = test_df["label"]
+
+    model = train_model(X_train, y_train)
+    train_acc, train_ll = _evaluate(model, X_train, y_train)
+    test_acc, test_ll = _evaluate(model, X_test, y_test)
+    baseline = baseline_stats_from(model, X_train)
+
+    return {
+        "model": model,
+        "baseline_stats": baseline,
+        "feature_names": feature_cols,
+        "training_metadata": {
+            "regime": label_name,
+            "fell_back_to_full_dataset": False,
+            "subset_rows": n,
+            "train_rows": int(len(train_df)),
+            "test_rows": int(len(test_df)),
+            "train_first_date": str(train_df.index[0].date()),
+            "train_last_date": str(train_df.index[-1].date()),
+            "test_first_date": str(test_df.index[0].date()),
+            "test_last_date": str(test_df.index[-1].date()),
+            "train_accuracy": train_acc,
+            "test_accuracy": test_acc,
+            "train_log_loss": train_ll,
+            "test_log_loss": test_ll,
+            "random_state": RANDOM_STATE,
+            "train_fraction": TRAIN_FRACTION,
+        },
+    }
+
+
+def resolve_save_path(regime: str) -> str:
+    """Resolve the on-disk save path for ``regime``."""
     repo_root = Path(__file__).resolve().parents[1]
     default_dir = repo_root / "models" / "saved_advanced"
     default_dir.mkdir(parents=True, exist_ok=True)
-    paths: List[str] = []
-    for attr, default_name in (
-        ("ML_MODEL_PATH_TRENDING", "baseline_trending.pkl"),
-        ("ML_MODEL_PATH_MEAN_REV", "baseline_mean_rev.pkl"),
-        ("ML_MODEL_PATH_VOLATILE", "baseline_volatile.pkl"),
-    ):
-        configured = str(getattr(ApexConfig, attr, "") or "").strip()
-        paths.append(configured if configured else str(default_dir / default_name))
-    return paths
+    attr = REGIME_TO_PATH_ATTR[regime]
+    configured = str(getattr(ApexConfig, attr, "") or "").strip()
+    if configured:
+        return configured
+    return str(default_dir / REGIME_TO_DEFAULT_BASENAME[regime])
 
 
 def save_payload(path: str, payload: Dict[str, Any]) -> None:
@@ -220,41 +419,52 @@ def save_payload(path: str, payload: Dict[str, Any]) -> None:
         pickle.dump(payload, f, protocol=pickle.HIGHEST_PROTOCOL)
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Main
+# ─────────────────────────────────────────────────────────────────────────────
+
 def main() -> int:
     setup_logging(level="WARNING", log_file=None, json_format=False, console_output=True)
 
     print("=" * 72)
-    print(" Round 9 — Baseline ML model training")
+    print(" Round 10 — Regime-specialised ML training")
     print("=" * 72)
-    print(f" Symbols        : {list(SYMBOLS)}")
-    print(f" Training span  : {TRAIN_START} → {TRAIN_END}")
-    print(f" Horizon        : {FORWARD_HORIZON} bars (sign of fwd log-return)")
-    print(f" Random seed    : {RANDOM_STATE}")
+    print(f" Symbols           : {list(SYMBOLS)}")
+    print(f" Training span     : {TRAIN_START} -> {TRAIN_END}")
+    print(f" Horizon           : {FORWARD_HORIZON} bars")
+    print(f" Random seed       : {RANDOM_STATE}")
+    print(f" ADX period        : {ADX_PERIOD}")
+    print(f" ATR period        : {ATR_PERIOD}")
+    print(f" ADX trending min  : {ADX_TRENDING_MIN}")
+    print(f" ADX mean-rev max  : {ADX_MEAN_REV_MAX}")
+    print(f" Vol ratio max     : {VOL_MAX}")
+    print(f" Min regime samples: {MIN_REGIME_SAMPLES}")
     print()
 
     print(" Fetching OHLCV from yfinance ...")
     panel = fetch_yf_ohlcv(SYMBOLS, TRAIN_START, TRAIN_END)
     for sym, df in panel.items():
-        print(f"   {sym}: {len(df)} bars  {df.index[0].date()} → {df.index[-1].date()}")
+        print(f"   {sym}: {len(df)} bars  {df.index[0].date()} -> {df.index[-1].date()}")
     print(f" Panel SHA-16  : {digest_panel(panel)}")
     print()
 
-    print(" Building feature matrix ...")
+    print(" Building feature matrix (with regime labels) ...")
     combined = build_training_frame(panel, horizon=FORWARD_HORIZON)
     feature_cols = list(ML_FEATURE_NAMES)
-    print(f"   rows           : {len(combined)}")
-    print(f"   features       : {feature_cols}")
-    up_count = int((combined["label"] == 1).sum())
-    down_count = int((combined["label"] == -1).sum())
-    total = up_count + down_count
-    up_ratio = up_count / total if total else 0.0
-    print(f"   up labels      : {up_count} ({up_ratio:.3%})")
-    print(f"   down labels    : {down_count} ({1.0 - up_ratio:.3%})")
+    total = len(combined)
+    print(f"   rows              : {total}")
+    print(f"   features          : {feature_cols}")
+    regime_counts = combined["regime"].value_counts().to_dict()
+    for regime in (REGIME_TRENDING, REGIME_MEAN_REV, REGIME_VOLATILE):
+        n = int(regime_counts.get(regime, 0))
+        pct = n / total if total else 0.0
+        print(f"   rows {regime:<9} : {n:>5} ({pct:.2%})")
     print()
 
-    # ── Leakage audit — MUST run before fit() ────────────────────────────────
-    print(" Running leakage_check (raise_on_fail=True) ...")
-    audit = leakage_check(
+    # ── Pre-compute the full-dataset "fallback" model first so any under- ──
+    # populated regime can inherit from it.
+    print(" Training full-dataset fallback model (audit + fit) ...")
+    leakage_check(
         combined[feature_cols + ["label"]],
         label_col="label",
         feature_cols=feature_cols,
@@ -263,82 +473,75 @@ def main() -> int:
         leak_corr_threshold=0.98,
         raise_on_fail=True,
     )
-    print(f"   leakage_check.ok   : {audit['ok']}")
-    print(f"   leaky_features     : {audit['leaky_features'] or '{}'}")
+    split_idx_full = int(total * TRAIN_FRACTION)
+    X_full_train = combined.iloc[:split_idx_full][feature_cols]
+    y_full_train = combined.iloc[:split_idx_full]["label"]
+    X_full_test = combined.iloc[split_idx_full:][feature_cols]
+    y_full_test = combined.iloc[split_idx_full:]["label"]
+    full_model = train_model(X_full_train, y_full_train)
+    full_stats = baseline_stats_from(full_model, X_full_train)
+    full_train_acc, full_train_ll = _evaluate(full_model, X_full_train, y_full_train)
+    full_test_acc, full_test_ll = _evaluate(full_model, X_full_test, y_full_test)
+    print(f"   full rows        : {total} (train {len(X_full_train)} / test {len(X_full_test)})")
+    print(f"   full train acc   : {full_train_acc:.4f}  (log-loss {full_train_ll:.4f})")
+    print(f"   full test  acc   : {full_test_acc:.4f}  (log-loss {full_test_ll:.4f})")
+    print(f"   full baseline    : mean {full_stats['mean']:.4f}  std {full_stats['std']:.4f}")
     print()
 
-    # ── Time-ordered train/test split ────────────────────────────────────────
-    split_idx = int(len(combined) * TRAIN_FRACTION)
-    train_df = combined.iloc[:split_idx]
-    test_df = combined.iloc[split_idx:]
-    X_train = train_df[feature_cols]
-    y_train = train_df["label"]
-    X_test = test_df[feature_cols]
-    y_test = test_df["label"]
-    print(f" Train rows     : {len(train_df)}  ({train_df.index[0].date()} → {train_df.index[-1].date()})")
-    print(f" Test  rows     : {len(test_df)}   ({test_df.index[0].date()} → {test_df.index[-1].date()})")
-    print()
+    # ── Train each regime ─────────────────────────────────────────────────────
+    regime_results: Dict[str, Dict[str, Any]] = {}
+    for regime in (REGIME_TRENDING, REGIME_MEAN_REV, REGIME_VOLATILE):
+        subset = combined[combined["regime"] == regime].copy()
+        print("-" * 72)
+        print(f" Training regime: {regime}")
+        print(f"   subset rows    : {len(subset)}")
+        payload = train_on_subset(
+            subset=subset,
+            feature_cols=feature_cols,
+            label_name=regime,
+            fallback_model=full_model,
+            fallback_stats=full_stats,
+        )
+        meta = payload.get("training_metadata", {})
+        if meta.get("fell_back_to_full_dataset"):
+            print(f"   status         : FELL BACK to full-dataset model "
+                  f"(needed >= {MIN_REGIME_SAMPLES}, got {meta.get('subset_rows')})")
+        else:
+            print(f"   status         : trained ({meta.get('train_rows')} train "
+                  f"/ {meta.get('test_rows')} test rows)")
+            print(f"   train accuracy : {meta.get('train_accuracy'):.4f}  "
+                  f"(log-loss {meta.get('train_log_loss'):.4f})")
+            print(f"   test  accuracy : {meta.get('test_accuracy'):.4f}  "
+                  f"(log-loss {meta.get('test_log_loss'):.4f})")
+            print(f"   baseline stats : mean {payload['baseline_stats']['mean']:.4f}  "
+                  f"std {payload['baseline_stats']['std']:.4f}")
 
-    # ── Train ─────────────────────────────────────────────────────────────────
-    print(" Training GradientBoostingClassifier ...")
-    model = train_model(X_train, y_train)
-    print(" Done.")
-    print()
+        # Attach common metadata.
+        payload["training_metadata"]["symbols"] = list(SYMBOLS)
+        payload["training_metadata"]["train_start"] = TRAIN_START
+        payload["training_metadata"]["train_end"] = TRAIN_END
+        payload["training_metadata"]["horizon"] = FORWARD_HORIZON
+        payload["training_metadata"]["panel_sha16"] = digest_panel(panel)
+        payload["training_metadata"]["adx_period"] = ADX_PERIOD
+        payload["training_metadata"]["atr_period"] = ATR_PERIOD
+        payload["training_metadata"]["adx_trending_min"] = ADX_TRENDING_MIN
+        payload["training_metadata"]["adx_mean_rev_max"] = ADX_MEAN_REV_MAX
+        payload["training_metadata"]["vol_max"] = VOL_MAX
+        payload["training_metadata"]["min_regime_samples"] = MIN_REGIME_SAMPLES
 
-    # ── Evaluate ──────────────────────────────────────────────────────────────
-    y_train_pred = model.predict(X_train.to_numpy())
-    y_test_pred = model.predict(X_test.to_numpy())
-    proba_train = model.predict_proba(X_train.to_numpy())
-    proba_test = model.predict_proba(X_test.to_numpy())
-    train_acc = accuracy_score(y_train, y_train_pred)
-    test_acc = accuracy_score(y_test, y_test_pred)
-    train_ll = log_loss(y_train, proba_train, labels=list(model.classes_))
-    test_ll = log_loss(y_test, proba_test, labels=list(model.classes_))
-    print(" Metrics")
-    print(" " + "-" * 68)
-    print(f"   train accuracy : {train_acc:.4f}   log-loss {train_ll:.4f}")
-    print(f"   test  accuracy : {test_acc:.4f}   log-loss {test_ll:.4f}")
-    print(f"   classes_       : {list(model.classes_)}")
-    print()
-
-    # ── Baseline stats for drift detection (GAP-8B) ──────────────────────────
-    baseline = baseline_stats_from(model, X_train)
-    print(" Baseline signed-score stats (training set)")
-    print(" " + "-" * 68)
-    print(f"   mean           : {baseline['mean']:.6f}")
-    print(f"   std            : {baseline['std']:.6f}")
-    print(f"   n_samples      : {baseline['n_samples']}")
-    print()
+        regime_results[regime] = payload
 
     # ── Persist ───────────────────────────────────────────────────────────────
-    payload: Dict[str, Any] = {
-        "model": model,
-        "baseline_stats": baseline,
-        "feature_names": feature_cols,
-        "training_metadata": {
-            "symbols": list(SYMBOLS),
-            "train_start": TRAIN_START,
-            "train_end": TRAIN_END,
-            "horizon": FORWARD_HORIZON,
-            "random_state": RANDOM_STATE,
-            "train_fraction": TRAIN_FRACTION,
-            "panel_sha16": digest_panel(panel),
-            "train_accuracy": float(train_acc),
-            "test_accuracy": float(test_acc),
-            "train_log_loss": float(train_ll),
-            "test_log_loss": float(test_ll),
-        },
-    }
-
-    save_paths = resolve_save_paths()
-    print(" Saving per-regime model copies")
+    print()
+    print(" Saving per-regime models")
     print(" " + "-" * 68)
-    for p in save_paths:
-        save_payload(p, payload)
-        print(f"   -> {p}  ({os.path.getsize(p)} bytes)")
+    for regime, payload in regime_results.items():
+        path = resolve_save_path(regime)
+        save_payload(path, payload)
+        print(f"   {regime:<9} -> {path}  ({os.path.getsize(path)} bytes)")
     print()
 
-    print(" Round 9 training complete.")
+    print(" Round 10 training complete.")
     return 0
 
 

@@ -59,6 +59,89 @@ _ML_VOLUME_LOOKBACK: int = int(getattr(ApexConfig, "ML_FEATURE_VOLUME_LOOKBACK",
 _ML_SMA_FAST: int = int(getattr(ApexConfig, "ML_FEATURE_SMA_FAST", 20))
 _ML_SMA_SLOW: int = int(getattr(ApexConfig, "ML_FEATURE_SMA_SLOW", 50))
 
+# Regime classification thresholds — identical to those in
+# ``scripts.train_baseline_models`` so bars are classified the same way
+# at training time and at inference time.
+_REGIME_ADX_PERIOD: int = int(os.getenv("APEX_REGIME_ADX_PERIOD", "14"))
+_REGIME_ATR_PERIOD: int = int(os.getenv("APEX_REGIME_ATR_PERIOD", "14"))
+_REGIME_ADX_TRENDING_MIN: float = float(
+    os.getenv("APEX_REGIME_ADX_TRENDING_MIN", "25.0")
+)
+_REGIME_ADX_MEAN_REV_MAX: float = float(
+    os.getenv("APEX_REGIME_ADX_MEAN_REV_MAX", "20.0")
+)
+_REGIME_VOL_MAX: float = float(os.getenv("APEX_REGIME_VOL_MAX", "0.015"))
+
+
+def _last_adx(high: pd.Series, low: pd.Series, close: pd.Series) -> float:
+    """Return the latest ADX(14) value or NaN when warm-up is incomplete."""
+    period = _REGIME_ADX_PERIOD
+    if len(close) < period * 2 + 1:
+        return float("nan")
+    high = high.astype(float)
+    low = low.astype(float)
+    close = close.astype(float)
+    plus_dm = high.diff().copy()
+    minus_dm = (-low.diff()).copy()
+    plus_dm[plus_dm < 0.0] = 0.0
+    minus_dm[minus_dm < 0.0] = 0.0
+    prev_close = close.shift(1)
+    tr = pd.concat(
+        [(high - low).abs(), (high - prev_close).abs(), (low - prev_close).abs()],
+        axis=1,
+    ).max(axis=1)
+    tr_sum = tr.rolling(window=period, min_periods=period).sum()
+    plus_di = 100.0 * (plus_dm.rolling(window=period, min_periods=period).sum() / tr_sum)
+    minus_di = 100.0 * (minus_dm.rolling(window=period, min_periods=period).sum() / tr_sum)
+    dx = 100.0 * (plus_di - minus_di).abs() / (plus_di + minus_di + 1e-10)
+    adx = dx.rolling(window=period, min_periods=period).mean()
+    if adx.empty:
+        return float("nan")
+    val = float(adx.iloc[-1])
+    return val if np.isfinite(val) else float("nan")
+
+
+def _last_atr_ratio(high: pd.Series, low: pd.Series, close: pd.Series) -> float:
+    """Return the latest ATR(14) / Close or NaN when warm-up is incomplete."""
+    period = _REGIME_ATR_PERIOD
+    if len(close) < period + 1:
+        return float("nan")
+    high = high.astype(float)
+    low = low.astype(float)
+    close = close.astype(float)
+    prev_close = close.shift(1)
+    tr = pd.concat(
+        [(high - low).abs(), (high - prev_close).abs(), (low - prev_close).abs()],
+        axis=1,
+    ).max(axis=1)
+    atr = tr.ewm(alpha=1.0 / period, adjust=False).mean()
+    last_atr = float(atr.iloc[-1])
+    last_close = float(close.iloc[-1])
+    if not np.isfinite(last_atr) or last_close <= 0.0:
+        return float("nan")
+    return last_atr / last_close
+
+
+def classify_regime(adx: float, vol_ratio: float) -> str:
+    """
+    Map ``(ADX, ATR/price)`` to a regime label.
+
+    Mirrors :func:`scripts.train_baseline_models.classify_regime`. NaN
+    inputs default to ``"TRENDING"`` — the same fallback used in training
+    when the warm-up window has not yet elapsed.
+    """
+    if vol_ratio is not None and np.isfinite(vol_ratio) and vol_ratio >= _REGIME_VOL_MAX:
+        return "VOLATILE"
+    if adx is not None and np.isfinite(adx) and adx > _REGIME_ADX_TRENDING_MIN:
+        return "TRENDING"
+    if (
+        adx is not None and np.isfinite(adx) and adx < _REGIME_ADX_MEAN_REV_MAX
+        and vol_ratio is not None and np.isfinite(vol_ratio)
+        and vol_ratio < _REGIME_VOL_MAX
+    ):
+        return "MEAN_REV"
+    return "TRENDING"
+
 
 def compute_ml_features(ohlcv: pd.DataFrame) -> pd.DataFrame:
     """
@@ -194,7 +277,7 @@ class RealSignalAdapter:
     counter used for reporting (single-writer expected).
     """
 
-    _DEFAULT_ENTRY_THRESHOLD: float = 0.30
+    _DEFAULT_ENTRY_THRESHOLD: float = 0.19
     _FALLBACK_Z_WINDOW: int = 20
     _DEFAULT_PRIMARY_CONF: float = 0.60
 
@@ -211,20 +294,28 @@ class RealSignalAdapter:
                 ``None``, falls through ``ApexConfig.ML_MODEL_PATH_*`` in
                 the order ``TRENDING`` → ``MEAN_REV`` → ``VOLATILE``.
             entry_threshold: Minimum ``|signal|`` for a long/short entry.
-                Defaults to ``ApexConfig.SIGNAL_ENTRY_THRESHOLD`` when set,
-                else ``0.30`` to match the backtester's internal gate.
+                When ``None``, resolves to ``ApexConfig.ML_CONFIDENCE_THRESHOLD``
+                (default 0.19 — P40 of the Round 10 calibration run). Falls
+                back to the legacy ``SIGNAL_ENTRY_THRESHOLD`` config field
+                and then the class default ``_DEFAULT_ENTRY_THRESHOLD``.
             enable_ml: When ``False``, skips all ML-model discovery and
-                forces the rule-based momentum primary. Used by the Round 9
-                driver to obtain a true pre-ML baseline even when trained
-                ``.pkl`` files are already on disk.
+                forces the rule-based momentum primary.
         """
-        self._entry_threshold: float = float(
-            entry_threshold
-            if entry_threshold is not None
-            else getattr(
-                ApexConfig, "SIGNAL_ENTRY_THRESHOLD", self._DEFAULT_ENTRY_THRESHOLD
+        if entry_threshold is not None:
+            resolved_threshold = float(entry_threshold)
+        else:
+            resolved_threshold = float(
+                getattr(
+                    ApexConfig,
+                    "ML_CONFIDENCE_THRESHOLD",
+                    getattr(
+                        ApexConfig,
+                        "SIGNAL_ENTRY_THRESHOLD",
+                        self._DEFAULT_ENTRY_THRESHOLD,
+                    ),
+                )
             )
-        )
+        self._entry_threshold: float = resolved_threshold
 
         self._aggregator = SignalAggregator()
         self._pattern_signal = PatternSignal()
@@ -253,47 +344,78 @@ class RealSignalAdapter:
             "momentum_fallback": 0,
         }
         self._entry_count: int = 0
+        # Per-regime hit counter populated by :meth:`_ml_primary` each time
+        # a non-zero ML score is returned for a specific regime.
+        self._regime_hits: Dict[str, int] = {}
 
     # ── ML model loading ──────────────────────────────────────────────────────
 
-    def _candidate_model_paths(self, explicit_path: Optional[str]) -> List[str]:
-        if explicit_path:
-            return [explicit_path]
-        paths: List[str] = []
-        for attr in (
-            "ML_MODEL_PATH_TRENDING",
-            "ML_MODEL_PATH_MEAN_REV",
-            "ML_MODEL_PATH_VOLATILE",
-        ):
-            p = str(getattr(ApexConfig, attr, "") or "").strip()
-            if p:
-                paths.append(p)
-        return paths
+    _REGIME_TRENDING: str = "TRENDING"
+    _REGIME_MEAN_REV: str = "MEAN_REV"
+    _REGIME_VOLATILE: str = "VOLATILE"
+
+    _REGIME_ATTR_MAP: Tuple[Tuple[str, str], ...] = (
+        ("TRENDING", "ML_MODEL_PATH_TRENDING"),
+        ("MEAN_REV", "ML_MODEL_PATH_MEAN_REV"),
+        ("VOLATILE", "ML_MODEL_PATH_VOLATILE"),
+    )
 
     def _load_ml_model(self, explicit_path: Optional[str]) -> None:
-        for path in self._candidate_model_paths(explicit_path):
+        """
+        Load up to three regime-specialised models (one per regime key).
+
+        When ``explicit_path`` is provided, that single model is used for
+        every regime (back-compat with callers that want the legacy
+        "one model everywhere" behaviour).
+        """
+        self._regime_models: Dict[str, Any] = {}
+        self._regime_baselines: Dict[str, Optional[Dict[str, float]]] = {}
+        self._regime_model_paths: Dict[str, str] = {}
+
+        path_entries: List[Tuple[str, str]]
+        if explicit_path:
+            path_entries = [(regime, explicit_path) for regime, _ in self._REGIME_ATTR_MAP]
+        else:
+            path_entries = []
+            for regime, attr in self._REGIME_ATTR_MAP:
+                p = str(getattr(ApexConfig, attr, "") or "").strip()
+                if p:
+                    path_entries.append((regime, p))
+
+        for regime, path in path_entries:
             if not os.path.isfile(path):
                 continue
             try:
                 with open(path, "rb") as f:
                     payload = pickle.load(f)
                 if isinstance(payload, dict) and "model" in payload:
-                    self._ml_model = payload["model"]
-                    self._ml_baseline = payload.get("baseline_stats")
+                    model_obj = payload["model"]
+                    baseline = payload.get("baseline_stats")
                 else:
-                    self._ml_model = payload
-                    self._ml_baseline = None
-                self._ml_model_path = path
-                self._ml_active = True
+                    model_obj = payload
+                    baseline = None
+                self._regime_models[regime] = model_obj
+                self._regime_baselines[regime] = baseline
+                self._regime_model_paths[regime] = path
                 logger.info(
-                    "RealSignalAdapter: loaded ML model from %s (baseline=%s)",
-                    path, bool(self._ml_baseline),
+                    "RealSignalAdapter: loaded %s model from %s (baseline=%s)",
+                    regime, path, bool(baseline),
                 )
-                return
             except Exception as exc:
                 logger.warning(
-                    "RealSignalAdapter: failed to load ML model %s (%s)", path, exc,
+                    "RealSignalAdapter: failed to load %s model %s (%s)",
+                    regime, path, exc,
                 )
+
+        # Legacy single-model attributes mirror whichever regime loaded
+        # first; callers that haven't migrated to per-regime routing still
+        # see a usable model.
+        if self._regime_models:
+            first_regime = next(iter(self._regime_models))
+            self._ml_model = self._regime_models[first_regime]
+            self._ml_baseline = self._regime_baselines[first_regime]
+            self._ml_model_path = self._regime_model_paths[first_regime]
+            self._ml_active = True
 
     # ── Primary signal computation ────────────────────────────────────────────
 
@@ -310,42 +432,84 @@ class RealSignalAdapter:
         sig = float(np.clip(z / 2.0, -1.0, 1.0))
         return sig if np.isfinite(sig) else 0.0
 
+    def _select_regime_model(
+        self, ohlcv: pd.DataFrame,
+    ) -> Tuple[str, Any, Optional[Dict[str, float]]]:
+        """
+        Classify the most recent bar's regime and pick the matching model.
+
+        Returns:
+            ``(regime_label, model, baseline_stats)``. If no model is
+            registered for the computed regime, falls back to the first
+            available model with an ``"_FALLBACK"`` suffix appended to
+            the regime label so diagnostics record the fallback.
+        """
+        adx = _last_adx(ohlcv["High"], ohlcv["Low"], ohlcv["Close"])
+        vol_ratio = _last_atr_ratio(ohlcv["High"], ohlcv["Low"], ohlcv["Close"])
+        regime = classify_regime(adx, vol_ratio)
+
+        model = self._regime_models.get(regime)
+        baseline = self._regime_baselines.get(regime)
+        if model is not None:
+            return regime, model, baseline
+
+        # Fallback: any other loaded regime.
+        if self._regime_models:
+            first = next(iter(self._regime_models))
+            return (
+                f"{regime}_FALLBACK",
+                self._regime_models[first],
+                self._regime_baselines.get(first),
+            )
+        return regime, None, None
+
     def _ml_primary(self, ohlcv: pd.DataFrame) -> Tuple[float, float]:
         """
-        Returns ``(signal, confidence)`` from the baseline ML classifier
-        evaluated on the most recent bar.
+        Return ``(signal, confidence)`` from the regime-appropriate ML
+        classifier evaluated on the most recent bar.
+
+        The bar's regime is derived from ADX(14) / ATR(14)-to-close using
+        the same rules as :mod:`scripts.train_baseline_models`, then the
+        matching model from ``self._regime_models`` is invoked.
         """
-        if self._ml_model is None or ohlcv is None or len(ohlcv) < _ML_SMA_SLOW + 5:
+        if (
+            not self._ml_active
+            or ohlcv is None
+            or len(ohlcv) < _ML_SMA_SLOW + 5
+            or not self._regime_models
+        ):
             return 0.0, 0.0
         try:
+            regime_used, model, baseline = self._select_regime_model(ohlcv)
+            if model is None:
+                return 0.0, 0.0
+
             feats = compute_ml_features(ohlcv)
             if feats.empty:
                 return 0.0, 0.0
             x = feats.iloc[[-1]][list(ML_FEATURE_NAMES)].to_numpy()
-            # Both scikit-learn GBMs and LightGBM classifiers expose
-            # ``predict_proba`` with columns ordered by sorted class label.
-            # Our training script labels ``-1`` (down) and ``+1`` (up).
-            if hasattr(self._ml_model, "predict_proba"):
-                proba = self._ml_model.predict_proba(x)
-                classes = list(getattr(self._ml_model, "classes_", [-1, 1]))
-                # Locate the "up" column (label 1). Fall back to last column.
+            if hasattr(model, "predict_proba"):
+                proba = model.predict_proba(x)
+                classes = list(getattr(model, "classes_", [-1, 1]))
                 up_idx = classes.index(1) if 1 in classes else len(classes) - 1
                 p_up = float(proba[0, up_idx])
             else:
-                raw = self._ml_model.predict(x)
+                raw = model.predict(x)
                 p_up = float(np.clip(raw[0], 0.0, 1.0))
 
             signal = float(np.clip((p_up - 0.5) * 2.0, -1.0, 1.0))
             confidence = float(abs(signal))
-            if self._ml_baseline is not None:
-                # Baseline recalibration clips signals that are too far from
-                # the training distribution so the aggregator can trust the
-                # magnitude under GAP-8B drift rules.
-                mu = float(self._ml_baseline.get("mean", 0.0))
-                sd = float(self._ml_baseline.get("std", 1.0)) or 1.0
+            if baseline is not None:
+                mu = float(baseline.get("mean", 0.0))
+                sd = float(baseline.get("std", 1.0)) or 1.0
                 z_drift = (signal - mu) / sd
                 if not np.isfinite(z_drift) or abs(z_drift) > 4.0:
                     return 0.0, 0.0
+
+            # Per-regime hit counter (diagnostics).
+            self._regime_hits[regime_used] = (
+                self._regime_hits.get(regime_used, 0) + 1
+            )
             return signal, confidence
         except Exception as exc:
             logger.debug("RealSignalAdapter._ml_primary error: %s", exc)
@@ -551,3 +715,11 @@ class RealSignalAdapter:
         report["_entries_fired"] = self._entry_count
         report["_ml_active"] = int(self._ml_active)
         return report
+
+    def regime_hit_report(self) -> Dict[str, int]:
+        """Per-regime counter for non-zero ML scores (diagnostics)."""
+        return dict(self._regime_hits)
+
+    def loaded_regime_models(self) -> List[str]:
+        """List the regime labels for which a model is currently loaded."""
+        return list(self._regime_models.keys())
