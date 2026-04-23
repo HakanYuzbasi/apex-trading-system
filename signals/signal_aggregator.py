@@ -178,6 +178,44 @@ class SignalAggregator:
         """Return the current dynamic weight for ``source`` (1.0 if unseen)."""
         return float(self._source_weight.get(source, 1.0))
 
+    def get_source_edge_stats(self, source: str) -> Dict[str, float]:
+        """
+        Summarise the rolling realised-PnL buffer for ``source`` so Kelly
+        sizing can compute a winning-edge estimate.
+
+        Args:
+            source: Source label passed to :meth:`record_source_outcome`.
+
+        Returns:
+            ``{"n_samples", "win_rate", "avg_win", "avg_loss"}``. All values
+            are in fractional units (e.g. ``avg_win=0.012`` → +1.2%). When
+            the buffer is empty or entirely one-sided the missing stat is
+            ``0.0``. This keeps the downstream Kelly caller's arithmetic
+            well-defined; callers must still gate on ``n_samples``.
+        """
+        buf = self._source_pnl_hist.get(source)
+        if buf is None or len(buf) == 0:
+            return {
+                "n_samples": 0.0,
+                "win_rate": 0.0,
+                "avg_win": 0.0,
+                "avg_loss": 0.0,
+            }
+        wins = [p for p in buf if p > 0.0]
+        losses = [p for p in buf if p < 0.0]
+        n = len(buf)
+        win_rate = len(wins) / n if n else 0.0
+        avg_win = (sum(wins) / len(wins)) if wins else 0.0
+        # ``avg_loss`` is returned as a POSITIVE magnitude for direct use
+        # in the Kelly formula ``(p*W - q*L) / W``.
+        avg_loss = (-sum(losses) / len(losses)) if losses else 0.0
+        return {
+            "n_samples": float(n),
+            "win_rate": float(win_rate),
+            "avg_win": float(avg_win),
+            "avg_loss": float(avg_loss),
+        }
+
     def combine(
         self,
         primary_signal: float,
