@@ -518,10 +518,18 @@ class AdvancedBacktester:
                 universe_schedule=universe_schedule,
                 n_sharpe_trials=1,
             )
+            # NaN-safe fold record: preserve NaN Sharpe so the aggregate can
+            # exclude insufficient-data folds from mean/median instead of
+            # silently coercing them to 0.
+            raw_sharpe = fold_metrics.get("sharpe_ratio")
+            try:
+                sharpe_val = float(raw_sharpe) if raw_sharpe is not None else float("nan")
+            except (TypeError, ValueError):
+                sharpe_val = float("nan")
             fold_results.append({
                 "oos_start": str(oos_from.date()),
                 "oos_end": str(oos_to.date()),
-                "sharpe_ratio": float(fold_metrics.get("sharpe_ratio", 0.0) or 0.0),
+                "sharpe_ratio": sharpe_val,
                 "total_return": float(fold_metrics.get("total_return", 0.0) or 0.0),
                 "max_drawdown": float(fold_metrics.get("max_drawdown", 0.0) or 0.0),
                 "win_rate": float(fold_metrics.get("win_rate", 0.0) or 0.0),
@@ -533,23 +541,37 @@ class AdvancedBacktester:
         if not fold_results:
             return {"folds": [], "aggregate": {"folds_run": 0}}
 
-        sharpes = [f["sharpe_ratio"] for f in fold_results]
+        sharpes_all = np.array(
+            [f["sharpe_ratio"] for f in fold_results], dtype=float
+        )
+        valid_mask = np.isfinite(sharpes_all)
+        valid_sharpes = sharpes_all[valid_mask]
+        insufficient_data_folds = int((~valid_mask).sum())
+
         compounded = 1.0
         for f in fold_results:
             compounded *= 1.0 + f["total_return"]
         compounded -= 1.0
         worst_dd = min((f["max_drawdown"] for f in fold_results), default=0.0)
         positive = sum(1 for f in fold_results if f["total_return"] > 0)
+        negative = sum(1 for f in fold_results if f["total_return"] < 0)
 
         return {
             "folds": fold_results,
             "aggregate": {
                 "folds_run": len(fold_results),
-                "mean_sharpe": float(np.mean(sharpes)) if sharpes else 0.0,
-                "median_sharpe": float(np.median(sharpes)) if sharpes else 0.0,
+                "mean_sharpe": (
+                    float(valid_sharpes.mean()) if valid_sharpes.size else float("nan")
+                ),
+                "median_sharpe": (
+                    float(np.median(valid_sharpes))
+                    if valid_sharpes.size else float("nan")
+                ),
                 "compounded_return": float(compounded),
                 "worst_fold_drawdown": float(worst_dd),
                 "positive_folds": int(positive),
+                "negative_folds": int(negative),
+                "insufficient_data_folds": insufficient_data_folds,
             },
         }
 
@@ -906,20 +928,34 @@ class AdvancedBacktester:
         years = days / ann_factor
         annual_return = (1 + total_return) ** (1 / years) - 1 if years > 0 else 0
         
-        # Volatility and Sharpe
-        if len(self.daily_returns) > 1:
-            daily_vol = np.std(self.daily_returns)
-            annual_vol = daily_vol * np.sqrt(ann_factor)
-            sharpe_ratio = (annual_return - 0.02) / annual_vol if annual_vol > 0 else 0
-            
-            # Sortino
-            downside_returns = [r for r in self.daily_returns if r < 0]
-            downside_vol = np.std(downside_returns) * np.sqrt(ann_factor) if downside_returns else 0
-            sortino_ratio = (annual_return - 0.02) / downside_vol if downside_vol > 0 else 0
+        # Volatility and Sharpe — NaN-safe: degenerate samples (too few
+        # points or zero variance) return NaN so walk-forward aggregation
+        # can exclude them instead of silently collapsing to 0.
+        daily_returns_arr = np.asarray(self.daily_returns, dtype=float)
+        if daily_returns_arr.size < 5:
+            annual_vol = 0.0
+            sharpe_ratio = float("nan")
+            sortino_ratio = float("nan")
         else:
-            annual_vol = 0
-            sharpe_ratio = 0
-            sortino_ratio = 0
+            daily_vol = float(np.std(daily_returns_arr, ddof=0))
+            annual_vol = daily_vol * float(np.sqrt(ann_factor))
+            if daily_vol < 1e-8 or not np.isfinite(daily_vol):
+                sharpe_ratio = float("nan")
+            else:
+                sharpe_ratio = float(
+                    (float(np.mean(daily_returns_arr)) / daily_vol)
+                    * float(np.sqrt(ann_factor))
+                )
+
+            downside = daily_returns_arr[daily_returns_arr < 0]
+            if downside.size < 5:
+                sortino_ratio = float("nan")
+            else:
+                downside_vol = float(np.std(downside, ddof=0)) * float(np.sqrt(ann_factor))
+                sortino_ratio = (
+                    float((annual_return - 0.02) / downside_vol)
+                    if downside_vol > 0 else float("nan")
+                )
         
         # Max Drawdown
         peak = equity_df['equity'].expanding().max()
