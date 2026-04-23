@@ -2409,6 +2409,43 @@ class ApexConfig:
         os.getenv("APEX_ML_CONFIDENCE_THRESHOLD", "0.19")
     )
 
+    # ── Round 11 / Portfolio-optimisation sizing (FIX 1: Kelly) ─────────────
+    # Half-Kelly position sizing sourced from the rolling per-source PnL
+    # stats tracked by ``signals.signal_aggregator.SignalAggregator``. When
+    # a source has fewer than ``KELLY_MIN_SAMPLES`` observations the
+    # backtester falls back to the existing quality-scaled ATR path.
+    KELLY_ENABLED: bool = (
+        os.getenv("APEX_KELLY_ENABLED", "true").lower() == "true"
+    )
+    KELLY_FRACTION_R11: float = float(os.getenv("APEX_KELLY_FRACTION_R11", "0.5"))
+    KELLY_MIN_SAMPLES: int = int(os.getenv("APEX_KELLY_MIN_SAMPLES", "30"))
+    MIN_POSITION_USD: float = float(os.getenv("APEX_MIN_POSITION_USD", "500"))
+    MAX_POSITION_PCT: float = float(os.getenv("APEX_MAX_POSITION_PCT", "0.15"))
+
+    # ── Round 11 / Partial exits (FIX 2) ────────────────────────────────────
+    # Initial risk R is defined as the ATR-multiplier stop distance.
+    # At +1R close ``PARTIAL_EXIT_R1`` fraction and move stop to break-even;
+    # at +2R close ``PARTIAL_EXIT_R2`` fraction and trail stop at 1R below
+    # current close; the remainder trails at ``PARTIAL_EXIT_ATR_MULT`` × ATR.
+    PARTIAL_EXIT_ENABLED: bool = (
+        os.getenv("APEX_PARTIAL_EXIT_ENABLED", "true").lower() == "true"
+    )
+    PARTIAL_EXIT_R1: float = float(os.getenv("APEX_PARTIAL_EXIT_R1", "0.33"))
+    PARTIAL_EXIT_R2: float = float(os.getenv("APEX_PARTIAL_EXIT_R2", "0.33"))
+    PARTIAL_EXIT_ATR_MULT: float = float(os.getenv("APEX_PARTIAL_EXIT_ATR_MULT", "2.0"))
+    PARTIAL_EXIT_R_STOP_MULT: float = float(
+        os.getenv("APEX_PARTIAL_EXIT_R_STOP_MULT", "2.5")
+    )
+
+    # ── Round 11 / Correlation-adjusted concurrent sizing (FIX 3) ───────────
+    # Rolling close-to-close correlation window. A candidate entry whose
+    # maximum correlation with any open position exceeds ``CORR_THRESHOLD``
+    # has its notional reduced by ``(1 - max_correlation)``. When three or
+    # more open positions have pairwise correlation above the threshold
+    # new entries are blocked until the concentration clears.
+    CORR_THRESHOLD: float = float(os.getenv("APEX_CORR_THRESHOLD", "0.70"))
+    CORR_LOOKBACK_BARS: int = int(os.getenv("APEX_CORR_LOOKBACK_BARS", "60"))
+
     # ── Label-Leakage Audit (Round 8 / GAP-8E) ───────────────────────────────
     # Maximum forward-shift horizon probed by ``models.ml_validator.leakage_check``.
     # Any feature whose absolute Pearson correlation with ``label.shift(-k)``
@@ -3053,6 +3090,18 @@ CONFIG_BOUNDS: Dict[str, _BoundSpec] = {
     "ML_MODEL_PATH_MEAN_REV": (str, None),
     "ML_MODEL_PATH_VOLATILE": (str, None),
     "ML_CONFIDENCE_THRESHOLD": (float, (0.0, 1.0)),
+    "KELLY_ENABLED": (bool, None),
+    "KELLY_FRACTION_R11": (float, (0.0, 1.0)),
+    "KELLY_MIN_SAMPLES": (int, (1, 10000)),
+    "MIN_POSITION_USD": (float, (0.0, 1_000_000.0)),
+    "MAX_POSITION_PCT": (float, (0.0, 1.0)),
+    "PARTIAL_EXIT_ENABLED": (bool, None),
+    "PARTIAL_EXIT_R1": (float, (0.0, 1.0)),
+    "PARTIAL_EXIT_R2": (float, (0.0, 1.0)),
+    "PARTIAL_EXIT_ATR_MULT": (float, (0.0, 20.0)),
+    "PARTIAL_EXIT_R_STOP_MULT": (float, (0.0, 20.0)),
+    "CORR_THRESHOLD": (float, (-1.0, 1.0)),
+    "CORR_LOOKBACK_BARS": (int, (5, 1000)),
     "ML_FEATURE_MAX_AGE_SECONDS": (float, (0.0, 86400.0)),
 
     # Circuit breaker

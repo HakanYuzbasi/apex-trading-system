@@ -100,6 +100,18 @@ class AdvancedBacktester:
         self._data_symbols = []
         self._n_sharpe_trials = 1
         self._borrow_costs_total = 0.0
+        # ── Round 11: position metadata (entry price, initial risk in $ per
+        # share, stop level, partial-exit stage, initial shares) indexed by
+        # symbol. A dict is maintained only for symbols whose position is
+        # currently non-zero; entries are created by ``_check_entries`` and
+        # removed when the position is fully closed.
+        self._position_meta: Dict[str, Dict[str, Any]] = {}
+        # Correlation/deployment diagnostics (populated once per entry attempt).
+        self._portfolio_corr_samples: List[float] = []
+        self._deployed_capital_samples: List[float] = []
+        # Signal aggregator instance used for Kelly edge stats. Wired by
+        # ``run_backtest`` when the signal generator carries an aggregator.
+        self._shared_aggregator = None
 
     def _annualization_factor(self, symbols: List[str]) -> int:
         classes = set()
@@ -326,6 +338,9 @@ class AdvancedBacktester:
         self.reset()
         self._data_symbols = list(data.keys())
         self._n_sharpe_trials = n_sharpe_trials
+        # Round 11: pick up the signal generator's aggregator so Kelly sizing
+        # can read per-source edge stats populated at exit time.
+        self._shared_aggregator = getattr(signal_generator, "_aggregator", None)
 
         # Validate data for common issues (splits, stale prices, NaN)
         validation = self._validate_data(data)
@@ -575,6 +590,173 @@ class AdvancedBacktester:
             },
         }
 
+    # ─────────────────────────────────────────────────────────────────────
+    # Round 11 helpers — ATR, Kelly sizing, correlation gating
+    # ─────────────────────────────────────────────────────────────────────
+
+    def _compute_atr(
+        self,
+        data: Dict[str, pd.DataFrame],
+        symbol: str,
+        date: datetime,
+        period: int = 14,
+    ) -> float:
+        """Wilder ATR(14) computed from bars strictly before ``date``."""
+        if symbol not in data:
+            return 0.0
+        hist = data[symbol].loc[:date].iloc[:-1]  # exclude current bar
+        if len(hist) < period + 1:
+            return 0.0
+        high = hist["High"].astype(float)
+        low = hist["Low"].astype(float)
+        close = hist["Close"].astype(float)
+        prev_close = close.shift(1)
+        tr = pd.concat(
+            [(high - low).abs(), (high - prev_close).abs(), (low - prev_close).abs()],
+            axis=1,
+        ).max(axis=1)
+        atr = tr.ewm(alpha=1.0 / period, adjust=False).mean()
+        val = float(atr.iloc[-1]) if len(atr) else 0.0
+        return val if np.isfinite(val) and val > 0.0 else 0.0
+
+    def _portfolio_max_correlation(
+        self,
+        data: Dict[str, pd.DataFrame],
+        candidate: str,
+        date: datetime,
+        lookback: int,
+    ) -> float:
+        """
+        Return the maximum rolling-return correlation between ``candidate``
+        and any currently-open position.
+
+        Args:
+            data: Panel.
+            candidate: Symbol about to be opened.
+            date: Decision timestamp.
+            lookback: Rolling window (bars).
+
+        Returns:
+            Maximum absolute pairwise correlation in ``[0, 1]``. When there
+            are no open positions or the lookback has too few overlapping
+            returns the function returns ``0.0`` — i.e. no correlation
+            penalty.
+        """
+        open_symbols = [
+            s for s, q in self.positions.items()
+            if q != 0 and s != candidate and s in data
+        ]
+        if not open_symbols or candidate not in data:
+            return 0.0
+        cand_hist = data[candidate].loc[:date]
+        if len(cand_hist) < lookback + 1:
+            return 0.0
+        cand_ret = cand_hist["Close"].pct_change().dropna().tail(lookback)
+        if len(cand_ret) < max(5, lookback // 4):
+            return 0.0
+
+        max_corr = 0.0
+        for sym in open_symbols:
+            sym_hist = data[sym].loc[:date]
+            if len(sym_hist) < lookback + 1:
+                continue
+            sym_ret = sym_hist["Close"].pct_change().dropna().tail(lookback)
+            aligned = pd.concat([cand_ret, sym_ret], axis=1, join="inner").dropna()
+            if len(aligned) < max(5, lookback // 4):
+                continue
+            a = aligned.iloc[:, 0].to_numpy()
+            b = aligned.iloc[:, 1].to_numpy()
+            if np.std(a) <= 0.0 or np.std(b) <= 0.0:
+                continue
+            rho = float(np.corrcoef(a, b)[0, 1])
+            if np.isfinite(rho) and abs(rho) > max_corr:
+                max_corr = abs(rho)
+        return max_corr
+
+    def _count_correlated_pairs(
+        self,
+        data: Dict[str, pd.DataFrame],
+        date: datetime,
+        lookback: int,
+        threshold: float,
+    ) -> int:
+        """
+        Count pairs of currently-open positions whose pairwise rolling
+        correlation exceeds ``threshold``.
+        """
+        open_symbols = [
+            s for s, q in self.positions.items()
+            if q != 0 and s in data
+        ]
+        if len(open_symbols) < 2:
+            return 0
+        count = 0
+        for i in range(len(open_symbols)):
+            for j in range(i + 1, len(open_symbols)):
+                a_hist = data[open_symbols[i]].loc[:date]
+                b_hist = data[open_symbols[j]].loc[:date]
+                if len(a_hist) < lookback + 1 or len(b_hist) < lookback + 1:
+                    continue
+                a_ret = a_hist["Close"].pct_change().dropna().tail(lookback)
+                b_ret = b_hist["Close"].pct_change().dropna().tail(lookback)
+                aligned = pd.concat([a_ret, b_ret], axis=1, join="inner").dropna()
+                if len(aligned) < max(5, lookback // 4):
+                    continue
+                x = aligned.iloc[:, 0].to_numpy()
+                y = aligned.iloc[:, 1].to_numpy()
+                if np.std(x) <= 0.0 or np.std(y) <= 0.0:
+                    continue
+                rho = float(np.corrcoef(x, y)[0, 1])
+                if np.isfinite(rho) and abs(rho) > threshold:
+                    count += 1
+        return count
+
+    def _kelly_notional(
+        self,
+        source: str,
+        portfolio_value: float,
+    ) -> Optional[float]:
+        """
+        Compute the half-Kelly notional for ``source`` using the shared
+        :class:`~signals.signal_aggregator.SignalAggregator`'s rolling
+        realised-PnL buffer.
+
+        Returns:
+            The Kelly-sized notional in USD after applying
+            ``ApexConfig.KELLY_FRACTION_R11`` and the
+            ``MIN_POSITION_USD`` / ``MAX_POSITION_PCT`` clamps. Returns
+            ``None`` when Kelly sizing is disabled, no aggregator is
+            wired, the source has fewer than ``KELLY_MIN_SAMPLES``
+            observations, or the computed edge is non-positive. The
+            caller must then fall back to the ATR / quality path.
+        """
+        if not getattr(ApexConfig, "KELLY_ENABLED", False):
+            return None
+        aggregator = getattr(self, "_shared_aggregator", None)
+        if aggregator is None:
+            return None
+        stats = aggregator.get_source_edge_stats(source)
+        n = int(stats.get("n_samples", 0))
+        if n < int(ApexConfig.KELLY_MIN_SAMPLES):
+            return None
+        win_rate = float(stats.get("win_rate", 0.0))
+        avg_win = float(stats.get("avg_win", 0.0))
+        avg_loss = float(stats.get("avg_loss", 0.0))
+        if avg_win <= 0.0:
+            return None
+        kelly_f = win_rate - ((1.0 - win_rate) * avg_loss) / avg_win
+        if kelly_f <= 0.0:
+            return None
+        kelly_f = kelly_f * float(ApexConfig.KELLY_FRACTION_R11)
+        raw_notional = kelly_f * float(portfolio_value)
+        min_usd = float(ApexConfig.MIN_POSITION_USD)
+        max_pct = float(ApexConfig.MAX_POSITION_PCT)
+        max_usd = max_pct * float(portfolio_value)
+        notional = max(min_usd, min(raw_notional, max_usd))
+        return float(notional)
+
+    # ─────────────────────────────────────────────────────────────────────
+
     def _process_trading_day(
         self,
         data: Dict[str, pd.DataFrame],
@@ -611,62 +793,254 @@ class AdvancedBacktester:
         date: datetime,
         signal_generator
     ):
-        """Check exit conditions for existing positions."""
-        
-        for symbol in list(self.positions.keys()):
-            if self.positions[symbol] == 0:
-                continue
+        """
+        Exit logic with Round 11 partial-exit state machine.
 
+        Each open position carries metadata
+        (entry_price, side, initial_shares, risk_per_share, stop_price,
+        stage, atr_at_entry). On every bar:
+
+          Stage 0 (just entered):
+            * if close <= stop_price (long) / >= stop_price (short)
+              → close FULL position (stop-out).
+            * if close crosses +1R → close ``PARTIAL_EXIT_R1`` fraction,
+              move stop to break-even, advance to stage 1.
+            * bearish/bullish opposing signal > 0.30 closes full position.
+
+          Stage 1 (+1R hit, stop at BE):
+            * close <= stop_price → close remainder at break-even.
+            * close crosses +2R → close ``PARTIAL_EXIT_R2`` fraction,
+              trail stop at 1R below current close, advance to stage 2.
+
+          Stage 2 (+2R hit, trailing):
+            * stop trails at ``PARTIAL_EXIT_ATR_MULT * ATR(14)`` below
+              current close (long) / above (short).
+            * stop-out closes remainder.
+        """
+        partial_enabled = bool(getattr(ApexConfig, "PARTIAL_EXIT_ENABLED", False))
+        pe_r1 = float(getattr(ApexConfig, "PARTIAL_EXIT_R1", 0.33))
+        pe_r2 = float(getattr(ApexConfig, "PARTIAL_EXIT_R2", 0.33))
+        pe_atr_mult = float(getattr(ApexConfig, "PARTIAL_EXIT_ATR_MULT", 2.0))
+
+        for symbol in list(self.positions.keys()):
+            qty = self.positions.get(symbol, 0)
+            if qty == 0:
+                continue
             if not self._is_market_open(symbol, date):
                 continue
-
             prev_date = self._get_prev_date(data, symbol, date)
             if not prev_date:
                 continue
-            
-            # Get current data
             if symbol not in data or date not in data[symbol].index:
                 continue
-            
+
             current_bar = data[symbol].loc[date]
-            price = current_bar['Open']
+            price = float(current_bar["Open"])
+            close_price = float(current_bar["Close"])
 
-            # Generate signal from data up to prev day (no lookahead)
             try:
-                prices = data[symbol].loc[:prev_date, 'Close']
+                prices = data[symbol].loc[:prev_date, "Close"]
                 signal_data = signal_generator.generate_ml_signal(symbol, prices)
-                signal = signal_data['signal']
-            except:
-                signal = 0
+                signal = float(signal_data.get("signal", 0.0))
+            except Exception:
+                signal = 0.0
 
-            # Simple exit logic (can be enhanced)
-            should_exit = False
-            exit_reason = ""
+            meta = self._position_meta.get(symbol)
 
-            if self.positions[symbol] > 0 and signal < -0.30:
-                should_exit = True
-                exit_reason = "Bearish signal"
-            
-            elif self.positions[symbol] < 0 and signal > 0.30:
-                should_exit = True
-                exit_reason = "Bullish signal"
-            
-            if should_exit:
-                exit_qty = abs(self.positions[symbol])
-                try:
-                    exit_ac = parse_symbol(symbol).asset_class
-                except ValueError:
-                    exit_ac = AssetClass.EQUITY
-                exit_slip = self._estimate_slippage_pct(symbol, data, date, exit_ac, exit_qty)
-                self._execute_order(
-                    symbol,
-                    'SELL' if self.positions[symbol] > 0 else 'BUY',
-                    exit_qty,
-                    price,
-                    date,
-                    exit_reason,
-                    slippage_pct=exit_slip
+            # Legacy reversal exit — kept for safety and back-compat with
+            # positions opened before the partial-exit metadata existed.
+            if meta is None:
+                if qty > 0 and signal < -0.30:
+                    self._close_position(symbol, data, date, price, "Bearish signal")
+                elif qty < 0 and signal > 0.30:
+                    self._close_position(symbol, data, date, price, "Bullish signal")
+                continue
+
+            side = meta["side"]  # +1 long / -1 short
+            entry = float(meta["entry_price"])
+            r_per_share = float(meta["risk_per_share"])
+            stop = float(meta["stop_price"])
+            stage = int(meta["stage"])
+            initial_shares = float(meta["initial_shares"])
+
+            # R-multiple of the current bar (positive when in-profit).
+            if r_per_share <= 0.0:
+                r_mult = 0.0
+            else:
+                r_mult = ((price - entry) * side) / r_per_share
+
+            # Partial-exit / stop / trail checks ---------------------------------
+            should_full_exit = False
+            full_exit_reason = ""
+
+            # Stop-out using bar's low (long) or high (short) to catch
+            # intra-bar touches; fall back to open if unavailable.
+            low_price = float(current_bar.get("Low", price))
+            high_price = float(current_bar.get("High", price))
+            stopped_out = (
+                (side > 0 and low_price <= stop)
+                or (side < 0 and high_price >= stop)
+            )
+
+            if stopped_out:
+                should_full_exit = True
+                full_exit_reason = f"Stop hit @R={r_mult:.2f} (stage {stage})"
+            elif (side > 0 and signal < -0.30) or (side < 0 and signal > 0.30):
+                should_full_exit = True
+                full_exit_reason = "Opposing signal"
+
+            if should_full_exit:
+                # Record R-multiple at the fill price for reporting.
+                fill_price = stop if stopped_out else price
+                realised_r = (
+                    ((fill_price - entry) * side) / r_per_share
+                    if r_per_share > 0.0 else 0.0
                 )
+                meta["realised_r"] = float(realised_r)
+                self._close_position(
+                    symbol, data, date, fill_price, full_exit_reason, realised_r=realised_r,
+                )
+                continue
+
+            if not partial_enabled:
+                continue
+
+            # Stage 0 → 1: +1R partial + move stop to break-even.
+            if stage == 0 and r_mult >= 1.0:
+                partial_qty = abs(self._quantize_shares(symbol, initial_shares * pe_r1))
+                if partial_qty > 0 and partial_qty < abs(qty):
+                    partial_r = 1.0
+                    self._execute_partial_exit(
+                        symbol, data, date, price, partial_qty,
+                        reason="Partial +1R exit", realised_r=partial_r,
+                    )
+                    meta["stop_price"] = entry  # break-even
+                    meta["stage"] = 1
+                continue
+
+            # Stage 1 → 2: +2R partial + trail stop at 1R below close.
+            if stage == 1 and r_mult >= 2.0:
+                partial_qty = abs(self._quantize_shares(symbol, initial_shares * pe_r2))
+                if partial_qty > 0 and partial_qty < abs(qty):
+                    partial_r = 2.0
+                    self._execute_partial_exit(
+                        symbol, data, date, price, partial_qty,
+                        reason="Partial +2R exit", realised_r=partial_r,
+                    )
+                    # Trail stop at 1R below current close (long) / above (short).
+                    new_stop = close_price - side * r_per_share
+                    meta["stop_price"] = float(new_stop)
+                    meta["stage"] = 2
+                continue
+
+            # Stage 2: ATR-multiple trailing stop.
+            if stage == 2:
+                atr_now = self._compute_atr(data, symbol, date)
+                if atr_now > 0.0:
+                    trail_stop = close_price - side * pe_atr_mult * atr_now
+                    # Only ratchet stop in the favourable direction.
+                    if side > 0 and trail_stop > meta["stop_price"]:
+                        meta["stop_price"] = float(trail_stop)
+                    elif side < 0 and trail_stop < meta["stop_price"]:
+                        meta["stop_price"] = float(trail_stop)
+                continue
+
+    def _quantize_shares(self, symbol: str, shares: float) -> float:
+        """Round ``shares`` per the symbol's asset class (equities = int)."""
+        try:
+            ac = parse_symbol(symbol).asset_class
+        except ValueError:
+            ac = AssetClass.EQUITY
+        if ac == AssetClass.EQUITY:
+            return float(int(shares))
+        return float(shares)
+
+    def _execute_partial_exit(
+        self,
+        symbol: str,
+        data: Dict[str, pd.DataFrame],
+        date: datetime,
+        price: float,
+        exit_qty: float,
+        *,
+        reason: str,
+        realised_r: float,
+    ) -> None:
+        """Close ``exit_qty`` of ``symbol`` without discarding position meta."""
+        if exit_qty <= 0.0:
+            return
+        pos_qty = self.positions.get(symbol, 0)
+        if pos_qty == 0:
+            return
+        side = "SELL" if pos_qty > 0 else "BUY"
+        try:
+            ac = parse_symbol(symbol).asset_class
+        except ValueError:
+            ac = AssetClass.EQUITY
+        slip = self._estimate_slippage_pct(symbol, data, date, ac, exit_qty)
+        ok = self._execute_order(
+            symbol, side, exit_qty, price, date,
+            f"{reason} @R={realised_r:.2f}",
+            slippage_pct=slip,
+        )
+        if not ok:
+            return
+        # Annotate the most recent trade record with R-multiple for reporting.
+        if self.trades:
+            self.trades[-1]["partial"] = True
+            self.trades[-1]["realised_r"] = float(realised_r)
+
+    def _close_position(
+        self,
+        symbol: str,
+        data: Dict[str, pd.DataFrame],
+        date: datetime,
+        price: float,
+        reason: str,
+        *,
+        realised_r: Optional[float] = None,
+    ) -> None:
+        """Close the full remaining quantity of ``symbol`` and drop its meta."""
+        pos_qty = self.positions.get(symbol, 0)
+        if pos_qty == 0:
+            return
+        exit_qty = abs(pos_qty)
+        side = "SELL" if pos_qty > 0 else "BUY"
+        try:
+            ac = parse_symbol(symbol).asset_class
+        except ValueError:
+            ac = AssetClass.EQUITY
+        slip = self._estimate_slippage_pct(symbol, data, date, ac, exit_qty)
+        ok = self._execute_order(
+            symbol, side, exit_qty, price, date, reason, slippage_pct=slip,
+        )
+        if not ok:
+            return
+        if realised_r is not None and self.trades:
+            self.trades[-1]["realised_r"] = float(realised_r)
+        # Feed realised PnL back into the shared aggregator so Kelly
+        # sizing learns from closed outcomes.
+        meta = self._position_meta.pop(symbol, None)
+        if meta is not None:
+            self._feed_source_outcome(meta, price)
+
+    def _feed_source_outcome(
+        self, meta: Dict[str, Any], exit_price: float,
+    ) -> None:
+        """Push a realised-PnL% sample to the shared aggregator."""
+        aggregator = getattr(self, "_shared_aggregator", None)
+        if aggregator is None:
+            return
+        entry = float(meta.get("entry_price", 0.0) or 0.0)
+        if entry <= 0.0:
+            return
+        side = int(meta.get("side", 1) or 1)
+        pnl_pct = (exit_price - entry) / entry * side
+        source_label = str(meta.get("source", "primary") or "primary")
+        try:
+            aggregator.record_source_outcome(source_label, float(pnl_pct))
+        except Exception as exc:
+            logger.debug("Aggregator record_source_outcome failed: %s", exc)
     
     def _check_entries(
         self,
@@ -726,74 +1100,146 @@ class AdvancedBacktester:
                 continue
 
             dynamic_threshold = 0.45 + (0.10 if confidence < 0.55 else 0.0)
-            if abs(signal) > dynamic_threshold:  # Signal threshold
-                # Calculate position size
-                try:
-                    asset_class = parse_symbol(symbol).asset_class
-                except ValueError:
-                    continue
+            if abs(signal) <= dynamic_threshold:
+                continue
 
-                if asset_class == AssetClass.EQUITY:
-                    shares = int(position_size_usd / price)
-                    shares = min(shares, 200)  # Max shares limit
-                else:
-                    shares = position_size_usd / price
+            try:
+                asset_class = parse_symbol(symbol).asset_class
+            except ValueError:
+                continue
 
-                # Scale by confidence/quality
-                size_mult = 0.5 + 0.5 * float(np.clip(quality, 0.0, 1.0))
-                if asset_class == AssetClass.EQUITY:
-                    shares = max(1, int(shares * size_mult))
-                else:
-                    shares = shares * size_mult
-
-                if asset_class != AssetClass.EQUITY and shares < 0.0001:
-                    continue
-
-                if asset_class == AssetClass.EQUITY and shares < 1:
-                    continue
-
-                # ADV capacity constraint — cap at max_adv_participation % of 20-day ADV
-                if self.max_adv_participation > 0 and 'Volume' in data[symbol].columns:
-                    hist_vol = data[symbol].loc[:date, 'Volume'].tail(20)
-                    if len(hist_vol) >= 5:
-                        adv = hist_vol.mean()
-                        if adv and adv > 0:
-                            max_shares = adv * self.max_adv_participation
-                            if shares > max_shares:
-                                if asset_class == AssetClass.EQUITY:
-                                    shares = max(1, int(max_shares))
-                                else:
-                                    shares = max_shares
-                                logger.debug(
-                                    "ADV cap: %s capped to %.0f shares (%.1f%% of ADV %.0f)",
-                                    symbol, shares, self.max_adv_participation * 100, adv,
-                                )
-
-                # Check if we have enough cash
-                slippage_pct = self._estimate_slippage_pct(symbol, data, date, asset_class, shares)
-                notional = shares * price * (1 + slippage_pct)
-                commission = self._calculate_commission(symbol, notional)
-                cost = notional + commission
-                
-                if cost > self.cash:
-                    continue
-                
-                # Execute order with same slippage used for cash check
-                side = 'BUY' if signal > 0 else 'SELL'
-                self._execute_order(
+            # ── FIX 3: correlation-adjusted concurrent sizing ─────────────
+            corr_threshold = float(getattr(ApexConfig, "CORR_THRESHOLD", 0.70))
+            corr_lookback = int(getattr(ApexConfig, "CORR_LOOKBACK_BARS", 60))
+            # Hard block: 3+ already-open positions with pairwise corr above threshold.
+            corr_blocked = (
+                self._count_correlated_pairs(
+                    data, date, corr_lookback, corr_threshold,
+                ) >= 3
+            )
+            if corr_blocked:
+                logger.debug(
+                    "event=entry_blocked symbol=%s reason=portfolio_correlated_cluster",
                     symbol,
-                    side,
-                    shares,
-                    price,
-                    date,
-                    f"Signal: {signal:.3f}",
-                    slippage_pct=slippage_pct
                 )
-                
-                current_positions += 1
-                
-                if current_positions >= max_positions:
-                    break
+                continue
+            max_corr = self._portfolio_max_correlation(
+                data, symbol, date, corr_lookback,
+            )
+            self._portfolio_corr_samples.append(float(max_corr))
+            corr_size_multiplier = 1.0
+            if max_corr > corr_threshold:
+                corr_size_multiplier = max(0.0, 1.0 - max_corr)
+                if corr_size_multiplier <= 0.0:
+                    logger.debug(
+                        "event=entry_blocked symbol=%s reason=corr_size_zeroed corr=%.2f",
+                        symbol, max_corr,
+                    )
+                    continue
+
+            # ── FIX 1: Kelly-derived notional, quality-scaled fallback ────
+            source_label = "primary"
+            if hasattr(signal_generator, "_source_hits"):
+                # RealSignalAdapter exposes its per-source tally;
+                # Kelly edge stats key off the aggregator's source labels
+                # (we use ``primary`` for the ML/momentum primary signal).
+                source_label = "primary"
+            kelly_notional = self._kelly_notional(source_label, portfolio_value)
+            if kelly_notional is not None:
+                base_notional = kelly_notional
+                sizing_mode = "kelly"
+            else:
+                # Fallback: caller-supplied position_size_usd scaled by quality.
+                size_mult = 0.5 + 0.5 * float(np.clip(quality, 0.0, 1.0))
+                base_notional = float(position_size_usd) * size_mult
+                sizing_mode = "atr_quality"
+
+            base_notional *= corr_size_multiplier
+            # Enforce absolute floors/ceilings.
+            min_usd = float(getattr(ApexConfig, "MIN_POSITION_USD", 500.0))
+            max_pct = float(getattr(ApexConfig, "MAX_POSITION_PCT", 0.15))
+            max_usd = max_pct * float(portfolio_value)
+            if base_notional < min_usd:
+                base_notional = min_usd
+            if base_notional > max_usd:
+                base_notional = max_usd
+
+            if asset_class == AssetClass.EQUITY:
+                shares = int(base_notional / price) if price > 0 else 0
+                shares = min(shares, 200)  # Keep legacy max-share guard
+            else:
+                shares = (base_notional / price) if price > 0 else 0.0
+
+            if asset_class == AssetClass.EQUITY and shares < 1:
+                continue
+            if asset_class != AssetClass.EQUITY and shares < 0.0001:
+                continue
+
+            # ADV capacity constraint — cap at max_adv_participation % of 20-day ADV
+            if self.max_adv_participation > 0 and 'Volume' in data[symbol].columns:
+                hist_vol = data[symbol].loc[:date, 'Volume'].tail(20)
+                if len(hist_vol) >= 5:
+                    adv = hist_vol.mean()
+                    if adv and adv > 0:
+                        max_shares = adv * self.max_adv_participation
+                        if shares > max_shares:
+                            if asset_class == AssetClass.EQUITY:
+                                shares = max(1, int(max_shares))
+                            else:
+                                shares = max_shares
+                            logger.debug(
+                                "ADV cap: %s capped to %.0f shares (%.1f%% of ADV %.0f)",
+                                symbol, shares, self.max_adv_participation * 100, adv,
+                            )
+
+            # Check cash
+            slippage_pct = self._estimate_slippage_pct(symbol, data, date, asset_class, shares)
+            notional = shares * price * (1 + slippage_pct)
+            commission = self._calculate_commission(symbol, notional)
+            cost = notional + commission
+            if cost > self.cash:
+                continue
+
+            side_str = 'BUY' if signal > 0 else 'SELL'
+            side_sign = 1 if signal > 0 else -1
+
+            # Compute initial risk R per share = ATR × PARTIAL_EXIT_R_STOP_MULT.
+            atr_now = self._compute_atr(data, symbol, date)
+            r_stop_mult = float(getattr(ApexConfig, "PARTIAL_EXIT_R_STOP_MULT", 2.5))
+            risk_per_share = atr_now * r_stop_mult if atr_now > 0 else price * 0.02
+            stop_price = price - side_sign * risk_per_share
+
+            ok = self._execute_order(
+                symbol, side_str, shares, price, date,
+                f"Signal: {signal:.3f} [{sizing_mode}]",
+                slippage_pct=slippage_pct,
+            )
+            if not ok:
+                continue
+
+            # Record metadata for the partial-exit state machine.
+            self._position_meta[symbol] = {
+                "entry_price": float(price),
+                "side": side_sign,
+                "initial_shares": float(shares),
+                "risk_per_share": float(risk_per_share),
+                "stop_price": float(stop_price),
+                "stage": 0,
+                "atr_at_entry": float(atr_now),
+                "source": source_label,
+                "sizing_mode": sizing_mode,
+                "entry_corr": float(max_corr),
+                "entry_date": date,
+            }
+
+            # Deployment sample taken AFTER the order fills so it reflects
+            # actual committed capital.
+            deployed = 1.0 - (self.cash / portfolio_value) if portfolio_value > 0 else 0.0
+            self._deployed_capital_samples.append(float(deployed))
+
+            current_positions += 1
+            if current_positions >= max_positions:
+                break
     
     def _execute_order(
         self,
@@ -1072,6 +1518,25 @@ class AdvancedBacktester:
             else:
                 dsr = psr  # with 1 trial, DSR = PSR
 
+        # ── Round 11 diagnostics ──────────────────────────────────────────
+        winner_r = [
+            float(t.get("realised_r", 0.0))
+            for t in self.trades
+            if t.get("realised_r") is not None
+            and float(t.get("realised_r", 0.0)) > 0.0
+        ]
+        avg_winner_r = float(np.mean(winner_r)) if winner_r else 0.0
+
+        corr_samples = list(self._portfolio_corr_samples)
+        avg_portfolio_correlation = (
+            float(np.mean(corr_samples)) if corr_samples else 0.0
+        )
+
+        deployed_samples = list(self._deployed_capital_samples)
+        avg_capital_deployed = (
+            float(np.mean(deployed_samples)) if deployed_samples else 0.0
+        )
+
         return {
             'initial_capital': self.initial_capital,
             'final_value': final_value,
@@ -1092,6 +1557,9 @@ class AdvancedBacktester:
             'total_slippage': total_slippage,
             'total_borrow_costs': self._borrow_costs_total,
             'n_sharpe_trials': self._n_sharpe_trials,
+            'avg_winner_r': avg_winner_r,
+            'avg_portfolio_correlation': avg_portfolio_correlation,
+            'avg_capital_deployed': avg_capital_deployed,
             'equity_curve': equity_df,
             'trades': trades_df
         }
