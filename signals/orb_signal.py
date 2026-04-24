@@ -97,6 +97,38 @@ class ORBSignal:
     Thread-safe reads; NOT safe for concurrent writes to the same symbol.
     """
 
+    # Logging guard for the "inactive because interval != 1h" warning so we
+    # do not spam one line per bar in a backtest.
+    _INACTIVE_LOG_EMITTED: bool = False
+
+    @classmethod
+    def is_active(cls) -> bool:
+        """
+        Return ``True`` iff the ORB signal is structurally usable under
+        the current ``ApexConfig.OHLCV_INTERVAL``.
+
+        ORB semantics require intraday bars (typical integration uses the
+        09:30-10:05 ET opening range on 1-hour bars). On daily bars the
+        whole "opening range" concept collapses and the signal is a
+        no-op — this classmethod exposes that fact cleanly so a future
+        switch of ``OHLCV_INTERVAL`` to ``"1h"`` re-activates ORB without
+        any code changes elsewhere.
+        """
+        try:
+            from config import ApexConfig
+            interval = str(getattr(ApexConfig, "OHLCV_INTERVAL", "1d")).strip().lower()
+        except Exception:
+            interval = "1d"
+        if interval == "1h":
+            return True
+        if not cls._INACTIVE_LOG_EMITTED:
+            logger.warning(
+                "ORB inactive: requires OHLCV_INTERVAL=1h, currently %r",
+                interval,
+            )
+            cls._INACTIVE_LOG_EMITTED = True
+        return False
+
     # Legacy class-level constants. Kept for backwards compatibility with
     # external callers that read them; the instance pulls live values from
     # :class:`ApexConfig` in ``__init__``.
@@ -278,6 +310,10 @@ class ORBSignal:
         # Skip non-equity (crypto / FX identified by '/' in symbol)
         if "/" in symbol or symbol.startswith("CRYPTO:") or symbol.startswith("FX:"):
             return _neutral_orb(symbol, "non_equity")
+
+        # Interval gate — ORB semantics require intraday bars.
+        if not self.is_active():
+            return _neutral_orb(symbol, "interval_gate")
 
         # Time gate
         try:

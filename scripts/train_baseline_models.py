@@ -69,7 +69,10 @@ logger = logging.getLogger(__name__)
 # Configuration constants — overridable via env.
 # ─────────────────────────────────────────────────────────────────────────────
 
-SYMBOLS: Tuple[str, ...] = ("AAPL", "MSFT", "GOOGL")
+SYMBOLS: Tuple[str, ...] = (
+    "AAPL", "MSFT", "GOOGL", "SPY", "QQQ", "NVDA", "AMZN",
+    "GLD", "TLT", "IWM",
+)
 TRAIN_START: str = "2018-01-01"
 TRAIN_END: str = "2023-01-01"  # yfinance end is exclusive
 FORWARD_HORIZON: int = 5

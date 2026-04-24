@@ -30,7 +30,10 @@ from backtesting.real_signal_adapter import RealSignalAdapter
 from core.logging_config import setup_logging
 
 
-CALIBRATION_SYMBOLS = ("AAPL", "MSFT", "GOOGL")
+CALIBRATION_SYMBOLS = (
+    "AAPL", "MSFT", "GOOGL", "SPY", "QQQ", "NVDA", "AMZN",
+    "GLD", "TLT", "IWM",
+)
 CALIBRATION_WINDOW_START = "2022-06-01"  # warm-up for SMA50 + ATR
 CALIBRATION_WINDOW_END = "2024-01-01"    # yfinance end is exclusive
 SCORE_WINDOW_START = pd.Timestamp("2023-01-01")

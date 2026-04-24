@@ -2405,8 +2405,12 @@ class ApexConfig:
     # over the 2023 window. Lowering to the P40 of the observed distribution
     # lets ~60% of above-noise signals through while still rejecting the
     # bottom quartile.
+    # Round 12 recalibration: new P40 on the 10-symbol 2023 window is
+    # 0.1257 (see scripts/calibrate_ml_threshold output, 2497 samples).
+    # The 7-symbol P40 from Round 10 was 0.19 — lowering to 0.13 admits
+    # the extra density the ETF regime models (GLD/TLT/IWM) produce.
     ML_CONFIDENCE_THRESHOLD: float = float(
-        os.getenv("APEX_ML_CONFIDENCE_THRESHOLD", "0.19")
+        os.getenv("APEX_ML_CONFIDENCE_THRESHOLD", "0.13")
     )
 
     # ── Round 11 / Portfolio-optimisation sizing (FIX 1: Kelly) ─────────────
@@ -2414,19 +2418,26 @@ class ApexConfig:
     # stats tracked by ``signals.signal_aggregator.SignalAggregator``. When
     # a source has fewer than ``KELLY_MIN_SAMPLES`` observations the
     # backtester falls back to the existing quality-scaled ATR path.
+    # Round 12 recalibration: lowered ``KELLY_MIN_SAMPLES`` from 30 → 10 so
+    # Kelly can activate within a single-year backtest once warm-start
+    # seeding is enabled (see ``KELLY_WARM_START_ENABLED`` below).
     KELLY_ENABLED: bool = (
         os.getenv("APEX_KELLY_ENABLED", "true").lower() == "true"
     )
     KELLY_FRACTION_R11: float = float(os.getenv("APEX_KELLY_FRACTION_R11", "0.5"))
-    KELLY_MIN_SAMPLES: int = int(os.getenv("APEX_KELLY_MIN_SAMPLES", "30"))
+    KELLY_MIN_SAMPLES: int = int(os.getenv("APEX_KELLY_MIN_SAMPLES", "10"))
     MIN_POSITION_USD: float = float(os.getenv("APEX_MIN_POSITION_USD", "500"))
-    MAX_POSITION_PCT: float = float(os.getenv("APEX_MAX_POSITION_PCT", "0.15"))
+    # Round 12 recalibration: 0.15 → 0.35 so Kelly-sized positions can
+    # scale up meaningfully once the edge estimate crosses the gate.
+    MAX_POSITION_PCT: float = float(os.getenv("APEX_MAX_POSITION_PCT", "0.35"))
 
     # ── Round 11 / Partial exits (FIX 2) ────────────────────────────────────
     # Initial risk R is defined as the ATR-multiplier stop distance.
     # At +1R close ``PARTIAL_EXIT_R1`` fraction and move stop to break-even;
     # at +2R close ``PARTIAL_EXIT_R2`` fraction and trail stop at 1R below
     # current close; the remainder trails at ``PARTIAL_EXIT_ATR_MULT`` × ATR.
+    # Round 12 recalibration: 2.5 → 3.5 so routine mean-reversion noise
+    # doesn't trip the initial stop.
     PARTIAL_EXIT_ENABLED: bool = (
         os.getenv("APEX_PARTIAL_EXIT_ENABLED", "true").lower() == "true"
     )
@@ -2434,7 +2445,7 @@ class ApexConfig:
     PARTIAL_EXIT_R2: float = float(os.getenv("APEX_PARTIAL_EXIT_R2", "0.33"))
     PARTIAL_EXIT_ATR_MULT: float = float(os.getenv("APEX_PARTIAL_EXIT_ATR_MULT", "2.0"))
     PARTIAL_EXIT_R_STOP_MULT: float = float(
-        os.getenv("APEX_PARTIAL_EXIT_R_STOP_MULT", "2.5")
+        os.getenv("APEX_PARTIAL_EXIT_R_STOP_MULT", "3.5")
     )
 
     # ── Round 11 / Correlation-adjusted concurrent sizing (FIX 3) ───────────
@@ -2443,8 +2454,69 @@ class ApexConfig:
     # has its notional reduced by ``(1 - max_correlation)``. When three or
     # more open positions have pairwise correlation above the threshold
     # new entries are blocked until the concentration clears.
-    CORR_THRESHOLD: float = float(os.getenv("APEX_CORR_THRESHOLD", "0.70"))
+    # Round 12 recalibration: 0.70 → 0.85 so mega-cap diversification
+    # attempts are not blocked by the ~0.65 baseline correlation among
+    # equity names. GLD, TLT, IWM expand the universe's factor structure.
+    CORR_THRESHOLD: float = float(os.getenv("APEX_CORR_THRESHOLD", "0.85"))
     CORR_LOOKBACK_BARS: int = int(os.getenv("APEX_CORR_LOOKBACK_BARS", "60"))
+
+    # ── Round 12 / Portfolio-level caps + data-interval switch ──────────────
+    # Maximum concurrent open positions across the portfolio. Matches the
+    # count of the 10-symbol Round 12 universe.
+    MAX_CONCURRENT_POSITIONS: int = int(
+        os.getenv("APEX_MAX_CONCURRENT_POSITIONS", "10")
+    )
+    # OHLCV interval used by the driver / signal stack. Changing this to
+    # "1h" flips the ORB signal back on without code changes (see
+    # ``ORBSignal.is_active``) and causes the chunked fetcher in the
+    # Round 12 driver to switch to 60-day chunks for intraday data.
+    OHLCV_INTERVAL: str = os.getenv("APEX_OHLCV_INTERVAL", "1d")
+    OHLCV_CHUNK_DAYS: int = int(os.getenv("APEX_OHLCV_CHUNK_DAYS", "60"))
+    SIGNAL_HORIZON_BARS: int = int(os.getenv("APEX_SIGNAL_HORIZON_BARS", "5"))
+
+    # ── Round 12 / Kelly warm-start (FIX 3) ─────────────────────────────────
+    # When enabled, the driver seeds ``SignalAggregator._source_pnl_hist``
+    # with ``KELLY_MIN_SAMPLES`` synthetic observations derived from the
+    # aggregate win_rate / avg_winner_r / avg_loser_r of a prior
+    # ``run_walk_forward`` pass. This lets Kelly activate immediately on
+    # the subsequent ``run_backtest`` without requiring a warm-up year.
+    KELLY_WARM_START_ENABLED: bool = (
+        os.getenv("APEX_KELLY_WARM_START_ENABLED", "true").lower() == "true"
+    )
+
+    # ── Round 12 / Macro regime gate (FIX 4) ────────────────────────────────
+    # Portfolio-level risk-on/off classifier driven by daily SPY bars.
+    # RISK_ON  : SPY.Close.pct_change(20).iloc[-1] > 0 AND ATR(14)/close < 0.015
+    # RISK_OFF : otherwise — scales each new position by RISK_OFF_SIZE_MULT
+    #            and blocks new LONG entries on HIGH_BETA_SYMBOLS.
+    MACRO_REGIME_ENABLED: bool = (
+        os.getenv("APEX_MACRO_REGIME_ENABLED", "true").lower() == "true"
+    )
+    RISK_OFF_SIZE_MULT: float = float(os.getenv("APEX_RISK_OFF_SIZE_MULT", "0.5"))
+    HIGH_BETA_SYMBOLS: List[str] = [
+        s.strip() for s in os.getenv(
+            "APEX_HIGH_BETA_SYMBOLS", "NVDA,AMZN,GOOGL",
+        ).split(",") if s.strip()
+    ]
+    MACRO_REGIME_RETURN_LOOKBACK: int = int(
+        os.getenv("APEX_MACRO_REGIME_RETURN_LOOKBACK", "20")
+    )
+    MACRO_REGIME_VOL_MAX: float = float(
+        os.getenv("APEX_MACRO_REGIME_VOL_MAX", "0.015")
+    )
+
+    # ── Round 12 / Realistic execution costs (FIX 5) ────────────────────────
+    # Additive bps cost applied on both entry and exit fills. The bid-ask
+    # ``SPREAD_BPS_DEFAULT`` is set higher for single-name equities than
+    # ETFs; the market-impact term scales with sqrt(notional / ADV_USD).
+    SPREAD_BPS_DEFAULT: float = float(os.getenv("APEX_SPREAD_BPS_DEFAULT", "3.0"))
+    SPREAD_BPS_ETF: float = float(os.getenv("APEX_SPREAD_BPS_ETF", "1.0"))
+    MARKET_IMPACT_MULT: float = float(os.getenv("APEX_MARKET_IMPACT_MULT", "0.1"))
+    ETF_SYMBOLS: List[str] = [
+        s.strip() for s in os.getenv(
+            "APEX_ETF_SYMBOLS", "SPY,QQQ,GLD,TLT,IWM",
+        ).split(",") if s.strip()
+    ]
 
     # ── Label-Leakage Audit (Round 8 / GAP-8E) ───────────────────────────────
     # Maximum forward-shift horizon probed by ``models.ml_validator.leakage_check``.
@@ -3102,6 +3174,18 @@ CONFIG_BOUNDS: Dict[str, _BoundSpec] = {
     "PARTIAL_EXIT_R_STOP_MULT": (float, (0.0, 20.0)),
     "CORR_THRESHOLD": (float, (-1.0, 1.0)),
     "CORR_LOOKBACK_BARS": (int, (5, 1000)),
+    "MAX_CONCURRENT_POSITIONS": (int, (1, 100)),
+    "OHLCV_INTERVAL": (str, None),
+    "OHLCV_CHUNK_DAYS": (int, (1, 365)),
+    "SIGNAL_HORIZON_BARS": (int, (1, 1000)),
+    "KELLY_WARM_START_ENABLED": (bool, None),
+    "MACRO_REGIME_ENABLED": (bool, None),
+    "RISK_OFF_SIZE_MULT": (float, (0.0, 1.0)),
+    "MACRO_REGIME_RETURN_LOOKBACK": (int, (2, 500)),
+    "MACRO_REGIME_VOL_MAX": (float, (0.0, 1.0)),
+    "SPREAD_BPS_DEFAULT": (float, (0.0, 1000.0)),
+    "SPREAD_BPS_ETF": (float, (0.0, 1000.0)),
+    "MARKET_IMPACT_MULT": (float, (0.0, 10.0)),
     "ML_FEATURE_MAX_AGE_SECONDS": (float, (0.0, 86400.0)),
 
     # Circuit breaker
