@@ -11,7 +11,7 @@ PROFESSIONAL BACKTESTING ENGINE
 import numpy as np
 import pandas as pd
 import logging
-from typing import List, Optional
+from typing import List, Optional, Tuple
 from datetime import datetime
 from collections import defaultdict
 
@@ -112,6 +112,9 @@ class AdvancedBacktester:
         # Signal aggregator instance used for Kelly edge stats. Wired by
         # ``run_backtest`` when the signal generator carries an aggregator.
         self._shared_aggregator = None
+        # Round 12 diagnostics.
+        self._macro_regime_samples: List[int] = []  # 1=RISK_ON, 0=RISK_OFF
+        self._entry_block_reasons: Dict[str, int] = {}
 
     def _annualization_factor(self, symbols: List[str]) -> int:
         classes = set()
@@ -711,6 +714,46 @@ class AdvancedBacktester:
                     count += 1
         return count
 
+    def _macro_regime(
+        self,
+        data: Dict[str, pd.DataFrame],
+        date: datetime,
+    ) -> str:
+        """
+        Round 12 FIX 4 — portfolio-level RISK_ON / RISK_OFF classifier
+        using daily SPY bars.
+
+        Returns ``"RISK_ON"`` when:
+          * SPY ``N``-bar return > 0 (``N`` = ``MACRO_REGIME_RETURN_LOOKBACK``)
+          * SPY ATR(14) / close < ``MACRO_REGIME_VOL_MAX``
+        Returns ``"RISK_OFF"`` otherwise, or ``"RISK_ON"`` as a safe
+        default when SPY data is missing (so the gate fails open rather
+        than freezing all new entries on a data gap).
+        """
+        if "SPY" not in data:
+            return "RISK_ON"
+        spy = data["SPY"].loc[:date]
+        lookback = int(getattr(ApexConfig, "MACRO_REGIME_RETURN_LOOKBACK", 20))
+        vol_max = float(getattr(ApexConfig, "MACRO_REGIME_VOL_MAX", 0.015))
+        if len(spy) < max(lookback + 1, 15):
+            return "RISK_ON"
+        close = spy["Close"].astype(float)
+        if close.iloc[-1] <= 0:
+            return "RISK_ON"
+        ret = float(close.iloc[-1] / close.iloc[-lookback - 1] - 1.0)
+        high = spy["High"].astype(float)
+        low = spy["Low"].astype(float)
+        prev_close = close.shift(1)
+        tr = pd.concat(
+            [(high - low).abs(), (high - prev_close).abs(), (low - prev_close).abs()],
+            axis=1,
+        ).max(axis=1)
+        atr = tr.ewm(alpha=1.0 / 14, adjust=False).mean()
+        atr_pct = float(atr.iloc[-1] / close.iloc[-1]) if close.iloc[-1] else 0.0
+        if ret > 0.0 and np.isfinite(atr_pct) and atr_pct < vol_max:
+            return "RISK_ON"
+        return "RISK_OFF"
+
     def _kelly_notional(
         self,
         source: str,
@@ -982,6 +1025,7 @@ class AdvancedBacktester:
             symbol, side, exit_qty, price, date,
             f"{reason} @R={realised_r:.2f}",
             slippage_pct=slip,
+            data=data,
         )
         if not ok:
             return
@@ -1012,7 +1056,9 @@ class AdvancedBacktester:
             ac = AssetClass.EQUITY
         slip = self._estimate_slippage_pct(symbol, data, date, ac, exit_qty)
         ok = self._execute_order(
-            symbol, side, exit_qty, price, date, reason, slippage_pct=slip,
+            symbol, side, exit_qty, price, date, reason,
+            slippage_pct=slip,
+            data=data,
         )
         if not ok:
             return
@@ -1108,6 +1154,27 @@ class AdvancedBacktester:
             except ValueError:
                 continue
 
+            # ── Round 12 FIX 4: Macro regime gate ─────────────────────────
+            macro_enabled = bool(getattr(ApexConfig, "MACRO_REGIME_ENABLED", False))
+            risk_off_mult = float(getattr(ApexConfig, "RISK_OFF_SIZE_MULT", 0.5))
+            high_beta = set(getattr(ApexConfig, "HIGH_BETA_SYMBOLS", []) or [])
+            regime_multiplier = 1.0
+            if macro_enabled:
+                regime = self._macro_regime(data, date)
+                self._macro_regime_samples.append(1 if regime == "RISK_ON" else 0)
+                if regime == "RISK_OFF":
+                    # Block new long entries on high-beta symbols.
+                    if signal > 0 and symbol in high_beta:
+                        self._entry_block_reasons["risk_off_highbeta"] = (
+                            self._entry_block_reasons.get("risk_off_highbeta", 0) + 1
+                        )
+                        logger.debug(
+                            "event=entry_blocked symbol=%s reason=risk_off_highbeta",
+                            symbol,
+                        )
+                        continue
+                    regime_multiplier = risk_off_mult
+
             # ── FIX 3: correlation-adjusted concurrent sizing ─────────────
             corr_threshold = float(getattr(ApexConfig, "CORR_THRESHOLD", 0.70))
             corr_lookback = int(getattr(ApexConfig, "CORR_LOOKBACK_BARS", 60))
@@ -1154,7 +1221,7 @@ class AdvancedBacktester:
                 base_notional = float(position_size_usd) * size_mult
                 sizing_mode = "atr_quality"
 
-            base_notional *= corr_size_multiplier
+            base_notional *= corr_size_multiplier * regime_multiplier
             # Enforce absolute floors/ceilings.
             min_usd = float(getattr(ApexConfig, "MIN_POSITION_USD", 500.0))
             max_pct = float(getattr(ApexConfig, "MAX_POSITION_PCT", 0.15))
@@ -1213,6 +1280,7 @@ class AdvancedBacktester:
                 symbol, side_str, shares, price, date,
                 f"Signal: {signal:.3f} [{sizing_mode}]",
                 slippage_pct=slippage_pct,
+                data=data,
             )
             if not ok:
                 continue
@@ -1241,6 +1309,66 @@ class AdvancedBacktester:
             if current_positions >= max_positions:
                 break
     
+    def _compute_exec_cost_bps(
+        self,
+        symbol: str,
+        data: Optional[Dict[str, pd.DataFrame]],
+        date: Optional[datetime],
+        asset_class: AssetClass,
+        notional: float,
+    ) -> Tuple[float, float, float]:
+        """
+        Round 12 FIX 5 — additive execution-cost model.
+
+        Returns ``(spread_bps, impact_bps, commission_bps)`` for the given
+        order. ``commission_bps`` already excludes the flat equity
+        commission floor (which is captured elsewhere in dollar terms);
+        it is exposed here only so the caller can reconstruct the full
+        per-trade bps for reporting.
+        """
+        etf_symbols = set(getattr(ApexConfig, "ETF_SYMBOLS", []) or [])
+        spread_etf = float(getattr(ApexConfig, "SPREAD_BPS_ETF", 1.0))
+        spread_default = float(getattr(ApexConfig, "SPREAD_BPS_DEFAULT", 3.0))
+        impact_mult = float(getattr(ApexConfig, "MARKET_IMPACT_MULT", 0.1))
+
+        if asset_class == AssetClass.EQUITY and symbol in etf_symbols:
+            spread_bps = spread_etf
+        elif asset_class == AssetClass.EQUITY:
+            spread_bps = spread_default
+        elif asset_class == AssetClass.CRYPTO:
+            spread_bps = float(self.crypto_spread_bps)
+        elif asset_class == AssetClass.FOREX:
+            spread_bps = float(self.fx_spread_bps)
+        else:
+            spread_bps = spread_default
+
+        impact_bps = 0.0
+        if impact_mult > 0.0 and data is not None and date is not None and symbol in data:
+            hist = data[symbol].loc[:date]
+            if (
+                len(hist) >= 5
+                and "Volume" in hist.columns
+                and "Close" in hist.columns
+            ):
+                vol = hist["Volume"].tail(20).astype(float)
+                px = hist["Close"].tail(20).astype(float)
+                adv_usd = float((vol * px).mean())
+                if adv_usd > 0.0 and abs(notional) > 0.0:
+                    ratio = abs(float(notional)) / adv_usd
+                    # 0.1 * sqrt(ratio) * 1e4 → 100 bps at 1% of ADV, 316 bps at 10%.
+                    impact_bps = impact_mult * float(np.sqrt(ratio)) * 10_000.0
+
+        # Commission-bps is just the asset-class bps component (ex the flat
+        # equity commission floor) for reporting; the dollar commission is
+        # still computed in ``_calculate_commission``.
+        if asset_class == AssetClass.CRYPTO:
+            commission_bps = float(self.crypto_commission_bps)
+        elif asset_class == AssetClass.FOREX:
+            commission_bps = float(self.fx_commission_bps)
+        else:
+            commission_bps = 0.0
+        return float(spread_bps), float(impact_bps), float(commission_bps)
+
     def _execute_order(
         self,
         symbol: str,
@@ -1249,7 +1377,8 @@ class AdvancedBacktester:
         price: float,
         date: datetime,
         reason: str = "",
-        slippage_pct: Optional[float] = None
+        slippage_pct: Optional[float] = None,
+        data: Optional[Dict[str, pd.DataFrame]] = None,
     ):
         """Execute an order with realistic fills."""
 
@@ -1274,46 +1403,66 @@ class AdvancedBacktester:
         if asset_class == AssetClass.EQUITY and isinstance(quantity, float) and not quantity.is_integer():
             logger.debug("event=order_rejected symbol=%s reason=fractional_equity quantity=%s", symbol, quantity)
             return False
-        
+
         # Apply slippage (use pre-computed dynamic slippage if provided)
         if slippage_pct is None:
             slippage_pct = self._get_slippage_pct(asset_class)
+
+        # Round 12 FIX 5 — additive spread + market-impact bps costs.
+        notional_pre_slip = quantity * price
+        spread_bps, impact_bps, _commission_bps = self._compute_exec_cost_bps(
+            symbol,
+            data,
+            date,
+            asset_class,
+            notional_pre_slip,
+        )
+        extra_bps = spread_bps + impact_bps
+        extra_pct = extra_bps / 10_000.0
+
         if side == 'BUY':
-            execution_price = price * (1 + slippage_pct)
+            execution_price = price * (1 + slippage_pct + extra_pct)
         else:
-            execution_price = price * (1 - slippage_pct)
-        
+            execution_price = price * (1 - slippage_pct - extra_pct)
+
         # Calculate costs
         gross_value = quantity * execution_price
         commission = self._calculate_commission(symbol, gross_value)
+        # Total bps of execution friction: slippage + spread + impact.
+        # The flat equity commission shows up in dollar terms only.
+        total_exec_bps = float((slippage_pct * 10_000.0) + extra_bps)
         logger.info(
-            "event=fee_model asset=%s symbol=%s notional=%.2f commission=%.4f slippage_bps=%.2f",
+            "event=fee_model asset=%s symbol=%s notional=%.2f commission=%.4f "
+            "slippage_bps=%.2f spread_bps=%.2f impact_bps=%.2f total_bps=%.2f",
             asset_class.value,
             symbol,
             gross_value,
             commission,
-            slippage_pct * 10000,
+            slippage_pct * 10_000.0,
+            spread_bps,
+            impact_bps,
+            total_exec_bps,
         )
-        
+
         if side == 'BUY':
             total_cost = gross_value + commission
-            
+
             # Check cash
             if total_cost > self.cash:
                 logger.debug(f"Insufficient cash for {symbol}: need ${total_cost:,.2f}, have ${self.cash:,.2f}")
                 return False
-            
+
             # Execute
             self.cash -= total_cost
             self.positions[symbol] = self.positions.get(symbol, 0) + quantity
-        
+
         else:  # SELL
             total_proceeds = gross_value - commission
-            
+
             # Execute
             self.cash += total_proceeds
             self.positions[symbol] = self.positions.get(symbol, 0) - quantity
-        
+
         # Record trade
         trade = {
             'date': date,
@@ -1324,10 +1473,14 @@ class AdvancedBacktester:
             'execution_price': execution_price,
             'commission': commission,
             'slippage': abs(execution_price - price) * quantity,
+            'slippage_bps': float(slippage_pct * 10_000.0),
+            'spread_bps': float(spread_bps),
+            'impact_bps': float(impact_bps),
+            'total_cost_bps': total_exec_bps,
             'reason': reason,
             'cash_after': self.cash
         }
-        
+
         self.trades.append(trade)
         
         logger.debug(f"{date.date()}: {side} {quantity} {symbol} @ ${execution_price:.2f}")
@@ -1537,6 +1690,21 @@ class AdvancedBacktester:
             float(np.mean(deployed_samples)) if deployed_samples else 0.0
         )
 
+        cost_bps_vals = [
+            float(t.get("total_cost_bps", 0.0))
+            for t in self.trades
+            if t.get("total_cost_bps") is not None
+        ]
+        avg_total_cost_bps = (
+            float(np.mean(cost_bps_vals)) if cost_bps_vals else 0.0
+        )
+
+        risk_on_samples = list(self._macro_regime_samples)
+        risk_on_fraction = (
+            float(np.mean(risk_on_samples)) if risk_on_samples else 1.0
+        )
+        entry_block_reasons = dict(self._entry_block_reasons)
+
         return {
             'initial_capital': self.initial_capital,
             'final_value': final_value,
@@ -1560,6 +1728,10 @@ class AdvancedBacktester:
             'avg_winner_r': avg_winner_r,
             'avg_portfolio_correlation': avg_portfolio_correlation,
             'avg_capital_deployed': avg_capital_deployed,
+            'avg_total_cost_bps': avg_total_cost_bps,
+            'risk_on_fraction': risk_on_fraction,
+            'entry_block_reasons': entry_block_reasons,
+            'orb_active': bool(getattr(__import__('signals.orb_signal', fromlist=['ORBSignal']).ORBSignal, 'is_active', lambda: False)()),
             'equity_curve': equity_df,
             'trades': trades_df
         }

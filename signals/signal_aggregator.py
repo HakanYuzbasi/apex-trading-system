@@ -178,6 +178,57 @@ class SignalAggregator:
         """Return the current dynamic weight for ``source`` (1.0 if unseen)."""
         return float(self._source_weight.get(source, 1.0))
 
+    def warm_start_source(
+        self,
+        source: str,
+        *,
+        win_rate: float,
+        avg_win: float,
+        avg_loss: float,
+        n_samples: int,
+    ) -> None:
+        """
+        Round 12 FIX 3 — seed ``_source_pnl_hist[source]`` with synthetic
+        realised-PnL observations matching ``(win_rate, avg_win, avg_loss)``.
+
+        ``avg_loss`` must be a POSITIVE magnitude (losses are pushed into
+        the deque as negative values). The seeded samples are arranged as
+        ``int(win_rate * n_samples)`` positive wins of magnitude
+        ``avg_win`` followed by the remainder as losses of magnitude
+        ``-avg_loss`` so ``get_source_edge_stats`` recovers the same
+        statistics.
+
+        Args:
+            source: Source label (e.g. ``"primary"``).
+            win_rate: Fraction of winners in ``[0.0, 1.0]``.
+            avg_win: Mean winning PnL fraction (e.g. ``0.02`` = +2%).
+            avg_loss: Mean losing PnL fraction magnitude, positive
+                (e.g. ``0.01`` means a typical loser was -1%).
+            n_samples: Number of synthetic samples to seed (must be >= 1).
+
+        Raises:
+            ValueError: On invalid inputs.
+        """
+        if n_samples <= 0:
+            raise ValueError(f"n_samples must be > 0, got {n_samples}")
+        if not (0.0 <= win_rate <= 1.0):
+            raise ValueError(f"win_rate out of range: {win_rate}")
+        if avg_win < 0.0 or avg_loss < 0.0:
+            raise ValueError(
+                f"avg_win and avg_loss must be non-negative magnitudes; "
+                f"got win={avg_win}, loss={avg_loss}"
+            )
+        buf = self._source_pnl_hist.get(source)
+        if buf is None:
+            buf = deque(maxlen=self._pnl_buffer_size)
+            self._source_pnl_hist[source] = buf
+        n_wins = int(round(win_rate * n_samples))
+        n_losses = max(0, n_samples - n_wins)
+        for _ in range(n_wins):
+            buf.append(float(avg_win))
+        for _ in range(n_losses):
+            buf.append(-float(avg_loss))
+
     def get_source_edge_stats(self, source: str) -> Dict[str, float]:
         """
         Summarise the rolling realised-PnL buffer for ``source`` so Kelly
