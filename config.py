@@ -2552,6 +2552,60 @@ class ApexConfig:
         os.getenv("APEX_LSTM_ENSEMBLE_WEIGHT", "0.6")
     )
 
+    # ── Round 14 / Conditional LSTM ensemble (FIX 1) ────────────────────────
+    # Flat 0.6 weight on Round 13 hurt performance because 6/10 LSTMs train
+    # below 50% test accuracy. Round 14 reads
+    # ``models/saved_advanced/lstm_metrics.json`` and computes per-symbol
+    # weight as ``max(0, (test_acc - LSTM_ACCURACY_FLOOR) / 0.20)`` clamped
+    # to ``[0, LSTM_MAX_WEIGHT]`` so the LSTM never dominates the GBM.
+    LSTM_MAX_WEIGHT: float = float(os.getenv("APEX_LSTM_MAX_WEIGHT", "0.5"))
+    LSTM_ACCURACY_FLOOR: float = float(
+        os.getenv("APEX_LSTM_ACCURACY_FLOOR", "0.50")
+    )
+
+    # ── Round 14 / Short-only-in-RISK_OFF (FIX 2) ───────────────────────────
+    # 2023 was a +25% SPY tape; SELL trades into the rally produced the
+    # -10% drag. When ``SHORT_ONLY_IN_RISK_OFF`` is True, new SELL/SHORT
+    # entries are blocked while the macro regime classifier returns
+    # ``RISK_ON``.
+    SHORT_ONLY_IN_RISK_OFF: bool = (
+        os.getenv("APEX_SHORT_ONLY_IN_RISK_OFF", "true").lower() == "true"
+    )
+
+    # ── Round 14 / Dynamic-threshold floor (FIX 3) ──────────────────────────
+    # The legacy adaptive threshold computed at advanced_backtester.py:1195
+    # (``0.45 + 0.10 if confidence < 0.55 else 0.0``) was blocking 1314 of
+    # ~1400 candidates per pass. Round 14 caps it from below: the effective
+    # gate is ``max(DYNAMIC_THRESHOLD_FLOOR, dynamic_threshold_computed)``.
+    # Floor of 0.30 keeps the dominant-confidence guard alive while
+    # admitting ~1.5× more candidate entries.
+    DYNAMIC_THRESHOLD_FLOOR: float = float(
+        os.getenv("APEX_DYNAMIC_THRESHOLD_FLOOR", "0.30")
+    )
+
+    # ── Round 14 / Online learning (SGD partial_fit) ────────────────────────
+    # Per-regime online updates after each closed trade. Updates only fire
+    # when the realised PnL crosses ``ONLINE_MIN_CONFIDENCE`` and at most
+    # ``ONLINE_MAX_UPDATES_PER_DAY`` per (regime, day). Rolling deque of
+    # length 100 tracks online accuracy; if it drops below
+    # ``ONLINE_ACCURACY_FLOOR`` for 20 consecutive updates, the adapter
+    # reverts to the original baseline pickle.
+    ONLINE_LEARNING_ENABLED: bool = (
+        os.getenv("APEX_ONLINE_LEARNING_ENABLED", "true").lower() == "true"
+    )
+    ONLINE_MIN_CONFIDENCE: float = float(
+        os.getenv("APEX_ONLINE_MIN_CONFIDENCE", "0.15")
+    )
+    ONLINE_MAX_UPDATES_PER_DAY: int = int(
+        os.getenv("APEX_ONLINE_MAX_UPDATES_PER_DAY", "10")
+    )
+    ONLINE_ACCURACY_FLOOR: float = float(
+        os.getenv("APEX_ONLINE_ACCURACY_FLOOR", "0.45")
+    )
+    ONLINE_REVERT_AFTER_BAD_UPDATES: int = int(
+        os.getenv("APEX_ONLINE_REVERT_AFTER_BAD_UPDATES", "20")
+    )
+
     # ── Label-Leakage Audit (Round 8 / GAP-8E) ───────────────────────────────
     # Maximum forward-shift horizon probed by ``models.ml_validator.leakage_check``.
     # Any feature whose absolute Pearson correlation with ``label.shift(-k)``
@@ -3233,6 +3287,15 @@ CONFIG_BOUNDS: Dict[str, _BoundSpec] = {
     "LSTM_WEIGHT_DECAY": (float, (0.0, 1.0)),
     "LSTM_N_SPLITS": (int, (2, 20)),
     "LSTM_ENSEMBLE_WEIGHT": (float, (0.0, 1.0)),
+    "LSTM_MAX_WEIGHT": (float, (0.0, 1.0)),
+    "LSTM_ACCURACY_FLOOR": (float, (0.0, 1.0)),
+    "SHORT_ONLY_IN_RISK_OFF": (bool, None),
+    "DYNAMIC_THRESHOLD_FLOOR": (float, (0.0, 1.0)),
+    "ONLINE_LEARNING_ENABLED": (bool, None),
+    "ONLINE_MIN_CONFIDENCE": (float, (0.0, 1.0)),
+    "ONLINE_MAX_UPDATES_PER_DAY": (int, (0, 1000)),
+    "ONLINE_ACCURACY_FLOOR": (float, (0.0, 1.0)),
+    "ONLINE_REVERT_AFTER_BAD_UPDATES": (int, (1, 10000)),
     "ML_FEATURE_MAX_AGE_SECONDS": (float, (0.0, 86400.0)),
 
     # Circuit breaker

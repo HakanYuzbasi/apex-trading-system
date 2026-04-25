@@ -54,7 +54,10 @@ import numpy as np
 import pandas as pd
 import yfinance as yf
 from sklearn.ensemble import GradientBoostingClassifier
+from sklearn.linear_model import SGDClassifier
 from sklearn.metrics import accuracy_score, log_loss
+from sklearn.pipeline import Pipeline
+from sklearn.preprocessing import StandardScaler
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
@@ -280,8 +283,39 @@ def digest_panel(panel: Dict[str, pd.DataFrame]) -> str:
 
 def train_model(
     X_train: pd.DataFrame, y_train: pd.Series,
+):
+    """
+    Round 14 — SGDClassifier pipeline (StandardScaler -> SGD log-loss).
+
+    The pipeline supports ``partial_fit`` for online learning so the
+    adapter can update the model after each closed trade. Hyperparameters
+    are tuned to be stable on small batches (l1_ratio elasticnet,
+    adaptive learning rate, eta0=0.01) and match the brief.
+    """
+    pipeline = Pipeline(
+        [
+            ("scaler", StandardScaler()),
+            ("sgdclassifier", SGDClassifier(
+                loss="log_loss",
+                penalty="elasticnet",
+                l1_ratio=0.15,
+                alpha=1e-4,
+                learning_rate="adaptive",
+                eta0=0.01,
+                max_iter=200,
+                tol=1e-4,
+                random_state=RANDOM_STATE,
+            )),
+        ]
+    )
+    pipeline.fit(X_train.to_numpy(), y_train.to_numpy())
+    return pipeline
+
+
+def train_gbm_legacy(
+    X_train: pd.DataFrame, y_train: pd.Series,
 ) -> GradientBoostingClassifier:
-    """Fit a ``GradientBoostingClassifier`` with fixed seed."""
+    """Legacy GBM fitter retained for A/B comparison via env override."""
     model = GradientBoostingClassifier(
         n_estimators=200, max_depth=3, learning_rate=0.05,
         subsample=0.8, random_state=RANDOM_STATE,
@@ -291,11 +325,19 @@ def train_model(
 
 
 def baseline_stats_from(
-    model: GradientBoostingClassifier, X_train: pd.DataFrame,
+    model, X_train: pd.DataFrame,
 ) -> Dict[str, float]:
-    """Record mean/std of the signed score on the training set."""
+    """Record mean/std of the signed score on the training set.
+
+    Works for both the new ``Pipeline(StandardScaler, SGDClassifier)`` and
+    the legacy ``GradientBoostingClassifier`` because both expose
+    ``predict_proba`` and ``classes_``.
+    """
     proba = model.predict_proba(X_train.to_numpy())
-    classes = list(model.classes_)
+    if hasattr(model, "named_steps") and "sgdclassifier" in model.named_steps:
+        classes = list(model.named_steps["sgdclassifier"].classes_)
+    else:
+        classes = list(model.classes_)
     up_idx = classes.index(1) if 1 in classes else len(classes) - 1
     p_up = proba[:, up_idx]
     signed = np.clip((p_up - 0.5) * 2.0, -1.0, 1.0)
@@ -307,7 +349,7 @@ def baseline_stats_from(
 
 
 def _evaluate(
-    model: GradientBoostingClassifier,
+    model,
     X: pd.DataFrame, y: pd.Series,
 ) -> Tuple[float, float]:
     """Return ``(accuracy, log_loss)`` for ``(X, y)``."""
@@ -316,7 +358,11 @@ def _evaluate(
     pred = model.predict(X.to_numpy())
     proba = model.predict_proba(X.to_numpy())
     acc = float(accuracy_score(y, pred))
-    ll = float(log_loss(y, proba, labels=list(model.classes_)))
+    if hasattr(model, "named_steps") and "sgdclassifier" in model.named_steps:
+        classes_ = list(model.named_steps["sgdclassifier"].classes_)
+    else:
+        classes_ = list(model.classes_)
+    ll = float(log_loss(y, proba, labels=classes_))
     return acc, ll
 
 
