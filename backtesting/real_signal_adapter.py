@@ -473,6 +473,27 @@ class RealSignalAdapter:
 
     def _init_lstm_runtime(self) -> None:
         """Try to import torch + torch.nn once. Sets ``_lstm_active``."""
+        # Round 14 FIX 1: load per-symbol LSTM test accuracy so the
+        # adapter can compute conditional ensemble weights.
+        self._lstm_test_accuracy: Dict[str, float] = {}
+        self._lstm_weight_used: Dict[str, float] = {}
+        try:
+            import json as _json
+            metrics_path = (
+                Path(__file__).resolve().parents[1]
+                / "models" / "saved_advanced" / "lstm_metrics.json"
+            )
+            if metrics_path.is_file():
+                with open(metrics_path, "r") as f:
+                    payload = _json.load(f)
+                acc = payload.get("test_accuracy", {})
+                self._lstm_test_accuracy = {
+                    str(k): float(v) for k, v in acc.items()
+                    if isinstance(v, (int, float))
+                }
+        except Exception as exc:
+            logger.debug("lstm_metrics.json load failed: %s", exc)
+
         if not bool(getattr(ApexConfig, "LSTM_ENABLED", True)):
             return
         try:
@@ -486,6 +507,196 @@ class RealSignalAdapter:
                 "disabled, GBM-only primary signal in effect."
             )
             self._lstm_active = False
+
+    def _lstm_weight_for(self, symbol: str) -> float:
+        """Round 14 FIX 1 — per-symbol conditional ensemble weight."""
+        if not self._lstm_active or not symbol:
+            return 0.0
+        max_weight = float(getattr(ApexConfig, "LSTM_MAX_WEIGHT", 0.5))
+        floor = float(getattr(ApexConfig, "LSTM_ACCURACY_FLOOR", 0.50))
+        # When metrics missing, fall back to the legacy flat weight (the
+        # Round 13 default) so behaviour is reproducible.
+        if not self._lstm_test_accuracy:
+            return min(
+                float(getattr(ApexConfig, "LSTM_ENSEMBLE_WEIGHT", 0.6)),
+                max_weight,
+            )
+        acc = self._lstm_test_accuracy.get(symbol)
+        if acc is None or not np.isfinite(acc):
+            return 0.0
+        raw = max(0.0, (float(acc) - floor) / 0.20)
+        return float(min(raw, max_weight))
+
+    def lstm_weight_report(self) -> Dict[str, float]:
+        """Return the per-symbol weights actually used during the backtest."""
+        return dict(self._lstm_weight_used)
+
+    # ── Round 14 / Online learning (SGD partial_fit) ────────────────────────
+
+    def _ensure_online_state(self) -> None:
+        if getattr(self, "_online_initialised", False):
+            return
+        from collections import deque, defaultdict
+        # Rolling deque of (correct: bool) per regime.
+        self._online_acc_deque: Dict[str, Any] = {
+            r: deque(maxlen=100) for r in ("TRENDING", "MEAN_REV", "VOLATILE")
+        }
+        self._online_consec_bad: Dict[str, int] = defaultdict(int)
+        self._online_updates_today: Dict[Tuple[str, Any], int] = defaultdict(int)
+        self._online_total_updates: int = 0
+        self._online_model_reverts: int = 0
+        # Snapshot the original baseline pickles so we can revert on
+        # accuracy collapse. We don't deep-copy the whole pickle here —
+        # we only stash the original sklearn model object.
+        import copy as _copy
+        self._original_regime_models: Dict[str, Any] = {
+            r: _copy.deepcopy(m) for r, m in self._regime_models.items()
+        }
+        self._online_initialised: bool = True
+
+    def record_online_update(
+        self,
+        regime: str,
+        feature_vector: np.ndarray,
+        realized_label: int,
+        *,
+        date: Any = None,
+        confidence: float = 0.0,
+    ) -> Dict[str, Any]:
+        """
+        Round 14 — apply ``partial_fit`` to the regime's SGDClassifier.
+
+        The feature vector must match the GBM/SGD input
+        (:data:`ML_FEATURE_NAMES`). Updates only fire when
+        ``ApexConfig.ONLINE_LEARNING_ENABLED`` is True, the realised
+        |confidence| crosses ``ONLINE_MIN_CONFIDENCE`` and the
+        per-(regime, date) update count is below
+        ``ONLINE_MAX_UPDATES_PER_DAY``. After each update the rolling
+        accuracy is checked; if it is below ``ONLINE_ACCURACY_FLOOR`` for
+        ``ONLINE_REVERT_AFTER_BAD_UPDATES`` consecutive updates the
+        regime model is reverted to its original baseline.
+
+        Args:
+            regime: ``"TRENDING"`` / ``"MEAN_REV"`` / ``"VOLATILE"``.
+            feature_vector: 1-D numpy array of length 8.
+            realized_label: ``+1`` if the close-out PnL was positive,
+                ``-1`` if negative. Zero-PnL trades are ignored.
+            date: Trade close date (used to gate updates per day).
+            confidence: |signal| at entry; updates skipped when below
+                ``ONLINE_MIN_CONFIDENCE``.
+
+        Returns:
+            Diagnostic dict with the new rolling accuracy + counters.
+        """
+        if not bool(getattr(ApexConfig, "ONLINE_LEARNING_ENABLED", True)):
+            return {"status": "disabled"}
+        if regime not in self._regime_models:
+            return {"status": "regime_missing"}
+        min_conf = float(getattr(ApexConfig, "ONLINE_MIN_CONFIDENCE", 0.15))
+        if abs(float(confidence)) < min_conf:
+            return {"status": "confidence_floor"}
+        if int(realized_label) not in (-1, 1):
+            return {"status": "neutral_label"}
+
+        self._ensure_online_state()
+        max_per_day = int(getattr(ApexConfig, "ONLINE_MAX_UPDATES_PER_DAY", 10))
+        key = (regime, date)
+        if self._online_updates_today.get(key, 0) >= max_per_day:
+            return {"status": "rate_limited"}
+
+        model = self._regime_models[regime]
+        sgd = (
+            model.named_steps.get("sgdclassifier")
+            if hasattr(model, "named_steps") else None
+        )
+        scaler = (
+            model.named_steps.get("scaler")
+            if hasattr(model, "named_steps") else None
+        )
+        if sgd is None or scaler is None:
+            # Legacy GBM has no partial_fit — silently skip.
+            return {"status": "incompatible_estimator"}
+
+        x = np.asarray(feature_vector, dtype=float).reshape(1, -1)
+        try:
+            x_scaled = scaler.transform(x)
+        except Exception as exc:
+            logger.debug("online: scaler.transform failed: %s", exc)
+            return {"status": "transform_error"}
+
+        # Pre-update prediction (for rolling accuracy book-keeping).
+        try:
+            pre_proba = sgd.predict_proba(x_scaled)
+            classes = list(sgd.classes_)
+            up_idx = classes.index(1) if 1 in classes else len(classes) - 1
+            pre_pred_sign = 1 if pre_proba[0, up_idx] >= 0.5 else -1
+        except Exception:
+            pre_pred_sign = 0
+        was_correct = (pre_pred_sign == int(realized_label))
+        self._online_acc_deque[regime].append(bool(was_correct))
+
+        try:
+            sgd.partial_fit(x_scaled, np.asarray([int(realized_label)]), classes=np.asarray([-1, 1]))
+        except Exception as exc:
+            logger.debug("online: partial_fit failed: %s", exc)
+            return {"status": "partial_fit_error"}
+
+        self._online_total_updates += 1
+        self._online_updates_today[key] += 1
+
+        # Rolling-accuracy check + revert.
+        deque_buf = self._online_acc_deque[regime]
+        rolling_acc = (
+            sum(deque_buf) / len(deque_buf) if len(deque_buf) > 0 else 0.0
+        )
+        floor = float(getattr(ApexConfig, "ONLINE_ACCURACY_FLOOR", 0.45))
+        revert_after = int(
+            getattr(ApexConfig, "ONLINE_REVERT_AFTER_BAD_UPDATES", 20)
+        )
+        if rolling_acc < floor:
+            self._online_consec_bad[regime] += 1
+            if self._online_consec_bad[regime] >= revert_after:
+                # Revert to the snapshot.
+                import copy as _copy
+                original = self._original_regime_models.get(regime)
+                if original is not None:
+                    self._regime_models[regime] = _copy.deepcopy(original)
+                    self._online_model_reverts += 1
+                    self._online_consec_bad[regime] = 0
+                    logger.warning(
+                        "online: reverted %s model after %d bad updates "
+                        "(rolling_acc=%.3f)",
+                        regime, revert_after, rolling_acc,
+                    )
+        else:
+            self._online_consec_bad[regime] = 0
+
+        return {
+            "status": "applied",
+            "regime": regime,
+            "rolling_acc": float(rolling_acc),
+            "total_updates": self._online_total_updates,
+            "reverts": self._online_model_reverts,
+        }
+
+    def online_learning_report(self) -> Dict[str, Any]:
+        """Return a summary of the online-learning loop."""
+        if not getattr(self, "_online_initialised", False):
+            return {
+                "total_updates": 0,
+                "reverts": 0,
+                "rolling_acc": {},
+            }
+        rolling = {}
+        for regime, buf in self._online_acc_deque.items():
+            rolling[regime] = (
+                float(sum(buf) / len(buf)) if len(buf) > 0 else 0.0
+            )
+        return {
+            "total_updates": self._online_total_updates,
+            "reverts": self._online_model_reverts,
+            "rolling_acc": rolling,
+        }
 
     def _build_lstm_module(self, n_features: int) -> Any:
         """Construct an LSTMSignal nn.Module mirroring the training script."""
@@ -626,10 +837,13 @@ class RealSignalAdapter:
                 self._regime_hits.get(regime_used, 0) + 1
             )
 
-            # LSTM ensemble — only when symbol is known and LSTM weight > 0.
-            ensemble_weight = float(
-                getattr(ApexConfig, "LSTM_ENSEMBLE_WEIGHT", 0.6)
-            )
+            # Round 14 FIX 1 — per-symbol conditional LSTM ensemble weight
+            # derived from each model's test accuracy:
+            #   weight = clamp(max(0, (acc - LSTM_ACCURACY_FLOOR) / 0.20),
+            #                  0.0, LSTM_MAX_WEIGHT)
+            # Falls back to the legacy flat ``LSTM_ENSEMBLE_WEIGHT`` when
+            # ``lstm_metrics.json`` is missing.
+            ensemble_weight = self._lstm_weight_for(symbol or "")
             lstm_signal: Optional[float] = None
             if symbol is not None and ensemble_weight > 0.0:
                 lstm_signal = self._lstm_primary(symbol, ohlcv)
@@ -640,6 +854,7 @@ class RealSignalAdapter:
                     + (1.0 - ensemble_weight) * gbm_signal
                 )
                 self._lstm_hits = getattr(self, "_lstm_hits", 0) + 1
+                self._lstm_weight_used[symbol or "?"] = ensemble_weight
             else:
                 signal = gbm_signal
             signal = float(np.clip(signal, -1.0, 1.0))

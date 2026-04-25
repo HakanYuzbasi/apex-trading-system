@@ -122,6 +122,9 @@ class AdvancedBacktester:
         # captured once per successful entry so the report can surface a
         # gross-deployed metric rather than the net (cash-based) view.
         self._gross_deployed_samples: List[float] = []
+        # Round 14 — every effective dynamic threshold value is recorded
+        # (post-floor) so the report can summarise the gate's distribution.
+        self._dynamic_threshold_samples: List[float] = []
 
     def _annualization_factor(self, symbols: List[str]) -> int:
         classes = set()
@@ -351,6 +354,9 @@ class AdvancedBacktester:
         # Round 11: pick up the signal generator's aggregator so Kelly sizing
         # can read per-source edge stats populated at exit time.
         self._shared_aggregator = getattr(signal_generator, "_aggregator", None)
+        # Round 14: keep a reference to the adapter so the close-out path
+        # can drive online SGD updates via ``record_online_update``.
+        self._signal_generator = signal_generator
 
         # Validate data for common issues (splits, stale prices, NaN)
         validation = self._validate_data(data)
@@ -1114,20 +1120,45 @@ class AdvancedBacktester:
     def _feed_source_outcome(
         self, meta: Dict[str, Any], exit_price: float,
     ) -> None:
-        """Push a realised-PnL% sample to the shared aggregator."""
+        """Push a realised-PnL% sample to the shared aggregator and, when
+        the adapter supports it, drive an online-learning update."""
         aggregator = getattr(self, "_shared_aggregator", None)
-        if aggregator is None:
-            return
         entry = float(meta.get("entry_price", 0.0) or 0.0)
+        side = int(meta.get("side", 1) or 1)
+        if aggregator is not None and entry > 0.0:
+            pnl_pct = (exit_price - entry) / entry * side
+            source_label = str(meta.get("source", "primary") or "primary")
+            try:
+                aggregator.record_source_outcome(source_label, float(pnl_pct))
+            except Exception as exc:
+                logger.debug("Aggregator record_source_outcome failed: %s", exc)
+
+        # Round 14 — online SGD partial_fit hook. The adapter's
+        # ``record_online_update`` self-gates on the relevant ApexConfig
+        # toggles so this call is safe to make unconditionally.
+        adapter = getattr(self, "_signal_generator", None)
+        if adapter is None or not hasattr(adapter, "record_online_update"):
+            return
+        feature_vector = meta.get("entry_features")
+        if feature_vector is None:
+            return
+        regime = meta.get("entry_regime") or "TRENDING"
         if entry <= 0.0:
             return
-        side = int(meta.get("side", 1) or 1)
         pnl_pct = (exit_price - entry) / entry * side
-        source_label = str(meta.get("source", "primary") or "primary")
+        if pnl_pct == 0.0 or not np.isfinite(pnl_pct):
+            return
+        realized_label = 1 if pnl_pct > 0 else -1
         try:
-            aggregator.record_source_outcome(source_label, float(pnl_pct))
+            adapter.record_online_update(
+                regime=str(regime),
+                feature_vector=np.asarray(feature_vector, dtype=float),
+                realized_label=int(realized_label),
+                date=meta.get("entry_date"),
+                confidence=float(meta.get("entry_signal_abs", 0.0)),
+            )
         except Exception as exc:
-            logger.debug("Aggregator record_source_outcome failed: %s", exc)
+            logger.debug("online update failed: %s", exc)
     
     def _check_entries(
         self,
@@ -1192,7 +1223,14 @@ class AdvancedBacktester:
                 )
                 continue
 
-            dynamic_threshold = 0.45 + (0.10 if confidence < 0.55 else 0.0)
+            # Round 14 FIX 3 — floor the legacy adaptive threshold so it
+            # cannot drift above the signal distribution and starve entries.
+            # The 2023 backtest had this gate blocking 1314 of ~1400
+            # candidates per pass before the floor landed.
+            raw_dynamic_threshold = 0.45 + (0.10 if confidence < 0.55 else 0.0)
+            dyn_floor = float(getattr(ApexConfig, "DYNAMIC_THRESHOLD_FLOOR", 0.30))
+            dynamic_threshold = max(dyn_floor, raw_dynamic_threshold)
+            self._dynamic_threshold_samples.append(float(dynamic_threshold))
             if abs(signal) <= dynamic_threshold:
                 self._entry_block_reasons["dynamic_threshold"] = (
                     self._entry_block_reasons.get("dynamic_threshold", 0) + 1
@@ -1207,14 +1245,34 @@ class AdvancedBacktester:
                 )
                 continue
 
-            # ── Round 12 FIX 4: Macro regime gate ─────────────────────────
+            # ── Round 12 FIX 4 / Round 14 FIX 2: Macro regime gate ────────
             macro_enabled = bool(getattr(ApexConfig, "MACRO_REGIME_ENABLED", False))
             risk_off_mult = float(getattr(ApexConfig, "RISK_OFF_SIZE_MULT", 0.5))
             high_beta = set(getattr(ApexConfig, "HIGH_BETA_SYMBOLS", []) or [])
+            short_only_risk_off = bool(
+                getattr(ApexConfig, "SHORT_ONLY_IN_RISK_OFF", True)
+            )
             regime_multiplier = 1.0
             if macro_enabled:
                 regime = self._macro_regime(data, date)
                 self._macro_regime_samples.append(1 if regime == "RISK_ON" else 0)
+                # Round 14 FIX 2: when RISK_ON, block SELL/SHORT entries
+                # entirely so the system stays long-biased through bull
+                # tapes (this is the dominant driver of the 2023 -10% drag
+                # documented in backtest_results_round13.txt).
+                if (
+                    short_only_risk_off
+                    and regime == "RISK_ON"
+                    and signal < 0
+                ):
+                    self._entry_block_reasons["short_blocked_risk_on"] = (
+                        self._entry_block_reasons.get("short_blocked_risk_on", 0) + 1
+                    )
+                    logger.debug(
+                        "event=entry_blocked symbol=%s reason=short_blocked_risk_on",
+                        symbol,
+                    )
+                    continue
                 if regime == "RISK_OFF":
                     # Block new long entries on high-beta symbols.
                     if signal > 0 and symbol in high_beta:
@@ -1376,6 +1434,30 @@ class AdvancedBacktester:
             if not ok:
                 continue
 
+            # Round 14 — capture entry-time feature vector + regime so the
+            # close-out path can drive online updates of the SGD pipeline.
+            entry_features: Optional[np.ndarray] = None
+            entry_regime: Optional[str] = None
+            entry_signal_abs: float = float(abs(signal))
+            try:
+                from backtesting.real_signal_adapter import (
+                    compute_ml_features as _compute_features,
+                    classify_regime as _classify_regime,
+                    _last_adx as _adx,
+                    _last_atr_ratio as _atr_ratio,
+                    ML_FEATURE_NAMES as _FEATS,
+                )
+                hist_at_entry = data[symbol].loc[:prev_date]
+                feats_df = _compute_features(hist_at_entry)
+                if not feats_df.empty:
+                    entry_features = feats_df.iloc[-1][list(_FEATS)].to_numpy()
+                entry_regime = _classify_regime(
+                    _adx(hist_at_entry["High"], hist_at_entry["Low"], hist_at_entry["Close"]),
+                    _atr_ratio(hist_at_entry["High"], hist_at_entry["Low"], hist_at_entry["Close"]),
+                )
+            except Exception as exc:
+                logger.debug("entry feature snapshot failed for %s: %s", symbol, exc)
+
             # Record metadata for the partial-exit state machine.
             self._position_meta[symbol] = {
                 "entry_price": float(price),
@@ -1389,6 +1471,10 @@ class AdvancedBacktester:
                 "sizing_mode": sizing_mode,
                 "entry_corr": float(max_corr),
                 "entry_date": date,
+                # Round 14 online-learning support.
+                "entry_features": entry_features,
+                "entry_regime": entry_regime,
+                "entry_signal_abs": entry_signal_abs,
             }
 
             # Deployment sample taken AFTER the order fills so it reflects
@@ -1853,6 +1939,19 @@ class AdvancedBacktester:
             if gross_deployed_samples else 0.0
         )
 
+        # Round 14 dynamic-threshold distribution diagnostic.
+        dyn_samples = np.asarray(self._dynamic_threshold_samples, dtype=float)
+        if dyn_samples.size > 0:
+            dyn_threshold_stats = {
+                "mean": float(np.mean(dyn_samples)),
+                "std": float(np.std(dyn_samples, ddof=0)),
+                "p10": float(np.quantile(dyn_samples, 0.10)),
+                "p90": float(np.quantile(dyn_samples, 0.90)),
+                "n": int(dyn_samples.size),
+            }
+        else:
+            dyn_threshold_stats = {"mean": 0.0, "std": 0.0, "p10": 0.0, "p90": 0.0, "n": 0}
+
         cost_bps_vals = [
             float(t.get("total_cost_bps", 0.0))
             for t in self.trades
@@ -1892,6 +1991,7 @@ class AdvancedBacktester:
             'avg_portfolio_correlation': avg_portfolio_correlation,
             'avg_capital_deployed': avg_capital_deployed,
             'avg_gross_deployed': avg_gross_deployed,
+            'dynamic_threshold_stats': dyn_threshold_stats,
             'avg_total_cost_bps': avg_total_cost_bps,
             'risk_on_fraction': risk_on_fraction,
             'entry_block_reasons': entry_block_reasons,

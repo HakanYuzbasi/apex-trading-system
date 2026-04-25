@@ -385,6 +385,33 @@ def main() -> int:
         else:
             print(f"   {sym:<5}: {s.get('status')} ({s.get('n_samples', 0)} samples)")
 
+    # Round 14 FIX 1: persist a metrics JSON the adapter reads to compute
+    # per-symbol ensemble weights. Keys are ticker -> test_accuracy.
+    metrics_payload = {
+        "test_accuracy": {
+            sym: float(s["test_accuracy"])
+            for sym, s in summary.items()
+            if s.get("status") == "trained" and "test_accuracy" in s
+        },
+        "training_metadata": {
+            "train_start": TRAIN_START,
+            "train_end": TRAIN_END,
+            "horizon": horizon,
+            "lookback": lookback,
+            "n_features": n_features,
+            "n_symbols_trained": sum(
+                1 for s in summary.values() if s.get("status") == "trained"
+            ),
+            "lstm_hidden": int(ApexConfig.LSTM_HIDDEN),
+            "lstm_layers": int(ApexConfig.LSTM_LAYERS),
+        },
+    }
+    metrics_path = save_dir / "lstm_metrics.json"
+    with open(metrics_path, "w") as f:
+        json.dump(metrics_payload, f, indent=2, sort_keys=True)
+    print()
+    print(f" Metrics written to {metrics_path}")
+
     return 0
 
 
