@@ -32,6 +32,7 @@ from __future__ import annotations
 import logging
 import os
 import pickle
+from pathlib import Path
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -325,8 +326,15 @@ class RealSignalAdapter:
         self._ml_baseline: Optional[Dict[str, float]] = None
         self._ml_model_path: Optional[str] = None
         self._ml_active: bool = False
+        # Round 13 — per-symbol LSTM ensemble (lazily loaded on demand).
+        self._lstm_torch_module: Any = None  # the torch module ref or None
+        self._lstm_models: Dict[str, Any] = {}
+        self._lstm_metas: Dict[str, Dict[str, Any]] = {}
+        self._lstm_load_attempted: set = set()
+        self._lstm_active: bool = False
         if enable_ml:
             self._load_ml_model(explicit_path=ml_model_path)
+            self._init_lstm_runtime()
 
         if not self._ml_active:
             logger.info(
@@ -463,14 +471,128 @@ class RealSignalAdapter:
             )
         return regime, None, None
 
-    def _ml_primary(self, ohlcv: pd.DataFrame) -> Tuple[float, float]:
-        """
-        Return ``(signal, confidence)`` from the regime-appropriate ML
-        classifier evaluated on the most recent bar.
+    def _init_lstm_runtime(self) -> None:
+        """Try to import torch + torch.nn once. Sets ``_lstm_active``."""
+        if not bool(getattr(ApexConfig, "LSTM_ENABLED", True)):
+            return
+        try:
+            import torch
+            import torch.nn as nn
+            self._lstm_torch_module = (torch, nn)
+            self._lstm_active = True
+        except ImportError:
+            logger.warning(
+                "RealSignalAdapter: PyTorch unavailable — LSTM ensemble "
+                "disabled, GBM-only primary signal in effect."
+            )
+            self._lstm_active = False
 
-        The bar's regime is derived from ADX(14) / ATR(14)-to-close using
-        the same rules as :mod:`scripts.train_baseline_models`, then the
-        matching model from ``self._regime_models`` is invoked.
+    def _build_lstm_module(self, n_features: int) -> Any:
+        """Construct an LSTMSignal nn.Module mirroring the training script."""
+        torch, nn = self._lstm_torch_module
+        hidden = int(getattr(ApexConfig, "LSTM_HIDDEN", 128))
+        layers = int(getattr(ApexConfig, "LSTM_LAYERS", 2))
+        dropout = float(getattr(ApexConfig, "LSTM_DROPOUT", 0.2))
+
+        class LSTMSignal(nn.Module):
+            def __init__(self) -> None:
+                super().__init__()
+                self.lstm = nn.LSTM(
+                    input_size=n_features,
+                    hidden_size=hidden,
+                    num_layers=layers,
+                    dropout=dropout if layers > 1 else 0.0,
+                    batch_first=True,
+                )
+                self.fc1 = nn.Linear(hidden, 64)
+                self.relu = nn.ReLU()
+                self.dropout = nn.Dropout(dropout)
+                self.fc2 = nn.Linear(64, 1)
+                self.tanh = nn.Tanh()
+
+            def forward(self, x):
+                out, _ = self.lstm(x)
+                last = out[:, -1, :]
+                h = self.relu(self.fc1(last))
+                h = self.dropout(h)
+                return self.tanh(self.fc2(h)).squeeze(-1)
+
+        return LSTMSignal()
+
+    def _maybe_load_lstm(self, symbol: str) -> Optional[Tuple[Any, Dict[str, Any]]]:
+        """Lazily load ``models/saved_advanced/lstm_<SYM>.pt`` once per symbol."""
+        if not self._lstm_active:
+            return None
+        if symbol in self._lstm_models:
+            return self._lstm_models[symbol], self._lstm_metas[symbol]
+        if symbol in self._lstm_load_attempted:
+            return None
+        self._lstm_load_attempted.add(symbol)
+        repo_root = Path(__file__).resolve().parents[1]
+        artefact = repo_root / "models" / "saved_advanced" / f"lstm_{symbol}.pt"
+        if not artefact.is_file():
+            return None
+        try:
+            torch, _nn = self._lstm_torch_module
+            payload = torch.load(str(artefact), map_location="cpu", weights_only=False)
+            meta = payload.get("meta", {})
+            n_features = len(meta.get("feature_names", []))
+            if n_features == 0:
+                return None
+            model = self._build_lstm_module(n_features)
+            model.load_state_dict(payload["model_state"])
+            model.eval()
+            self._lstm_models[symbol] = model
+            self._lstm_metas[symbol] = meta
+            return model, meta
+        except Exception as exc:
+            logger.warning(
+                "RealSignalAdapter: failed to load LSTM for %s: %s",
+                symbol, exc,
+            )
+            return None
+
+    def _lstm_primary(
+        self, symbol: str, ohlcv: pd.DataFrame,
+    ) -> Optional[float]:
+        """
+        Return the LSTM's signed score for ``symbol`` evaluated on the
+        most recent bar, or ``None`` when the model is unavailable / the
+        warm-up window is incomplete.
+        """
+        loaded = self._maybe_load_lstm(symbol)
+        if loaded is None:
+            return None
+        model, meta = loaded
+        # Build the same feature matrix the training script used.
+        from scripts.train_lstm_signals import _build_features, LSTM_FEATURE_NAMES
+        feats = _build_features(ohlcv)
+        lookback = int(meta.get("lookback", getattr(ApexConfig, "LSTM_LOOKBACK", 60)))
+        if len(feats) < lookback:
+            return None
+        feat_cols = list(meta.get("feature_names", LSTM_FEATURE_NAMES))
+        window = feats[feat_cols].tail(lookback).to_numpy(dtype=np.float32)
+        mean = np.asarray(meta.get("feat_mean", [0.0] * len(feat_cols)), dtype=np.float32)
+        std = np.asarray(meta.get("feat_std", [1.0] * len(feat_cols)), dtype=np.float32) + 1e-6
+        normalised = (window - mean) / std
+        torch, _nn = self._lstm_torch_module
+        with torch.no_grad():
+            x = torch.from_numpy(normalised).unsqueeze(0)  # (1, lookback, n_features)
+            pred = float(model(x).item())
+        if not np.isfinite(pred):
+            return None
+        return float(np.clip(pred, -1.0, 1.0))
+
+    def _ml_primary(
+        self, ohlcv: pd.DataFrame, *, symbol: Optional[str] = None,
+    ) -> Tuple[float, float]:
+        """
+        Return ``(signal, confidence)`` from the regime-appropriate GBM
+        ensembled with the per-symbol LSTM (when available).
+
+        Round 13: ensembles the GBM regime model with a per-symbol LSTM
+        at ``LSTM_ENSEMBLE_WEIGHT``. Falls back to GBM-only when LSTM is
+        disabled, missing, or the rolling window is too short.
         """
         if (
             not self._ml_active
@@ -497,7 +619,31 @@ class RealSignalAdapter:
                 raw = model.predict(x)
                 p_up = float(np.clip(raw[0], 0.0, 1.0))
 
-            signal = float(np.clip((p_up - 0.5) * 2.0, -1.0, 1.0))
+            gbm_signal = float(np.clip((p_up - 0.5) * 2.0, -1.0, 1.0))
+
+            # Per-regime hit counter (diagnostics).
+            self._regime_hits[regime_used] = (
+                self._regime_hits.get(regime_used, 0) + 1
+            )
+
+            # LSTM ensemble — only when symbol is known and LSTM weight > 0.
+            ensemble_weight = float(
+                getattr(ApexConfig, "LSTM_ENSEMBLE_WEIGHT", 0.6)
+            )
+            lstm_signal: Optional[float] = None
+            if symbol is not None and ensemble_weight > 0.0:
+                lstm_signal = self._lstm_primary(symbol, ohlcv)
+
+            if lstm_signal is not None:
+                signal = (
+                    ensemble_weight * lstm_signal
+                    + (1.0 - ensemble_weight) * gbm_signal
+                )
+                self._lstm_hits = getattr(self, "_lstm_hits", 0) + 1
+            else:
+                signal = gbm_signal
+            signal = float(np.clip(signal, -1.0, 1.0))
+
             confidence = float(abs(signal))
             if baseline is not None:
                 mu = float(baseline.get("mean", 0.0))
@@ -506,10 +652,6 @@ class RealSignalAdapter:
                 if not np.isfinite(z_drift) or abs(z_drift) > 4.0:
                     return 0.0, 0.0
 
-            # Per-regime hit counter (diagnostics).
-            self._regime_hits[regime_used] = (
-                self._regime_hits.get(regime_used, 0) + 1
-            )
             return signal, confidence
         except Exception as exc:
             logger.debug("RealSignalAdapter._ml_primary error: %s", exc)
@@ -556,7 +698,7 @@ class RealSignalAdapter:
 
         # Primary signal: ML preferred, rule-based momentum as fallback.
         if self._ml_active:
-            primary_signal, primary_conf = self._ml_primary(window)
+            primary_signal, primary_conf = self._ml_primary(window, symbol=symbol)
             if primary_signal == 0.0 and primary_conf == 0.0:
                 # ML returned a truly neutral score — still feed rule-based
                 # momentum so the aggregator has something to gate votes on.
@@ -714,6 +856,8 @@ class RealSignalAdapter:
         report = dict(self._source_hits)
         report["_entries_fired"] = self._entry_count
         report["_ml_active"] = int(self._ml_active)
+        report["_lstm_active"] = int(self._lstm_active)
+        report["_lstm_hits"] = int(getattr(self, "_lstm_hits", 0))
         return report
 
     def regime_hit_report(self) -> Dict[str, int]:

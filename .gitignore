@@ -163,3 +163,6 @@ docs/_build/
 run_state/
 data/*.jsonl
 data/*.json.tmp
+
+# Round 13: PyTorch checkpoints (reproduced via scripts/train_lstm_signals.py)
+*.pt

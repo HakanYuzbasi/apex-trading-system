@@ -1,0 +1,253 @@
+===========================================================================
+ Apex Trading System — Round 13 Report
+   generated : 2026-04-25 07:17:14 UTC
+   branch    : claude/optimize-apex-roi-QetPP
+   commit    : 5982d07d49f27fc7a79c8b15f8afd9dea15cabda (pre-commit)
+===========================================================================
+
+ Scope: cap gross leverage so the Round 12 -92% fold drawdowns can be
+ ruled in/out as a real strategy signal vs. an instrumentation bug;
+ complete the entry-block tagging so blocked signals can be diagnosed;
+ and add an LSTM ensemble layer alongside the existing GBM primary.
+
+---------------------------------------------------------------------------
+ STEP 0 — exact line numbers (pre-Round-13)
+---------------------------------------------------------------------------
+   1. SHORT fills credit cash without borrow-margin check
+        backtesting/advanced_backtester.py:1463-1464
+        ``self.cash += total_proceeds``
+        ``self.positions[symbol] = self.positions.get(symbol, 0) - quantity``
+
+   2. ``deployed = 1.0 - cash/portfolio_value`` (understates gross)
+        backtesting/advanced_backtester.py:1305
+
+   3. Long-only cash check while short-exposure uncapped
+        backtesting/advanced_backtester.py:1267
+        ``if cost > self.cash:  # guards BUY only``
+        SELL branch at 1462-1464 had no margin gate.
+
+---------------------------------------------------------------------------
+ STEP 1 — Integration smoke tests (pytest -v --no-cov)
+---------------------------------------------------------------------------
+ 7/7 passed in 2.78s. Schema validator accepts all Round 13 fields.
+
+---------------------------------------------------------------------------
+ STEP 2 — LSTM training (scripts/train_lstm_signals.py)
+---------------------------------------------------------------------------
+ PyTorch 2.11.0+cu130 installed via ``pip install torch``.
+ Trained per-symbol LSTM (hidden=128, layers=2, dropout=0.2) on daily
+ bars 2018-2022 with TimeSeriesSplit(n_splits=5), early-stopping
+ patience=5, leakage_check raise_on_fail=True per symbol.
+
+ Per-symbol summary
+ ----------------------------------------------------------------------
+   Symbol    test_accuracy   epochs_run    best_val_loss
+   AAPL      0.5969          15            0.6808
+   MSFT      0.6020          11            0.6822
+   GOOGL     0.4184           6            0.7123
+   SPY       0.4718           6            0.7405
+   QQQ       0.4564           6            0.7181
+   NVDA      0.4718           6            0.6957
+   AMZN      0.3980           6            0.7075
+   GLD       0.4308           6            0.7072
+   TLT       0.6000          11            0.6815
+   IWM       0.4847           6            0.6967
+
+   Mean test accuracy: 0.4931 — basically a coin flip on a 5-day
+   forward-return label. AAPL / MSFT / TLT clear 0.59; the rest sit at
+   or below 50%. The 0.6 ensemble weight is therefore probably too
+   high — see PASS C below. All 10 ``.pt`` artefacts (≈830 KB each)
+   saved under ``models/saved_advanced/lstm_<SYM>.pt``.
+
+---------------------------------------------------------------------------
+ STEP 3 — Walk-forward 2020-2024 (FIX 1+2+3, leverage capped, LSTM on)
+---------------------------------------------------------------------------
+   WF_IS_BARS=378  WF_OOS_BARS=126  WF_STEP_BARS=63
+   universe: 10 symbols  PORTFOLIO_GROSS_LEVERAGE_MAX=1.5
+
+   #  OOS start    OOS end          Sharpe    TotRet     MaxDD    Win%      PF  Trades
+ --------------------------------------------------------------------
+   1  2021-01-13   2021-05-18       0.1758   0.107%  -7.700%  50.00%   0.700       4
+   2  2021-03-17   2021-07-20       0.2341   0.590%  -9.364% 100.00%     inf       8
+   3  2021-05-19   2021-09-21       0.2407  -0.089% -10.195% 100.00%     inf       4
+   4  2021-07-21   2021-11-23       0.1375   0.319%  -5.375% 100.00%     inf       4
+   5  2021-09-22   2022-01-25       0.0469  -0.183%  -3.601%   0.00%   0.000       2
+   6  2021-11-24   2022-03-29       0.0800   0.116%  -1.882%   0.00%   0.000       1
+   7  2022-01-26   2022-05-31        NaN    0.000%   0.000%   0.00%   0.000       0
+   8  2022-03-30   2022-08-02      -0.0426  -0.137%  -1.573%   0.00%   0.000       2
+   9  2022-06-01   2022-10-04        NaN    0.000%   0.000%   0.00%   0.000       0
+  10  2022-08-03   2022-12-06       0.0482  -0.033%  -1.987%   0.00%   0.000       1
+  11  2022-10-05   2023-02-07       0.1096   0.246%  -2.008% 100.00%     inf       2
+  12  2022-12-07   2023-04-11       0.0565  -0.007%  -5.366%   0.00%   0.000       2
+  13  2023-02-08   2023-06-13       0.2238   0.573%  -7.495% 100.00%     inf       4
+  14  2023-04-12   2023-08-15       0.0972  -0.108%  -3.823%  50.00%   2.709       4
+  15  2023-06-14   2023-10-17       0.0063  -0.267%  -3.744%   0.00%   0.000       3
+  16  2023-08-16   2023-12-19       0.1326   0.414%  -3.601% 100.00%     inf       6
+  17  2023-10-18   2024-02-20       0.1763  -0.009%  -7.578%  50.00%   0.286       7
+  18  2023-12-20   2024-04-23       0.0856  -0.313%  -3.994%   0.00%   0.000       3
+  19  2024-02-21   2024-06-25       0.1267   0.338%  -1.851% 100.00%     inf       3
+  20  2024-04-24   2024-08-27        NaN    0.000%   0.000%   0.00%   0.000       0
+  21  2024-06-26   2024-10-29       0.0532  -0.003%  -3.757%   0.00%   0.000       1
+  22  2024-08-28   2024-12-31       0.1710   0.433%  -5.441% 100.00%     inf       6
+
+ Walk-forward aggregate
+ ----------------------------------------------------------------------
+ Folds run               : 22
+ Mean Sharpe             :  0.113665   (R12 was 0.828 — leverage-inflated)
+ Median Sharpe           :  0.109627
+ Compounded Return       :  2.0010%    (R12 was +23.86% — leverage-inflated)
+ Worst Fold Drawdown     : -10.1954%   (R12 was -92.12% — fix lands)
+ Positive Folds          : 9 / 22
+ Negative Folds          : 10 / 22
+ Insufficient-data Folds : 3 / 22
+
+ Warm-start stats: win_rate=0.4318, avg_win=0.0035, avg_loss=0.0011, n=22
+
+---------------------------------------------------------------------------
+ STEP 4 — 3-pass A/B 2023-01-01 -> 2023-12-31
+---------------------------------------------------------------------------
+                                       PASS A    PASS B    PASS C
+ Universe                              10 syms   10 syms   10 syms
+ Leverage cap                          OFF       1.5x      1.5x
+ Short margin                          0%        50%       50%
+ LSTM ensemble                         off       off       on (0.6)
+
+ Total Return                          -10.76%   -10.71%   -15.89%
+ Sharpe                                  0.566     0.633     0.405
+ Max Drawdown                          -42.19%   -47.85%   -29.12%
+ Win Rate                               47.06%    47.06%    62.50%
+ Profit Factor                           0.306     0.306     0.380
+ Total Trades                              73       73        22
+ Avg Winner R                            0.935     0.935     1.688
+ Avg Capital Deployed (NET)             10.47%    11.33%    13.90%
+ Avg Capital Deployed (GROSS)           19.71%    20.24%    13.88%
+ Avg Portfolio Correlation               0.522     0.522     0.431
+ Avg Total Cost bps                      7.23      7.22      8.11
+ RISK_ON fraction                        0.583     0.583     0.500
+
+ Adapter source hits (all passes)
+ ----------------------------------------------------------------------
+   PASS A : ml=1014 pattern=107 momentum_fallback=2 lstm_hits=0
+   PASS B : ml=1014 pattern=107 momentum_fallback=2 lstm_hits=0
+   PASS C : ml=1071 pattern=116 momentum_fallback=0 lstm_hits=1716
+
+ Entry-block breakdown (every pass)
+ ----------------------------------------------------------------------
+   dynamic_threshold : 1314 (PASS A/B), 1466 (PASS C)
+   (no other blocker tripped — confirms FIX 2 tagging works and the
+    overwhelming gate is dynamic_threshold rather than corr/leverage/
+    cash/macro on this universe.)
+
+---------------------------------------------------------------------------
+ Targets — honest comparison
+---------------------------------------------------------------------------
+   Target                          | Achieved          | Hit?
+   --------------------------------|-------------------|-----
+   run_backtest 2023 Return  > +5% | best -10.71%      | NO
+   run_backtest 2023 Sharpe  > 0.80| best  0.633       | NO
+   WF 2020-2024 Mean Sharpe  > 0.80| 0.114             | NO
+   WF Positive folds >= 17/22      | 9/22              | NO
+   Worst fold DD < -15%            | -10.20%           | YES
+   Gross deployed > 25%            | 20.24% (PASS B)   | NO
+
+---------------------------------------------------------------------------
+ What this round actually proved
+---------------------------------------------------------------------------
+ The dominant Round 12 finding — that mean WF Sharpe was 0.828 — was
+ a leverage-artifact, not strategy edge. With Reg-T-style short
+ margin (Round 13 FIX 1) and a 1.5× gross-exposure cap, the same
+ universe and same signal stack produces:
+
+   * Worst-fold DD bounded at -10.20% (R12 was -92.12%) — FIX 1 works.
+   * Mean WF Sharpe 0.114 — that is the TRUE edge. The R12 number
+     reflected a 3.5× leveraged book whose mark-to-market PnL
+     amplified noise.
+   * Compounded return drops from +23.86% to +2.00% — same reason.
+
+ The 2023 single-year backtest (PASS A vs PASS B) shows the leverage
+ cap is largely INERT in 2023 because gross deployed never reaches the
+ cap (max 20.24% << 150%). The remaining -42% DD on PASS A/B is real
+ strategy loss, not leverage. PASS A and PASS B differ only because
+ short proceeds no longer credit cash in PASS B, which slightly
+ changes intermediate cash balances and trade execution timing — but
+ the trades themselves are nearly identical (73 trades, same
+ symbols).
+
+ LSTM ensemble (PASS C) ROI is negative on this universe at the
+ 0.6 weight specified by the brief because 6/10 LSTMs train below
+ 50% test accuracy. The ensemble drowns the GBM signal with mostly
+ noise. The trade count collapses from 73 -> 22 (only AAPL/SPY pass
+ the gate when the LSTM dominates), worsening diversification and
+ producing -15.89% return. Lowering ``LSTM_ENSEMBLE_WEIGHT`` to
+ ~0.2 or making it symbol-conditional (only ensemble symbols whose
+ LSTM beat 0.55 test accuracy: AAPL, MSFT, TLT) is the natural
+ follow-up.
+
+ Per-block tagging (FIX 2) is now wired at every continue site in
+ ``_check_entries``. The 2023 run shows ONE dominant gate in every
+ pass: ``dynamic_threshold`` filters 1314-1466 candidate entries.
+ The remaining gates (corr_blocked, corr_size_zeroed, cash_insufficient,
+ leverage_cap, macro_regime, share_size_zero, signal_error,
+ invalid_symbol, confidence_gate) all read 0 in this run — that is
+ NOT a tagging bug; it confirms the upstream signal threshold
+ already filters everything below the dynamic confidence floor before
+ the structural gates can bite.
+
+ The deployed-capital metric now exposes BOTH the legacy net view
+ (``avg_capital_deployed``) AND the new gross view
+ (``avg_gross_deployed``). PASS A's net 10.47% vs gross 19.71% shows
+ the previous metric was indeed understating exposure by ~half.
+
+---------------------------------------------------------------------------
+ Targets that miss — what would close the gap
+---------------------------------------------------------------------------
+ 1) WF Mean Sharpe 0.80 / Positive folds 17/22:
+    Won't happen on this signal set. The honest mean Sharpe is 0.11.
+    A real path to 0.80 needs:
+      * higher-frequency signal (1h bars — blocked by yfinance data)
+      * fundamentally better primary signals (current GBM test acc
+        is 0.45-0.56 across regimes; LSTMs 0.40-0.60)
+      * larger universe with genuine factor diversity (commodities,
+        rates, FX cross-asset; current universe is 1 SPY + 6 mega-cap
+        equities + 3 ETFs).
+
+ 2) 2023 return > +5% / Sharpe > 0.80:
+    The 2023 mega-cap tape was a +25% year for SPY. A long-only or
+    mostly-long allocation would have captured that. The current
+    signal stack is bidirectional (trades both BUY and SELL) and
+    the SELL trades into the 2023 rally generated the -10% drag.
+    Restricting shorts to a ``RISK_OFF`` regime (which 2023 had only
+    41.7% of) would close most of the gap; the mechanic is in place
+    via ``HIGH_BETA_SYMBOLS`` block but only on longs not shorts.
+
+ 3) Gross deployed > 25%:
+    With dynamic_threshold gating 1300+ candidates and only ~75 making
+    it to a fill, the supply of qualifying entries is the bottleneck —
+    not the leverage cap. Either lower the dynamic_threshold floor
+    (currently 0.45-0.55) or improve the primary signal so more
+    candidates clear it.
+
+---------------------------------------------------------------------------
+ Artifacts
+---------------------------------------------------------------------------
+   backtesting/advanced_backtester.py    (gross-leverage cap +
+                                          Reg-T short margin +
+                                          gross_deployed metric +
+                                          full entry-block tagging +
+                                          short-margin ledger)
+   backtesting/real_signal_adapter.py    (per-symbol LSTM loader,
+                                          ensemble in _ml_primary,
+                                          _lstm_active diagnostic)
+   config.py                             (PORTFOLIO_GROSS_LEVERAGE_MAX,
+                                          SHORT_MARGIN_PCT, LSTM_*
+                                          fields, all schema-registered)
+   scripts/train_lstm_signals.py         (10-symbol LSTM trainer +
+                                          leakage_check + early stop)
+   scripts/round13_real_data_report.py   (3-pass A/B + WF driver)
+   models/saved_advanced/lstm_*.pt       (10 per-symbol artefacts,
+                                          gitignored as binary models)
+   backtest_results_round13.txt          (this file)
+
+===========================================================================
+ End of Round 13 report.
+===========================================================================
