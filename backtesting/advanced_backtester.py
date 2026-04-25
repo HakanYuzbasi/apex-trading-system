@@ -115,6 +115,13 @@ class AdvancedBacktester:
         # Round 12 diagnostics.
         self._macro_regime_samples: List[int] = []  # 1=RISK_ON, 0=RISK_OFF
         self._entry_block_reasons: Dict[str, int] = {}
+        # Round 13 — Reg-T style short margin ledger. Keyed by symbol,
+        # records the total USD margin currently posted for the open short.
+        self._short_margin_posted: Dict[str, float] = {}
+        # Gross-exposure snapshots (sum of |notional| / portfolio_value)
+        # captured once per successful entry so the report can surface a
+        # gross-deployed metric rather than the net (cash-based) view.
+        self._gross_deployed_samples: List[float] = []
 
     def _annualization_factor(self, symbols: List[str]) -> int:
         classes = set()
@@ -676,6 +683,40 @@ class AdvancedBacktester:
                 max_corr = abs(rho)
         return max_corr
 
+    def _gross_exposure(
+        self,
+        data: Dict[str, pd.DataFrame],
+        date: datetime,
+        *,
+        additional_notional: float = 0.0,
+    ) -> float:
+        """
+        Round 13 FIX 1 — total gross USD exposure across all open positions.
+
+        ``Σ |quantity × close_price|`` using each symbol's most recent close
+        at ``date``. ``additional_notional`` adds a hypothetical pending
+        order (in absolute USD) so the caller can check the leverage cap
+        BEFORE admitting a new entry. Falls back to the position's entry
+        price when the symbol is absent from ``data`` (defensive — normal
+        production flow always has data).
+        """
+        total = abs(float(additional_notional or 0.0))
+        for sym, qty in self.positions.items():
+            if qty == 0:
+                continue
+            price: Optional[float] = None
+            if sym in data:
+                hist = data[sym].loc[:date]
+                if not hist.empty and "Close" in hist.columns:
+                    val = float(hist["Close"].iloc[-1])
+                    if np.isfinite(val) and val > 0.0:
+                        price = val
+            if price is None:
+                meta = self._position_meta.get(sym, {})
+                price = float(meta.get("entry_price", 0.0) or 0.0)
+            total += abs(float(qty)) * float(price)
+        return float(total)
+
     def _count_correlated_pairs(
         self,
         data: Dict[str, pd.DataFrame],
@@ -1137,21 +1178,33 @@ class AdvancedBacktester:
                 confidence = signal_data.get('confidence', 0.5)
                 quality = signal_data.get('quality', confidence)
             except:
+                self._entry_block_reasons["signal_error"] = (
+                    self._entry_block_reasons.get("signal_error", 0) + 1
+                )
                 continue
-            
+
             # Entry logic
             # Dynamic quality gating for better Sharpe
             min_conf = 0.35
             if confidence < min_conf or quality < 0.35:
+                self._entry_block_reasons["confidence_gate"] = (
+                    self._entry_block_reasons.get("confidence_gate", 0) + 1
+                )
                 continue
 
             dynamic_threshold = 0.45 + (0.10 if confidence < 0.55 else 0.0)
             if abs(signal) <= dynamic_threshold:
+                self._entry_block_reasons["dynamic_threshold"] = (
+                    self._entry_block_reasons.get("dynamic_threshold", 0) + 1
+                )
                 continue
 
             try:
                 asset_class = parse_symbol(symbol).asset_class
             except ValueError:
+                self._entry_block_reasons["invalid_symbol"] = (
+                    self._entry_block_reasons.get("invalid_symbol", 0) + 1
+                )
                 continue
 
             # ── Round 12 FIX 4: Macro regime gate ─────────────────────────
@@ -1185,6 +1238,9 @@ class AdvancedBacktester:
                 ) >= 3
             )
             if corr_blocked:
+                self._entry_block_reasons["corr_blocked"] = (
+                    self._entry_block_reasons.get("corr_blocked", 0) + 1
+                )
                 logger.debug(
                     "event=entry_blocked symbol=%s reason=portfolio_correlated_cluster",
                     symbol,
@@ -1198,6 +1254,9 @@ class AdvancedBacktester:
             if max_corr > corr_threshold:
                 corr_size_multiplier = max(0.0, 1.0 - max_corr)
                 if corr_size_multiplier <= 0.0:
+                    self._entry_block_reasons["corr_size_zeroed"] = (
+                        self._entry_block_reasons.get("corr_size_zeroed", 0) + 1
+                    )
                     logger.debug(
                         "event=entry_blocked symbol=%s reason=corr_size_zeroed corr=%.2f",
                         symbol, max_corr,
@@ -1238,8 +1297,33 @@ class AdvancedBacktester:
                 shares = (base_notional / price) if price > 0 else 0.0
 
             if asset_class == AssetClass.EQUITY and shares < 1:
+                self._entry_block_reasons["share_size_zero"] = (
+                    self._entry_block_reasons.get("share_size_zero", 0) + 1
+                )
                 continue
             if asset_class != AssetClass.EQUITY and shares < 0.0001:
+                self._entry_block_reasons["share_size_zero"] = (
+                    self._entry_block_reasons.get("share_size_zero", 0) + 1
+                )
+                continue
+
+            # ── Round 13 FIX 1: portfolio gross-leverage cap ──────────────
+            leverage_cap = float(
+                getattr(ApexConfig, "PORTFOLIO_GROSS_LEVERAGE_MAX", 1.5)
+            )
+            candidate_notional = float(shares) * float(price)
+            gross_after = self._gross_exposure(
+                data, date, additional_notional=candidate_notional,
+            )
+            if leverage_cap > 0.0 and gross_after > portfolio_value * leverage_cap:
+                self._entry_block_reasons["leverage_cap"] = (
+                    self._entry_block_reasons.get("leverage_cap", 0) + 1
+                )
+                logger.debug(
+                    "event=entry_blocked symbol=%s reason=leverage_cap "
+                    "gross_after=%.2f cap=%.2f",
+                    symbol, gross_after, portfolio_value * leverage_cap,
+                )
                 continue
 
             # ADV capacity constraint — cap at max_adv_participation % of 20-day ADV
@@ -1259,12 +1343,19 @@ class AdvancedBacktester:
                                 symbol, shares, self.max_adv_participation * 100, adv,
                             )
 
-            # Check cash
+            # Check cash — LONGs need full notional, SHORTs need short margin.
             slippage_pct = self._estimate_slippage_pct(symbol, data, date, asset_class, shares)
             notional = shares * price * (1 + slippage_pct)
             commission = self._calculate_commission(symbol, notional)
-            cost = notional + commission
-            if cost > self.cash:
+            short_margin_pct = float(getattr(ApexConfig, "SHORT_MARGIN_PCT", 0.50))
+            if signal > 0:
+                cash_required = notional + commission
+            else:
+                cash_required = (abs(notional) * short_margin_pct) + commission
+            if cash_required > self.cash:
+                self._entry_block_reasons["cash_insufficient"] = (
+                    self._entry_block_reasons.get("cash_insufficient", 0) + 1
+                )
                 continue
 
             side_str = 'BUY' if signal > 0 else 'SELL'
@@ -1301,7 +1392,16 @@ class AdvancedBacktester:
             }
 
             # Deployment sample taken AFTER the order fills so it reflects
-            # actual committed capital.
+            # actual committed capital. Round 13: switch from the net
+            # (1 - cash/portfolio) formulation — which went negative on
+            # short proceeds — to a gross view summing |notional| / PV.
+            gross_after_fill = self._gross_exposure(data, date)
+            gross_deployed = (
+                gross_after_fill / portfolio_value
+                if portfolio_value > 0 else 0.0
+            )
+            self._gross_deployed_samples.append(float(gross_deployed))
+            # Preserve the legacy net figure for regression analysis.
             deployed = 1.0 - (self.cash / portfolio_value) if portfolio_value > 0 else 0.0
             self._deployed_capital_samples.append(float(deployed))
 
@@ -1444,24 +1544,81 @@ class AdvancedBacktester:
             total_exec_bps,
         )
 
+        # Round 13 FIX 1 — Reg-T-style short-margin accounting.
+        # Branch based on the position BEFORE the fill:
+        #   BUY  with pre_pos >= 0  : opening/extending long  (standard cash debit)
+        #   BUY  with pre_pos <  0  : covering a short        (release margin + PnL)
+        #   SELL with pre_pos >  0  : closing a long          (standard cash credit)
+        #   SELL with pre_pos <= 0  : opening/extending short (debit margin, not credit)
+        pre_pos = self.positions.get(symbol, 0)
+        short_margin_pct = float(getattr(ApexConfig, "SHORT_MARGIN_PCT", 0.50))
+
         if side == 'BUY':
-            total_cost = gross_value + commission
-
-            # Check cash
-            if total_cost > self.cash:
-                logger.debug(f"Insufficient cash for {symbol}: need ${total_cost:,.2f}, have ${self.cash:,.2f}")
-                return False
-
-            # Execute
-            self.cash -= total_cost
-            self.positions[symbol] = self.positions.get(symbol, 0) + quantity
+            if pre_pos < 0:
+                # Cover a short (quantity must not exceed abs(pre_pos) — mixed
+                # orders are not supported; guard explicitly).
+                if quantity > abs(pre_pos) + 1e-9:
+                    logger.error(
+                        "event=order_rejected symbol=%s reason=mixed_cover_not_supported "
+                        "qty=%s pre_pos=%s", symbol, quantity, pre_pos,
+                    )
+                    return False
+                posted = float(self._short_margin_posted.get(symbol, 0.0))
+                cover_fraction = quantity / abs(pre_pos) if pre_pos else 0.0
+                margin_released = posted * cover_fraction
+                entry_price = float(
+                    self._position_meta.get(symbol, {}).get(
+                        "entry_price", execution_price,
+                    )
+                )
+                # Short PnL = (entry - cover) * qty, minus commission.
+                short_pnl = (entry_price - execution_price) * quantity - commission
+                self.cash += margin_released + short_pnl
+                new_posted = max(0.0, posted - margin_released)
+                if new_posted < 1e-6:
+                    self._short_margin_posted.pop(symbol, None)
+                else:
+                    self._short_margin_posted[symbol] = new_posted
+                self.positions[symbol] = pre_pos + quantity
+            else:
+                total_cost = gross_value + commission
+                if total_cost > self.cash:
+                    logger.debug(
+                        f"Insufficient cash for {symbol}: need ${total_cost:,.2f}, "
+                        f"have ${self.cash:,.2f}"
+                    )
+                    return False
+                self.cash -= total_cost
+                self.positions[symbol] = pre_pos + quantity
 
         else:  # SELL
-            total_proceeds = gross_value - commission
-
-            # Execute
-            self.cash += total_proceeds
-            self.positions[symbol] = self.positions.get(symbol, 0) - quantity
+            if pre_pos > 0:
+                # Closing an existing long (quantity must not exceed pre_pos).
+                if quantity > pre_pos + 1e-9:
+                    logger.error(
+                        "event=order_rejected symbol=%s reason=mixed_flip_not_supported "
+                        "qty=%s pre_pos=%s", symbol, quantity, pre_pos,
+                    )
+                    return False
+                total_proceeds = gross_value - commission
+                self.cash += total_proceeds
+                self.positions[symbol] = pre_pos - quantity
+            else:
+                # Opening/extending a short — debit margin rather than credit
+                # proceeds so gross exposure stays capped by cash.
+                margin_required = abs(gross_value) * short_margin_pct + commission
+                if margin_required > self.cash:
+                    logger.debug(
+                        f"Insufficient margin for short {symbol}: need "
+                        f"${margin_required:,.2f}, have ${self.cash:,.2f}"
+                    )
+                    return False
+                self.cash -= margin_required
+                self._short_margin_posted[symbol] = (
+                    self._short_margin_posted.get(symbol, 0.0)
+                    + abs(gross_value) * short_margin_pct
+                )
+                self.positions[symbol] = pre_pos - quantity
 
         # Record trade
         trade = {
@@ -1690,6 +1847,12 @@ class AdvancedBacktester:
             float(np.mean(deployed_samples)) if deployed_samples else 0.0
         )
 
+        gross_deployed_samples = list(self._gross_deployed_samples)
+        avg_gross_deployed = (
+            float(np.mean(gross_deployed_samples))
+            if gross_deployed_samples else 0.0
+        )
+
         cost_bps_vals = [
             float(t.get("total_cost_bps", 0.0))
             for t in self.trades
@@ -1728,6 +1891,7 @@ class AdvancedBacktester:
             'avg_winner_r': avg_winner_r,
             'avg_portfolio_correlation': avg_portfolio_correlation,
             'avg_capital_deployed': avg_capital_deployed,
+            'avg_gross_deployed': avg_gross_deployed,
             'avg_total_cost_bps': avg_total_cost_bps,
             'risk_on_fraction': risk_on_fraction,
             'entry_block_reasons': entry_block_reasons,

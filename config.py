@@ -2518,6 +2518,40 @@ class ApexConfig:
         ).split(",") if s.strip()
     ]
 
+    # ── Round 13 / Gross-leverage cap + Reg-T-style short margin (FIX 1) ────
+    # Dominant fix for the -92% fold drawdowns seen in Round 12. The R12
+    # cash gate only checked LONG orders; a combined long/short book could
+    # gross up to MAX_POSITION_PCT × MAX_CONCURRENT_POSITIONS = 3.5× AUM.
+    # Cap gross_exposure = Σ |notional_i| at ``PORTFOLIO_GROSS_LEVERAGE_MAX``
+    # times portfolio value before admitting any new entry. On SHORT entries
+    # debit ``SHORT_MARGIN_PCT`` * |notional| from cash instead of crediting
+    # proceeds; the margin is released when the short is covered.
+    PORTFOLIO_GROSS_LEVERAGE_MAX: float = float(
+        os.getenv("APEX_PORTFOLIO_GROSS_LEVERAGE_MAX", "1.5")
+    )
+    SHORT_MARGIN_PCT: float = float(os.getenv("APEX_SHORT_MARGIN_PCT", "0.50"))
+
+    # ── Round 13 / LSTM ensemble (FIX 3) ────────────────────────────────────
+    # Per-symbol LSTM trained on daily bars 2018-2022. Ensembled with the
+    # existing GBM primary signal at ``LSTM_ENSEMBLE_WEIGHT`` weight. When
+    # PyTorch is unavailable or the per-symbol ``.pt`` file is missing the
+    # adapter falls back to pure GBM.
+    LSTM_ENABLED: bool = (
+        os.getenv("APEX_LSTM_ENABLED", "true").lower() == "true"
+    )
+    LSTM_LOOKBACK: int = int(os.getenv("APEX_LSTM_LOOKBACK", "60"))
+    LSTM_HIDDEN: int = int(os.getenv("APEX_LSTM_HIDDEN", "128"))
+    LSTM_LAYERS: int = int(os.getenv("APEX_LSTM_LAYERS", "2"))
+    LSTM_DROPOUT: float = float(os.getenv("APEX_LSTM_DROPOUT", "0.2"))
+    LSTM_EPOCHS: int = int(os.getenv("APEX_LSTM_EPOCHS", "50"))
+    LSTM_PATIENCE: int = int(os.getenv("APEX_LSTM_PATIENCE", "5"))
+    LSTM_LR: float = float(os.getenv("APEX_LSTM_LR", "0.001"))
+    LSTM_WEIGHT_DECAY: float = float(os.getenv("APEX_LSTM_WEIGHT_DECAY", "0.0001"))
+    LSTM_N_SPLITS: int = int(os.getenv("APEX_LSTM_N_SPLITS", "5"))
+    LSTM_ENSEMBLE_WEIGHT: float = float(
+        os.getenv("APEX_LSTM_ENSEMBLE_WEIGHT", "0.6")
+    )
+
     # ── Label-Leakage Audit (Round 8 / GAP-8E) ───────────────────────────────
     # Maximum forward-shift horizon probed by ``models.ml_validator.leakage_check``.
     # Any feature whose absolute Pearson correlation with ``label.shift(-k)``
@@ -3186,6 +3220,19 @@ CONFIG_BOUNDS: Dict[str, _BoundSpec] = {
     "SPREAD_BPS_DEFAULT": (float, (0.0, 1000.0)),
     "SPREAD_BPS_ETF": (float, (0.0, 1000.0)),
     "MARKET_IMPACT_MULT": (float, (0.0, 10.0)),
+    "PORTFOLIO_GROSS_LEVERAGE_MAX": (float, (0.0, 10.0)),
+    "SHORT_MARGIN_PCT": (float, (0.0, 2.0)),
+    "LSTM_ENABLED": (bool, None),
+    "LSTM_LOOKBACK": (int, (2, 500)),
+    "LSTM_HIDDEN": (int, (2, 2048)),
+    "LSTM_LAYERS": (int, (1, 10)),
+    "LSTM_DROPOUT": (float, (0.0, 1.0)),
+    "LSTM_EPOCHS": (int, (1, 1000)),
+    "LSTM_PATIENCE": (int, (1, 100)),
+    "LSTM_LR": (float, (0.0, 1.0)),
+    "LSTM_WEIGHT_DECAY": (float, (0.0, 1.0)),
+    "LSTM_N_SPLITS": (int, (2, 20)),
+    "LSTM_ENSEMBLE_WEIGHT": (float, (0.0, 1.0)),
     "ML_FEATURE_MAX_AGE_SECONDS": (float, (0.0, 86400.0)),
 
     # Circuit breaker
