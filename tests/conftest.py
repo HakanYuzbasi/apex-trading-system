@@ -1,4 +1,28 @@
 # tests/conftest.py - Pytest configuration and fixtures
+#
+# websockets compat: alpaca-trade-api pins websockets<11 but yfinance==1.0
+# imports websockets.sync and websockets.asyncio (added in websockets 12).
+# We inject empty stub modules here — at pytest_configure time — so they are
+# present before any test file or plugin tries to import yfinance.live.
+import sys
+import types as _types
+
+def _stub_websockets_subpkgs() -> None:
+    """Register websockets.sync and websockets.asyncio stubs if missing."""
+    _stubs = {
+        "websockets.sync":           {},
+        "websockets.sync.client":    {"connect": lambda *a, **kw: None},
+        "websockets.asyncio":        {},
+        "websockets.asyncio.client": {"connect": lambda *a, **kw: None},
+    }
+    for mod_name, attrs in _stubs.items():
+        if mod_name not in sys.modules:
+            mod = _types.ModuleType(mod_name)
+            for k, v in attrs.items():
+                setattr(mod, k, v)
+            sys.modules[mod_name] = mod
+
+_stub_websockets_subpkgs()
 
 import os
 import tempfile
