@@ -11,24 +11,41 @@ from pathlib import Path
 from typing import Optional
 
 import pandas as pd
+from dotenv import load_dotenv
 
 log = logging.getLogger("data_provider")
 
 ROOT     = Path(__file__).resolve().parents[1]
+load_dotenv(ROOT / ".env")
 DATA_DIR = ROOT / "data"
 SOURCE_LOG = DATA_DIR / "data_source_log.jsonl"
 
-ALPACA_API_KEY  = os.getenv("ALPACA_API_KEY", "")
-ALPACA_SECRET   = os.getenv("ALPACA_SECRET_KEY", "")
+APEX_ALPACA_API_KEY = os.getenv("APEX_ALPACA_API_KEY", "")
+APEX_ALPACA_SECRET  = os.getenv("APEX_ALPACA_SECRET_KEY", "")
 POLYGON_API_KEY = os.getenv("POLYGON_API_KEY", "")
 _RETRIES        = int(os.getenv("DATA_RETRY_COUNT", "3"))
 _BACKOFF        = float(os.getenv("DATA_RETRY_BACKOFF_S", "5"))
 
+class CriticalFileHandler(logging.Handler):
+    def emit(self, record):
+        if record.levelno >= logging.CRITICAL:
+            import datetime
+            ts = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%d_%H%M%S")
+            path = DATA_DIR / f"CRITICAL_{record.name}_{ts}.txt"
+            DATA_DIR.mkdir(parents=True, exist_ok=True)
+            path.write_text(self.format(record) + "\n")
+
+log.addHandler(CriticalFileHandler())
+
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 def _validate(df: pd.DataFrame, symbol: str) -> bool:
-    """Return True only if latest bar has price>0, volume>0, no NaN."""
+    """Return True only if latest bar is recent and has price>0, volume>0, no NaN."""
     if df.empty:
+        return False
+    latest = pd.Timestamp(df.index[-1]).date()
+    if (date.today() - latest).days > 5:
+        log.warning("%s: stale latest bar %s — rejected", symbol, latest)
         return False
     bar = df.iloc[-1]
     if df[["Close", "Volume"]].isnull().any().any():
@@ -41,21 +58,31 @@ def _validate(df: pd.DataFrame, symbol: str) -> bool:
 
 
 def _log_source(symbol: str, src: str, latency_ms: float) -> None:
-    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    SOURCE_LOG.parent.mkdir(parents=True, exist_ok=True)
+    if SOURCE_LOG.exists() and SOURCE_LOG.stat().st_size > 50 * 1_048_576:
+        import gzip, shutil
+        import datetime
+        ts = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%d_%H%M%S")
+        arch = DATA_DIR / f"data_source_log_{ts}.jsonl.gz"
+        with SOURCE_LOG.open("rb") as f_in, gzip.open(arch, "wb") as f_out:
+            shutil.copyfileobj(f_in, f_out)
+        SOURCE_LOG.unlink()
+        log.info("Data source log rotated -> %s", arch)
+
     record = {"date": str(date.today()), "symbol": symbol,
               "data_source": src, "latency_ms": round(latency_ms, 1)}
     with SOURCE_LOG.open("a") as f:
         f.write(json.dumps(record) + "\n")
 
 
-def _retry(fn, label: str):
+def _retry(fn, label: str, exc_types):
     """Call fn() up to _RETRIES times; return result or None on exhaustion."""
     for attempt in range(1, _RETRIES + 1):
         try:
             result = fn()
             if result is not None:
                 return result
-        except Exception as exc:
+        except exc_types as exc:
             log.warning("[%s] attempt %d/%d failed: %s", label, attempt, _RETRIES, exc)
         if attempt < _RETRIES:
             time.sleep(_BACKOFF * (2 ** (attempt - 1)))
@@ -68,7 +95,7 @@ def _fetch_alpaca(symbol: str, start: str, end: str) -> Optional[pd.DataFrame]:
     from alpaca.data.requests import StockBarsRequest
     from alpaca.data.timeframe import TimeFrame
 
-    client = StockHistoricalDataClient(ALPACA_API_KEY, ALPACA_SECRET)
+    client = StockHistoricalDataClient(APEX_ALPACA_API_KEY, APEX_ALPACA_SECRET)
     req    = StockBarsRequest(symbol_or_symbols=symbol,
                                timeframe=TimeFrame.Day, start=start, end=end)
     bars   = client.get_stock_bars(req)
@@ -111,6 +138,13 @@ def _fetch_yfinance(symbol: str) -> Optional[pd.DataFrame]:
 class DataProvider:
     """Fetch OHLCV data through a 3-tier fallback chain."""
 
+    def __init__(self):
+        import os
+        if not os.getenv("APEX_ALPACA_API_KEY") or not os.getenv("APEX_ALPACA_SECRET_KEY"):
+            raise RuntimeError("APEX_ALPACA_API_KEY and APEX_ALPACA_SECRET_KEY must be set in .env")
+        if not os.getenv("POLYGON_API_KEY"):
+            log.warning("POLYGON_API_KEY missing from .env - Tier 2 data will fail gracefully")
+
     def fetch(self, symbols: list[str],
               fetch_date: Optional[date] = None) -> dict[str, pd.DataFrame]:
         """Return {symbol: DataFrame} for all symbols using best available tier."""
@@ -136,14 +170,16 @@ class DataProvider:
         return results
 
     def _fetch_symbol(self, sym: str, start: str, end: str) -> Optional[pd.DataFrame]:
+        import urllib.error
+        import alpaca_trade_api
         tiers = [
-            ("alpaca",  lambda: _fetch_alpaca(sym, start, end)),
-            ("polygon", lambda: _fetch_polygon(sym, start, end)),
-            ("yfinance", lambda: _fetch_yfinance(sym)),
+            ("alpaca",  lambda: _fetch_alpaca(sym, start, end), alpaca_trade_api.rest.APIError),
+            ("polygon", lambda: _fetch_polygon(sym, start, end), (urllib.error.URLError, urllib.error.HTTPError)),
+            ("yfinance", lambda: _fetch_yfinance(sym), Exception),
         ]
-        for tier_name, fn in tiers:
+        for tier_name, fn, exc_types in tiers:
             t0  = time.monotonic()
-            df  = _retry(fn, f"{tier_name}/{sym}")
+            df  = _retry(fn, f"{tier_name}/{sym}", exc_types)
             ms  = (time.monotonic() - t0) * 1000
             if df is not None and _validate(df, sym):
                 _log_source(sym, tier_name, ms)
@@ -156,6 +192,3 @@ class DataProvider:
                 return df
             log.warning("%s: tier %s failed validation or returned empty.", sym, tier_name)
         return None
-
-
-print("FILE COMPLETE: data_provider.py")
