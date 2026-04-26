@@ -9,7 +9,8 @@ import signal as _signal
 
 import pandas as pd
 import schedule
-import yfinance as yf
+
+from scripts.data_provider import DataProvider
 
 # ── Project root on sys.path ──────────────────────────────────────────────────
 ROOT = Path(__file__).resolve().parents[1]
@@ -57,29 +58,9 @@ def _acquire_pid() -> None:
     atexit.register(lambda: PID_FILE.unlink(missing_ok=True))
 
 
-# ── Data fetch with retry ─────────────────────────────────────────────────────
-def _fetch_with_retry(symbol: str, period: str = "5d") -> pd.DataFrame:
-    last_exc = None
-    for attempt in range(1, DATA_RETRY_COUNT + 1):
-        try:
-            df = yf.download(symbol, period=period, progress=False, auto_adjust=True)
-            if isinstance(df.columns, pd.MultiIndex):
-                df.columns = df.columns.get_level_values(0)
-            if not df.empty:
-                return df
-            raise ValueError(f"{symbol}: empty DataFrame from yfinance")
-        except Exception as exc:
-            last_exc = exc
-            log.warning("yfinance attempt %d/%d for %s failed: %s",
-                        attempt, DATA_RETRY_COUNT, symbol, exc)
-            if attempt < DATA_RETRY_COUNT:
-                time.sleep(DATA_RETRY_BACK * (2 ** (attempt - 1)))
-    # All retries exhausted
-    alert_path = DATA_DIR / f"ALERT_data_failure_{date.today():%Y%m%d}.txt"
-    DATA_DIR.mkdir(parents=True, exist_ok=True)
-    alert_path.write_text(f"yfinance failed for {symbol}: {last_exc}\n")
-    log.critical("DATA FAILURE for %s — alert written to %s. Skipping.", symbol, alert_path)
-    return pd.DataFrame()
+# ── Data fetch (delegated to DataProvider) ───────────────────────────────────
+# DataProvider handles Tier 1 (Alpaca), Tier 2 (Polygon), Tier 3 (yfinance)
+# with retries, validation, and ALERT files internally.
 
 
 # ── Alpaca order wrapper ──────────────────────────────────────────────────────
@@ -176,20 +157,26 @@ def run_once() -> None:
         log.critical("Model load failed: %s. Raising.", exc)
         raise
 
-    # Fetch SPY for features
-    spy_df = _fetch_with_retry("SPY")
+    # Fetch all symbols via 3-tier DataProvider
+    today_str = str(date.today())
+    provider  = DataProvider()
+    try:
+        all_bars = provider.fetch(list(UNIVERSE))
+    except RuntimeError as exc:
+        log.critical("DataProvider halt: %s. Aborting cycle.", exc)
+        return
+
+    spy_df = all_bars.get("SPY", pd.DataFrame())
     if spy_df.empty:
         log.critical("SPY data unavailable — cannot compute features. Aborting cycle.")
         return
     spy_ret = spy_df["Close"].pct_change(1)
 
-    today_str = str(date.today())
-
     from scripts.execution_log import ExecutionLog
     elog = ExecutionLog()
 
     for sym in UNIVERSE:
-        df = _fetch_with_retry(sym)
+        df = all_bars.get(sym, pd.DataFrame())
         if df.empty:
             continue
 
@@ -199,11 +186,10 @@ def run_once() -> None:
             log.warning("%s: latest bar %s != today %s — skipping.", sym, latest_date, today_str)
             continue
 
-        # Bar validation
+        # Bar validation (DataProvider already validates, belt-and-suspenders)
         bar = df.iloc[-1]
         if bar["Close"] <= 0 or bar["Volume"] <= 0 or pd.isna(bar["Close"]):
-            log.warning("%s: invalid bar (close=%.4f vol=%.0f) — skipping.",
-                        sym, bar["Close"], bar["Volume"])
+            log.warning("%s: invalid bar — skipping.", sym)
             continue
 
         # Feature + prediction

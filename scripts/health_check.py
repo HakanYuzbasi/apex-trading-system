@@ -115,6 +115,46 @@ def check_disk_space() -> dict:
     return {"check": label, "ok": ok, "detail": f"free={free_mb:.0f}MB"}
 
 
+def check_polygon_reachable() -> dict:
+    """Ping Polygon.io /v1/marketstatus/now — WARN on failure (not FAIL)."""
+    label = "polygon_api"
+    api_key = os.getenv("POLYGON_API_KEY", "")
+    if not api_key:
+        return {"check": label, "ok": False, "detail": "POLYGON_API_KEY not set (WARN)"}
+    try:
+        import urllib.request
+        url = f"https://api.polygon.io/v1/marketstatus/now?apiKey={api_key}"
+        with urllib.request.urlopen(url, timeout=8) as resp:
+            data = json.loads(resp.read())
+        market = data.get("market", "unknown")
+        return {"check": label, "ok": True, "detail": f"market={market}"}
+    except Exception as exc:
+        log.warning("Polygon unreachable (WARN only): %s", exc)
+        return {"check": label, "ok": False, "detail": f"WARN: {exc}"}
+
+
+def check_alpaca_data_reachable() -> dict:
+    """Verify Alpaca Data API responds — WARN on failure (not FAIL)."""
+    label = "alpaca_data_api"
+    api_key = os.getenv("ALPACA_API_KEY", "")
+    secret  = os.getenv("ALPACA_SECRET_KEY", "")
+    if not api_key or not secret:
+        return {"check": label, "ok": False, "detail": "credentials not set (WARN)"}
+    try:
+        import urllib.request
+        req = urllib.request.Request(
+            "https://data.alpaca.markets/v2/stocks/SPY/bars?timeframe=1Day&limit=1",
+            headers={"APCA-API-KEY-ID": api_key, "APCA-API-SECRET-KEY": secret},
+        )
+        with urllib.request.urlopen(req, timeout=8) as resp:
+            data = json.loads(resp.read())
+        bars = data.get("bars", [])
+        return {"check": label, "ok": True, "detail": f"bars_returned={len(bars)}"}
+    except Exception as exc:
+        log.warning("Alpaca Data API unreachable (WARN only): %s", exc)
+        return {"check": label, "ok": False, "detail": f"WARN: {exc}"}
+
+
 def check_exec_log_writable() -> dict:
     """Confirm execution log path is writable."""
     label = "exec_log_writable"
@@ -149,6 +189,8 @@ def check_last_run_recency() -> dict:
 CHECKS = [
     check_model_files,
     check_alpaca_reachable,
+    check_alpaca_data_reachable,
+    check_polygon_reachable,
     check_yfinance_reachable,
     check_disk_space,
     check_exec_log_writable,
