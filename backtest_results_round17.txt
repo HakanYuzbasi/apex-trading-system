@@ -1,0 +1,58 @@
+==============================================================
+BACKTEST RESULTS ROUND 17
+==============================================================
+
+SMOKE TESTS:
+  PASS  T1 r17_train imports
+  PASS  T2 r17_backtest imports
+  PASS  T3 r17_wf imports
+  PASS  T4 DynamicLSTMWeight fallback float
+  PASS  T5 DynamicLSTMWeight high-acc weight >0.3
+  PASS  T6 Kelly regime scale constants
+  PASS  T7 feature counts 8 vs 11
+Result: 7/7
+
+FIX 4 — Macro Feature Validation (PASS A=11feat+blackout vs B=8feat):
+  PASS A (11+blackout): Sharpe=1.714  Trades=281
+  PASS B (8, no blackout): Sharpe=2.143  Trades=133
+  Decision: 8 features (B wins, reverted)
+
+FIX 5 — SGD Blend Weight Sweep on 2023:
+  SGD_W=0.0: Ret=2.82%  Sharpe=2.293  Trades=269  MaxDD=-0.65%
+  SGD_W=0.1: Ret=1.1%  Sharpe=2.143  Trades=133  MaxDD=-0.51%
+  SGD_W=0.2: Ret=0.4%  Sharpe=1.362  Trades=68  MaxDD=-0.38%
+  SGD_W=0.3: Ret=0.67%  Sharpe=2.527  Trades=47  MaxDD=-0.36%
+  Locked: 0.0
+
+4-Pass A/B/C/D (2023):
+  PASS A: Ret=3.75%  Sharpe=2.672  MaxDD=-0.61%  Trades=270  Deploy=94.8%
+  PASS B: Ret=2.64%  Sharpe=2.129  MaxDD=-0.65%  Trades=270  Deploy=85.4%
+  PASS C: Ret=3.93%  Sharpe=2.821  MaxDD=-0.61%  Trades=269  Deploy=94.1%
+  PASS D: Ret=2.82%  Sharpe=2.293  MaxDD=-0.65%  Trades=269  Deploy=84.7%
+
+OOS Window Sweep (FIX 3) + Walk-Forward:
+  A(OOS=63): MeanSharpe=0.128 PosFolds=8/15 WorstDD=-21.52% Compounded=5.93%
+  B(OOS=126): MeanSharpe=0.461 PosFolds=6/7 WorstDD=-44.03% Compounded=105.37%
+  C(OOS=189): MeanSharpe=0.277 PosFolds=4/5 WorstDD=-29.29% Compounded=67.65%
+  Best OOS: B
+
+PASS D WF: MeanSharpe=0.461  Compounded=105.37%  PosFolds=6/7  WorstDD=-44.03%
+
+Threshold dist (PASS D): mean=0.5875  std=0.0422
+Top-5 features (PASS D):
+  r5: 0.1518
+  r1: 0.1444
+  rsi14: 0.1406
+  vol_ratio: 0.1314
+  vol20: 0.1248
+
+TARGET CHECKS:
+  PASS  2023 Return >0%      (2.82%)
+  PASS  2023 Sharpe >0.60    (2.293)
+  PASS  2023 Trades >=70     (269)
+  PASS  2023 MaxDD <-15%     (-0.65%)
+  PASS  WF MeanSharpe >0.20  (0.461)
+  FAIL  WF PosFolds >=12/22  (6/7)
+  FAIL  WF WorstDD >-15%     (-44.03%)
+
+==============================================================
