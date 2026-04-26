@@ -255,3 +255,172 @@ def test_slippage_monitor_alert_threshold(tmp_path, monkeypatch):
         f"HALT file must be written when rolling-20 avg >= {sm.HALT_BPS} bps. "
         f"summary={summary}"
     )
+
+# ─────────────────────────────────────────────────────────────────────────────
+# T8 — DataProvider uses Tier 1 (Alpaca) when available
+# ─────────────────────────────────────────────────────────────────────────────
+@patch("scripts.data_provider._fetch_alpaca")
+@patch("scripts.data_provider._fetch_polygon")
+@patch("scripts.data_provider._fetch_yfinance")
+def test_data_provider_tier1_alpaca(mock_yf, mock_poly, mock_alpaca, tmp_path, monkeypatch):
+    """DataProvider must use Tier 1 (Alpaca) if it returns valid data, and log source."""
+    import scripts.data_provider as dp
+    monkeypatch.setattr(dp, "DATA_DIR", tmp_path)
+    monkeypatch.setattr(dp, "SOURCE_LOG", tmp_path / "data_source_log.jsonl")
+
+    # Valid Alpaca df
+    dates = pd.date_range(end=pd.Timestamp.today(), periods=2, freq="D")
+    df = pd.DataFrame({"Open": [10, 10], "High": [12, 12], "Low": [9, 9],
+                       "Close": [11.0, 11.0], "Volume": [100, 100]}, index=dates)
+    mock_alpaca.return_value = df
+
+    provider = dp.DataProvider()
+    res = provider.fetch(["AAPL"])
+
+    assert "AAPL" in res
+    assert mock_alpaca.call_count == 1
+    assert mock_poly.call_count == 0
+    assert mock_yf.call_count == 0
+
+    log_file = tmp_path / "data_source_log.jsonl"
+    assert log_file.exists()
+    records = [json.loads(line) for line in log_file.read_text().splitlines() if line.strip()]
+    assert records[-1]["data_source"] == "alpaca"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# T9 — Falls back to Tier 2 (Polygon) on Alpaca failure
+# ─────────────────────────────────────────────────────────────────────────────
+@patch("scripts.data_provider._fetch_alpaca")
+@patch("scripts.data_provider._fetch_polygon")
+@patch("scripts.data_provider._fetch_yfinance")
+def test_data_provider_tier2_polygon(mock_yf, mock_poly, mock_alpaca, tmp_path, monkeypatch):
+    """DataProvider must retry Alpaca 3x, then fall back to Tier 2 (Polygon)."""
+    import scripts.data_provider as dp
+    monkeypatch.setattr(dp, "_RETRIES", 3)
+    monkeypatch.setattr(dp, "_BACKOFF", 0.001)  # fast tests
+    monkeypatch.setattr(dp, "DATA_DIR", tmp_path)
+    monkeypatch.setattr(dp, "SOURCE_LOG", tmp_path / "data_source_log.jsonl")
+
+    # Mock Alpaca failing continuously
+    mock_alpaca.side_effect = Exception("Alpaca down")
+
+    # Valid Polygon df
+    dates = pd.date_range(end=pd.Timestamp.today(), periods=2, freq="D")
+    df = pd.DataFrame({"Open": [10, 10], "High": [12, 12], "Low": [9, 9],
+                       "Close": [11.0, 11.0], "Volume": [100, 100]}, index=dates)
+    mock_poly.return_value = df
+
+    provider = dp.DataProvider()
+    res = provider.fetch(["AAPL"])
+
+    assert "AAPL" in res
+    assert mock_alpaca.call_count == 3
+    assert mock_poly.call_count == 1
+    assert mock_yf.call_count == 0
+
+    records = [json.loads(line) for line in (tmp_path / "data_source_log.jsonl").read_text().splitlines()]
+    assert records[-1]["data_source"] == "polygon"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# T10 — Falls back to Tier 3 (yfinance) on both failures
+# ─────────────────────────────────────────────────────────────────────────────
+@patch("scripts.data_provider._fetch_alpaca")
+@patch("scripts.data_provider._fetch_polygon")
+@patch("scripts.data_provider._fetch_yfinance")
+def test_data_provider_tier3_yfinance(mock_yf, mock_poly, mock_alpaca, tmp_path, monkeypatch):
+    """DataProvider must fall back to Tier 3 (yf) if Tier 1 and 2 fail, and write WARN file."""
+    import scripts.data_provider as dp
+    monkeypatch.setattr(dp, "_RETRIES", 3)
+    monkeypatch.setattr(dp, "_BACKOFF", 0.001)
+    monkeypatch.setattr(dp, "DATA_DIR", tmp_path)
+    monkeypatch.setattr(dp, "SOURCE_LOG", tmp_path / "data_source_log.jsonl")
+
+    mock_alpaca.side_effect = Exception("Alpaca down")
+    mock_poly.side_effect = Exception("Polygon down")
+
+    dates = pd.date_range(end=pd.Timestamp.today(), periods=2, freq="D")
+    df = pd.DataFrame({"Open": [10, 10], "High": [12, 12], "Low": [9, 9],
+                       "Close": [11.0, 11.0], "Volume": [100, 100]}, index=dates)
+    mock_yf.return_value = df
+
+    provider = dp.DataProvider()
+    res = provider.fetch(["AAPL"])
+
+    assert "AAPL" in res
+    assert mock_alpaca.call_count == 3
+    assert mock_poly.call_count == 3
+    assert mock_yf.call_count == 1
+
+    records = [json.loads(line) for line in (tmp_path / "data_source_log.jsonl").read_text().splitlines()]
+    assert records[-1]["data_source"] == "yfinance"
+
+    warn_files = list(tmp_path.glob("WARN_data_fallback_*.txt"))
+    assert len(warn_files) >= 1, "Should write WARN file for yfinance fallback"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# T11 — Halts + writes ALERT when all 3 tiers fail
+# ─────────────────────────────────────────────────────────────────────────────
+@patch("scripts.data_provider._fetch_alpaca")
+@patch("scripts.data_provider._fetch_polygon")
+@patch("scripts.data_provider._fetch_yfinance")
+def test_data_provider_halt_all_failed(mock_yf, mock_poly, mock_alpaca, tmp_path, monkeypatch):
+    """DataProvider must raise RuntimeError and write ALERT if all tiers fail for all symbols."""
+    import scripts.data_provider as dp
+    monkeypatch.setattr(dp, "_RETRIES", 1)  # faster
+    monkeypatch.setattr(dp, "_BACKOFF", 0.001)
+    monkeypatch.setattr(dp, "DATA_DIR", tmp_path)
+
+    mock_alpaca.side_effect = Exception("1")
+    mock_poly.side_effect = Exception("2")
+    mock_yf.side_effect = Exception("3")
+
+    provider = dp.DataProvider()
+    with pytest.raises(RuntimeError, match="all 1 symbols failed all tiers"):
+        provider.fetch(["AAPL"])
+
+    alert_files = list(tmp_path.glob("ALERT_data_failure_*.txt"))
+    assert len(alert_files) >= 1, "Should write ALERT file on total data failure"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# T12 — data_source_log.jsonl records correct tier per symbol
+# ─────────────────────────────────────────────────────────────────────────────
+@patch("scripts.data_provider._fetch_alpaca")
+@patch("scripts.data_provider._fetch_polygon")
+@patch("scripts.data_provider._fetch_yfinance")
+def test_data_source_log_per_symbol(mock_yf, mock_poly, mock_alpaca, tmp_path, monkeypatch):
+    """Ensure data_source_log.jsonl accurately reflects mixed tiers."""
+    import scripts.data_provider as dp
+    monkeypatch.setattr(dp, "_RETRIES", 1)
+    monkeypatch.setattr(dp, "_BACKOFF", 0.001)
+    monkeypatch.setattr(dp, "DATA_DIR", tmp_path)
+    monkeypatch.setattr(dp, "SOURCE_LOG", tmp_path / "data_source_log.jsonl")
+
+    dates = pd.date_range(end=pd.Timestamp.today(), periods=2, freq="D")
+    df = pd.DataFrame({"Open": [10, 10], "High": [12, 12], "Low": [9, 9],
+                       "Close": [11.0, 11.0], "Volume": [100, 100]}, index=dates)
+
+    # AAPL fails Alpaca -> Polygon. MSFT works on Alpaca.
+    def alpaca_effect(sym, *a, **k):
+        if sym == "AAPL": raise Exception("fail")
+        return df
+    
+    def poly_effect(sym, *a, **k):
+        return df
+
+    mock_alpaca.side_effect = alpaca_effect
+    mock_poly.side_effect = poly_effect
+
+    provider = dp.DataProvider()
+    provider.fetch(["AAPL", "MSFT"])
+
+    records = [json.loads(line) for line in (tmp_path / "data_source_log.jsonl").read_text().splitlines()]
+    
+    aapl_rec = next(r for r in records if r["symbol"] == "AAPL")
+    msft_rec = next(r for r in records if r["symbol"] == "MSFT")
+
+    assert aapl_rec["data_source"] == "polygon"
+    assert msft_rec["data_source"] == "alpaca"
