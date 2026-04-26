@@ -1,0 +1,29 @@
+{
+  "winner": "raw",
+  "threshold": 0.17779407388138746,
+  "env": {
+    "APEX_KELLY_ENABLED": "true",
+    "APEX_KELLY_MIN_SAMPLES": "10",
+    "APEX_MAX_POSITION_PCT": "0.35",
+    "APEX_PARTIAL_EXIT_ENABLED": "true",
+    "APEX_PARTIAL_EXIT_R_STOP_MULT": "3.5",
+    "APEX_CORR_THRESHOLD": "0.85",
+    "APEX_MAX_CONCURRENT_POSITIONS": "10",
+    "APEX_MACRO_REGIME_ENABLED": "true",
+    "APEX_KELLY_WARM_START_ENABLED": "true",
+    "APEX_SPREAD_BPS_DEFAULT": "3.0",
+    "APEX_SPREAD_BPS_ETF": "1.0",
+    "APEX_MARKET_IMPACT_MULT": "0.1",
+    "APEX_PORTFOLIO_GROSS_LEVERAGE_MAX": "1.5",
+    "APEX_SHORT_MARGIN_PCT": "0.50",
+    "APEX_LSTM_ENABLED": "true",
+    "APEX_SHORT_ONLY_IN_RISK_OFF": "true",
+    "APEX_DYNAMIC_THRESHOLD_FLOOR": "0.30",
+    "APEX_ONLINE_LEARNING_ENABLED": "false",
+    "APEX_DYN_THRESH_CONF_PROP": "true",
+    "APEX_ML_MODEL_PATH_TRENDING": "/home/user/apex-trading-system/models/saved_advanced/r16_raw_trending.pkl",
+    "APEX_ML_MODEL_PATH_MEAN_REV": "/home/user/apex-trading-system/models/saved_advanced/r16_raw_mean_rev.pkl",
+    "APEX_ML_MODEL_PATH_VOLATILE": "/home/user/apex-trading-system/models/saved_advanced/r16_raw_volatile.pkl",
+    "APEX_ML_CONFIDENCE_THRESHOLD": "0.177794"
+  }
+}
