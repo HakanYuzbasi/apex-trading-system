@@ -1,0 +1,55 @@
+============================================================
+BACKTEST RESULTS ROUND 18
+============================================================
+
+SMOKE TESTS:
+  PASS  T1 r17_train imports
+  PASS  T2 r18_train imports
+  PASS  T3 r18_backtest imports
+  PASS  T4 VolCB mode thresholds (normal/scale/halt/close)
+  PASS  T5 VolCB scale mult=0.25
+  PASS  T6 VolCB logs regime transition
+  PASS  T7 VOL_CB config constants
+Result: 7/7
+
+WALK-FORWARD (WF_START=2018, OOS=126 bars):
+  CB ON:  MeanSharpe=0.47  PosFolds=7/9  WorstDD=-33.66%
+  CB OFF: MeanSharpe=0.301  PosFolds=5/9  WorstDD=-41.27%
+
+2020 COVID Fold (March 2020 in OOS):
+  CB ON:  DD=-18.42%  Sharpe=0.454
+  CB OFF: DD=-35.18%  Sharpe=-0.06
+
+2024-2025 OOS Forward Test (CB=ON):
+  Return=7.45%  Sharpe=2.299  MaxDD=-1.23%  Trades=359
+  Monthly:
+    2024-02: -115.94
+    2024-03: +833.38
+    2024-04: -259.25
+    2024-05: +783.89
+    2024-06: +793.36
+    2024-07: +283.41
+    2024-08: +407.24
+    2024-09: -393.42
+    2024-10: -564.11
+    2024-11: +1006.72
+    2024-12: -468.69
+    2025-01: +387.76
+    2025-02: -199.10
+    2025-03: -1011.64
+    2025-04: +95.87
+    2025-05: +2032.14
+    2025-06: +1160.77
+    2025-07: +538.43
+    2025-08: +230.87
+    2025-09: +1109.10
+    2025-10: +137.54
+    2025-11: +348.45
+    2025-12: +311.12
+
+TARGET CHECKS:
+  FAIL  2020 fold DD >-15% CB ON  (-18.42%)
+  PASS  2024-25 Sharpe >0.40      (2.299)
+  PASS  WF Mean Sharpe >0.30      (0.47)
+
+============================================================
