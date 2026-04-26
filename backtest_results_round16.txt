@@ -1,0 +1,87 @@
+===========================================================================
+ Apex Trading System — Round 16 Report
+   generated : 2026-04-26 08:21:23 UTC
+   branch    : claude/fix-gbm-calibration-YOxJX
+===========================================================================
+ DATA NOTE: Yahoo Finance API was unreachable (DNS blocked) in this env.
+   OHLCV data generated via regime-aware GBM synthetic fallback (r16_data.py).
+   Performance metrics reflect synthetic data — architecture & pipeline are
+   validated.  Re-run with live yfinance access for real-market numbers.
+===========================================================================
+ FIX 1  calibration=raw  FIX 2  threshold(P40)=0.1778
+        ML_MODEL_PATH_TRENDING=/home/user/apex-trading-system/models/saved_advanced/r16_raw_trending.pkl
+
+ Fetching 10-symbol panel 2020-01-01 → 2024-12-31 ...
+   AAPL : 1306 bars  2020-01-01 → 2025-01-01
+   MSFT : 1306 bars  2020-01-01 → 2025-01-01
+   GOOGL: 1258 bars  2020-01-02 → 2024-12-31
+   SPY  : 1258 bars  2020-01-02 → 2024-12-31
+   QQQ  : 1258 bars  2020-01-02 → 2024-12-31
+   NVDA : 1258 bars  2020-01-02 → 2024-12-31
+   AMZN : 1258 bars  2020-01-02 → 2024-12-31
+   GLD  : 1258 bars  2020-01-02 → 2024-12-31
+   TLT  : 1258 bars  2020-01-02 → 2024-12-31
+   IWM  : 1258 bars  2020-01-02 → 2024-12-31
+
+ Walk-forward 2020-2024  IS=378 OOS=126 step=63
+---------------------------------------------------------------------------
+
+   #  OOS start    OOS end        Sharpe    TotRet     MaxDD    Win%      PF  Trades
+ ----------------------------------------------------------------------
+   1  2021-01-13   2021-05-18     0.5047   -4.853%  -25.262%  66.67%   1.953      24
+   2  2021-03-17   2021-07-20     0.8745    0.549%  -51.097%  77.78%   3.394      21
+   3  2021-05-19   2021-09-21     1.3956  -13.817%  -68.376%  54.55%   0.885      25
+   4  2021-07-21   2021-11-23     0.3374   -9.879%  -30.727%  25.00%   0.050      31
+   5  2021-09-22   2022-01-25     0.0347   -6.759%  -11.302%  16.67%   0.013      29
+   6  2021-11-24   2022-03-29    -0.4197   -7.443%   -9.328%  46.15%   0.356      33
+   7  2022-01-26   2022-05-31    -0.0825   -3.165%   -9.605%  52.38%   2.129      50
+   8  2022-03-30   2022-08-02    -0.1425   -1.545%   -5.029%  60.00%   1.139      24
+   9  2022-06-01   2022-10-04    -0.0882   -2.080%   -6.134%  25.00%   0.075      35
+  10  2022-08-03   2022-12-06    -0.2633   -2.768%   -6.349%  70.00%   0.495      24
+  11  2022-10-05   2023-02-07    -0.4870   -4.626%   -7.047%  41.67%   0.541      27
+  12  2022-12-07   2023-04-11    -0.8355  -13.147%  -16.382%  33.33%   0.202      37
+  13  2023-02-08   2023-06-13     0.1433   -0.104%   -7.896%  37.50%   0.601      19
+  14  2023-04-12   2023-08-15     0.4734   -2.172%  -18.715%  83.33%   0.931      16
+  15  2023-06-14   2023-10-17    -0.3240   -5.506%  -10.850%  43.75%   0.426      39
+  16  2023-08-16   2023-12-19     0.0021   -2.390%  -12.150%  50.00%   0.417      27
+  17  2023-10-18   2024-02-20     0.4659   -0.060%  -22.221%  50.00%   0.983      19
+  18  2023-12-20   2024-04-23     0.3233   -4.235%  -18.655%  80.00%  28.383      28
+  19  2024-02-21   2024-06-25     0.1429   -2.358%  -17.926%  70.00%   2.054      25
+  20  2024-04-24   2024-08-27    -0.0366  -12.953%  -18.457%  26.67%   0.229      37
+  21  2024-06-26   2024-10-29     0.5338    1.792%  -18.685% 100.00%     inf      20
+  22  2024-08-28   2024-12-31     0.5448   -0.223%  -27.201%  70.59%   1.722      39
+
+ Walk-forward aggregate
+ ----------------------------------------------------------------------
+ Folds run              : 22
+ Mean Sharpe            : 0.140782
+ Compounded Return      : -64.0918%
+ Worst Fold Drawdown    : -68.3758%
+ Positive Folds         : 2 / 22
+ Negative Folds         : 20 / 22
+
+ Targets
+ ----------------------------------------------------------------------
+   Mean Sharpe > 0.15               MISS   actual=0.1408
+   Positive folds >= 11/22          MISS   actual=2/22
+   Worst DD < -15%                  MISS   actual=-68.38%
+
+ Smoke tests (7/7)
+---------------------------------------------------------------------------
+ Result: 7 passed, 0 failed
+   tests/test_integration_smoke.py::test_config_load_and_schema_validator PASSED [ 14%]
+   tests/test_integration_smoke.py::test_adaptive_meta_controller_persist_and_reload PASSED [ 28%]
+   tests/test_integration_smoke.py::test_signal_aggregator_records_and_refits_weights PASSED [ 42%]
+   tests/test_integration_smoke.py::test_expected_cost_bps_positive_float_for_equity_taker PASSED [ 57%]
+   tests/test_integration_smoke.py::test_run_walk_forward_returns_folds_and_aggregate PASSED [ 71%]
+   08:22:50 [   ERROR] risk.risk_session: 🚨 CIRCUIT BREAKER TRIPPED: Consecutive losses: 5
+   08:22:50 [   ERROR] risk.risk_session:    Trading halted at 2026-04-26 08:22:50.732434
+   08:22:50 [   ERROR] risk.risk_session:    Cooldown: 24 hours
+   08:22:50 [   ERROR] risk.risk_session:    Bar cooldown: 240 bars
+   PASSED                                                                   [ 85%]
+   08:22:51 [ WARNING] models.ml_validator: leakage_check FAILED (1 issue(s)): feature 'leak' equals label.shift(-1) — direct forward leakage — historical accuracy metrics computed without this audit are INFLATED and must be re-run on leakage-free features.
+   08:22:51 [ WARNING] models.ml_validator: leakage_check FAILED (1 issue(s)): feature 'leak' equals label.shift(-1) — direct forward leakage — historical accuracy metrics computed without this audit are INFLATED and must be re-run on leakage-free features.
+   PASSED                                                                   [100%]
+   ERROR: Coverage failure: total of 2 is less than fail-under=10
+   ========================= 7 passed, 1 warning in 9.00s =========================
+
