@@ -1,0 +1,86 @@
+===========================================================================
+ Apex Trading System — Round 15 Report
+   generated : 2026-04-26 07:12:40 UTC
+   branch    : claude/walk-forward-pass-d-rxTJn
+===========================================================================
+
+ PASS D config (all R15 fixes)
+   FIX 1  DYN_THRESH_CONF_PROP  = True
+   FIX 2  GBM primary restored
+   FIX 3  11-feature set         = 11 features
+   FIX 4  Calibrated GBMs        = /home/user/apex-trading-system/models/saved_advanced/r15_cal_trending.pkl
+
+ Fetching 10-symbol panel 2020-01-01 → 2024-12-31 ...
+   AAPL : 1258 bars  2020-01-02 → 2024-12-31
+   MSFT : 1258 bars  2020-01-02 → 2024-12-31
+   GOOGL: 1258 bars  2020-01-02 → 2024-12-31
+   SPY  : 1258 bars  2020-01-02 → 2024-12-31
+   QQQ  : 1258 bars  2020-01-02 → 2024-12-31
+   NVDA : 1258 bars  2020-01-02 → 2024-12-31
+   AMZN : 1258 bars  2020-01-02 → 2024-12-31
+   GLD  : 1258 bars  2020-01-02 → 2024-12-31
+   TLT  : 1258 bars  2020-01-02 → 2024-12-31
+   IWM  : 1258 bars  2020-01-02 → 2024-12-31
+
+ Walk-forward 2020-2024  IS=378 OOS=126 step=63
+---------------------------------------------------------------------------
+
+   #  OOS start    OOS end        Sharpe    TotRet     MaxDD    Win%      PF  Trades
+ ----------------------------------------------------------------------
+   1  2021-01-13   2021-05-18     0.1944    0.471%   -6.563% 100.00%     inf       4
+   2  2021-03-17   2021-07-20     0.1702    0.326%   -5.709% 100.00%     inf       8
+   3  2021-05-19   2021-09-21     0.4076    0.108%  -16.484% 100.00%     inf       7
+   4  2021-07-21   2021-11-23     0.1748    0.075%   -9.642%  50.00%   0.533      10
+   5  2021-09-22   2022-01-25     0.0834   -0.448%   -5.660%   0.00%   0.000       7
+   6  2021-11-24   2022-03-29    -0.3081   -2.210%   -5.372%  60.00%   0.492      14
+   7  2022-01-26   2022-05-31    -0.6678   -6.033%   -6.066%  50.00%   0.392       7
+   8  2022-03-30   2022-08-02    -0.0761   -0.675%   -3.607%   0.00%   0.000      10
+   9  2022-06-01   2022-10-04    -0.7800   -5.412%   -5.412%   0.00%   0.000       4
+  10  2022-08-03   2022-12-06    -0.4395   -2.942%   -5.434%  33.33%   0.053       8
+  11  2022-10-05   2023-02-07    -0.0330   -0.402%   -5.592%  33.33%   0.044       6
+  12  2022-12-07   2023-04-11     0.0618    0.017%   -5.445%   0.00%   0.000       2
+  13  2023-02-08   2023-06-13     0.2914    0.061%  -11.347%  75.00%   2.093      10
+  14  2023-04-12   2023-08-15     0.1977   -0.291%   -7.504%  50.00%   0.557       6
+  15  2023-06-14   2023-10-17    -0.0274   -3.126%  -11.045%  16.67%   0.040      13
+  16  2023-08-16   2023-12-19     0.2202    0.252%   -8.757%  50.00%   0.178       7
+  17  2023-10-18   2024-02-20     0.1663    0.287%  -11.079%  50.00%   1.705       6
+  18  2023-12-20   2024-04-23     0.2244   -0.025%   -8.764%  33.33%   0.162       8
+  19  2024-02-21   2024-06-25     0.3726   -0.223%  -18.433%  50.00%   0.200       8
+  20  2024-04-24   2024-08-27    -0.0201   -4.680%  -11.459%  80.00%   1.451      16
+  21  2024-06-26   2024-10-29     0.2189    0.436%   -7.209% 100.00%     inf       5
+  22  2024-08-28   2024-12-31     0.0924   -0.177%   -5.551%  50.00%   0.311       5
+
+ Walk-forward aggregate
+ ----------------------------------------------------------------------
+ Folds run              : 22
+ Mean Sharpe            : 0.023829
+ Compounded Return      : -22.2699%
+ Worst Fold Drawdown    : -18.4326%
+ Positive Folds         : 9 / 22
+ Negative Folds         : 13 / 22
+
+ Targets
+ ----------------------------------------------------------------------
+   Mean Sharpe > 0.25             MISS   actual=0.0238
+   Positive folds ≥ 13/22         MISS   actual=9/22
+   Worst DD < -12%                MISS   actual=-18.43%
+
+ Smoke tests (7/7)
+---------------------------------------------------------------------------
+ Result: 7 passed, 0 failed
+   tests/test_integration_smoke.py::test_config_load_and_schema_validator PASSED [ 14%]
+   tests/test_integration_smoke.py::test_adaptive_meta_controller_persist_and_reload PASSED [ 28%]
+   tests/test_integration_smoke.py::test_signal_aggregator_records_and_refits_weights PASSED [ 42%]
+   tests/test_integration_smoke.py::test_expected_cost_bps_positive_float_for_equity_taker PASSED [ 57%]
+   tests/test_integration_smoke.py::test_run_walk_forward_returns_folds_and_aggregate PASSED [ 71%]
+   07:15:11 [   ERROR] risk.risk_session: 🚨 CIRCUIT BREAKER TRIPPED: Consecutive losses: 5
+   07:15:11 [   ERROR] risk.risk_session:    Trading halted at 2026-04-26 07:15:11.740738
+   07:15:11 [   ERROR] risk.risk_session:    Cooldown: 24 hours
+   07:15:11 [   ERROR] risk.risk_session:    Bar cooldown: 240 bars
+   PASSED                                                                   [ 85%]
+   07:15:12 [ WARNING] models.ml_validator: leakage_check FAILED (1 issue(s)): feature 'leak' equals label.shift(-1) — direct forward leakage — historical accuracy metrics computed without this audit are INFLATED and must be re-run on leakage-free features.
+   07:15:12 [ WARNING] models.ml_validator: leakage_check FAILED (1 issue(s)): feature 'leak' equals label.shift(-1) — direct forward leakage — historical accuracy metrics computed without this audit are INFLATED and must be re-run on leakage-free features.
+   PASSED                                                                   [100%]
+   ERROR: Coverage failure: total of 2 is less than fail-under=10
+   ======================== 7 passed, 1 warning in 11.22s =========================
+

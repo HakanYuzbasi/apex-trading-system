@@ -1227,7 +1227,15 @@ class AdvancedBacktester:
             # cannot drift above the signal distribution and starve entries.
             # The 2023 backtest had this gate blocking 1314 of ~1400
             # candidates per pass before the floor landed.
-            raw_dynamic_threshold = 0.45 + (0.10 if confidence < 0.55 else 0.0)
+            if bool(getattr(ApexConfig, "DYN_THRESH_CONF_PROP", False)):
+                # Round 15 FIX 1: confidence-proportional formula. At
+                # confidence ≥ 0.55 the threshold equals the floor (0.30);
+                # at confidence = 0 it reaches ~0.52, preserving the noise
+                # guard. This allows high-confidence GBM signals through
+                # while still filtering low-confidence noise.
+                raw_dynamic_threshold = 0.30 + 0.40 * max(0.0, 0.55 - confidence)
+            else:
+                raw_dynamic_threshold = 0.45 + (0.10 if confidence < 0.55 else 0.0)
             dyn_floor = float(getattr(ApexConfig, "DYNAMIC_THRESHOLD_FLOOR", 0.30))
             dynamic_threshold = max(dyn_floor, raw_dynamic_threshold)
             self._dynamic_threshold_samples.append(float(dynamic_threshold))
