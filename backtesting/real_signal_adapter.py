@@ -210,6 +210,22 @@ def compute_ml_features(ohlcv: pd.DataFrame) -> pd.DataFrame:
     price_vs_sma20 = (close - sma_fast) / sma_fast
     price_vs_sma50 = (close - sma_slow) / sma_slow
 
+    # Round 15 FIX 3 — three additional features for richer signal diversity.
+    # bb_pctb: Bollinger %B (20-period, 2σ) — position within the band.
+    bb_sma = close.rolling(20, min_periods=20).mean()
+    bb_std = close.rolling(20, min_periods=20).std(ddof=0)
+    bb_upper = bb_sma + 2.0 * bb_std
+    bb_lower = bb_sma - 2.0 * bb_std
+    bb_pctb = (close - bb_lower) / (bb_upper - bb_lower + 1e-10)
+
+    # roc_10: 10-bar rate of change — medium-term momentum signal.
+    roc_10 = close.pct_change(10)
+
+    # price_vs_high60d: position vs 60-day high — trend/breakout context.
+    high_60d = close.rolling(60, min_periods=20).max()
+    low_60d = close.rolling(60, min_periods=20).min()
+    price_vs_high60d = (close - high_60d) / (high_60d - low_60d + 1e-10)
+
     feats = pd.DataFrame(
         {
             "rsi": rsi,
@@ -220,6 +236,9 @@ def compute_ml_features(ohlcv: pd.DataFrame) -> pd.DataFrame:
             "volume_ratio": volume_ratio,
             "price_vs_sma20": price_vs_sma20,
             "price_vs_sma50": price_vs_sma50,
+            "bb_pctb": bb_pctb,
+            "roc_10": roc_10,
+            "price_vs_high60d": price_vs_high60d,
         },
         index=ohlcv.index,
     )
@@ -235,6 +254,9 @@ ML_FEATURE_NAMES: Tuple[str, ...] = (
     "volume_ratio",
     "price_vs_sma20",
     "price_vs_sma50",
+    "bb_pctb",
+    "roc_10",
+    "price_vs_high60d",
 )
 
 

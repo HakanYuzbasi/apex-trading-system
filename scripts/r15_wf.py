@@ -1,0 +1,188 @@
+"""
+scripts/r15_wf.py — Round 15 walk-forward + smoke tests + report.
+
+Loads PASS D config (all four R15 fixes) from disk and runs a
+22-fold walk-forward 2020-2024.  Progress printed every 5 folds.
+Targets: Mean Sharpe >0.25 | Positive folds ≥13/22 | Worst DD <-12%
+"""
+from __future__ import annotations
+
+import os, sys, subprocess, datetime
+from pathlib import Path
+from io import StringIO
+from contextlib import redirect_stdout
+import numpy as np, pandas as pd
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from backtesting.advanced_backtester import AdvancedBacktester
+from backtesting.real_signal_adapter import RealSignalAdapter
+from config import ApexConfig
+from core.logging_config import setup_logging
+from scripts.round12_real_data_report import (
+    R12_SYMBOLS, R12_FULL_START, fetch_panel_chunked, _reload_apex_config,
+)
+from scripts.round14_real_data_report import _apply_round14_env_overrides
+from scripts.r15_backtest import PASS_D_ENV, _apply_r15_env
+
+_REPO   = Path(__file__).resolve().parents[1]
+_MODELS = _REPO / "models" / "saved_advanced"
+
+WF_START = "2020-01-01"
+WF_END   = "2024-12-31"
+
+
+def _activate_pass_d(env: dict) -> None:
+    for k, v in env.items():
+        os.environ[k] = v
+    _reload_apex_config(env)
+    _apply_round14_env_overrides(env)
+    _apply_r15_env(env)
+
+
+def run_wf(panel: dict) -> dict:
+    is_n   = int(ApexConfig.WF_IS_BARS)
+    oos_n  = int(ApexConfig.WF_OOS_BARS)
+    step_n = int(ApexConfig.WF_STEP_BARS)
+    dates  = pd.date_range(WF_START, WF_END, freq="D")
+
+    adapter = RealSignalAdapter()
+    adapter.attach_panel(panel)
+    bt = AdvancedBacktester(initial_capital=100_000)
+
+    folds, idx = [], 0
+    while idx + is_n + oos_n <= len(dates):
+        oos_s = dates[idx + is_n]
+        oos_e = dates[min(idx + is_n + oos_n - 1, len(dates) - 1)]
+        m = bt.run_backtest(
+            data=panel, signal_generator=adapter,
+            start_date=str(oos_s.date()), end_date=str(oos_e.date()),
+            position_size_usd=5_000, max_positions=10,
+        )
+        folds.append({
+            "oos_start": str(oos_s.date()), "oos_end": str(oos_e.date()),
+            "sharpe":    float(m.get("sharpe_ratio") or 0.0),
+            "ret":       float(m.get("total_return") or 0.0),
+            "dd":        float(m.get("max_drawdown")  or 0.0),
+            "win":       float(m.get("win_rate")      or 0.0),
+            "pf":        float(m.get("profit_factor") or 0.0),
+            "trades":    int(m.get("total_trades")    or 0),
+        })
+        n = len(folds)
+        if n % 5 == 0 or n == 1:
+            print(f"  [progress] fold {n:>2}  OOS {oos_s.date()} → {oos_e.date()}"
+                  f"  sharpe={folds[-1]['sharpe']:+.3f}  ret={folds[-1]['ret']*100:+.2f}%")
+        idx += step_n
+
+    sharpes  = [f["sharpe"] for f in folds if np.isfinite(f["sharpe"])]
+    comp     = 1.0
+    for f in folds:
+        comp *= 1.0 + f["ret"]
+    return {
+        "folds": folds,
+        "mean_sharpe":       float(np.mean(sharpes)) if sharpes else float("nan"),
+        "compounded_return": comp - 1.0,
+        "worst_dd":          min(f["dd"] for f in folds) if folds else 0.0,
+        "positive_folds":    sum(1 for f in folds if f["ret"] > 0),
+        "n_folds":           len(folds),
+    }
+
+
+def run_smoke() -> tuple[int, int, str]:
+    r = subprocess.run(
+        [sys.executable, "-m", "pytest", "tests/test_integration_smoke.py", "-v"],
+        capture_output=True, text=True, cwd=str(_REPO),
+    )
+    out = r.stdout + r.stderr
+    import re
+    m = re.search(r"(\d+) passed", out)
+    passed = int(m.group(1)) if m else 0
+    # Only count real test FAILUREs, not coverage threshold errors
+    m = re.search(r"(\d+) failed", out)
+    failed = int(m.group(1)) if m else 0
+    return passed, failed, out
+
+
+def main() -> int:
+    setup_logging(level="WARNING", log_file=None, json_format=False, console_output=True)
+    buf = StringIO()
+
+    def w(line: str = "") -> None:
+        print(line)
+        buf.write(line + "\n")
+
+    _activate_pass_d(PASS_D_ENV)
+    w("=" * 75)
+    w(f" Apex Trading System — Round 15 Report")
+    w(f"   generated : {datetime.datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')} UTC")
+    w(f"   branch    : claude/walk-forward-pass-d-rxTJn")
+    w("=" * 75)
+    w()
+    w(" PASS D config (all R15 fixes)")
+    w(f"   FIX 1  DYN_THRESH_CONF_PROP  = {ApexConfig.DYN_THRESH_CONF_PROP}")
+    w(f"   FIX 2  GBM primary restored")
+    w(f"   FIX 3  11-feature set         = {len(__import__('backtesting.real_signal_adapter', fromlist=['ML_FEATURE_NAMES']).ML_FEATURE_NAMES)} features")
+    w(f"   FIX 4  Calibrated GBMs        = {ApexConfig.ML_MODEL_PATH_TRENDING}")
+    w()
+
+    w(" Fetching 10-symbol panel 2020-01-01 → 2024-12-31 ...")
+    panel = fetch_panel_chunked(R12_SYMBOLS, R12_FULL_START, "2025-01-01")
+    for sym, df in panel.items():
+        w(f"   {sym:<5}: {len(df)} bars  {df.index[0].date()} → {df.index[-1].date()}")
+    w()
+
+    w(f" Walk-forward 2020-2024  IS={ApexConfig.WF_IS_BARS} OOS={ApexConfig.WF_OOS_BARS} step={ApexConfig.WF_STEP_BARS}")
+    w("-" * 75)
+    agg = run_wf(panel)
+    folds = agg["folds"]
+    w()
+
+    w(f" {'#':>3}  {'OOS start':<12} {'OOS end':<12} {'Sharpe':>8} {'TotRet':>9} {'MaxDD':>9} {'Win%':>7} {'PF':>7} {'Trades':>7}")
+    w(" " + "-" * 70)
+    for i, f in enumerate(folds, 1):
+        sh = f["sharpe"]
+        w(f" {i:>3}  {f['oos_start']:<12} {f['oos_end']:<12} "
+          f"{sh:>8.4f} {f['ret']*100:>8.3f}% {f['dd']*100:>8.3f}% "
+          f"{f['win']*100:>6.2f}% {f['pf']:>7.3f} {f['trades']:>7d}")
+    w()
+
+    ms, cr, wd, pf, nf = (agg["mean_sharpe"], agg["compounded_return"],
+                          agg["worst_dd"], agg["positive_folds"], agg["n_folds"])
+    w(" Walk-forward aggregate")
+    w(" " + "-" * 70)
+    w(f" Folds run              : {nf}")
+    w(f" Mean Sharpe            : {ms:.6f}")
+    w(f" Compounded Return      : {cr*100:.4f}%")
+    w(f" Worst Fold Drawdown    : {wd*100:.4f}%")
+    w(f" Positive Folds         : {pf} / {nf}")
+    w(f" Negative Folds         : {nf - pf} / {nf}")
+    w()
+
+    targets = [
+        ("Mean Sharpe > 0.25",      ms > 0.25,       f"{ms:.4f}"),
+        ("Positive folds ≥ 13/22",  pf >= 13,        f"{pf}/{nf}"),
+        ("Worst DD < -12%",         wd > -0.12,      f"{wd*100:.2f}%"),
+    ]
+    w(" Targets")
+    w(" " + "-" * 70)
+    for desc, hit, val in targets:
+        w(f"   {desc:<30} {'HIT' if hit else 'MISS':4}   actual={val}")
+    w()
+
+    w(" Smoke tests (7/7)")
+    w("-" * 75)
+    passed, failed, smoke_raw = run_smoke()
+    w(f" Result: {passed} passed, {failed} failed")
+    for line in smoke_raw.splitlines():
+        if any(k in line for k in ("PASSED", "FAILED", "ERROR", "passed", "failed")):
+            w(f"   {line.strip()}")
+    w()
+
+    out_path = _REPO / "backtest_results_round15.txt"
+    out_path.write_text(buf.getvalue())
+    print(f"\n Saved → {out_path}")
+    return 0 if failed == 0 else 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

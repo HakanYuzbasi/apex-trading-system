@@ -2606,6 +2606,17 @@ class ApexConfig:
         os.getenv("APEX_ONLINE_REVERT_AFTER_BAD_UPDATES", "20")
     )
 
+    # ── Round 15 / FIX 1 — confidence-proportional dynamic threshold ────────
+    # When True the entry-gate threshold responds continuously to the signal
+    # confidence rather than using the step-function from Round 14:
+    #   threshold = 0.30 + 0.40 * max(0, 0.55 - confidence)
+    # At confidence ≥ 0.55 the threshold collapses to the floor (0.30),
+    # letting high-confidence GBM signals through. At confidence = 0 it
+    # reaches 0.52, preserving the noise guard.
+    DYN_THRESH_CONF_PROP: bool = (
+        os.getenv("APEX_DYN_THRESH_CONF_PROP", "false").lower() == "true"
+    )
+
     # ── Label-Leakage Audit (Round 8 / GAP-8E) ───────────────────────────────
     # Maximum forward-shift horizon probed by ``models.ml_validator.leakage_check``.
     # Any feature whose absolute Pearson correlation with ``label.shift(-k)``
@@ -3296,6 +3307,7 @@ CONFIG_BOUNDS: Dict[str, _BoundSpec] = {
     "ONLINE_MAX_UPDATES_PER_DAY": (int, (0, 1000)),
     "ONLINE_ACCURACY_FLOOR": (float, (0.0, 1.0)),
     "ONLINE_REVERT_AFTER_BAD_UPDATES": (int, (1, 10000)),
+    "DYN_THRESH_CONF_PROP": (bool, None),
     "ML_FEATURE_MAX_AGE_SECONDS": (float, (0.0, 86400.0)),
 
     # Circuit breaker
