@@ -129,4 +129,3 @@ if __name__ == "__main__":
               status="FILLED")
     print("Records:", len(ExecutionLog.read_all()))
 
-print("FILE COMPLETE: execution_log.py")

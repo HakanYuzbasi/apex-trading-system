@@ -12,9 +12,18 @@ import yfinance as yf
 ROOT     = Path(__file__).resolve().parents[1]
 DATA_DIR = ROOT / "data"
 STATUS_FILE = DATA_DIR / "health_status.json"
-MODEL_PATH  = ROOT / "r18_artifacts" / "model.pkl"
+MODEL_PATH  = ROOT / "models" / "saved_advanced" / "r18_raw_RISK_ON.pkl"
 EXEC_LOG    = DATA_DIR / "execution_log.jsonl"
 LAST_RUN    = DATA_DIR / "last_successful_run.txt"
+
+print("--- PATH RESOLUTIONS ---")
+print(f"ROOT:        {ROOT}")
+print(f"DATA_DIR:    {DATA_DIR}")
+print(f"STATUS_FILE: {STATUS_FILE}")
+print(f"MODEL_PATH:  {MODEL_PATH}")
+print(f"EXEC_LOG:    {EXEC_LOG}")
+print(f"LAST_RUN:    {LAST_RUN}")
+print("------------------------")
 DISK_MIN_MB = 500
 CHECK_INTERVAL_MIN = 60
 
@@ -24,6 +33,16 @@ logging.basicConfig(
     handlers=[logging.StreamHandler()],
 )
 log = logging.getLogger("health_check")
+
+class CriticalFileHandler(logging.Handler):
+    def emit(self, record):
+        if record.levelno >= logging.CRITICAL:
+            ts = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+            path = DATA_DIR / f"CRITICAL_{record.name}_{ts}.txt"
+            DATA_DIR.mkdir(parents=True, exist_ok=True)
+            path.write_text(self.format(record) + "\n")
+
+log.addHandler(CriticalFileHandler())
 
 # Stored checksums (written on first successful load, verified thereafter)
 _CKSUM_FILE = DATA_DIR / "model_checksums.json"
@@ -86,6 +105,9 @@ def check_alpaca_reachable() -> dict:
         clock = api.get_clock()
         return {"check": label, "ok": True,
                 "detail": f"is_open={clock.is_open}"}
+    except tradeapi.rest.APIError as exc:
+        log.error("Alpaca unreachable (API Error): %s", exc)
+        return {"check": label, "ok": False, "detail": str(exc)}
     except Exception as exc:
         log.error("Alpaca unreachable: %s", exc)
         return {"check": label, "ok": False, "detail": str(exc)}
@@ -128,6 +150,9 @@ def check_polygon_reachable() -> dict:
             data = json.loads(resp.read())
         market = data.get("market", "unknown")
         return {"check": label, "ok": True, "detail": f"market={market}"}
+    except urllib.error.URLError as exc:
+        log.warning("Polygon unreachable (URLError): %s", exc)
+        return {"check": label, "ok": False, "detail": f"WARN: {exc}"}
     except Exception as exc:
         log.warning("Polygon unreachable (WARN only): %s", exc)
         return {"check": label, "ok": False, "detail": f"WARN: {exc}"}
@@ -150,6 +175,9 @@ def check_alpaca_data_reachable() -> dict:
             data = json.loads(resp.read())
         bars = data.get("bars", [])
         return {"check": label, "ok": True, "detail": f"bars_returned={len(bars)}"}
+    except urllib.error.URLError as exc:
+        log.warning("Alpaca Data API unreachable (URLError): %s", exc)
+        return {"check": label, "ok": False, "detail": f"WARN: {exc}"}
     except Exception as exc:
         log.warning("Alpaca Data API unreachable (WARN only): %s", exc)
         return {"check": label, "ok": False, "detail": f"WARN: {exc}"}
@@ -256,4 +284,3 @@ if __name__ == "__main__":
     result = run_health_check(halt_on_fail=False)
     sys.exit(0 if result["overall"] != "FAIL" else 2)
 
-print("FILE COMPLETE: health_check.py")
