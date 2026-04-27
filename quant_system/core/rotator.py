@@ -4,7 +4,7 @@ import asyncio
 import logging
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Dict, List
 
 import numpy as np
 import bottleneck as bn
@@ -65,7 +65,8 @@ class StrategyRotator:
         
         self._shadow_strategies: Dict[str, KalmanPairsStrategy] = {}
         self._performance: Dict[str, ShadowPerformance] = {}
-        
+        self._last_swap_time: Dict[str, datetime] = {}
+
         # Initialize shadow strategies
         for config in self._universe:
             label = f"{config['instrument_a']}/{config['instrument_b']}"
@@ -116,24 +117,35 @@ class StrategyRotator:
             key=lambda x: x[1],
             reverse=True
         )
-        
+
         used_backbench = set()
-        
+        now = datetime.now(timezone.utc)
+        cooldown = timedelta(hours=4)
+
         for active_label, active_sortino in active_pairs:
+            # Only swap genuinely underperforming pairs — skip if no history (sortino=0.0)
+            if active_sortino >= -0.1:
+                continue
+
+            # Enforce per-pair cooldown to prevent repeated triggering every loop tick
+            last = self._last_swap_time.get(active_label)
+            if last is not None and (now - last) < cooldown:
+                continue
+
             for bb_label, bb_sortino in backbench_sorted:
                 if bb_label in used_backbench:
                     continue
-                
+
                 if bb_sortino > active_sortino * self._swap_threshold:
-                    logger.info("Swap suggested: %s (Sortino %.2f) -> %s (Sortino %.2f)", 
+                    logger.info("Swap suggested: %s (Sortino %.2f) -> %s (Sortino %.2f)",
                                 active_label, active_sortino, bb_label, bb_sortino)
-                    
-                    # Find backbench config
+
                     bb_config = next(c for c in self._universe if f"{c['instrument_a']}/{c['instrument_b']}" == bb_label)
                     swaps.append((active_label, bb_config))
                     used_backbench.add(bb_label)
-                    break # Move to next active pair
-                    
+                    self._last_swap_time[active_label] = now
+                    break
+
         return swaps
 
     def close(self):

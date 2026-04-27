@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 from datetime import datetime, timezone
 from itertools import count
@@ -245,12 +246,39 @@ class AlpacaBroker:
             submitted_order = await asyncio.to_thread(self._trading_client.submit_order, alpaca_request)
         except Exception as exc:
             err_str = str(exc).lower()
-            # Known recoverable rejections — log as WARNING, not ERROR
-            if any(k in err_str for k in (
-                "insufficient balance", "wash trade", "40310000",
-                "position_limit_exceeded", "forbidden",
-                "qty must be", "42210000",
-                "unprocessable", "422",
+            # Wash-trade rejection: Alpaca refuses to place a limit order on the
+            # same side as an already-resting limit at the same price.  Extract
+            # the conflicting order ID and cancel it so the next cycle can retry.
+            if "wash trade" in err_str or (
+                "40310000" in err_str and "existing_order_id" in err_str
+            ):
+                try:
+                    raw_json = str(exc)
+                    start = raw_json.find("{")
+                    body = json.loads(raw_json[start:]) if start != -1 else {}
+                    conflict_id = body.get("existing_order_id", "")
+                    if conflict_id:
+                        await asyncio.to_thread(
+                            self._trading_client.cancel_order_by_id, conflict_id
+                        )
+                        logger.warning(
+                            "Wash-trade conflict on %s — cancelled conflicting order %s; will retry next cycle.",
+                            self._alpaca_symbol(event.instrument_id),
+                            conflict_id,
+                        )
+                    else:
+                        logger.warning(
+                            "Wash-trade rejection on %s (no conflict ID in body): %s",
+                            self._alpaca_symbol(event.instrument_id), exc,
+                        )
+                except Exception as cancel_exc:
+                    logger.warning(
+                        "Wash-trade: failed to cancel conflicting order for %s: %s",
+                        self._alpaca_symbol(event.instrument_id), cancel_exc,
+                    )
+            elif any(k in err_str for k in (
+                "insufficient balance", "position_limit_exceeded", "forbidden",
+                "qty must be", "42210000", "unprocessable", "422",
             )):
                 logger.warning(
                     "Order %s rejected by Alpaca (%s): %s",
@@ -321,13 +349,16 @@ class AlpacaBroker:
             )
         except Exception as exc:
             err_str = str(exc).lower()
-            # Paper trading fills orders instantly — "filled" or "unprocessable" means
-            # the order is already complete; suppress the noisy exception.
-            if any(k in err_str for k in ("filled", "422", "unprocessable", "already")):
+            # Suppress terminal errors: order is gone from Alpaca's system (filled,
+            # cancelled, or purged). "not found" / 40410000 means the venue_order_id
+            # no longer exists and retrying will never succeed.
+            if any(k in err_str for k in ("filled", "422", "unprocessable", "already", "not found", "40410000")):
                 logger.debug(
-                    "Chased order %s already filled/closed — skipping reprice.",
+                    "Chased order %s already filled/closed or not found — abandoning chase.",
                     state.venue_order_id,
                 )
+                # Signal the chaser to stop retrying this state by marking it done.
+                state.done = True
             else:
                 logger.warning(
                     "Failed to replace chased order client_order_id=%s venue_order_id=%s: %s",

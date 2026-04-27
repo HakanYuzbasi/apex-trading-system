@@ -3,7 +3,6 @@ from __future__ import annotations
 import logging
 import asyncio
 from typing import Dict, Any, Optional
-from datetime import datetime
 import numpy as np
 
 from quant_system.core.bus import InMemoryEventBus, Subscription
@@ -26,7 +25,8 @@ class ShadowAccounting:
         reconciler: PositionReconciler,
         ibkr_connector: Optional[Any] = None,
         notifier: Optional[Any] = None,
-        check_interval_seconds: int = 300, # 5 minutes
+        check_interval_seconds: int = 300,
+        single_venue: bool = False,
     ) -> None:
         self._event_bus = event_bus
         self._ledger = ledger
@@ -34,15 +34,21 @@ class ShadowAccounting:
         self._ibkr = ibkr_connector
         self._notifier = notifier
         self._check_interval = check_interval_seconds
+        # When True, skip multi-venue sovereign equity and capital imbalance checks
+        # (irrelevant and noisy when running on a single broker).
+        self._single_venue = single_venue
         
-        self.shadow_positions: Dict[str, float] = {}
         self._subscription: Optional[Subscription] = None
         self._stop_event = asyncio.Event()
+        # Seed from ledger so shadow doesn't diverge on every restart
+        self.shadow_positions: Dict[str, float] = {
+            sym: pos.quantity for sym, pos in self._ledger.positions.items()
+        }
 
     def start(self) -> None:
         """Subscribe to execution events and start the mirror."""
         self._subscription = self._event_bus.subscribe("execution", self._on_execution)
-        logger.info("🕵️ ShadowAccounting: Monitoring started")
+        logger.info("🕵️ ShadowAccounting: Monitoring started (%d positions seeded from ledger)", len(self.shadow_positions))
 
     async def _on_execution(self, event: Any) -> None:
         if not isinstance(event, ExecutionEvent):
@@ -52,9 +58,9 @@ class ShadowAccounting:
             return
             
         # NORMALIZE symbol to avoid duplicate keys (e.g., XRPUSD vs CRYPTO:XRP/USD)
-        from quant_system.data.normalizers.symbol import normalize_symbol
-        symbol = normalize_symbol(event.symbol)
-        qty = float(event.executed_qty)
+        from core.symbols import normalize_symbol
+        symbol = normalize_symbol(event.instrument_id)
+        qty = float(event.fill_qty)
         signed_qty = qty if event.side == "buy" else -qty
         
         current = self.shadow_positions.get(symbol, 0.0)
@@ -75,7 +81,13 @@ class ShadowAccounting:
             # Use the passed-in IBKR connector if available
             if self._ibkr and hasattr(self._ibkr, "get_net_liquidation"):
                 try:
-                    if not self._ibkr.ib.isConnected():
+                    # is_connected() checks both ib.isConnected() AND offline_mode flag
+                    connected = (
+                        self._ibkr.is_connected()
+                        if hasattr(self._ibkr, "is_connected")
+                        else self._ibkr.ib.isConnected()
+                    )
+                    if not connected:
                         return 0.0
                     
                     # Use async version to avoid 'Event loop is already running' errors
@@ -123,47 +135,42 @@ class ShadowAccounting:
                 logger.warning(f"⚠️ SHADOW DIVERGENCE: {symbol} Shadow={shadow_qty} Ledger={ledger_qty}")
                 discrepancies.append(symbol)
 
-        # 2. Multi-Venue Sovereign Equity Check
-        # Attempt to synthesize total real-world equity over the venues
-        sovereign_equity = 0.0
-        venue_balances = {}
-        try:
-            venue_balances["alpaca"] = await self._fetch_venue_balance("alpaca")
-            venue_balances["ibkr"] = await self._fetch_venue_balance("ibkr")
-            sovereign_equity = sum(venue_balances.values())
-            logger.info(f"⚖️ Sovereign Equity: Total=${sovereign_equity:,.2f} (Alpaca=${venue_balances['alpaca']:,.2f}, IBKR=${venue_balances['ibkr']:,.2f})")
-        except Exception as e:
-            logger.error(f"Failed pulling multi-venue sovereign equity: {e}")
-            
-        local_total_equity = self._ledger.total_equity() # Assume capital holds roughly total ledger unencumbered + positioned value
-        
-        # Threshold hard-stop check (>$100 divergence – raised slightly for dual venue latency)
-        if sovereign_equity > 0 and abs(sovereign_equity - local_total_equity) > 100.0:
-            logger.critical(f"🚨 SOVEREIGN EQUITY FAILURE: Sovereign={sovereign_equity} Local={local_total_equity} (Diff > $100)")
-            if self._notifier:
-                await self._notifier.notify_text("CRITICAL: Multi-Venue Sovereign Equity deviated by > $50 from internal ledgers. Hard stop triggered.")
-            # Trigger full kill switch (assumes an event or explicit command)
-            # self._event_bus.publish("kill_switch", {"reason": "Sovereign Equity Deviation"})
-            return
+        # 2 & 3. Multi-Venue Sovereign Equity + Capital Imbalance checks.
+        # Skipped in single-venue mode (Alpaca-only) — meaningless with one broker
+        # and a frequent source of false alarms when IBKR is offline.
+        if not self._single_venue:
+            sovereign_equity = 0.0
+            venue_balances = {}
+            try:
+                venue_balances["alpaca"] = await self._fetch_venue_balance("alpaca")
+                venue_balances["ibkr"] = await self._fetch_venue_balance("ibkr")
+                active_balances = {v: b for v, b in venue_balances.items() if b > 0.0}
+                sovereign_equity = sum(active_balances.values())
+                logger.info(
+                    "⚖️ Sovereign Equity: Total=$%.2f active_venues=%s",
+                    sovereign_equity, list(active_balances.keys()),
+                )
+            except Exception as e:
+                logger.error(f"Failed pulling multi-venue sovereign equity: {e}")
 
-        # 3. Inventory Capital Rebalancer (Drift > 2 Sigma)
-        if sovereign_equity > 0:
-            weights = np.array(list(venue_balances.values())) / sovereign_equity
-            std_dev = np.std(weights)
-            
-            # Target parity is 33% each. We assume std deviation > threshold indicates a lockup
-            # E.g., moving $10k means the drift is too high.
-            # Typical acceptable drift sigma might be ~0.10. Let's use 0.15 as 2-sigma threshold proxy.
-            if std_dev > 0.15:
-                logger.warning(f"⚖️ CAPITAL IMBALANCE: Venue weights {weights} drifted > 2-sigma ({std_dev:.3f}).")
-                # Identify over-weighted and under-weighted venues
-                sorted_venues = sorted(venue_balances.items(), key=lambda x: x[1])
-                deficit_venue, deficit_bal = sorted_venues[0]
-                surplus_venue, surplus_bal = sorted_venues[-1]
-                
-                transfer_amt = (surplus_bal - deficit_bal) / 2.0
-                logger.info(f"💸 Rebalancer Action: Would emit TransferEvent for ${transfer_amt:.2f} from {surplus_venue} to {deficit_venue}")
-                # self._event_bus.publish(...) # FIXME: Requires concrete Event object
+            local_total_equity = self._ledger.total_equity()
+
+            if sovereign_equity > 0 and abs(sovereign_equity - local_total_equity) > 100.0:
+                logger.critical(f"🚨 SOVEREIGN EQUITY FAILURE: Sovereign={sovereign_equity} Local={local_total_equity} (Diff > $100)")
+                if self._notifier:
+                    await self._notifier.notify_text("CRITICAL: Multi-Venue Sovereign Equity deviated by > $50 from internal ledgers.")
+                return
+
+            if sovereign_equity > 0 and len(active_balances) >= 2:
+                weights = np.array(list(active_balances.values())) / sovereign_equity
+                std_dev = np.std(weights)
+                if std_dev > 0.15:
+                    logger.warning(f"⚖️ CAPITAL IMBALANCE: Venue weights {weights} drifted > 2-sigma ({std_dev:.3f}).")
+                    sorted_venues = sorted(active_balances.items(), key=lambda x: x[1])
+                    deficit_venue, deficit_bal = sorted_venues[0]
+                    surplus_venue, surplus_bal = sorted_venues[-1]
+                    transfer_amt = (surplus_bal - deficit_bal) / 2.0
+                    logger.info(f"💸 Rebalancer Action: Would emit TransferEvent for ${transfer_amt:.2f} from {surplus_venue} to {deficit_venue}")
 
         # 4. If discrepant physically on positions, trigger full Broker Reconcile
         if discrepancies:

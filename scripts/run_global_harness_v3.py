@@ -84,6 +84,8 @@ from quant_system.core.calendars import SessionManager
 from quant_system.data.normalizers.live_bridge import LiveDataBridge
 from quant_system.data.stores.client import TimescaleDBClient
 from quant_system.execution.brokers.alpaca_broker import AlpacaBroker
+from quant_system.execution.brokers.ibkr_broker import IBKRBroker
+from quant_system.events.market import BarEvent
 try:
     from quant_system.execution.neural_sniper import NeuralSniper
 except ModuleNotFoundError:
@@ -278,6 +280,92 @@ DEFAULT_WINNER_DICTIONARY: dict[str, list[dict[str, Any]]] = {
             "leg_notional": 6_000.0,
             "warmup_bars": 20,
         },
+        # ETF Pairs — tradeable via Alpaca (IEX feed), no new API needed.
+        # 5 pairs × 2 = 10 new symbols; total active stock symbols = 22 (under 25 IEX cap).
+        {
+            "slot": "etf_gld_slv",
+            "strategy": "kalman_pairs",
+            "instrument_a": "GLD",
+            "instrument_b": "SLV",
+            "entry_z_score": 2.0,
+            "exit_z_score": 0.5,
+            "leg_notional": 5_000.0,
+            "warmup_bars": 20,
+        },
+        {
+            "slot": "etf_tlt_ief",
+            "strategy": "kalman_pairs",
+            "instrument_a": "TLT",
+            "instrument_b": "IEF",
+            "entry_z_score": 2.0,
+            "exit_z_score": 0.5,
+            "leg_notional": 5_000.0,
+            "warmup_bars": 20,
+        },
+        {
+            "slot": "etf_uso_xle",
+            "strategy": "kalman_pairs",
+            "instrument_a": "USO",
+            "instrument_b": "XLE",
+            "entry_z_score": 2.1,
+            "exit_z_score": 0.5,
+            "leg_notional": 5_000.0,
+            "warmup_bars": 20,
+        },
+        {
+            "slot": "etf_spy_qqq",
+            "strategy": "kalman_pairs",
+            "instrument_a": "SPY",
+            "instrument_b": "QQQ",
+            "entry_z_score": 2.0,
+            "exit_z_score": 0.5,
+            "leg_notional": 5_000.0,
+            "warmup_bars": 20,
+        },
+        {
+            "slot": "etf_xlf_xlk",
+            "strategy": "kalman_pairs",
+            "instrument_a": "XLF",
+            "instrument_b": "XLK",
+            "entry_z_score": 2.1,
+            "exit_z_score": 0.5,
+            "leg_notional": 5_000.0,
+            "warmup_bars": 20,
+        },
+    ],
+    "forex": [
+        # Forex pairs — executed via IBKR TWS using IBKRBroker.
+        # Data fed via 60s IBKR poll loop → synthetic BarEvents on the event bus.
+        {
+            "slot": "fx_eurusd_gbpusd",
+            "strategy": "kalman_pairs",
+            "instrument_a": "FOREX:EUR/USD",
+            "instrument_b": "FOREX:GBP/USD",
+            "entry_z_score": 2.0,
+            "exit_z_score": 0.5,
+            "leg_notional": 10_000.0,
+            "warmup_bars": 30,
+        },
+        {
+            "slot": "fx_audusd_nzdusd",
+            "strategy": "kalman_pairs",
+            "instrument_a": "FOREX:AUD/USD",
+            "instrument_b": "FOREX:NZD/USD",
+            "entry_z_score": 2.0,
+            "exit_z_score": 0.5,
+            "leg_notional": 10_000.0,
+            "warmup_bars": 30,
+        },
+        {
+            "slot": "fx_eurusd_chfusd",
+            "strategy": "kalman_pairs",
+            "instrument_a": "FOREX:EUR/USD",
+            "instrument_b": "FOREX:CHF/USD",
+            "entry_z_score": 2.0,
+            "exit_z_score": 0.5,
+            "leg_notional": 10_000.0,
+            "warmup_bars": 30,
+        },
     ],
 }
 
@@ -292,6 +380,16 @@ DEFAULT_EXPECTED_SHARPE_BY_PAIR: dict[str, float] = {
     "JPM/BAC": 1.55,
     "KO/PEP": 1.60,
     "AMD/NVDA": 1.50,
+    # ETF pairs
+    "GLD/SLV": 1.45,
+    "TLT/IEF": 1.50,
+    "USO/XLE": 1.35,
+    "SPY/QQQ": 1.40,
+    "XLF/XLK": 1.30,
+    # Forex pairs (keys use normalized FX: prefix from parse_symbol)
+    "FX:EUR/USD/FX:GBP/USD": 1.20,
+    "FX:AUD/USD/FX:NZD/USD": 1.15,
+    "FX:EUR/USD/FX:CHF/USD": 1.10,
 }
 
 # Equity backbench: 13 extra symbols + 12 already in active pairs = 25 total.
@@ -335,6 +433,17 @@ BACKBENCH_UNIVERSE: list[dict[str, Any]] = [
 # Helpers
 # ---------------------------------------------------------------------------
 
+class _IBKRInternalErrorFilter(logging.Filter):
+    """Drop ib_insync.wrapper 'Internal server error' (code 2147483647).
+
+    Fired when IBKR paper accounts lack a market-data subscription for a
+    contract type (e.g. forex snapshots).  Not actionable; suppressing keeps
+    the console clean without hiding real connectivity errors.
+    """
+    def filter(self, record: logging.LogRecord) -> bool:
+        return "Internal server error" not in record.getMessage()
+
+
 def _configure_logging() -> None:
     setup_logging(
         level=os.getenv("GLOBAL_LOG_LEVEL", "INFO").upper(),
@@ -345,7 +454,10 @@ def _configure_logging() -> None:
     )
     # Silence third party loggers for the harness
     logging.getLogger("ib_insync").setLevel(logging.WARNING)
+    logging.getLogger("ib_insync.wrapper").addFilter(_IBKRInternalErrorFilter())
     logging.getLogger("urllib3").setLevel(logging.WARNING)
+    logging.getLogger("yfinance").setLevel(logging.CRITICAL)
+    logging.getLogger("peewee").setLevel(logging.CRITICAL)
 
 
 def _required_env(name: str) -> str:
@@ -522,7 +634,7 @@ def _load_winner_dictionary() -> dict[str, list[dict[str, Any]]]:
     else:
         payload = DEFAULT_WINNER_DICTIONARY
 
-    normalized: dict[str, list[dict[str, Any]]] = {"crypto": [], "equity": []}
+    normalized: dict[str, list[dict[str, Any]]] = {"crypto": [], "equity": [], "forex": []}
     for asset_group, configs in payload.items():
         if asset_group not in normalized or not isinstance(configs, list):
             continue
@@ -821,6 +933,14 @@ class StrategyController:
         )
         return tuple(sorted(symbols))
 
+    def configured_forex_symbols(self) -> tuple[str, ...]:
+        symbols: set[str] = set()
+        for config in self._configured_slots.values():
+            if self._slot_asset_class(config) == AssetClass.FOREX:
+                symbols.add(config.instrument_a)
+                symbols.add(config.instrument_b)
+        return tuple(sorted(symbols))
+
     def active_slot_configs(self) -> tuple[StrategySlotConfig, ...]:
         return tuple(config for config, _ in self._active_strategies.values())
 
@@ -972,10 +1092,12 @@ class StrategyController:
     def _should_be_active(self, config: StrategySlotConfig) -> bool:
         if config.slot in self._paused_slots:
             return False # Manually halted
-            
+
         asset_class = self._slot_asset_class(config)
         if asset_class == AssetClass.CRYPTO:
-            return True  # Crypto is always tradable  24/7.
+            return True  # Crypto is always tradable — 24/7.
+        if asset_class == AssetClass.FOREX:
+            return True  # Forex is 24/5; IBKR data loop provides prices only when live.
         return self._session_manager.is_market_open(config.instrument_a) and \
                self._session_manager.is_market_open(config.instrument_b)
 
@@ -1126,6 +1248,71 @@ async def _run_broker_forever(broker: AlpacaBroker, stop_event: asyncio.Event) -
             logger.exception("alpaca-broker stream failed; retrying in %.1fs", backoff_seconds)
             await asyncio.sleep(backoff_seconds)
             backoff_seconds = min(backoff_seconds * 2.0, 60.0)
+
+
+async def _run_forex_data_loop(
+    ibkr_connector: Any,
+    forex_symbols_fn: "Callable[[], tuple[str, ...]]",
+    event_bus: InMemoryEventBus,
+    stop_event: asyncio.Event,
+    poll_interval: float = 60.0,
+) -> None:
+    """
+    Poll IBKR every minute for forex mid-prices and synthesize BarEvents so
+    KalmanPairsStrategy can process them on the shared event bus.
+    No data is emitted when IBKR is offline — pairs stay in warmup until TWS reconnects.
+    """
+    # Wait for IBKR to fully connect before first poll attempt.
+    await asyncio.sleep(30.0)
+
+    _seq = 0
+    while not stop_event.is_set():
+        symbols = forex_symbols_fn()
+        # Only poll when IBKR is genuinely connected (respects offline_mode flag).
+        ibkr_live = (
+            ibkr_connector is not None
+            and hasattr(ibkr_connector, "is_connected")
+            and ibkr_connector.is_connected()
+        )
+        if symbols and ibkr_live:
+            for symbol in symbols:
+                try:
+                    quote = await ibkr_connector.get_quote(symbol)
+                    if not quote or not quote.get("mid"):
+                        continue
+                    mid = float(quote["mid"])
+                    now = datetime.now(timezone.utc)
+                    bar = BarEvent(
+                        instrument_id=symbol,
+                        exchange_ts=now,
+                        received_ts=now,
+                        processed_ts=now,
+                        sequence_id=_seq,
+                        source="ibkr.forex.poll",
+                        open_price=mid,
+                        high_price=mid,
+                        low_price=mid,
+                        close_price=mid,
+                        volume=1.0,
+                        metadata={
+                            "venue": "ibkr",
+                            "bid": quote.get("bid", mid),
+                            "ask": quote.get("ask", mid),
+                        },
+                    )
+                    _seq += 1
+                    await event_bus.publish_async(bar)
+                    logger.debug("Forex bar published: %s mid=%.5f", symbol, mid)
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:
+                    logger.debug("Forex data poll error for %s: %s", symbol, exc)
+        elif symbols and not ibkr_live:
+            logger.debug("Forex data loop: IBKR offline, skipping poll for %d symbols", len(symbols))
+        try:
+            await asyncio.sleep(poll_interval)
+        except asyncio.CancelledError:
+            break
 
 
 def _subscribe_stock_stream(
@@ -1502,7 +1689,9 @@ async def _winner_refresh_loop(
             controller.apply_winner_dictionary(winner_dictionary)
             active_stocks = controller.configured_stock_symbols()
             active_cryptos = controller.configured_crypto_symbols()
-            all_stocks = tuple(sorted(set(active_stocks) | set(_backbench_stock_symbols())))
+            # Only subscribe active symbols to the IEX feed (25-symbol cap).
+            # Backbench uses mock OBI data in the rotator — no live feed needed.
+            all_stocks = tuple(sorted(set(active_stocks)))
             all_cryptos = tuple(sorted(set(active_cryptos) | set(_backbench_crypto_symbols())))
             await stock_supervisor.update_symbols(all_stocks)
             await crypto_supervisor.update_symbols(all_cryptos)
@@ -1528,9 +1717,8 @@ async def _winner_refresh_loop(
         swaps = rotator.get_swaps(active_performance)
         if swaps:
             for old_label, new_config in swaps:
-                logger.warning("HOT-SWAP TRIGGERED: Replacing %s with %s", old_label, new_config['instrument_a'])
-                # Update winner dictionary in-place for next refresh or force reconcile
-                # For now, let's just log it. Real implementation would update the config source.
+                logger.info("HOT-SWAP candidate: %s → %s (cooldown active, no action taken)", old_label, new_config['instrument_a'])
+                # TODO: implement actual swap — update winner dictionary and force reconcile.
 
         # Hot-Swap Logic
         # ... (implementation from previous step)
@@ -1891,6 +2079,8 @@ async def main() -> None:
         model_path="run_state/models/ppo_execution_v1.zip"
     )
     broker = AlpacaBroker(trading_client, event_bus, limit_chaser=neural_sniper)
+    ibkr_broker = IBKRBroker(ibkr_connector, event_bus)
+    ibkr_broker.start()
     eod_liquidator = EODLiquidator(ledger, event_bus, session_manager=session_manager)
     
     # Dashboard integration
@@ -1932,13 +2122,15 @@ async def main() -> None:
     position_reconciler = PositionReconciler(reconciler_adapter)
     
     health_monitor = HealthMonitor(notifier=notifier)
+    _broker_mode = get_active_broker_mode(PROJECT_ROOT / "run_state" / "trading_control_commands.json")
     shadow_accounting = ShadowAccounting(
         event_bus=event_bus,
         ledger=ledger,
         reconciler=position_reconciler,
         ibkr_connector=ibkr_connector,
         notifier=notifier,
-        check_interval_seconds=300
+        check_interval_seconds=300,
+        single_venue=(_broker_mode != "both"),
     )
     
     health_monitor.start()
@@ -2002,6 +2194,16 @@ async def main() -> None:
     )
     broker_task = asyncio.create_task(
         _run_broker_forever(broker, stop_event), name="alpaca-broker-supervisor-v3"
+    )
+    forex_data_task = asyncio.create_task(
+        _run_forex_data_loop(
+            ibkr_connector=ibkr_connector,
+            forex_symbols_fn=controller.configured_forex_symbols,
+            event_bus=event_bus,
+            stop_event=stop_event,
+            poll_interval=60.0,
+        ),
+        name="ibkr-forex-data-v3",
     )
     tca_schedule_task = asyncio.create_task(
         tca_task_obj.run(stop_event), name="tca-daily-report-v3"
@@ -2108,6 +2310,7 @@ async def main() -> None:
             stock_task,
             crypto_task,
             broker_task,
+            forex_data_task,
             tca_schedule_task,
             dashboard_task,
             ha_heartbeat_task,
@@ -2141,6 +2344,7 @@ async def main() -> None:
         equity_protector.close()
         bayesian_vol.close()
         broker.close()
+        ibkr_broker.close()
         risk_manager.close()
         ledger.close()
 
