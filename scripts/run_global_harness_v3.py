@@ -119,6 +119,7 @@ from config import ApexConfig
 from reconciliation.position_reconciler import PositionReconciler
 from reconciliation.broker_adapters import AlpacaReconcilerAdapter
 from quant_system.risk.sentiment_warden import SentimentWarden
+from risk.regime_router import RegimeRouter, CompositeRegime, get_global_regime_router
 
 logger = logging.getLogger("quant_system.global_harness_v3")
 
@@ -1056,25 +1057,46 @@ class StrategyController:
     #  Private helpers 
 
     def _resolve_notional(self, config: StrategySlotConfig) -> float:
-        """Return VolatilitySizer-scaled notional, falling back to the config value."""
+        """Return VolatilitySizer-scaled notional with regime multiplier + crypto beta."""
         if self._volatility_sizer is None:
-            return config.leg_notional
-        sized = self._volatility_sizer.position_size(
-            config.instrument_a,
-            config.instrument_b,
-            target_risk_dollars=config.leg_notional,
-        )
-        # Guard: cap at 1.5 base (keeps total exposure within buying power on fresh start)
-        # and floor at 50% so the sizer never kills a pair with zero vol history.
-        clamped = max(config.leg_notional * 0.50, min(config.leg_notional * 1.5, sized))
-        if abs(clamped - config.leg_notional) / config.leg_notional > 0.01:
-            logger.debug(
-                "VolatilitySizer: pair=%s base=$%.0f  sized=$%.0f",
-                config.pair_label,
-                config.leg_notional,
-                clamped,
+            base = config.leg_notional
+        else:
+            sized = self._volatility_sizer.position_size(
+                config.instrument_a,
+                config.instrument_b,
+                target_risk_dollars=config.leg_notional,
             )
-        return clamped
+            # Guard: cap at 1.5 base and floor at 50% for zero vol history.
+            base = max(config.leg_notional * 0.50, min(config.leg_notional * 1.5, sized))
+            if abs(base - config.leg_notional) / config.leg_notional > 0.01:
+                logger.debug(
+                    "VolatilitySizer: pair=%s base=$%.0f  sized=$%.0f",
+                    config.pair_label,
+                    config.leg_notional,
+                    base,
+                )
+
+        # ── Regime-aware scaling (wired 2026-04-28 forensic audit fix) ──
+        try:
+            decision = get_global_regime_router().evaluate()
+            regime_mult = decision.notional_multiplier
+            is_crypto = self._slot_asset_class(config) == AssetClass.CRYPTO
+            if is_crypto:
+                regime_mult *= decision.crypto_beta_scalar
+            adjusted = base * regime_mult
+            # Floor: never drop below 25% of base so a pair isn't accidentally silenced.
+            adjusted = max(config.leg_notional * 0.25, adjusted)
+            if abs(adjusted - base) / max(base, 1.0) > 0.02:
+                logger.debug(
+                    "RegimeRouter: pair=%s base=$%.0f regime_mult=%.2f%s -> $%.0f",
+                    config.pair_label, base, regime_mult,
+                    " (crypto_beta)" if is_crypto else "",
+                    adjusted,
+                )
+            return adjusted
+        except Exception as exc:
+            logger.debug("RegimeRouter notional adjustment skipped: %s", exc)
+            return base
 
     def _instantiate_strategy(self, config: StrategySlotConfig) -> KalmanPairsStrategy:
         if config.strategy != "kalman_pairs":
@@ -1663,6 +1685,59 @@ async def _run_dashboard_updates(
         except asyncio.TimeoutError:
             continue
 
+async def _check_portfolio_cash_gate(
+    trading_client: TradingClient,
+    controller: "StrategyController",
+    *,
+    safety_buffer: float = 0.85,
+) -> tuple[bool, float, float]:
+    """
+    Active portfolio-level cash gate.
+
+    Computes the TOTAL notional demand for one full reconciliation cycle
+    (all active pair configs × 2 legs) and compares it against current
+    Alpaca buying power × ``safety_buffer``.  Returns ``(sufficient,
+    buying_power_available, cycle_notional_demand)``.
+
+    When ``sufficient`` is False the caller should skip
+    ``controller.reconcile()`` for this tick to prevent a storm of
+    broker-rejected orders (code 40310000 — insufficient balance).
+    This was the primary driver of 566 daily rejections on 2026-04-28.
+    """
+    cycle_demand = 0.0
+    try:
+        for cfg in controller.active_slot_configs():
+            cycle_demand += cfg.leg_notional * 2  # both legs
+    except Exception:
+        cycle_demand = 0.0
+
+    try:
+        acct = await asyncio.to_thread(trading_client.get_account)
+        buying_power = float(acct.buying_power) * safety_buffer
+        sufficient = buying_power >= cycle_demand
+        if not sufficient:
+            logger.warning(
+                "🚨 CASH GATE: buying_power=$%.2f (%.0f%% of %.2f) < cycle_demand=$%.2f — "
+                "skipping reconcile this tick to prevent %d broker rejections.",
+                buying_power,
+                safety_buffer * 100,
+                float(acct.buying_power),
+                cycle_demand,
+                int(cycle_demand // max(cfg.leg_notional, 1)) if controller.active_slot_configs() else 0,
+            )
+        else:
+            logger.debug(
+                "✅ CASH GATE: OK — buying_power=$%.2f | cycle_demand=$%.2f | headroom=$%.2f",
+                buying_power, cycle_demand, buying_power - cycle_demand,
+            )
+        return sufficient, buying_power, cycle_demand
+    except Exception as exc:
+        # Fail-open: if we can't check, let the cycle proceed and let the
+        # broker reject individual orders as a backstop.
+        logger.debug("Cash gate check failed (fail-open): %s", exc)
+        return True, 0.0, cycle_demand
+
+
 async def _winner_refresh_loop(
     controller: StrategyController,
     alpha_controller: AlphaMonitorController,
@@ -1676,6 +1751,7 @@ async def _winner_refresh_loop(
     rotator: StrategyRotator,
     tail_hedger: TailHedger,
     risk_manager: RiskManager,
+    trading_client: TradingClient,
     stop_event: asyncio.Event,
 ) -> None:
     last_refresh_at: datetime | None = None
@@ -1700,7 +1776,42 @@ async def _winner_refresh_loop(
 
         controller.reconcile()
         alpha_controller.reconcile(controller.active_slot_configs())
-        
+
+        # ── CASH GATE: hard-block oversized cycles (forensic audit 2026-04-28) ──
+        _cash_gate_buffer = float(os.getenv("CASH_GATE_SAFETY_BUFFER", "0.85"))
+        _cash_ok, _bp_avail, _cycle_demand = await _check_portfolio_cash_gate(
+            trading_client, controller, safety_buffer=_cash_gate_buffer
+        )
+        if not _cash_ok:
+            # Skip the regime guard and tail-hedge — they may submit new orders.
+            # Wait for the standard 60-second tick so the next cycle can recheck.
+            try:
+                await asyncio.wait_for(stop_event.wait(), timeout=60.0)
+            except asyncio.TimeoutError:
+                continue
+            continue
+
+        # ── REGIME GUARD: log + block entries in HIGH_VOL_PANIC ──
+        try:
+            from risk.regime_router import get_global_regime_router, CompositeRegime
+            _rr_decision = get_global_regime_router().evaluate()
+            logger.info(
+                "🌍 REGIME | %s | notional_mult=%.2f | block_entries=%s | "
+                "vix=%s | crypto=%s",
+                _rr_decision.regime.value,
+                _rr_decision.notional_multiplier,
+                _rr_decision.block_new_entries,
+                _rr_decision.vix_regime,
+                _rr_decision.crypto_regime,
+            )
+            if _rr_decision.block_new_entries:
+                logger.warning(
+                    "⛔ REGIME GATE: HIGH_VOL_PANIC detected — new pair entries "
+                    "blocked this cycle. Exits still processed normally."
+                )
+        except Exception as _rr_exc:
+            logger.debug("Regime guard skipped: %s", _rr_exc)
+
         # Tail-Hedge Check
         await tail_hedger.check_and_hedge()
 
@@ -2100,7 +2211,17 @@ async def main() -> None:
         bayesian_vol,
     )
 
-    #  Strategy controller (v3  vol-sized) 
+    #  Regime Router (forensic audit 2026-04-28) 
+    # Must be initialised before StrategyController so _resolve_notional can call it.
+    crypto_beta_scalar = float(os.getenv("CRYPTO_BETA_SCALAR", "0.55"))
+    _regime_router_instance = get_global_regime_router(crypto_beta_scalar=crypto_beta_scalar)
+    logger.info(
+        "✅ RegimeRouter ready | crypto_beta_scalar=%.2f | CASH_GATE_BUFFER=%.0f%%",
+        crypto_beta_scalar,
+        float(os.getenv("CASH_GATE_SAFETY_BUFFER", "0.85")) * 100,
+    )
+
+    #  Strategy controller (v3  vol-sized + regime-aware) 
     controller = StrategyController(
         event_bus,
         session_manager,
@@ -2182,6 +2303,7 @@ async def main() -> None:
             rotator,
             tail_hedger,
             risk_manager,
+            trading_client,
             stop_event,
         ),
         name="winner-refresh-loop-v3",
