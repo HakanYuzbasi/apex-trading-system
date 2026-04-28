@@ -3,12 +3,14 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import time
 from datetime import datetime, timezone
 from itertools import count
-from typing import Any, Mapping
+from typing import Any, Mapping, Set
 
 from alpaca.trading.client import TradingClient
 from alpaca.trading.enums import OrderSide as AlpacaOrderSide
+from requests.adapters import HTTPAdapter
 from alpaca.trading.enums import OrderType as AlpacaOrderType
 from alpaca.trading.enums import TimeInForce as AlpacaTimeInForce
 from alpaca.trading.requests import LimitOrderRequest, MarketOrderRequest, ReplaceOrderRequest
@@ -41,6 +43,10 @@ class AlpacaBroker:
         limit_chaser: LimitOrderChaser | None = None,
     ) -> None:
         self._trading_client = trading_client
+        # Raise urllib3 pool size to avoid connection-pool exhaustion under rapid order flow.
+        _adapter = HTTPAdapter(pool_connections=1, pool_maxsize=25, max_retries=3)
+        if hasattr(trading_client, "_session"):
+            trading_client._session.mount("https://", _adapter)
         self._event_bus = event_bus
         self._sequence = count()
         self._latest_market: dict[str, QuoteTick | TradeTick | BarEvent] = {}
@@ -73,6 +79,15 @@ class AlpacaBroker:
             )
         else:
             self._limit_chaser = None
+
+        # Wash-trade deduplication state.
+        # _pending_cancels: order_id → monotonic timestamp when cancel was sent.
+        # Prevents the same conflicting order from being cancelled twice within
+        # the 90-second in-flight window and stops the per-cycle duplicate storm.
+        self._pending_cancels: dict[str, float] = {}
+        # Per-cycle set: cleared at the start of every _submit_direct_order batch
+        # to catch same-cycle duplicates (same order_id cancelled twice in <1s).
+        self._cycle_cancel_ids: Set[str] = set()
 
         self._subscriptions: tuple[Subscription, ...] = (
             self._event_bus.subscribe("bar", self._on_bar),
@@ -116,6 +131,8 @@ class AlpacaBroker:
     async def _on_order_event(self, event: OrderEvent) -> None:
         if event.order_action != "submit":
             return
+        # New cycle starting — reset same-cycle cancel dedup set
+        self._cycle_cancel_ids = set()
 
         if self._limit_chaser is not None and event.order_type == "market":
             venue_order_id = await self._limit_chaser.submit(event)
@@ -185,6 +202,11 @@ class AlpacaBroker:
             remaining_qty=remaining_qty,
             metadata={"alpaca_event": raw_event},
         )
+        # A fill or cancel confirmation means the order is gone — remove from the
+        # pending-cancel registry so the 90s guard doesn't block future conflicts.
+        if execution_status in {"filled", "canceled"} and venue_order_id:
+            self._pending_cancels.pop(venue_order_id, None)
+
         if self._limit_chaser is not None:
             await self._limit_chaser.mark_execution(
                 order_id=order_id,
@@ -246,36 +268,73 @@ class AlpacaBroker:
             submitted_order = await asyncio.to_thread(self._trading_client.submit_order, alpaca_request)
         except Exception as exc:
             err_str = str(exc).lower()
-            # Wash-trade rejection: Alpaca refuses to place a limit order on the
-            # same side as an already-resting limit at the same price.  Extract
-            # the conflicting order ID and cancel it so the next cycle can retry.
+            # Wash-trade rejection: Alpaca refuses to place an order on the same
+            # side as an already-resting limit at the same price.  Extract the
+            # conflicting order ID and cancel it — but only if we haven't already
+            # sent a cancel for that ID within the last 90 seconds (prevents the
+            # cancel→"pending cancel"→retry infinite loop).
             if "wash trade" in err_str or (
                 "40310000" in err_str and "existing_order_id" in err_str
             ):
+                # Purge stale entries (> 120s) before checking
+                _now = time.monotonic()
+                self._pending_cancels = {
+                    oid: ts for oid, ts in self._pending_cancels.items()
+                    if _now - ts < 120.0
+                }
                 try:
                     raw_json = str(exc)
                     start = raw_json.find("{")
                     body = json.loads(raw_json[start:]) if start != -1 else {}
                     conflict_id = body.get("existing_order_id", "")
-                    if conflict_id:
+
+                    if not conflict_id:
+                        logger.warning(
+                            "Wash-trade rejection on %s (no conflict ID in body): %s",
+                            self._alpaca_symbol(event.instrument_id), exc,
+                        )
+                    elif conflict_id in self._cycle_cancel_ids:
+                        # Same cycle duplicate — skip silently
+                        logger.debug(
+                            "Wash-trade: cancel already sent this cycle for %s — skipping",
+                            conflict_id,
+                        )
+                    elif (
+                        conflict_id in self._pending_cancels
+                        and _now - self._pending_cancels[conflict_id] < 90.0
+                    ):
+                        logger.debug(
+                            "Wash-trade: cancel already in-flight for %s (%.0fs ago) — skipping",
+                            conflict_id, _now - self._pending_cancels[conflict_id],
+                        )
+                    else:
                         await asyncio.to_thread(
                             self._trading_client.cancel_order_by_id, conflict_id
                         )
+                        self._pending_cancels[conflict_id] = _now
+                        self._cycle_cancel_ids.add(conflict_id)
                         logger.warning(
                             "Wash-trade conflict on %s — cancelled conflicting order %s; will retry next cycle.",
                             self._alpaca_symbol(event.instrument_id),
                             conflict_id,
                         )
+                except Exception as cancel_exc:
+                    cancel_err = str(cancel_exc).lower()
+                    if "42210000" in cancel_err or "already filled" in cancel_err:
+                        # The conflicting order was filled before we could cancel it.
+                        # Remove from pending (the fill means the position exists).
+                        conflict_id_safe = locals().get("conflict_id", "")
+                        if conflict_id_safe:
+                            self._pending_cancels.pop(conflict_id_safe, None)
+                        logger.info(
+                            "Wash-trade: conflicting order already filled — no retry needed (%s)",
+                            cancel_exc,
+                        )
                     else:
                         logger.warning(
-                            "Wash-trade rejection on %s (no conflict ID in body): %s",
-                            self._alpaca_symbol(event.instrument_id), exc,
+                            "Wash-trade: failed to cancel conflicting order for %s: %s",
+                            self._alpaca_symbol(event.instrument_id), cancel_exc,
                         )
-                except Exception as cancel_exc:
-                    logger.warning(
-                        "Wash-trade: failed to cancel conflicting order for %s: %s",
-                        self._alpaca_symbol(event.instrument_id), cancel_exc,
-                    )
             elif any(k in err_str for k in (
                 "insufficient balance", "position_limit_exceeded", "forbidden",
                 "qty must be", "42210000", "unprocessable", "422",
