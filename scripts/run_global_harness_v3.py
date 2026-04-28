@@ -1694,22 +1694,53 @@ async def _check_portfolio_cash_gate(
     """
     Active portfolio-level cash gate.
 
-    Computes the TOTAL notional demand for one full reconciliation cycle
-    (all active pair configs × 2 legs) and compares it against current
-    Alpaca buying power × ``safety_buffer``.  Returns ``(sufficient,
-    buying_power_available, cycle_notional_demand)``.
+    Computes the TOTAL **regime-adjusted** notional demand for one full
+    reconciliation cycle and compares it against Alpaca buying_power ×
+    safety_buffer.  Demand uses the same multipliers that _resolve_notional()
+    applies so the check is apples-to-apples with actual order sizes.
 
-    When ``sufficient`` is False the caller should skip
-    ``controller.reconcile()`` for this tick to prevent a storm of
-    broker-rejected orders (code 40310000 — insufficient balance).
-    This was the primary driver of 566 daily rejections on 2026-04-28.
+    Returns (sufficient, buying_power_available, cycle_notional_demand).
+    When False the caller skips controller.reconcile() to prevent the
+    40310000 (insufficient balance) storm (566 rejections on 2026-04-28).
     """
+    # ── Regime multipliers (fail-safe defaults if router unavailable) ──
+    regime_notional_mult = 1.0
+    crypto_beta_scalar   = float(os.getenv("CRYPTO_BETA_SCALAR", "0.55"))
+    try:
+        from risk.regime_router import get_global_regime_router
+        _dec = get_global_regime_router().evaluate()
+        regime_notional_mult = _dec.notional_multiplier
+        crypto_beta_scalar   = _dec.crypto_beta_scalar
+    except Exception:
+        pass
+
+    # ── Sum regime-adjusted demand — crypto always, equity only during market hours ──
+    # At midnight, equity strategies are configured but NOT reconciling (market
+    # is closed), so their notionals must NOT inflate the gate's demand estimate.
+    # We determine this by checking the symbol asset class: crypto = always,
+    # equity = only when the underlying market session is open.
     cycle_demand = 0.0
     try:
+        from datetime import timezone as _tz
+        from zoneinfo import ZoneInfo as _ZI
+        _et_now = datetime.now(_ZI("America/New_York"))
+        _market_open = (
+            _et_now.weekday() < 5  # Mon–Fri
+            and _et_now.hour >= 9
+            and (_et_now.hour > 9 or _et_now.minute >= 30)
+            and _et_now.hour < 16
+        )
         for cfg in controller.active_slot_configs():
-            cycle_demand += cfg.leg_notional * 2  # both legs
+            is_crypto = StrategyController._slot_asset_class(cfg) == AssetClass.CRYPTO
+            # Skip equity pairs outside market hours — they won't submit orders.
+            if not is_crypto and not _market_open:
+                continue
+            pair_mult = regime_notional_mult
+            if is_crypto:
+                pair_mult *= crypto_beta_scalar
+            cycle_demand += cfg.leg_notional * 2 * pair_mult   # both legs
     except Exception:
-        cycle_demand = 0.0
+        cycle_demand = 0.0   # fail-open if slot inspection fails
 
     try:
         acct = await asyncio.to_thread(trading_client.get_account)
@@ -1717,13 +1748,13 @@ async def _check_portfolio_cash_gate(
         sufficient = buying_power >= cycle_demand
         if not sufficient:
             logger.warning(
-                "🚨 CASH GATE: buying_power=$%.2f (%.0f%% of %.2f) < cycle_demand=$%.2f — "
-                "skipping reconcile this tick to prevent %d broker rejections.",
+                "🚨 CASH GATE: buying_power=$%.2f (%.0f%% of %.2f) < "
+                "regime-adjusted cycle_demand=$%.2f — "
+                "skipping reconcile this tick to prevent broker rejections.",
                 buying_power,
                 safety_buffer * 100,
                 float(acct.buying_power),
                 cycle_demand,
-                int(cycle_demand // max(cfg.leg_notional, 1)) if controller.active_slot_configs() else 0,
             )
         else:
             logger.debug(
@@ -1732,10 +1763,10 @@ async def _check_portfolio_cash_gate(
             )
         return sufficient, buying_power, cycle_demand
     except Exception as exc:
-        # Fail-open: if we can't check, let the cycle proceed and let the
-        # broker reject individual orders as a backstop.
+        # Fail-open: if we can't check, let the cycle proceed.
         logger.debug("Cash gate check failed (fail-open): %s", exc)
         return True, 0.0, cycle_demand
+
 
 
 async def _winner_refresh_loop(
