@@ -145,7 +145,8 @@ class AlpacaBroker:
                     event.side,
                     event.quantity,
                 )
-            return
+                return
+            # Limit chaser had no market ref — fall through to direct submit
 
         await self._submit_direct_order(event)
 

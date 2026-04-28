@@ -9,6 +9,8 @@ Verifies that:
 """
 from __future__ import annotations
 
+import pytest
+
 from models.portfolio_optimizer import get_kelly_multiplier
 from monitoring.signal_drift_monitor import SignalDriftMonitor
 
@@ -161,8 +163,8 @@ class TestKellyWithSDMWinRate:
         wr = _kelly_win_rate_from_sdm(sdm)
         assert abs(wr - 0.1) < 1e-9
         m = get_kelly_multiplier(ml_confidence=0.65, historical_win_rate=wr)
-        # full_kelly = 0.375 - (0.625/1.5) = 0.375 - 0.417 = -0.042 <= 0 → returns 0.0 directly
-        assert m == 0.0
+        # full_kelly = 0.375 - (0.625/1.5) = 0.375 - 0.417 = -0.042 <= 0 → returns MIN_LEVERAGE=0.1
+        assert m == pytest.approx(0.1)
 
     def test_zero_winrate_clamped_to_half_in_kelly(self):
         """SDM rolling_win_rate=0.0 gets clamped to 0.5 inside get_kelly_multiplier."""

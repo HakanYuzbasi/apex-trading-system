@@ -80,14 +80,18 @@ class TestICTrackerActiveAPI:
         assert counts["ml"] == 2
 
     def test_pending_count(self):
+        import datetime
+        today = datetime.date.today().isoformat()
         ict = ICTracker(persist=False)
-        ict.record_features("AAPL", "2026-03-20", {"ml": 0.15}, 0.15)
+        ict.record_features("AAPL", today, {"ml": 0.15}, 0.15)
         assert ict.get_pending_count() == 1
 
     def test_record_and_fill(self):
+        import datetime
+        today = datetime.date.today().isoformat()
         ict = ICTracker(persist=False)
-        ict.record_features("AAPL", "2026-03-20", {"ml": 0.15, "tech": 0.10}, 0.15)
-        ict.record_return("AAPL", "2026-03-20", 0.02)
+        ict.record_features("AAPL", today, {"ml": 0.15, "tech": 0.10}, 0.15)
+        ict.record_return("AAPL", today, 0.02)
         assert "ml" in ict._observations
         assert len(ict._observations["ml"]) == 1
 

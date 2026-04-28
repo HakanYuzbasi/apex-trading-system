@@ -39,22 +39,30 @@ def _fill_obs(tracker: ICTracker, feature: str, n: int, positive: bool = True) -
 
 class TestRecordCycle:
     def test_record_features_creates_pending_entry(self, tracker):
-        tracker.record_features("AAPL", "2026-03-01", {"rsi": 62.0}, 0.2)
+        import datetime
+        today = datetime.date.today().isoformat()
+        tracker.record_features("AAPL", today, {"rsi": 62.0}, 0.2)
         assert tracker.get_pending_count() == 1
 
     def test_duplicate_date_not_double_counted(self, tracker):
-        tracker.record_features("AAPL", "2026-03-01", {"rsi": 62.0}, 0.2)
-        tracker.record_features("AAPL", "2026-03-01", {"rsi": 63.0}, 0.3)
+        import datetime
+        today = datetime.date.today().isoformat()
+        tracker.record_features("AAPL", today, {"rsi": 62.0}, 0.2)
+        tracker.record_features("AAPL", today, {"rsi": 63.0}, 0.3)
         assert tracker.get_pending_count() == 1
 
     def test_record_return_removes_from_pending(self, tracker):
-        tracker.record_features("AAPL", "2026-03-01", {"rsi": 62.0}, 0.2)
-        tracker.record_return("AAPL", "2026-03-01", 0.025)
+        import datetime
+        today = datetime.date.today().isoformat()
+        tracker.record_features("AAPL", today, {"rsi": 62.0}, 0.2)
+        tracker.record_return("AAPL", today, 0.025)
         assert tracker.get_pending_count() == 0
 
     def test_record_return_populates_observations(self, tracker):
-        tracker.record_features("AAPL", "2026-03-01", {"rsi": 62.0, "macd": 0.1}, 0.2)
-        tracker.record_return("AAPL", "2026-03-01", 0.02)
+        import datetime
+        today = datetime.date.today().isoformat()
+        tracker.record_features("AAPL", today, {"rsi": 62.0, "macd": 0.1}, 0.2)
+        tracker.record_return("AAPL", today, 0.02)
         counts = tracker.get_observation_counts()
         assert "rsi" in counts
         assert "macd" in counts

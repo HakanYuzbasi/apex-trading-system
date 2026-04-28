@@ -2163,7 +2163,7 @@ class ApexConfig:
     ATR_FALLBACK_PCT: float = float(os.getenv("APEX_ATR_FALLBACK_PCT", "0.02"))
     ATR_REGIME_MULT_STRONG_BULL: float = float(os.getenv("APEX_ATR_REGIME_MULT_STRONG_BULL", "2.20"))
     ATR_REGIME_MULT_BULL: float = float(os.getenv("APEX_ATR_REGIME_MULT_BULL", "2.00"))
-    ATR_REGIME_MULT_NEUTRAL: float = float(os.getenv("APEX_ATR_REGIME_MULT_NEUTRAL", "2.00"))
+    ATR_REGIME_MULT_NEUTRAL: float = float(os.getenv("APEX_ATR_REGIME_MULT_NEUTRAL", "1.50"))
     ATR_REGIME_MULT_BEAR: float = float(os.getenv("APEX_ATR_REGIME_MULT_BEAR", "2.00"))
     ATR_REGIME_MULT_STRONG_BEAR: float = float(os.getenv("APEX_ATR_REGIME_MULT_STRONG_BEAR", "2.20"))
     ATR_REGIME_MULT_VOLATILE: float = float(os.getenv("APEX_ATR_REGIME_MULT_VOLATILE", "2.60"))

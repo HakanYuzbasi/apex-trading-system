@@ -183,9 +183,10 @@ def _calculate_sharpe_ratio(raw: Dict[str, Any]) -> float:
     While not a perfect Sharpe, it provides a functional 'Return/Risk' score for the UI.
     """
     try:
-        # Check if engine already provided a valid non-zero sharpe
+        # Check if engine already provided a valid non-zero sharpe.
+        # Values outside [-10, 10] are almost certainly calculation errors.
         engine_sharpe = _as_finite_float(raw.get("sharpe_ratio"))
-        if engine_sharpe is not None and engine_sharpe > 0:
+        if engine_sharpe is not None and 0 < engine_sharpe <= 10.0:
             return engine_sharpe
 
         total_pnl = _as_finite_float(raw.get("total_pnl")) or 0.0

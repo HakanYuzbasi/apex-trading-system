@@ -215,6 +215,8 @@ class TradingExcellenceManager:
         
         moderate_mismatch_val = mod_thresh
 
+        severity = MismatchSeverity.NONE
+
         # Strong opposite signal with high confidence = CRITICAL
         if position_side == 'LONG' and signal < self.CRITICAL_MISMATCH_THRESHOLD and confidence > self.CRITICAL_CONFIDENCE_THRESHOLD:
             severity = MismatchSeverity.CRITICAL

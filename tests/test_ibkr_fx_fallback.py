@@ -10,6 +10,7 @@ async def test_get_contract_fx_fallback_qualifies_when_primary_fails():
     connector = IBKRConnector()
     connector.offline_mode = False
     connector.ib = MagicMock()
+    connector.contracts = {}  # discard any disk-cached contracts from previous sessions
     connector.ib.isConnected.return_value = True
 
     qualified_contract = MagicMock()

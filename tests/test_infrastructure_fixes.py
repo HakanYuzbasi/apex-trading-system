@@ -116,7 +116,7 @@ class TestIBKRPersistentRecoveryLoop(unittest.TestCase):
         async def _run():
             await connector._persistent_recovery_loop()
 
-        asyncio.get_event_loop().run_until_complete(_run())
+        asyncio.run(_run())
         self.assertFalse(connector._persistently_down)
 
     def test_recovery_loop_stops_on_fatal_error(self):
@@ -137,7 +137,7 @@ class TestIBKRPersistentRecoveryLoop(unittest.TestCase):
             connector._persistently_down = False  # loop exits before sleep
             await connector._persistent_recovery_loop()
 
-        asyncio.get_event_loop().run_until_complete(_run())
+        asyncio.run(_run())
         self.assertEqual(len(connect_called), 0)
 
     def test_recovery_loop_retries_on_failure(self):
@@ -157,7 +157,7 @@ class TestIBKRPersistentRecoveryLoop(unittest.TestCase):
         async def _run():
             await connector._persistent_recovery_loop()
 
-        asyncio.get_event_loop().run_until_complete(_run())
+        asyncio.run(_run())
         # 2 failures + 1 success = 3 attempts
         self.assertGreaterEqual(len(attempts), 1)
         self.assertFalse(connector._persistently_down)
@@ -172,7 +172,7 @@ class TestIBKRPersistentRecoveryLoop(unittest.TestCase):
         async def _run():
             await connector._persistent_recovery_loop()
 
-        asyncio.get_event_loop().run_until_complete(_run())
+        asyncio.run(_run())
         self.assertFalse(connector._persistently_down)
         self.assertEqual(connector._reconnect_failure_count, 0)
 

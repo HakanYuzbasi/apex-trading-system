@@ -68,7 +68,7 @@ def get_kelly_multiplier(
 
     full_kelly = implied_edge_prob - (loss_prob / max(odds_ratio, 1e-9))
     if full_kelly <= 0.0:
-        return 0.0
+        return min_leverage
 
     leverage = (full_kelly * max(fractional_modifier, 0.0)) / max(base_risk_pct, 1e-9)
 
@@ -76,6 +76,28 @@ def get_kelly_multiplier(
         leverage *= 0.6
 
     return float(np.clip(leverage, min_leverage, max_leverage))
+
+
+# ------------------------------------------------------------------------------
+# 0. KELLY CRITERION OPTIMIZER (thin wrapper used by tests and execution loop)
+# ------------------------------------------------------------------------------
+class KellyCriterionOptimizer:
+    """Stateless wrapper around get_kelly_multiplier with named constants."""
+
+    MIN_LEVERAGE: float = 0.1
+    MAX_LEVERAGE: float = 3.0
+
+    def __init__(self, target_rr: float = 1.5, half_kelly_modifier: float = 0.5) -> None:
+        self.target_rr = target_rr
+        self.half_kelly_modifier = half_kelly_modifier
+
+    def calculate_sizing_multiplier(
+        self,
+        ml_confidence: float,
+        historical_win_rate: float,
+        is_high_vix: bool = False,
+    ) -> float:
+        return get_kelly_multiplier(ml_confidence, historical_win_rate, is_high_vix)
 
 
 # ------------------------------------------------------------------------------

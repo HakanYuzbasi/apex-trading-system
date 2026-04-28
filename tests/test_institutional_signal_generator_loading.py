@@ -3,16 +3,18 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pandas as pd
-import pytest
 from joblib import dump
-from sklearn.ensemble import RandomForestRegressor
-from sklearn.impute import SimpleImputer
-from sklearn.preprocessing import RobustScaler
 
 from models.institutional_signal_generator import UltimateSignalGenerator
 
 
 def test_load_models_warns_once_for_missing_regime_bundles(tmp_path, caplog):
+    # Lazy imports so the _restore_real_sklearn fixture has already run and
+    # these resolve to the real classes (not stubs from test_crypto_alpha_features).
+    from sklearn.ensemble import RandomForestRegressor
+    from sklearn.impute import SimpleImputer
+    from sklearn.preprocessing import RobustScaler
+
     model_dir = tmp_path / "saved_ultimate"
     neutral_dir = model_dir / "neutral"
     neutral_dir.mkdir(parents=True)

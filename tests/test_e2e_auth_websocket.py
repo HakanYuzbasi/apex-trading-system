@@ -9,6 +9,44 @@ from api.auth import AUTH_CONFIG, USER_STORE
 from api.server import PROMETHEUS_AVAILABLE, app
 
 
+@pytest.fixture(scope="module", autouse=True)
+def _sqlite_db(tmp_path_factory):
+    """Point auth service at a temp SQLite DB so tests don't need PostgreSQL."""
+    import services.common.db as _db_mod
+    from services.auth.models import Base as _AuthBase
+
+    db_file = tmp_path_factory.mktemp("auth_e2e") / "test.db"
+    old_url = os.environ.get("DATABASE_URL")
+    os.environ["DATABASE_URL"] = f"sqlite+aiosqlite:///{db_file}"
+
+    # Reset lazy singletons so they pick up the new URL
+    old_engine = _db_mod._engine
+    old_factory = _db_mod._session_factory
+    _db_mod._engine = None
+    _db_mod._session_factory = None
+
+    async def _setup():
+        engine = _db_mod.get_engine()
+        async with engine.begin() as conn:
+            await conn.run_sync(_AuthBase.metadata.create_all)
+
+    asyncio.run(_setup())
+
+    yield
+
+    async def _teardown():
+        if _db_mod._engine:
+            await _db_mod._engine.dispose()
+
+    asyncio.run(_teardown())
+    _db_mod._engine = old_engine
+    _db_mod._session_factory = old_factory
+    if old_url is not None:
+        os.environ["DATABASE_URL"] = old_url
+    else:
+        os.environ.pop("DATABASE_URL", None)
+
+
 @pytest.fixture
 def client():
     original_enabled = AUTH_CONFIG.enabled

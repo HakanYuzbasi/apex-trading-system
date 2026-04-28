@@ -24,6 +24,50 @@ def _stub_websockets_subpkgs() -> None:
 
 _stub_websockets_subpkgs()
 
+# Pre-load real packages before test module-level stubs can shadow them.
+# Several test files (test_dampener_kelly_fixes, test_crypto_alpha_features,
+# test_wss_diagnostics) insert empty ModuleType stubs into sys.modules for
+# heavy dependencies. The guard `if _mod not in sys.modules` only prevents
+# overwriting, so we must load the real packages first.
+import config as _real_config  # noqa: F401
+
+# Save real sklearn objects before any test file's module-level stub code can
+# replace them. test_crypto_alpha_features.py mutates sklearn.preprocessing's
+# RobustScaler/StandardScaler attributes in-place (not just sys.modules), so
+# we must save references HERE and restore them before each test.
+_sklearn_saved: dict = {}
+try:
+    import sklearn as _real_sklearn  # noqa: F401
+    import sklearn.preprocessing
+    import sklearn.cluster
+    import sklearn.ensemble
+    import sklearn.linear_model
+    import sklearn.pipeline
+    import sklearn.model_selection
+    import sklearn.metrics
+    _sklearn_saved["preprocessing.RobustScaler"] = sklearn.preprocessing.RobustScaler
+    _sklearn_saved["preprocessing.StandardScaler"] = sklearn.preprocessing.StandardScaler
+    _sklearn_saved["cluster.KMeans"] = sklearn.cluster.KMeans
+    _sklearn_saved["ensemble.RandomForestClassifier"] = sklearn.ensemble.RandomForestClassifier
+    _sklearn_saved["linear_model.LogisticRegression"] = sklearn.linear_model.LogisticRegression
+except (ImportError, AttributeError):
+    pass
+try:
+    import scipy as _real_scipy  # noqa: F401
+    import scipy.stats
+    import scipy.optimize
+except ImportError:
+    pass
+try:
+    import ib_insync as _real_ib_insync  # noqa: F401
+except ImportError:
+    pass
+try:
+    import alpaca_trade_api  # noqa: F401
+    import alpaca_trade_api.rest  # noqa: F401
+except ImportError:
+    pass
+
 import os
 import tempfile
 from pathlib import Path
@@ -40,6 +84,35 @@ import asyncio
 import numpy as np
 import pandas as pd
 from unittest.mock import AsyncMock, MagicMock
+
+
+@pytest.fixture(autouse=True)
+def _restore_real_sklearn():
+    """Restore real sklearn objects before every test.
+
+    Some test files (test_crypto_alpha_features.py) mutate the real
+    sklearn.preprocessing module's attributes (RobustScaler, StandardScaler)
+    at module-collection time.  Without restoration, any test that runs
+    afterwards and imports those classes inside a function gets the stub.
+    """
+    if _sklearn_saved:
+        try:
+            import sklearn.preprocessing
+            import sklearn.cluster
+            import sklearn.ensemble
+            import sklearn.linear_model
+            for key, val in _sklearn_saved.items():
+                mod_name, attr = key.split(".", 1)
+                mod = {"preprocessing": sklearn.preprocessing,
+                       "cluster": sklearn.cluster,
+                       "ensemble": sklearn.ensemble,
+                       "linear_model": sklearn.linear_model}.get(mod_name)
+                if mod is not None:
+                    setattr(mod, attr, val)
+        except ImportError:
+            pass
+    yield
+
 
 # Async support
 @pytest.fixture(scope="session")

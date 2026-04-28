@@ -80,8 +80,11 @@ class TestPointInTimeUniverse:
         traded_symbols = set(t['symbol'] for t in bt.trades)
         assert 'GONE' not in traded_symbols
 
-    def test_delisting_force_closes_position(self):
+    def test_delisting_force_closes_position(self, monkeypatch):
         """When a symbol leaves the universe, its position must be force-closed."""
+        from config import ApexConfig
+        monkeypatch.setattr(ApexConfig, "MAX_INDICATOR_LOOKBACK", 0, raising=False)
+
         n = 40
         dates = pd.bdate_range("2024-01-02", periods=n, freq="B")
         data = {
@@ -114,8 +117,11 @@ class TestPointInTimeUniverse:
         delist_trades = [t for t in bt.trades if "Universe exit" in t.get('reason', '')]
         assert len(delist_trades) >= 1
 
-    def test_no_universe_trades_all_symbols(self):
+    def test_no_universe_trades_all_symbols(self, monkeypatch):
         """Without universe_schedule, all symbols in data are tradeable."""
+        from config import ApexConfig
+        monkeypatch.setattr(ApexConfig, "MAX_INDICATOR_LOOKBACK", 0, raising=False)
+
         n = 40
         data = {}
         for sym in ['AAPL', 'MSFT']:

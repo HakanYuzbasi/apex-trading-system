@@ -418,8 +418,10 @@ class TestExecutionPrice:
                 f"Expected price=100.0 (Open), got {trade['price']} (Close would be 105.0)"
             )
 
-    def test_exit_uses_open_price(self):
+    def test_exit_uses_open_price(self, monkeypatch):
         """When exiting a position, execution price should be based on Open."""
+        from config import ApexConfig
+        monkeypatch.setattr(ApexConfig, "MAX_INDICATOR_LOOKBACK", 0, raising=False)
         bt = AdvancedBacktester(
             initial_capital=100_000,
             commission_per_trade=0.0,

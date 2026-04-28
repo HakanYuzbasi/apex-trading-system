@@ -1520,6 +1520,9 @@ class AdvancedBacktester:
         it is exposed here only so the caller can reconstruct the full
         per-trade bps for reporting.
         """
+        if data is None:
+            return 0.0, 0.0, 0.0
+
         etf_symbols = set(getattr(ApexConfig, "ETF_SYMBOLS", []) or [])
         spread_etf = float(getattr(ApexConfig, "SPREAD_BPS_ETF", 1.0))
         spread_default = float(getattr(ApexConfig, "SPREAD_BPS_DEFAULT", 3.0))
@@ -1599,18 +1602,24 @@ class AdvancedBacktester:
             return False
 
         # Apply slippage (use pre-computed dynamic slippage if provided)
+        _explicit_slippage = slippage_pct is not None
         if slippage_pct is None:
             slippage_pct = self._get_slippage_pct(asset_class)
 
         # Round 12 FIX 5 — additive spread + market-impact bps costs.
+        # When an explicit slippage_pct is provided by the caller (already
+        # includes spread/impact estimates), skip double-counting.
         notional_pre_slip = quantity * price
-        spread_bps, impact_bps, _commission_bps = self._compute_exec_cost_bps(
-            symbol,
-            data,
-            date,
-            asset_class,
-            notional_pre_slip,
-        )
+        spread_bps = 0.0
+        impact_bps = 0.0
+        if not _explicit_slippage:
+            spread_bps, impact_bps, _commission_bps = self._compute_exec_cost_bps(
+                symbol,
+                data,
+                date,
+                asset_class,
+                notional_pre_slip,
+            )
         extra_bps = spread_bps + impact_bps
         extra_pct = extra_bps / 10_000.0
 
