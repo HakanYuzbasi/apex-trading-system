@@ -294,9 +294,67 @@ class EquityProtector:
                     path,
                     _today_utc(),
                 )
+            elif self._halted_date is not None and self._halted_date < _today_utc():
+                # Stale halt from a previous UTC session — auto-clear so it
+                # doesn't carry over and silently block today's entries.
+                logger.info(
+                    "EquityProtector: stale halt date %s is before today %s — auto-clearing.",
+                    self._halted_date, _today_utc(),
+                )
+                self._halted_date = None
+                if self._state_path is not None:
+                    self.save_state(self._state_path)
             else:
                 logger.info(
                     "EquityProtector: state restored from %s (not halted)", path
                 )
         except Exception:
             logger.exception("EquityProtector: failed to load state from %s", path)
+
+    # ── Manual control ───────────────────────────────────────────────────────
+
+    def reset_halt(self) -> None:
+        """
+        Clear today's halt flag after manual review confirms the system is
+        healthy.  Persists the cleared state so a restart stays unhalted.
+        """
+        if not self.is_halted():
+            logger.debug("EquityProtector.reset_halt() called but bot is not halted — no-op.")
+            return
+        self._halted_date = None
+        if self._state_path is not None:
+            self.save_state(self._state_path)
+        logger.warning(
+            "EquityProtector: halt manually cleared — entries re-enabled for today."
+        )
+
+    def reseed_day_equity(self, sovereign_equity: float) -> None:
+        """
+        Override ``day_start_equity`` with the broker-verified equity truth.
+
+        Call this after the Master Sync block during harness startup, passing
+        the confirmed Alpaca equity value.  Prevents phantom baselines from
+        IBKR multi-venue seeding from poisoning the drawdown calculation.
+
+        A reseed is skipped if ``sovereign_equity <= 0`` or if it is more than
+        10× the current baseline (would indicate a data error).
+        """
+        if sovereign_equity <= 0:
+            logger.warning(
+                "EquityProtector.reseed_day_equity: sovereign_equity=%.2f is invalid — skipping.",
+                sovereign_equity,
+            )
+            return
+        if self._day_start_equity > 0 and sovereign_equity > self._day_start_equity * 10:
+            logger.warning(
+                "EquityProtector.reseed_day_equity: sovereign_equity=$%.2f is >10× current "
+                "baseline=$%.2f — looks like a data error, skipping.",
+                sovereign_equity, self._day_start_equity,
+            )
+            return
+        old = self._day_start_equity
+        self._day_start_equity = sovereign_equity
+        logger.info(
+            "EquityProtector: day_start_equity reseeded $%.2f → $%.2f (Alpaca sovereign truth).",
+            old, sovereign_equity,
+        )

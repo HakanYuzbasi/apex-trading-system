@@ -13,6 +13,9 @@ try:  # pragma: no cover - optional dependency path
 except ImportError:  # pragma: no cover - tested via fallback behavior
     mcal = None
 
+from quant_system.core.market_clock import AlpacaMarketClock
+
+
 
 class SessionManager:
     """
@@ -27,12 +30,20 @@ class SessionManager:
     _NYSE_OPEN = time(9, 30)
     _NYSE_CLOSE = time(16, 0)
 
-    def __init__(self, *, nyse_calendar_name: str = "NYSE") -> None:
+    def __init__(
+        self, 
+        *, 
+        nyse_calendar_name: str = "NYSE",
+        market_clock: AlpacaMarketClock | None = None
+    ) -> None:
+        self._market_clock = market_clock
         self._calendar = mcal.get_calendar(nyse_calendar_name) if mcal is not None else None
-        if self._calendar is None:
+        if self._calendar is None and self._market_clock is None:
             logger.warning(
-                "pandas_market_calendars is not installed; SessionManager is using a weekday 09:30-16:00 ET fallback"
+                "pandas_market_calendars and AlpacaMarketClock are unavailable; SessionManager is using a weekday 09:30-16:00 ET fallback"
             )
+        elif self._calendar is None:
+            logger.info("SessionManager using AlpacaMarketClock for NYSE session resolution.")
 
     def is_market_open(self, instrument_id: str, when: datetime | None = None) -> bool:
         asset_class = parse_symbol(instrument_id).asset_class
@@ -66,6 +77,11 @@ class SessionManager:
         return None
 
     def _is_nyse_open(self, timestamp: datetime) -> bool:
+        if self._market_clock is not None:
+            # Note: We ignore the timestamp arg here because the live clock
+            # only knows the "current" state. In backtesting, market_clock is None.
+            return self._market_clock.is_open()
+            
         session = self._session_bounds(timestamp)
         if session is None:
             return False

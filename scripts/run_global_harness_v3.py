@@ -81,6 +81,7 @@ from execution.ibkr_adapter import IBKRAdapter
 
 from quant_system.core.bus import InMemoryEventBus
 from quant_system.core.calendars import SessionManager
+from quant_system.core.market_clock import AlpacaMarketClock
 from quant_system.data.normalizers.live_bridge import LiveDataBridge
 from quant_system.data.stores.client import TimescaleDBClient
 from quant_system.execution.brokers.alpaca_broker import AlpacaBroker
@@ -228,7 +229,7 @@ DEFAULT_WINNER_DICTIONARY: dict[str, list[dict[str, Any]]] = {
             "instrument_b": "MSFT",
             "entry_z_score": 2.0,
             "exit_z_score": 0.5,
-            "leg_notional": 7_000.0,
+            "leg_notional": 3_500.0,
             "warmup_bars": 20,
         },
         {
@@ -238,7 +239,7 @@ DEFAULT_WINNER_DICTIONARY: dict[str, list[dict[str, Any]]] = {
             "instrument_b": "MA",
             "entry_z_score": 2.0,
             "exit_z_score": 0.5,
-            "leg_notional": 7_000.0,
+            "leg_notional": 3_500.0,
             "warmup_bars": 20,
         },
         {
@@ -248,7 +249,7 @@ DEFAULT_WINNER_DICTIONARY: dict[str, list[dict[str, Any]]] = {
             "instrument_b": "GOOGL",
             "entry_z_score": 2.1,
             "exit_z_score": 0.5,
-            "leg_notional": 7_000.0,
+            "leg_notional": 3_500.0,
             "warmup_bars": 20,
         },
         {
@@ -258,7 +259,7 @@ DEFAULT_WINNER_DICTIONARY: dict[str, list[dict[str, Any]]] = {
             "instrument_b": "BAC",
             "entry_z_score": 2.0,
             "exit_z_score": 0.5,
-            "leg_notional": 6_000.0,
+            "leg_notional": 3_000.0,
             "warmup_bars": 20,
         },
         {
@@ -268,7 +269,7 @@ DEFAULT_WINNER_DICTIONARY: dict[str, list[dict[str, Any]]] = {
             "instrument_b": "PEP",
             "entry_z_score": 2.0,
             "exit_z_score": 0.5,
-            "leg_notional": 6_000.0,
+            "leg_notional": 3_000.0,
             "warmup_bars": 20,
         },
         {
@@ -278,7 +279,7 @@ DEFAULT_WINNER_DICTIONARY: dict[str, list[dict[str, Any]]] = {
             "instrument_b": "NVDA",
             "entry_z_score": 2.5,
             "exit_z_score": 0.5,
-            "leg_notional": 6_000.0,
+            "leg_notional": 3_000.0,
             "warmup_bars": 20,
         },
         # ETF Pairs — tradeable via Alpaca (IEX feed), no new API needed.
@@ -290,7 +291,7 @@ DEFAULT_WINNER_DICTIONARY: dict[str, list[dict[str, Any]]] = {
             "instrument_b": "SLV",
             "entry_z_score": 2.0,
             "exit_z_score": 0.5,
-            "leg_notional": 5_000.0,
+            "leg_notional": 2_500.0,
             "warmup_bars": 20,
         },
         {
@@ -300,7 +301,7 @@ DEFAULT_WINNER_DICTIONARY: dict[str, list[dict[str, Any]]] = {
             "instrument_b": "IEF",
             "entry_z_score": 2.0,
             "exit_z_score": 0.5,
-            "leg_notional": 5_000.0,
+            "leg_notional": 2_500.0,
             "warmup_bars": 20,
         },
         {
@@ -310,7 +311,7 @@ DEFAULT_WINNER_DICTIONARY: dict[str, list[dict[str, Any]]] = {
             "instrument_b": "XLE",
             "entry_z_score": 2.1,
             "exit_z_score": 0.5,
-            "leg_notional": 5_000.0,
+            "leg_notional": 2_500.0,
             "warmup_bars": 20,
         },
         {
@@ -320,7 +321,7 @@ DEFAULT_WINNER_DICTIONARY: dict[str, list[dict[str, Any]]] = {
             "instrument_b": "QQQ",
             "entry_z_score": 2.0,
             "exit_z_score": 0.5,
-            "leg_notional": 5_000.0,
+            "leg_notional": 2_500.0,
             "warmup_bars": 20,
         },
         {
@@ -330,7 +331,7 @@ DEFAULT_WINNER_DICTIONARY: dict[str, list[dict[str, Any]]] = {
             "instrument_b": "XLK",
             "entry_z_score": 2.1,
             "exit_z_score": 0.5,
-            "leg_notional": 5_000.0,
+            "leg_notional": 2_500.0,
             "warmup_bars": 20,
         },
     ],
@@ -945,11 +946,17 @@ class StrategyController:
     def active_slot_configs(self) -> tuple[StrategySlotConfig, ...]:
         return tuple(config for config, _ in self._active_strategies.values())
 
-    def reconcile(self) -> None:
+    async def reconcile(self) -> None:
         desired_slots = set(self._configured_slots)
         for slot in list(self._active_strategies):
             if slot not in desired_slots:
                 self._close_slot(slot)
+
+        EQUITY_ACTIVATION_BATCH_SIZE = 3
+        EQUITY_ACTIVATION_DELAY_S = 3.0
+
+        equity_slots_to_activate = []
+        crypto_slots_to_activate = []
 
         for slot, config in self._configured_slots.items():
             should_be_active = self._should_be_active(config)
@@ -977,16 +984,34 @@ class StrategyController:
             if active is not None and active[0].signature == live_config.signature:
                 continue  # Already running with the same parameters.
 
-            if active is not None:
+            if self._slot_asset_class(config) in {AssetClass.EQUITY, AssetClass.OPTION}:
+                equity_slots_to_activate.append((slot, live_config, sized_notional))
+            else:
+                crypto_slots_to_activate.append((slot, live_config, sized_notional))
+
+        for slot, live_config, sized_notional in crypto_slots_to_activate:
+            if slot in self._active_strategies:
                 self._close_slot(slot)
             self._active_strategies[slot] = (live_config, self._instantiate_strategy(live_config))
             logger.info(
-                "v3 Activated strategy slot=%s pair=%s leg_notional=$%.0f (sizer=%s)",
-                slot,
-                live_config.pair_label,
-                sized_notional,
+                "v3 Activated crypto strategy slot=%s pair=%s leg_notional=$%.0f (sizer=%s)",
+                slot, live_config.pair_label, sized_notional,
                 "vol-adjusted" if self._volatility_sizer is not None else "fixed",
             )
+
+        for i in range(0, len(equity_slots_to_activate), EQUITY_ACTIVATION_BATCH_SIZE):
+            batch = equity_slots_to_activate[i:i + EQUITY_ACTIVATION_BATCH_SIZE]
+            for slot, live_config, sized_notional in batch:
+                if slot in self._active_strategies:
+                    self._close_slot(slot)
+                self._active_strategies[slot] = (live_config, self._instantiate_strategy(live_config))
+                logger.info(
+                    "v3 Activated equity strategy slot=%s pair=%s leg_notional=$%.0f (sizer=%s)",
+                    slot, live_config.pair_label, sized_notional,
+                    "vol-adjusted" if self._volatility_sizer is not None else "fixed",
+                )
+            if i + EQUITY_ACTIVATION_BATCH_SIZE < len(equity_slots_to_activate):
+                await asyncio.sleep(EQUITY_ACTIVATION_DELAY_S)
 
 
     def close(self) -> None:
@@ -1805,7 +1830,7 @@ async def _winner_refresh_loop(
             last_refresh_at = now
             logger.info("Winner dictionary refreshed (v3)")
 
-        controller.reconcile()
+        await controller.reconcile()
         alpha_controller.reconcile(controller.active_slot_configs())
 
         # ── CASH GATE: hard-block oversized cycles (forensic audit 2026-04-28) ──
@@ -2041,13 +2066,14 @@ async def main() -> None:
     else:
         is_paper = os.getenv("LIVE_TRADING", "True").lower() == "false"
     trading_client = TradingClient(api_key, secret_key, paper=is_paper)
+    market_clock = AlpacaMarketClock(trading_client)
     fallback_starting_cash = await _bootstrap_cash(trading_client)
 
     event_bus = InMemoryEventBus()
     #  Subscribe to executions for dashboard history 
     event_bus.subscribe("execution", _capture_order_execution)
     
-    session_manager = SessionManager()
+    session_manager = SessionManager(market_clock=market_clock)
     bridge = LiveDataBridge(event_bus)
     ledger = PortfolioLedger(event_bus, starting_cash=fallback_starting_cash)
     telemetry_state["ledger"] = ledger
@@ -2156,52 +2182,13 @@ async def main() -> None:
     # MASTER SYNC: Overwrite stale recovered state with actual brokerage truth (Sovereign Truth)
     try:
         alpaca_equity = await _bootstrap_cash(trading_client)
+        if equity_protector is not None:
+            equity_protector.reseed_day_equity(alpaca_equity)
+        
         ibkr_equity = 0.0
-        # Fire-and-forget connection attempt
-        asyncio.create_task(ibkr_adapter.connect())
         
-        # Wait a moment for IBKR to connect if possible
-        await asyncio.sleep(1.0)
-        
-        if ibkr_connector.ib.isConnected():
-            try:
-                summary = await asyncio.wait_for(
-                    ibkr_connector.ib.accountSummaryAsync(), timeout=8.0
-                )
-                for item in summary:
-                    if item.tag == 'NetLiquidation':
-                        ibkr_equity = float(item.value)
-                        break
-            except (asyncio.TimeoutError, Exception) as ibkr_err:
-                logger.warning("IBKR account summary unavailable (%s) — proceeding Alpaca-only", ibkr_err)
-
-            # Seed IBKR equity positions that Alpaca doesn't know about (e.g. COP).
-            # _seed_existing_positions() above only covers Alpaca; IBKR equity positions
-            # must be added here so the ledger (and dashboard) reflects them correctly.
-            try:
-                ibkr_pos_map = await ibkr_connector.get_detailed_positions()
-                ibkr_seeded = 0
-                for sym, pos_data in ibkr_pos_map.items():
-                    qty = float(pos_data.get("qty", 0))
-                    avg_cost = float(pos_data.get("avg_cost", 0))
-                    if abs(qty) < 1e-6:
-                        continue
-                    pos_obj = ledger.get_position(sym)
-                    if abs(pos_obj.quantity) < 1e-6:  # don't overwrite Alpaca positions
-                        pos_obj.quantity = qty
-                        pos_obj.avg_price = avg_cost
-                        ibkr_seeded += 1
-                        logger.info(
-                            "   Seeded IBKR position: %s | Qty: %.4f | AvgCost: %.4f",
-                            sym, qty, avg_cost,
-                        )
-                if ibkr_seeded:
-                    logger.info(
-                        "✅ IBKR Position Seed: %d equity position(s) added to ledger",
-                        ibkr_seeded,
-                    )
-            except Exception as ibkr_pos_err:
-                logger.warning("⚠️ IBKR position seeding failed: %s", ibkr_pos_err)
+        # IBKR multi-venue seeding is permanently disabled to prevent phantom baseline corruption.
+        # Sovereign equity is anchored exclusively to Alpaca.
 
         sovereign_truth = alpaca_equity + ibkr_equity
         current_equity = ledger.total_equity()
