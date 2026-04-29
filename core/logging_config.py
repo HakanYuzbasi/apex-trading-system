@@ -49,6 +49,8 @@ _MAIN_LOG_INFO_KEYWORDS = (
     "mandate", "governor policy",
     # Walk-forward / model / PPO
     "model retrained", "regime change", "[shadow mode] ppo suggests",
+    # Regime Router (2026-04-28 forensic audit fix)
+    "regime |", "cash gate",
 )
 
 
@@ -89,11 +91,23 @@ class NoDebugFilter(logging.Filter):
 
 
 class ConsoleObservabilityFilter(logging.Filter):
-    """Allow warnings/errors plus opt-in terminal metrics snapshots."""
+    """Allow warnings/errors, opt-in terminal metrics, and whitelisted INFO lines.
+
+    Docker captures stdout, so this is what appears in ``docker logs``.
+    We extend it to pass the same whitelisted INFO keywords as MainLogFilter
+    (e.g. '🌍 REGIME |', '🚨 CASH GATE') so operational log lines are visible
+    without opening the debug log file.
+    """
     def filter(self, record: logging.LogRecord) -> bool:
-        return record.levelno >= logging.WARNING or bool(
-            getattr(record, "terminal_metrics", False)
-        )
+        if record.levelno >= logging.WARNING:
+            return True
+        if getattr(record, "terminal_metrics", False):
+            return True
+        if record.levelno == logging.INFO:
+            msg = record.getMessage().lower()
+            return any(kw in msg for kw in _MAIN_LOG_INFO_KEYWORDS)
+        return False
+
 
 
 # IBKR connectivity blips (Error 1100/1102) are logged at ERROR by ib_insync
