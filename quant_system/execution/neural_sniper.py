@@ -37,6 +37,11 @@ class NeuralSniper(OBISniper):
         self.last_state_vector: np.ndarray = np.zeros(6, dtype=np.float32)
         self.logger = logger
 
+        self.EVAL_COOLDOWN = 1.0  # seconds between neural inferences
+        self.ACTION_LOCK = 5.0    # seconds to wait after deciding to execute
+        self._last_eval_time: dict[str, float] = {}
+        self._locked_until: dict[str, float] = {}
+
     def _build_state_vector(self, instrument: str) -> np.ndarray:
         """Transforms current execution context into the normalized 6-D DRL State Vector."""
         
@@ -80,9 +85,21 @@ class NeuralSniper(OBISniper):
     def _target_limit_price(self, order_event: OrderEvent) -> float | None:
         """
         Overrides OBISniper/LimitOrderChaser. Queries the PPO model in shadow mode,
-        logs its intent, then executes a market-sweep (pay ask / take bid).
+        respects its intent (Wait vs Execute), and applies execution locks.
         Falls back to parent implementation if no market data is available.
         """
+        now = time.monotonic()
+        instrument = order_event.instrument_id
+        
+        # 1. State Management: Prevent duplicate execution sweeps
+        if now < self._locked_until.get(instrument, 0.0):
+            return None  # Symbol is locked/pending execution
+            
+        # 2. Rate Limiting: Throttle neural evaluation
+        if now - self._last_eval_time.get(instrument, 0.0) < self.EVAL_COOLDOWN:
+            return None
+        self._last_eval_time[instrument] = now
+
         # Resolve bid/ask from the latest market snapshot (same path as base class)
         market_event = self._latest_market.get(order_event.instrument_id)
         if market_event is None:
@@ -110,12 +127,23 @@ class NeuralSniper(OBISniper):
             predicted_action_idx = 3  # default: Market Sweep
 
         action_map = {0: "Wait", 1: "Passive Maker", 2: "Penny-Jump", 3: "Market Sweep"}
-        suggested_action = action_map.get(predicted_action_idx, "Market Sweep")
         self.last_action = predicted_action_idx
-        self.logger.info(
-            "🛰️ [SHADOW MODE] PPO suggests: %s | Overriding to Market Sweep for %s.",
-            suggested_action, order_event.instrument_id,
-        )
+        
+        # 3. Handle 'Wait' and Emergency Override
+        if predicted_action_idx == 0:  # Wait
+            vpin = state_vector[0] if len(state_vector) > 0 else 0.0
+            if vpin > 0.80:
+                self.logger.warning("🚨 [SHADOW MODE] PPO suggests: Wait | OVERRIDING to Market Sweep (VPIN=%.2f is High).", vpin)
+                predicted_action_idx = 3 # Force sweep
+            else:
+                self.logger.info("🛰️ [SHADOW MODE] PPO suggests: Wait for %s. Passing tick.", instrument)
+                return None # Respect the Wait command
+                
+        if predicted_action_idx != 0:
+            suggested_action = action_map.get(predicted_action_idx, "Market Sweep")
+            self.logger.info("🛰️ [SHADOW MODE] PPO Execution: %s for %s.", suggested_action, instrument)
+            # Lock symbol to prevent duplicate firing
+            self._locked_until[instrument] = now + self.ACTION_LOCK
 
         # Always execute as market sweep: buy at ask, sell at bid
         raw_price = ask if order_event.side.upper() == "BUY" else bid

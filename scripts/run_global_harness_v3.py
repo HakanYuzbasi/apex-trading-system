@@ -81,6 +81,7 @@ from execution.ibkr_adapter import IBKRAdapter
 
 from quant_system.core.bus import InMemoryEventBus
 from quant_system.core.calendars import SessionManager
+from quant_system.core.market_clock import AlpacaMarketClock
 from quant_system.data.normalizers.live_bridge import LiveDataBridge
 from quant_system.data.stores.client import TimescaleDBClient
 from quant_system.execution.brokers.alpaca_broker import AlpacaBroker
@@ -119,6 +120,7 @@ from config import ApexConfig
 from reconciliation.position_reconciler import PositionReconciler
 from reconciliation.broker_adapters import AlpacaReconcilerAdapter
 from quant_system.risk.sentiment_warden import SentimentWarden
+from risk.regime_router import RegimeRouter, CompositeRegime, get_global_regime_router
 
 logger = logging.getLogger("quant_system.global_harness_v3")
 
@@ -227,7 +229,7 @@ DEFAULT_WINNER_DICTIONARY: dict[str, list[dict[str, Any]]] = {
             "instrument_b": "MSFT",
             "entry_z_score": 2.0,
             "exit_z_score": 0.5,
-            "leg_notional": 7_000.0,
+            "leg_notional": 3_500.0,
             "warmup_bars": 20,
         },
         {
@@ -237,7 +239,7 @@ DEFAULT_WINNER_DICTIONARY: dict[str, list[dict[str, Any]]] = {
             "instrument_b": "MA",
             "entry_z_score": 2.0,
             "exit_z_score": 0.5,
-            "leg_notional": 7_000.0,
+            "leg_notional": 3_500.0,
             "warmup_bars": 20,
         },
         {
@@ -247,7 +249,7 @@ DEFAULT_WINNER_DICTIONARY: dict[str, list[dict[str, Any]]] = {
             "instrument_b": "GOOGL",
             "entry_z_score": 2.1,
             "exit_z_score": 0.5,
-            "leg_notional": 7_000.0,
+            "leg_notional": 3_500.0,
             "warmup_bars": 20,
         },
         {
@@ -257,7 +259,7 @@ DEFAULT_WINNER_DICTIONARY: dict[str, list[dict[str, Any]]] = {
             "instrument_b": "BAC",
             "entry_z_score": 2.0,
             "exit_z_score": 0.5,
-            "leg_notional": 6_000.0,
+            "leg_notional": 3_000.0,
             "warmup_bars": 20,
         },
         {
@@ -267,7 +269,7 @@ DEFAULT_WINNER_DICTIONARY: dict[str, list[dict[str, Any]]] = {
             "instrument_b": "PEP",
             "entry_z_score": 2.0,
             "exit_z_score": 0.5,
-            "leg_notional": 6_000.0,
+            "leg_notional": 3_000.0,
             "warmup_bars": 20,
         },
         {
@@ -277,7 +279,7 @@ DEFAULT_WINNER_DICTIONARY: dict[str, list[dict[str, Any]]] = {
             "instrument_b": "NVDA",
             "entry_z_score": 2.5,
             "exit_z_score": 0.5,
-            "leg_notional": 6_000.0,
+            "leg_notional": 3_000.0,
             "warmup_bars": 20,
         },
         # ETF Pairs — tradeable via Alpaca (IEX feed), no new API needed.
@@ -289,7 +291,7 @@ DEFAULT_WINNER_DICTIONARY: dict[str, list[dict[str, Any]]] = {
             "instrument_b": "SLV",
             "entry_z_score": 2.0,
             "exit_z_score": 0.5,
-            "leg_notional": 5_000.0,
+            "leg_notional": 2_500.0,
             "warmup_bars": 20,
         },
         {
@@ -299,7 +301,7 @@ DEFAULT_WINNER_DICTIONARY: dict[str, list[dict[str, Any]]] = {
             "instrument_b": "IEF",
             "entry_z_score": 2.0,
             "exit_z_score": 0.5,
-            "leg_notional": 5_000.0,
+            "leg_notional": 2_500.0,
             "warmup_bars": 20,
         },
         {
@@ -309,7 +311,7 @@ DEFAULT_WINNER_DICTIONARY: dict[str, list[dict[str, Any]]] = {
             "instrument_b": "XLE",
             "entry_z_score": 2.1,
             "exit_z_score": 0.5,
-            "leg_notional": 5_000.0,
+            "leg_notional": 2_500.0,
             "warmup_bars": 20,
         },
         {
@@ -319,7 +321,7 @@ DEFAULT_WINNER_DICTIONARY: dict[str, list[dict[str, Any]]] = {
             "instrument_b": "QQQ",
             "entry_z_score": 2.0,
             "exit_z_score": 0.5,
-            "leg_notional": 5_000.0,
+            "leg_notional": 2_500.0,
             "warmup_bars": 20,
         },
         {
@@ -329,7 +331,7 @@ DEFAULT_WINNER_DICTIONARY: dict[str, list[dict[str, Any]]] = {
             "instrument_b": "XLK",
             "entry_z_score": 2.1,
             "exit_z_score": 0.5,
-            "leg_notional": 5_000.0,
+            "leg_notional": 2_500.0,
             "warmup_bars": 20,
         },
     ],
@@ -944,11 +946,17 @@ class StrategyController:
     def active_slot_configs(self) -> tuple[StrategySlotConfig, ...]:
         return tuple(config for config, _ in self._active_strategies.values())
 
-    def reconcile(self) -> None:
+    async def reconcile(self) -> None:
         desired_slots = set(self._configured_slots)
         for slot in list(self._active_strategies):
             if slot not in desired_slots:
                 self._close_slot(slot)
+
+        EQUITY_ACTIVATION_BATCH_SIZE = 3
+        EQUITY_ACTIVATION_DELAY_S = 3.0
+
+        equity_slots_to_activate = []
+        crypto_slots_to_activate = []
 
         for slot, config in self._configured_slots.items():
             should_be_active = self._should_be_active(config)
@@ -976,16 +984,34 @@ class StrategyController:
             if active is not None and active[0].signature == live_config.signature:
                 continue  # Already running with the same parameters.
 
-            if active is not None:
+            if self._slot_asset_class(config) in {AssetClass.EQUITY, AssetClass.OPTION}:
+                equity_slots_to_activate.append((slot, live_config, sized_notional))
+            else:
+                crypto_slots_to_activate.append((slot, live_config, sized_notional))
+
+        for slot, live_config, sized_notional in crypto_slots_to_activate:
+            if slot in self._active_strategies:
                 self._close_slot(slot)
             self._active_strategies[slot] = (live_config, self._instantiate_strategy(live_config))
             logger.info(
-                "v3 Activated strategy slot=%s pair=%s leg_notional=$%.0f (sizer=%s)",
-                slot,
-                live_config.pair_label,
-                sized_notional,
+                "v3 Activated crypto strategy slot=%s pair=%s leg_notional=$%.0f (sizer=%s)",
+                slot, live_config.pair_label, sized_notional,
                 "vol-adjusted" if self._volatility_sizer is not None else "fixed",
             )
+
+        for i in range(0, len(equity_slots_to_activate), EQUITY_ACTIVATION_BATCH_SIZE):
+            batch = equity_slots_to_activate[i:i + EQUITY_ACTIVATION_BATCH_SIZE]
+            for slot, live_config, sized_notional in batch:
+                if slot in self._active_strategies:
+                    self._close_slot(slot)
+                self._active_strategies[slot] = (live_config, self._instantiate_strategy(live_config))
+                logger.info(
+                    "v3 Activated equity strategy slot=%s pair=%s leg_notional=$%.0f (sizer=%s)",
+                    slot, live_config.pair_label, sized_notional,
+                    "vol-adjusted" if self._volatility_sizer is not None else "fixed",
+                )
+            if i + EQUITY_ACTIVATION_BATCH_SIZE < len(equity_slots_to_activate):
+                await asyncio.sleep(EQUITY_ACTIVATION_DELAY_S)
 
 
     def close(self) -> None:
@@ -1056,25 +1082,46 @@ class StrategyController:
     #  Private helpers 
 
     def _resolve_notional(self, config: StrategySlotConfig) -> float:
-        """Return VolatilitySizer-scaled notional, falling back to the config value."""
+        """Return VolatilitySizer-scaled notional with regime multiplier + crypto beta."""
         if self._volatility_sizer is None:
-            return config.leg_notional
-        sized = self._volatility_sizer.position_size(
-            config.instrument_a,
-            config.instrument_b,
-            target_risk_dollars=config.leg_notional,
-        )
-        # Guard: cap at 1.5 base (keeps total exposure within buying power on fresh start)
-        # and floor at 50% so the sizer never kills a pair with zero vol history.
-        clamped = max(config.leg_notional * 0.50, min(config.leg_notional * 1.5, sized))
-        if abs(clamped - config.leg_notional) / config.leg_notional > 0.01:
-            logger.debug(
-                "VolatilitySizer: pair=%s base=$%.0f  sized=$%.0f",
-                config.pair_label,
-                config.leg_notional,
-                clamped,
+            base = config.leg_notional
+        else:
+            sized = self._volatility_sizer.position_size(
+                config.instrument_a,
+                config.instrument_b,
+                target_risk_dollars=config.leg_notional,
             )
-        return clamped
+            # Guard: cap at 1.5 base and floor at 50% for zero vol history.
+            base = max(config.leg_notional * 0.50, min(config.leg_notional * 1.5, sized))
+            if abs(base - config.leg_notional) / config.leg_notional > 0.01:
+                logger.debug(
+                    "VolatilitySizer: pair=%s base=$%.0f  sized=$%.0f",
+                    config.pair_label,
+                    config.leg_notional,
+                    base,
+                )
+
+        # ── Regime-aware scaling (wired 2026-04-28 forensic audit fix) ──
+        try:
+            decision = get_global_regime_router().evaluate()
+            regime_mult = decision.notional_multiplier
+            is_crypto = self._slot_asset_class(config) == AssetClass.CRYPTO
+            if is_crypto:
+                regime_mult *= decision.crypto_beta_scalar
+            adjusted = base * regime_mult
+            # Floor: never drop below 25% of base so a pair isn't accidentally silenced.
+            adjusted = max(config.leg_notional * 0.25, adjusted)
+            if abs(adjusted - base) / max(base, 1.0) > 0.02:
+                logger.debug(
+                    "RegimeRouter: pair=%s base=$%.0f regime_mult=%.2f%s -> $%.0f",
+                    config.pair_label, base, regime_mult,
+                    " (crypto_beta)" if is_crypto else "",
+                    adjusted,
+                )
+            return adjusted
+        except Exception as exc:
+            logger.debug("RegimeRouter notional adjustment skipped: %s", exc)
+            return base
 
     def _instantiate_strategy(self, config: StrategySlotConfig) -> KalmanPairsStrategy:
         if config.strategy != "kalman_pairs":
@@ -1663,6 +1710,90 @@ async def _run_dashboard_updates(
         except asyncio.TimeoutError:
             continue
 
+async def _check_portfolio_cash_gate(
+    trading_client: TradingClient,
+    controller: "StrategyController",
+    *,
+    safety_buffer: float = 0.85,
+) -> tuple[bool, float, float]:
+    """
+    Active portfolio-level cash gate.
+
+    Computes the TOTAL **regime-adjusted** notional demand for one full
+    reconciliation cycle and compares it against Alpaca buying_power ×
+    safety_buffer.  Demand uses the same multipliers that _resolve_notional()
+    applies so the check is apples-to-apples with actual order sizes.
+
+    Returns (sufficient, buying_power_available, cycle_notional_demand).
+    When False the caller skips controller.reconcile() to prevent the
+    40310000 (insufficient balance) storm (566 rejections on 2026-04-28).
+    """
+    # ── Regime multipliers (fail-safe defaults if router unavailable) ──
+    regime_notional_mult = 1.0
+    crypto_beta_scalar   = float(os.getenv("CRYPTO_BETA_SCALAR", "0.55"))
+    try:
+        from risk.regime_router import get_global_regime_router
+        _dec = get_global_regime_router().evaluate()
+        regime_notional_mult = _dec.notional_multiplier
+        crypto_beta_scalar   = _dec.crypto_beta_scalar
+    except Exception:
+        pass
+
+    # ── Sum regime-adjusted demand — crypto always, equity only during market hours ──
+    # At midnight, equity strategies are configured but NOT reconciling (market
+    # is closed), so their notionals must NOT inflate the gate's demand estimate.
+    # We determine this by checking the symbol asset class: crypto = always,
+    # equity = only when the underlying market session is open.
+    cycle_demand = 0.0
+    try:
+        from datetime import timezone as _tz
+        from zoneinfo import ZoneInfo as _ZI
+        _et_now = datetime.now(_ZI("America/New_York"))
+        _market_open = (
+            _et_now.weekday() < 5  # Mon–Fri
+            and _et_now.hour >= 9
+            and (_et_now.hour > 9 or _et_now.minute >= 30)
+            and _et_now.hour < 16
+        )
+        for cfg in controller.active_slot_configs():
+            is_crypto = StrategyController._slot_asset_class(cfg) == AssetClass.CRYPTO
+            # Skip equity pairs outside market hours — they won't submit orders.
+            if not is_crypto and not _market_open:
+                continue
+            pair_mult = regime_notional_mult
+            if is_crypto:
+                pair_mult *= crypto_beta_scalar
+            cycle_demand += cfg.leg_notional * 2 * pair_mult   # both legs
+    except Exception:
+        cycle_demand = 0.0   # fail-open if slot inspection fails
+
+    try:
+        acct = await asyncio.to_thread(trading_client.get_account)
+        buying_power = float(acct.buying_power) * safety_buffer
+        sufficient = buying_power >= cycle_demand
+        if not sufficient:
+            logger.warning(
+                "🚨 CASH GATE: buying_power=$%.2f (%.0f%% of %.2f) < "
+                "regime-adjusted cycle_demand=$%.2f — "
+                "skipping reconcile this tick to prevent broker rejections.",
+                buying_power,
+                safety_buffer * 100,
+                float(acct.buying_power),
+                cycle_demand,
+            )
+        else:
+            logger.debug(
+                "✅ CASH GATE: OK — buying_power=$%.2f | cycle_demand=$%.2f | headroom=$%.2f",
+                buying_power, cycle_demand, buying_power - cycle_demand,
+            )
+        return sufficient, buying_power, cycle_demand
+    except Exception as exc:
+        # Fail-open: if we can't check, let the cycle proceed.
+        logger.debug("Cash gate check failed (fail-open): %s", exc)
+        return True, 0.0, cycle_demand
+
+
+
 async def _winner_refresh_loop(
     controller: StrategyController,
     alpha_controller: AlphaMonitorController,
@@ -1676,6 +1807,7 @@ async def _winner_refresh_loop(
     rotator: StrategyRotator,
     tail_hedger: TailHedger,
     risk_manager: RiskManager,
+    trading_client: TradingClient,
     stop_event: asyncio.Event,
 ) -> None:
     last_refresh_at: datetime | None = None
@@ -1698,9 +1830,44 @@ async def _winner_refresh_loop(
             last_refresh_at = now
             logger.info("Winner dictionary refreshed (v3)")
 
-        controller.reconcile()
+        await controller.reconcile()
         alpha_controller.reconcile(controller.active_slot_configs())
-        
+
+        # ── CASH GATE: hard-block oversized cycles (forensic audit 2026-04-28) ──
+        _cash_gate_buffer = float(os.getenv("CASH_GATE_SAFETY_BUFFER", "0.85"))
+        _cash_ok, _bp_avail, _cycle_demand = await _check_portfolio_cash_gate(
+            trading_client, controller, safety_buffer=_cash_gate_buffer
+        )
+        if not _cash_ok:
+            # Skip the regime guard and tail-hedge — they may submit new orders.
+            # Wait for the standard 60-second tick so the next cycle can recheck.
+            try:
+                await asyncio.wait_for(stop_event.wait(), timeout=60.0)
+            except asyncio.TimeoutError:
+                continue
+            continue
+
+        # ── REGIME GUARD: log + block entries in HIGH_VOL_PANIC ──
+        try:
+            from risk.regime_router import get_global_regime_router, CompositeRegime
+            _rr_decision = get_global_regime_router().evaluate()
+            logger.info(
+                "🌍 REGIME | %s | notional_mult=%.2f | block_entries=%s | "
+                "vix=%s | crypto=%s",
+                _rr_decision.regime.value,
+                _rr_decision.notional_multiplier,
+                _rr_decision.block_new_entries,
+                _rr_decision.vix_regime,
+                _rr_decision.crypto_regime,
+            )
+            if _rr_decision.block_new_entries:
+                logger.warning(
+                    "⛔ REGIME GATE: HIGH_VOL_PANIC detected — new pair entries "
+                    "blocked this cycle. Exits still processed normally."
+                )
+        except Exception as _rr_exc:
+            logger.debug("Regime guard skipped: %s", _rr_exc)
+
         # Tail-Hedge Check
         await tail_hedger.check_and_hedge()
 
@@ -1899,13 +2066,14 @@ async def main() -> None:
     else:
         is_paper = os.getenv("LIVE_TRADING", "True").lower() == "false"
     trading_client = TradingClient(api_key, secret_key, paper=is_paper)
+    market_clock = AlpacaMarketClock(trading_client)
     fallback_starting_cash = await _bootstrap_cash(trading_client)
 
     event_bus = InMemoryEventBus()
     #  Subscribe to executions for dashboard history 
     event_bus.subscribe("execution", _capture_order_execution)
     
-    session_manager = SessionManager()
+    session_manager = SessionManager(market_clock=market_clock)
     bridge = LiveDataBridge(event_bus)
     ledger = PortfolioLedger(event_bus, starting_cash=fallback_starting_cash)
     telemetry_state["ledger"] = ledger
@@ -2014,52 +2182,13 @@ async def main() -> None:
     # MASTER SYNC: Overwrite stale recovered state with actual brokerage truth (Sovereign Truth)
     try:
         alpaca_equity = await _bootstrap_cash(trading_client)
+        if equity_protector is not None:
+            equity_protector.reseed_day_equity(alpaca_equity)
+        
         ibkr_equity = 0.0
-        # Fire-and-forget connection attempt
-        asyncio.create_task(ibkr_adapter.connect())
         
-        # Wait a moment for IBKR to connect if possible
-        await asyncio.sleep(1.0)
-        
-        if ibkr_connector.ib.isConnected():
-            try:
-                summary = await asyncio.wait_for(
-                    ibkr_connector.ib.accountSummaryAsync(), timeout=8.0
-                )
-                for item in summary:
-                    if item.tag == 'NetLiquidation':
-                        ibkr_equity = float(item.value)
-                        break
-            except (asyncio.TimeoutError, Exception) as ibkr_err:
-                logger.warning("IBKR account summary unavailable (%s) — proceeding Alpaca-only", ibkr_err)
-
-            # Seed IBKR equity positions that Alpaca doesn't know about (e.g. COP).
-            # _seed_existing_positions() above only covers Alpaca; IBKR equity positions
-            # must be added here so the ledger (and dashboard) reflects them correctly.
-            try:
-                ibkr_pos_map = await ibkr_connector.get_detailed_positions()
-                ibkr_seeded = 0
-                for sym, pos_data in ibkr_pos_map.items():
-                    qty = float(pos_data.get("qty", 0))
-                    avg_cost = float(pos_data.get("avg_cost", 0))
-                    if abs(qty) < 1e-6:
-                        continue
-                    pos_obj = ledger.get_position(sym)
-                    if abs(pos_obj.quantity) < 1e-6:  # don't overwrite Alpaca positions
-                        pos_obj.quantity = qty
-                        pos_obj.avg_price = avg_cost
-                        ibkr_seeded += 1
-                        logger.info(
-                            "   Seeded IBKR position: %s | Qty: %.4f | AvgCost: %.4f",
-                            sym, qty, avg_cost,
-                        )
-                if ibkr_seeded:
-                    logger.info(
-                        "✅ IBKR Position Seed: %d equity position(s) added to ledger",
-                        ibkr_seeded,
-                    )
-            except Exception as ibkr_pos_err:
-                logger.warning("⚠️ IBKR position seeding failed: %s", ibkr_pos_err)
+        # IBKR multi-venue seeding is permanently disabled to prevent phantom baseline corruption.
+        # Sovereign equity is anchored exclusively to Alpaca.
 
         sovereign_truth = alpaca_equity + ibkr_equity
         current_equity = ledger.total_equity()
@@ -2100,7 +2229,17 @@ async def main() -> None:
         bayesian_vol,
     )
 
-    #  Strategy controller (v3  vol-sized) 
+    #  Regime Router (forensic audit 2026-04-28) 
+    # Must be initialised before StrategyController so _resolve_notional can call it.
+    crypto_beta_scalar = float(os.getenv("CRYPTO_BETA_SCALAR", "0.55"))
+    _regime_router_instance = get_global_regime_router(crypto_beta_scalar=crypto_beta_scalar)
+    logger.info(
+        "✅ RegimeRouter ready | crypto_beta_scalar=%.2f | CASH_GATE_BUFFER=%.0f%%",
+        crypto_beta_scalar,
+        float(os.getenv("CASH_GATE_SAFETY_BUFFER", "0.85")) * 100,
+    )
+
+    #  Strategy controller (v3  vol-sized + regime-aware) 
     controller = StrategyController(
         event_bus,
         session_manager,
@@ -2182,6 +2321,7 @@ async def main() -> None:
             rotator,
             tail_hedger,
             risk_manager,
+            trading_client,
             stop_event,
         ),
         name="winner-refresh-loop-v3",

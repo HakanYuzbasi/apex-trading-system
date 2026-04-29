@@ -1,0 +1,23 @@
+{
+  "A": {
+    "mean_sharpe": 0.128,
+    "positive_folds": 8,
+    "n_folds": 15,
+    "worst_dd": -21.52,
+    "compounded": 5.93
+  },
+  "B": {
+    "mean_sharpe": 0.461,
+    "positive_folds": 6,
+    "n_folds": 7,
+    "worst_dd": -44.03,
+    "compounded": 105.37
+  },
+  "C": {
+    "mean_sharpe": 0.277,
+    "positive_folds": 4,
+    "n_folds": 5,
+    "worst_dd": -29.29,
+    "compounded": 67.65
+  }
+}

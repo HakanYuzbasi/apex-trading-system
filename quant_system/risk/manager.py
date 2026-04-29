@@ -270,22 +270,35 @@ class RiskManager:
                 )
                 return None
 
-        # ── EquityProtector halt veto ────────────────────────────────────────
+        # ── EquityProtector halt veto (equity-scoped) ───────────────────────
         # When the daily loss limit has been breached the bot is halted for
         # the rest of the UTC day.  Only risk-reducing signals (flatten,
-        # cover, rebalance) are allowed through so that the protector's own
-        # flatten signals can actually reach the broker.
+        # cover, rebalance) are allowed through so the protector's own
+        # flatten signals can reach the broker.
+        #
+        # SCOPE: equity and options only.  Crypto and forex run on
+        # independent capital envelopes — a US-equity drawdown event must
+        # not freeze overnight crypto P&L.  A separate CryptoProtector
+        # threshold can be added when needed.
         if (
             event.side not in {"flatten", "rebalance", "cover"}
             and self.equity_protector is not None
             and self.equity_protector.is_halted()
         ):
-            logger.warning(
-                "RiskManager vetoed %s entry for %s: EquityProtector halt active",
-                event.side,
+            _parsed = parse_symbol(event.instrument_id)
+            if _parsed.asset_class in {AssetClass.EQUITY, AssetClass.OPTION}:
+                logger.warning(
+                    "RiskManager vetoed %s entry for %s: EquityProtector halt active (equity-only scope)",
+                    event.side,
+                    event.instrument_id,
+                )
+                return None
+            # Crypto / Forex: pass through — independent capital, no US-equity halt applies.
+            logger.debug(
+                "EquityProtector halted but %s is %s — passing through (equity-only scope)",
                 event.instrument_id,
+                _parsed.asset_class.value,
             )
-            return None
 
         # ── FactorMonitor sector concentration veto ──────────────────────────
         if (

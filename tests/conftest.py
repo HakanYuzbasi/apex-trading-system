@@ -67,6 +67,13 @@ try:
     import alpaca_trade_api.rest  # noqa: F401
 except ImportError:
     pass
+# Pre-import production modules that bind sklearn classes at module level so
+# that their local references are captured before any test file can replace
+# the sklearn.preprocessing attributes in-place.
+try:
+    import models.online_learner  # noqa: F401
+except Exception:
+    pass
 
 import os
 import tempfile
