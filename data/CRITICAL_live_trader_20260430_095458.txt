@@ -1,0 +1,1 @@
+Daily loss limit breached (10.46%). Halting all new orders.

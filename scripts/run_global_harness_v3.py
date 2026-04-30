@@ -109,6 +109,7 @@ from quant_system.analytics.tca import TransactionCostAnalyzer
 
 from core.logic.ml.meta_labeler import MetaLabeler
 from quant_system.strategies.kalman_pairs import KalmanPairsStrategy
+from quant_system.strategies.directional_equity import DirectionalEquityStrategy
 from quant_system.core.rotator import StrategyRotator
 from quant_system.risk.tail_hedger import TailHedger
 from portfolio.correlation_manager import CorrelationManager
@@ -218,122 +219,247 @@ DEFAULT_WINNER_DICTIONARY: dict[str, list[dict[str, Any]]] = {
             "leg_notional": 1_500.0,
             "warmup_bars": 24,
         },
+        # Directional crypto: EMA-crossover trend-following (RSI+EMA single-name).
+        # Uses same DirectionalEquityStrategy as equity but on 24/7 crypto feed.
+        {"slot": "dir_btc", "strategy": "directional", "instrument_a": "CRYPTO:BTC/USD", "instrument_b": "CRYPTO:BTC/USD", "entry_z_score": 0.0, "exit_z_score": 0.0, "leg_notional": 2_500.0, "warmup_bars": 14},
+        {"slot": "dir_eth", "strategy": "directional", "instrument_a": "CRYPTO:ETH/USD", "instrument_b": "CRYPTO:ETH/USD", "entry_z_score": 0.0, "exit_z_score": 0.0, "leg_notional": 2_000.0, "warmup_bars": 14},
     ],
     "equity": [
-        # Notionals raised to $7k/leg to better utilise the $154k buying power.
-        # All 6 pairs share 12 symbols = exactly the 25-symbol IEX bar subscription.
+        # Entry z-scores lowered to 1.5 (from 2.0–2.5) for more frequent signals.
+        # Warmup reduced to 10 bars (from 20) for faster readiness.
+        # All 16 pairs use existing 22 subscribed symbols — no IEX 25-cap impact.
         {
             "slot": "equity_aapl_msft",
             "strategy": "kalman_pairs",
             "instrument_a": "AAPL",
             "instrument_b": "MSFT",
-            "entry_z_score": 2.0,
+            "entry_z_score": 1.5,
             "exit_z_score": 0.5,
             "leg_notional": 3_500.0,
-            "warmup_bars": 20,
+            "warmup_bars": 10,
         },
         {
             "slot": "equity_v_ma",
             "strategy": "kalman_pairs",
             "instrument_a": "V",
             "instrument_b": "MA",
-            "entry_z_score": 2.0,
+            "entry_z_score": 1.5,
             "exit_z_score": 0.5,
             "leg_notional": 3_500.0,
-            "warmup_bars": 20,
+            "warmup_bars": 10,
         },
         {
             "slot": "equity_amzn_googl",
             "strategy": "kalman_pairs",
             "instrument_a": "AMZN",
             "instrument_b": "GOOGL",
-            "entry_z_score": 2.1,
+            "entry_z_score": 1.5,
             "exit_z_score": 0.5,
             "leg_notional": 3_500.0,
-            "warmup_bars": 20,
+            "warmup_bars": 10,
         },
         {
             "slot": "equity_jpm_bac",
             "strategy": "kalman_pairs",
             "instrument_a": "JPM",
             "instrument_b": "BAC",
-            "entry_z_score": 2.0,
+            "entry_z_score": 1.5,
             "exit_z_score": 0.5,
             "leg_notional": 3_000.0,
-            "warmup_bars": 20,
+            "warmup_bars": 10,
         },
         {
             "slot": "equity_ko_pep",
             "strategy": "kalman_pairs",
             "instrument_a": "KO",
             "instrument_b": "PEP",
-            "entry_z_score": 2.0,
+            "entry_z_score": 1.5,
             "exit_z_score": 0.5,
             "leg_notional": 3_000.0,
-            "warmup_bars": 20,
+            "warmup_bars": 10,
         },
         {
             "slot": "equity_amd_nvda",
             "strategy": "kalman_pairs",
             "instrument_a": "AMD",
             "instrument_b": "NVDA",
-            "entry_z_score": 2.5,
+            "entry_z_score": 1.5,
             "exit_z_score": 0.5,
             "leg_notional": 3_000.0,
-            "warmup_bars": 20,
+            "warmup_bars": 10,
+        },
+        # New pairs — all reuse existing subscribed symbols (no IEX cap impact).
+        {
+            "slot": "equity_msft_googl",
+            "strategy": "kalman_pairs",
+            "instrument_a": "MSFT",
+            "instrument_b": "GOOGL",
+            "entry_z_score": 1.5,
+            "exit_z_score": 0.5,
+            "leg_notional": 2_500.0,
+            "warmup_bars": 10,
+        },
+        {
+            "slot": "equity_msft_amzn",
+            "strategy": "kalman_pairs",
+            "instrument_a": "MSFT",
+            "instrument_b": "AMZN",
+            "entry_z_score": 1.5,
+            "exit_z_score": 0.5,
+            "leg_notional": 2_500.0,
+            "warmup_bars": 10,
+        },
+        {
+            "slot": "equity_aapl_amzn",
+            "strategy": "kalman_pairs",
+            "instrument_a": "AAPL",
+            "instrument_b": "AMZN",
+            "entry_z_score": 1.5,
+            "exit_z_score": 0.5,
+            "leg_notional": 2_500.0,
+            "warmup_bars": 10,
+        },
+        {
+            "slot": "equity_jpm_v",
+            "strategy": "kalman_pairs",
+            "instrument_a": "JPM",
+            "instrument_b": "V",
+            "entry_z_score": 1.5,
+            "exit_z_score": 0.5,
+            "leg_notional": 2_500.0,
+            "warmup_bars": 10,
+        },
+        {
+            "slot": "equity_nvda_aapl",
+            "strategy": "kalman_pairs",
+            "instrument_a": "NVDA",
+            "instrument_b": "AAPL",
+            "entry_z_score": 1.5,
+            "exit_z_score": 0.5,
+            "leg_notional": 2_000.0,
+            "warmup_bars": 10,
         },
         # ETF Pairs — tradeable via Alpaca (IEX feed), no new API needed.
-        # 5 pairs × 2 = 10 new symbols; total active stock symbols = 22 (under 25 IEX cap).
         {
             "slot": "etf_gld_slv",
             "strategy": "kalman_pairs",
             "instrument_a": "GLD",
             "instrument_b": "SLV",
-            "entry_z_score": 2.0,
+            "entry_z_score": 1.5,
             "exit_z_score": 0.5,
             "leg_notional": 2_500.0,
-            "warmup_bars": 20,
+            "warmup_bars": 10,
         },
         {
             "slot": "etf_tlt_ief",
             "strategy": "kalman_pairs",
             "instrument_a": "TLT",
             "instrument_b": "IEF",
-            "entry_z_score": 2.0,
+            "entry_z_score": 1.5,
             "exit_z_score": 0.5,
             "leg_notional": 2_500.0,
-            "warmup_bars": 20,
+            "warmup_bars": 10,
         },
         {
             "slot": "etf_uso_xle",
             "strategy": "kalman_pairs",
             "instrument_a": "USO",
             "instrument_b": "XLE",
-            "entry_z_score": 2.1,
+            "entry_z_score": 1.5,
             "exit_z_score": 0.5,
             "leg_notional": 2_500.0,
-            "warmup_bars": 20,
+            "warmup_bars": 10,
         },
         {
             "slot": "etf_spy_qqq",
             "strategy": "kalman_pairs",
             "instrument_a": "SPY",
             "instrument_b": "QQQ",
-            "entry_z_score": 2.0,
+            "entry_z_score": 1.5,
             "exit_z_score": 0.5,
             "leg_notional": 2_500.0,
-            "warmup_bars": 20,
+            "warmup_bars": 10,
         },
         {
             "slot": "etf_xlf_xlk",
             "strategy": "kalman_pairs",
             "instrument_a": "XLF",
             "instrument_b": "XLK",
-            "entry_z_score": 2.1,
+            "entry_z_score": 1.5,
             "exit_z_score": 0.5,
             "leg_notional": 2_500.0,
+            "warmup_bars": 10,
+        },
+        # Additional equity pairs — cointegrated names added 2026-04-30.
+        {
+            "slot": "equity_meta_googl",
+            "strategy": "kalman_pairs",
+            "instrument_a": "META",
+            "instrument_b": "GOOGL",
+            "entry_z_score": 2.0,
+            "exit_z_score": 0.5,
+            "leg_notional": 2_000.0,
             "warmup_bars": 20,
         },
+        {
+            "slot": "equity_gs_ms",
+            "strategy": "kalman_pairs",
+            "instrument_a": "GS",
+            "instrument_b": "MS",
+            "entry_z_score": 2.0,
+            "exit_z_score": 0.5,
+            "leg_notional": 2_000.0,
+            "warmup_bars": 20,
+        },
+        {
+            "slot": "equity_cvx_xom",
+            "strategy": "kalman_pairs",
+            "instrument_a": "CVX",
+            "instrument_b": "XOM",
+            "entry_z_score": 2.0,
+            "exit_z_score": 0.5,
+            "leg_notional": 2_000.0,
+            "warmup_bars": 20,
+        },
+        {
+            "slot": "equity_amzn_cost",
+            "strategy": "kalman_pairs",
+            "instrument_a": "AMZN",
+            "instrument_b": "COST",
+            "entry_z_score": 2.0,
+            "exit_z_score": 0.5,
+            "leg_notional": 2_000.0,
+            "warmup_bars": 20,
+        },
+        {
+            "slot": "equity_t_vz",
+            "strategy": "kalman_pairs",
+            "instrument_a": "T",
+            "instrument_b": "VZ",
+            "entry_z_score": 2.0,
+            "exit_z_score": 0.5,
+            "leg_notional": 2_000.0,
+            "warmup_bars": 20,
+        },
+        # Directional single-name slots (RSI mean-reversion + EMA trend filter).
+        # instrument_b == instrument_a signals single-name mode to the harness.
+        # All 8 symbols are already in the 22-symbol IEX subscription — no new slots needed.
+        {"slot": "dir_aapl",  "strategy": "directional", "instrument_a": "AAPL",  "instrument_b": "AAPL",  "entry_z_score": 0.0, "exit_z_score": 0.0, "leg_notional": 2_000.0, "warmup_bars": 10},
+        {"slot": "dir_msft",  "strategy": "directional", "instrument_a": "MSFT",  "instrument_b": "MSFT",  "entry_z_score": 0.0, "exit_z_score": 0.0, "leg_notional": 2_000.0, "warmup_bars": 10},
+        {"slot": "dir_nvda",  "strategy": "directional", "instrument_a": "NVDA",  "instrument_b": "NVDA",  "entry_z_score": 0.0, "exit_z_score": 0.0, "leg_notional": 2_000.0, "warmup_bars": 10},
+        {"slot": "dir_amzn",  "strategy": "directional", "instrument_a": "AMZN",  "instrument_b": "AMZN",  "entry_z_score": 0.0, "exit_z_score": 0.0, "leg_notional": 2_000.0, "warmup_bars": 10},
+        {"slot": "dir_googl", "strategy": "directional", "instrument_a": "GOOGL", "instrument_b": "GOOGL", "entry_z_score": 0.0, "exit_z_score": 0.0, "leg_notional": 2_000.0, "warmup_bars": 10},
+        {"slot": "dir_amd",   "strategy": "directional", "instrument_a": "AMD",   "instrument_b": "AMD",   "entry_z_score": 0.0, "exit_z_score": 0.0, "leg_notional": 1_500.0, "warmup_bars": 10},
+        {"slot": "dir_spy",   "strategy": "directional", "instrument_a": "SPY",   "instrument_b": "SPY",   "entry_z_score": 0.0, "exit_z_score": 0.0, "leg_notional": 2_500.0, "warmup_bars": 10},
+        {"slot": "dir_qqq",   "strategy": "directional", "instrument_a": "QQQ",   "instrument_b": "QQQ",   "entry_z_score": 0.0, "exit_z_score": 0.0, "leg_notional": 2_500.0, "warmup_bars": 10},
+        {"slot": "dir_meta",  "strategy": "directional", "instrument_a": "META",  "instrument_b": "META",  "entry_z_score": 0.0, "exit_z_score": 0.0, "leg_notional": 2_000.0, "warmup_bars": 10},
+        {"slot": "dir_tsla",  "strategy": "directional", "instrument_a": "TSLA",  "instrument_b": "TSLA",  "entry_z_score": 0.0, "exit_z_score": 0.0, "leg_notional": 1_500.0, "warmup_bars": 10},
+        {"slot": "dir_nflx",  "strategy": "directional", "instrument_a": "NFLX",  "instrument_b": "NFLX",  "entry_z_score": 0.0, "exit_z_score": 0.0, "leg_notional": 2_000.0, "warmup_bars": 10},
+        {"slot": "dir_crm",   "strategy": "directional", "instrument_a": "CRM",   "instrument_b": "CRM",   "entry_z_score": 0.0, "exit_z_score": 0.0, "leg_notional": 1_500.0, "warmup_bars": 10},
+        {"slot": "dir_uber",  "strategy": "directional", "instrument_a": "UBER",  "instrument_b": "UBER",  "entry_z_score": 0.0, "exit_z_score": 0.0, "leg_notional": 1_500.0, "warmup_bars": 10},
+        {"slot": "dir_coin",  "strategy": "directional", "instrument_a": "COIN",  "instrument_b": "COIN",  "entry_z_score": 0.0, "exit_z_score": 0.0, "leg_notional": 1_500.0, "warmup_bars": 10},
+        {"slot": "dir_ba",    "strategy": "directional", "instrument_a": "BA",    "instrument_b": "BA",    "entry_z_score": 0.0, "exit_z_score": 0.0, "leg_notional": 1_500.0, "warmup_bars": 10},
+        {"slot": "dir_tgt",   "strategy": "directional", "instrument_a": "TGT",   "instrument_b": "TGT",   "entry_z_score": 0.0, "exit_z_score": 0.0, "leg_notional": 1_500.0, "warmup_bars": 10},
     ],
     "forex": [
         # Forex pairs — executed via IBKR TWS using IBKRBroker.
@@ -376,12 +502,43 @@ DEFAULT_EXPECTED_SHARPE_BY_PAIR: dict[str, float] = {
     "CRYPTO:ETH/USD/CRYPTO:SOL/USD": 1.30,
     "CRYPTO:BTC/USD/CRYPTO:SOL/USD": 1.25,
     "CRYPTO:ETH/USD/CRYPTO:AVAX/USD": 1.20,
+    "CRYPTO:BTC/USD/CRYPTO:BTC/USD": 1.30,
+    "CRYPTO:ETH/USD/CRYPTO:ETH/USD": 1.25,
     "AAPL/MSFT": 1.85,
     "V/MA": 1.72,
     "AMZN/GOOGL": 1.65,
     "JPM/BAC": 1.55,
     "KO/PEP": 1.60,
     "AMD/NVDA": 1.50,
+    # Directional single-name slots (RSI mean-reversion + EMA trend filter)
+    "AAPL/AAPL": 1.40,
+    "MSFT/MSFT": 1.40,
+    "NVDA/NVDA": 1.35,
+    "AMZN/AMZN": 1.38,
+    "GOOGL/GOOGL": 1.38,
+    "AMD/AMD": 1.30,
+    "SPY/SPY": 1.45,
+    "QQQ/QQQ": 1.42,
+    "META/META": 1.38,
+    "TSLA/TSLA": 1.10,
+    "NFLX/NFLX": 1.28,
+    "CRM/CRM":   1.25,
+    "UBER/UBER": 1.20,
+    "COIN/COIN": 1.05,
+    "BA/BA":     1.15,
+    "TGT/TGT":   1.22,
+    # New equity pairs
+    "MSFT/GOOGL": 1.60,
+    "MSFT/AMZN": 1.55,
+    "AAPL/AMZN": 1.50,
+    "JPM/V": 1.45,
+    "NVDA/AAPL": 1.40,
+    # Additional equity pairs (2026-04-30)
+    "META/GOOGL": 1.55,
+    "GS/MS": 1.60,
+    "CVX/XOM": 1.58,
+    "AMZN/COST": 1.45,
+    "T/VZ": 1.52,
     # ETF pairs
     "GLD/SLV": 1.45,
     "TLT/IEF": 1.50,
@@ -1028,12 +1185,18 @@ class StrategyController:
             
             status = "PAUSED" if is_paused else ("ACTIVE" if active else "CLOSED")
             z_score = getattr(active[1], "last_z_score", 0.0) if active else 0.0
-            pnl = (
-                ledger.get_unrealized_pnl(config.instrument_a)
-                + ledger.get_unrealized_pnl(config.instrument_b)
-                + ledger.get_position(config.instrument_a).realized_pnl
-                + ledger.get_position(config.instrument_b).realized_pnl
-            )
+            if config.instrument_a == config.instrument_b:
+                pnl = (
+                    ledger.get_unrealized_pnl(config.instrument_a)
+                    + ledger.get_position(config.instrument_a).realized_pnl
+                )
+            else:
+                pnl = (
+                    ledger.get_unrealized_pnl(config.instrument_a)
+                    + ledger.get_unrealized_pnl(config.instrument_b)
+                    + ledger.get_position(config.instrument_a).realized_pnl
+                    + ledger.get_position(config.instrument_b).realized_pnl
+                )
             
             snapshot.append({
                 "pair_name": slot,
@@ -1123,10 +1286,17 @@ class StrategyController:
             logger.debug("RegimeRouter notional adjustment skipped: %s", exc)
             return base
 
-    def _instantiate_strategy(self, config: StrategySlotConfig) -> KalmanPairsStrategy:
+    def _instantiate_strategy(self, config: StrategySlotConfig) -> KalmanPairsStrategy | DirectionalEquityStrategy:
+        if config.strategy == "directional":
+            return DirectionalEquityStrategy(
+                self._event_bus,
+                instrument=config.instrument_a,
+                leg_notional=config.leg_notional,
+                warmup_bars=config.warmup_bars,
+            )
         if config.strategy != "kalman_pairs":
             raise ValueError(f"Unsupported strategy in v3 harness: {config.strategy}")
-        return KalmanPairsStrategy(
+        strategy = KalmanPairsStrategy(
             self._event_bus,
             instrument_a=config.instrument_a,
             instrument_b=config.instrument_b,
@@ -1135,6 +1305,18 @@ class StrategyController:
             leg_notional=config.leg_notional,
             warmup_bars=config.warmup_bars,
         )
+        strategy.load_state(self._persistence_dir / "kalman_states")
+        return strategy
+
+    def save_kalman_states(self) -> None:
+        """Flush Kalman filter state for all active pairs to disk."""
+        kalman_dir = self._persistence_dir / "kalman_states"
+        for _slot, (cfg, strategy) in self._active_strategies.items():
+            if cfg.strategy == "kalman_pairs" and isinstance(strategy, KalmanPairsStrategy):
+                try:
+                    strategy.save_state(kalman_dir)
+                except Exception as exc:
+                    logger.warning("save_kalman_states failed for %s: %s", cfg.pair_label, exc)
 
     def _should_be_active(self, config: StrategySlotConfig) -> bool:
         if config.slot in self._paused_slots:
@@ -1728,17 +1910,6 @@ async def _check_portfolio_cash_gate(
     When False the caller skips controller.reconcile() to prevent the
     40310000 (insufficient balance) storm (566 rejections on 2026-04-28).
     """
-    # ── Regime multipliers (fail-safe defaults if router unavailable) ──
-    regime_notional_mult = 1.0
-    crypto_beta_scalar   = float(os.getenv("CRYPTO_BETA_SCALAR", "0.55"))
-    try:
-        from risk.regime_router import get_global_regime_router
-        _dec = get_global_regime_router().evaluate()
-        regime_notional_mult = _dec.notional_multiplier
-        crypto_beta_scalar   = _dec.crypto_beta_scalar
-    except Exception:
-        pass
-
     # ── Sum regime-adjusted demand — crypto always, equity only during market hours ──
     # At midnight, equity strategies are configured but NOT reconciling (market
     # is closed), so their notionals must NOT inflate the gate's demand estimate.
@@ -1755,15 +1926,38 @@ async def _check_portfolio_cash_gate(
             and (_et_now.hour > 9 or _et_now.minute >= 30)
             and _et_now.hour < 16
         )
-        for cfg in controller.active_slot_configs():
-            is_crypto = StrategyController._slot_asset_class(cfg) == AssetClass.CRYPTO
+        flat_slot_demands: list[float] = []
+        for cfg, strategy in controller._active_strategies.values():
+            asset_cls = StrategyController._slot_asset_class(cfg)
+            is_crypto = asset_cls == AssetClass.CRYPTO
+            # FOREX uses a separate margin pool — exclude from Alpaca equity buying_power gate.
+            if asset_cls == AssetClass.FOREX:
+                continue
             # Skip equity pairs outside market hours — they won't submit orders.
             if not is_crypto and not _market_open:
                 continue
-            pair_mult = regime_notional_mult
-            if is_crypto:
-                pair_mult *= crypto_beta_scalar
-            cycle_demand += cfg.leg_notional * 2 * pair_mult   # both legs
+            # Only flat, non-diverged slots require new buying_power.
+            # Slots already in position have capital deployed; diverged Kalman
+            # pairs will never submit orders.  Counting all slots caused
+            # cycle_demand to permanently exceed buying_power on small accounts.
+            pair_state = (
+                getattr(strategy, '_pair_state', None)
+                or getattr(strategy, '_state', 'flat')
+            )
+            if pair_state != 'flat':
+                continue
+            if getattr(strategy, '_kalman_diverged', False):
+                continue
+            # cfg.leg_notional is already regime-adjusted by _resolve_notional();
+            # applying pair_mult again would double-count the regime scalar.
+            flat_slot_demands.append(cfg.leg_notional * 2)  # both legs
+
+        # Cap at MAX_CONCURRENT_NEW_ENTRIES to represent worst-case for one cycle.
+        # The reconciler can only open N new positions per cycle due to signal timing.
+        # Without this cap, 40+ flat slots fill the sum and permanently block the gate.
+        _max_conc = int(os.getenv("MAX_CONCURRENT_NEW_ENTRIES", "6"))
+        flat_slot_demands.sort(reverse=True)
+        cycle_demand = sum(flat_slot_demands[:_max_conc])
     except Exception:
         cycle_demand = 0.0   # fail-open if slot inspection fails
 
@@ -1847,19 +2041,11 @@ async def _winner_refresh_loop(
                 continue
             continue
 
-        # ── REGIME GUARD: log + block entries in HIGH_VOL_PANIC ──
+        # ── REGIME GUARD: block entries in HIGH_VOL_PANIC ──
+        # RegimeRouter.evaluate() already logs the REGIME line; no duplicate here.
         try:
             from risk.regime_router import get_global_regime_router, CompositeRegime
             _rr_decision = get_global_regime_router().evaluate()
-            logger.info(
-                "🌍 REGIME | %s | notional_mult=%.2f | block_entries=%s | "
-                "vix=%s | crypto=%s",
-                _rr_decision.regime.value,
-                _rr_decision.notional_multiplier,
-                _rr_decision.block_new_entries,
-                _rr_decision.vix_regime,
-                _rr_decision.crypto_regime,
-            )
             if _rr_decision.block_new_entries:
                 logger.warning(
                     "⛔ REGIME GATE: HIGH_VOL_PANIC detected — new pair entries "
@@ -1968,7 +2154,7 @@ async def main() -> None:
     sector_concentration_limit = float(
         os.getenv("SECTOR_CONCENTRATION_LIMIT", "0.30")
     )
-    daily_loss_limit = float(os.getenv("DAILY_LOSS_LIMIT", "-0.02"))
+    daily_loss_limit = float(os.getenv("DAILY_LOSS_LIMIT", "-0.035"))
     target_risk_dollars = float(os.getenv("TARGET_RISK_DOLLARS", "1000.0"))
     vol_lookback_window = int(os.getenv("VOL_LOOKBACK_WINDOW", "30"))
 
@@ -2054,7 +2240,85 @@ async def main() -> None:
     stop_event = asyncio.Event()
     telemetry_task = asyncio.create_task(_run_telemetry_server(), name="telemetry-bridge-v3")
 
-    #  Infrastructure 
+    # Health-check HTTP API — GET /health  (port 8766)
+    async def _run_health_server():
+        """Lightweight HTTP endpoint: GET /health → JSON with today's trades, hit-rate, open P&L."""
+        try:
+            from aiohttp import web as _web
+        except ImportError:
+            logger.warning("aiohttp not available — health endpoint disabled")
+            await stop_event.wait()
+            return
+
+        async def _health_handler(_request):
+            ledger_obj = telemetry_state.get("ledger")
+            controller_obj = telemetry_state.get("controller")
+
+            # Open P&L from ledger
+            unrealized = round(ledger_obj.total_unrealized_pnl(), 2) if ledger_obj else 0.0
+            realized   = round(ledger_obj.total_realized_pnl(), 2)   if ledger_obj else 0.0
+            equity     = round(ledger_obj.total_equity(), 2)          if ledger_obj else 0.0
+
+            # Today's trades from LiveMonitor trades.csv
+            trades_today: list[dict] = []
+            _trades_file = Path("/app/data/trades.csv")
+            today_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+            if _trades_file.exists():
+                try:
+                    with open(_trades_file) as _f:
+                        import csv as _csv
+                        reader = _csv.DictReader(_f)
+                        for row in reader:
+                            if row.get("timestamp", "").startswith(today_str):
+                                trades_today.append(row)
+                except Exception:
+                    pass
+
+            # Hit-rate: fraction of closed trades with pnl > 0
+            closed = [t for t in trades_today if float(t.get("pnl", 0)) != 0]
+            wins   = [t for t in closed if float(t.get("pnl", 0)) > 0]
+            hit_rate = round(len(wins) / len(closed), 4) if closed else None
+
+            # Active pairs summary
+            active_pairs: list[dict] = []
+            if controller_obj:
+                for slot, (cfg, strat) in controller_obj._active_strategies.items():
+                    state = getattr(strat, "_pair_state", None) or getattr(strat, "_state", "flat")
+                    active_pairs.append({"slot": slot, "pair": cfg.pair_label, "state": state})
+
+            payload = {
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "equity": equity,
+                "unrealized_pnl": unrealized,
+                "realized_pnl_today": realized,
+                "open_pnl": unrealized,
+                "trades_today": len(trades_today),
+                "closed_trades_today": len(closed),
+                "wins_today": len(wins),
+                "hit_rate": hit_rate,
+                "active_strategies": len(active_pairs),
+                "pairs": active_pairs,
+            }
+            return _web.Response(
+                text=json.dumps(payload, indent=2),
+                content_type="application/json",
+            )
+
+        app = _web.Application()
+        app.router.add_get("/health", _health_handler)
+        runner = _web.AppRunner(app)
+        await runner.setup()
+        site = _web.TCPSite(runner, "0.0.0.0", 8766)
+        await site.start()
+        logger.info("Health endpoint started on http://0.0.0.0:8766/health")
+        try:
+            await stop_event.wait()
+        finally:
+            await runner.cleanup()
+
+    health_task = asyncio.create_task(_run_health_server(), name="health-server-v3")
+
+    #  Infrastructure
     db_client = TimescaleDBClient()
     await asyncio.to_thread(db_client.ensure_schema)
     # is_paper: honour APCA_API_BASE_URL first (paper-api.alpaca.markets = paper),
@@ -2458,6 +2722,7 @@ async def main() -> None:
             sentiment_task,
             quote_poll_task,
             telemetry_task,
+            health_task,
         )
         for task in all_tasks:
             task.cancel()
@@ -2466,6 +2731,8 @@ async def main() -> None:
         # Final state flush before any resource is closed.
         await asyncio.to_thread(risk_state_controller.save)
         logger.info("RiskStateController: final state flushed")
+        controller.save_kalman_states()
+        logger.info("StrategyController: Kalman states flushed")
 
         await asyncio.gather(
             stock_supervisor.update_symbols(()),

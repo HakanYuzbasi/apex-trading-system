@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import json
 import logging
+import time
 from enum import Enum
 from pathlib import Path
 
@@ -168,10 +169,12 @@ class FactorMonitor:
             )
         self._ledger = ledger
         self._limit = float(sector_concentration_limit)
-        # Start with the built-in table and overlay any caller-supplied overrides.
         self._sector_map: dict[str, Sector] = dict(_DEFAULT_SECTOR_MAP)
         if sector_overrides:
             self._sector_map.update(sector_overrides)
+        # Rate-limit VETO warnings to once per 5 min per sector (behaviour unchanged)
+        self._veto_last_warned: dict[str, float] = {}
+        self._veto_warn_interval = 300.0
 
     # ── Public accessors ────────────────────────────────────────────────────
 
@@ -289,16 +292,23 @@ class FactorMonitor:
         if projected_gross <= limit_notional + 1e-2:
             return True
 
-        logger.warning(
-            "FactorMonitor VETO | instrument=%s sector=%s "
-            "projected_gross=$%.0f limit=$%.0f (%.1f%% of equity=$%.0f)",
-            event.instrument_id,
-            sector.value,
-            projected_gross,
-            limit_notional,
-            100.0 * projected_gross / total_equity,
-            total_equity,
-        )
+        now = time.monotonic()
+        sector_key = sector.value
+        if now - self._veto_last_warned.get(sector_key, 0.0) >= self._veto_warn_interval:
+            logger.warning(
+                "FactorMonitor VETO | sector=%s at %.1f%% of equity=$%.0f "
+                "(limit=%.0f%%) — suppressing per-signal logs for 5 min",
+                sector.value,
+                100.0 * projected_gross / total_equity,
+                total_equity,
+                self._limit * 100.0,
+            )
+            self._veto_last_warned[sector_key] = now
+        else:
+            logger.debug(
+                "FactorMonitor VETO | instrument=%s sector=%s projected=$%.0f limit=$%.0f",
+                event.instrument_id, sector.value, projected_gross, limit_notional,
+            )
         return False
 
     # ── Persistence ─────────────────────────────────────────────────────────

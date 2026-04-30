@@ -23,17 +23,21 @@ from dataclasses import dataclass
 from enum import Enum
 import logging
 
+import io
+
+import requests
+
 from config import ApexConfig
 
 logger = logging.getLogger(__name__)
 
-# Try to import yfinance for free VIX data
-try:
-    import yfinance as yf
-    YFINANCE_AVAILABLE = True
-except ImportError:
-    YFINANCE_AVAILABLE = False
-    logger.warning("yfinance not available. Install with: pip install yfinance")
+_VIX_SOURCES = [
+    # CBOE official daily CSV — no auth, works in Docker
+    "https://cdn.cboe.com/api/global/us_indices/daily_prices/VIX_History.csv",
+    # Stooq fallback — also no auth
+    "https://stooq.com/q/d/l/?s=%5Evix&i=d",
+]
+_HTTP_TIMEOUT = 10  # seconds
 
 
 class VIXRegime(Enum):
@@ -119,7 +123,7 @@ class VIXRegimeManager:
     #   VIXRegimeManager × EnhancedSignalFilter × DynamicConfigAdjuster
     #   ≈ 0.90 × 0.86 × 0.95 ≈ 0.74  (was 0.65 × 0.71 × 0.95 ≈ 0.44)
     RISK_MULTIPLIERS = {
-        VIXRegime.COMPLACENCY: 0.8,  # Slightly reduce (complacency = hidden risk)
+        VIXRegime.COMPLACENCY: 1.0,  # Low VIX = best environment for pairs mean-reversion
         VIXRegime.NORMAL: 1.0,
         VIXRegime.ELEVATED: 0.90,    # Raised from 0.85: stressed market, keep most size
         VIXRegime.FEAR: 0.75,        # Raised from 0.65: meaningful reduction but still tradeable
@@ -153,54 +157,42 @@ class VIXRegimeManager:
         self._last_vix_spike_log: Optional[datetime] = None
         
         logger.info("VIXRegimeManager initialized")
-        if not YFINANCE_AVAILABLE:
-            logger.warning("yfinance not available - using simulated VIX")
-    
+
+    def _fetch_from_url(self, url: str, lookback_days: int) -> Optional[pd.DataFrame]:
+        """Fetch VIX CSV from a single URL and return a normalised DataFrame."""
+        resp = requests.get(url, timeout=_HTTP_TIMEOUT, headers={"User-Agent": "apex-trading/1.0"})
+        resp.raise_for_status()
+        df = pd.read_csv(io.StringIO(resp.text))
+        # Normalise column names — CBOE uses 'DATE', Stooq uses 'Date'
+        df.columns = [c.strip().upper() for c in df.columns]
+        if "DATE" not in df.columns or "CLOSE" not in df.columns:
+            raise ValueError(f"Unexpected columns: {list(df.columns)}")
+        df["DATE"] = pd.to_datetime(df["DATE"], errors="coerce")
+        df = df.dropna(subset=["DATE", "CLOSE"]).sort_values("DATE")
+        df = df.tail(lookback_days).set_index("DATE")
+        df = df.rename(columns={"OPEN": "Open", "HIGH": "High", "LOW": "Low", "CLOSE": "Close"})
+        return df[["Open", "High", "Low", "Close"]].copy()
+
     def fetch_vix_data(self, lookback_days: int = 365) -> Optional[pd.DataFrame]:
-        """
-        Fetch VIX historical data from Yahoo Finance (free).
-        
-        Args:
-            lookback_days: Days of history to fetch
-        
-        Returns:
-            DataFrame with VIX data
-        """
-        if not YFINANCE_AVAILABLE:
-            return self._simulate_vix_data(lookback_days)
-        
-        try:
-            # yfinance 1.0: history(start=, end=) raises KeyError('chart').
-            # Use period= strings instead; map lookback_days to the closest period.
-            if lookback_days <= 30:
-                period = "1mo"
-            elif lookback_days <= 90:
-                period = "3mo"
-            elif lookback_days <= 180:
-                period = "6mo"
-            elif lookback_days <= 365:
-                period = "1y"
-            elif lookback_days <= 730:
-                period = "2y"
-            else:
-                period = "5y"
+        """Fetch VIX data from CBOE (primary) then Stooq (fallback)."""
+        for url in _VIX_SOURCES:
+            try:
+                data = self._fetch_from_url(url, lookback_days)
+                if data is not None and not data.empty:
+                    self._vix_cache = data
+                    self._last_fetch = datetime.now()
+                    logger.debug("Fetched %d days of VIX data from %s", len(data), url)
+                    return data
+            except Exception as e:
+                logger.debug("VIX fetch failed for %s: %s", url, e)
 
-            vix = yf.Ticker("^VIX")
-            data = vix.history(period=period)
-
-            if data.empty:
-                logger.warning("No VIX data received from yfinance")
-                return self._simulate_vix_data(lookback_days)
-
-            self._vix_cache = data
-            self._last_fetch = datetime.now()
-
-            logger.debug(f"Fetched {len(data)} days of VIX data (period={period})")
-            return data
-
-        except Exception as e:
-            logger.error(f"Error fetching VIX data: {e}")
-            return self._simulate_vix_data(lookback_days)
+        # All sources failed — stamp last_fetch so cache prevents retry spam
+        self._last_fetch = datetime.now()
+        if self._vix_cache is not None:
+            logger.debug("All VIX sources failed; using last cached data")
+            return self._vix_cache
+        logger.warning("All VIX sources failed and no cache available; using simulated data")
+        return self._simulate_vix_data(lookback_days)
     
     def _simulate_vix_data(self, lookback_days: int) -> pd.DataFrame:
         """Simulate VIX data when yfinance unavailable."""

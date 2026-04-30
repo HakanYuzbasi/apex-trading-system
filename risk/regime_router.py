@@ -83,7 +83,7 @@ class CompositeRegime(Enum):
 
 _NOTIONAL_MULTIPLIERS: dict[CompositeRegime, float] = {
     CompositeRegime.TRENDING:       1.00,   # no reduction — momentum favours size
-    CompositeRegime.RANGING:        0.85,   # slight reduction, still good edge
+    CompositeRegime.RANGING:        1.00,   # ranging = peak environment for mean-reversion pairs
     CompositeRegime.HIGH_VOL_PANIC: 0.40,   # severe reduction, survival mode
 }
 

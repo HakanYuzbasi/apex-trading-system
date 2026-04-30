@@ -223,18 +223,37 @@ class AlpacaBroker:
         tif = self._map_time_in_force(event.time_in_force)
         # Alpaca crypto restrictions: GTC/IOC only (no DAY), and no short selling.
         parsed = self._parse_symbol(event.instrument_id)
-        if parsed is not None and parsed.asset_class.value == "CRYPTO":
+        is_crypto = parsed is not None and parsed.asset_class.value == "CRYPTO"
+        is_equity = parsed is not None and parsed.asset_class.value in ("US_EQUITY", "EQUITY")
+        if is_crypto:
             if tif not in {AlpacaTimeInForce.GTC, AlpacaTimeInForce.IOC}:
                 tif = AlpacaTimeInForce.GTC
             # Alpaca crypto paper/live does NOT support short selling.
             # Silently skip SELL orders when we have no position to close
             # (short opens). Sell-to-close orders on existing longs are fine.
+
+        # Alpaca paper does NOT support fractional short-sells on equities.
+        # Round SELL quantities down to whole shares so Kalman pairs can short
+        # equity legs without hitting "fractional orders cannot be sold short".
+        qty = event.quantity
+        if is_equity and side == AlpacaOrderSide.SELL:
+            whole = int(qty)
+            if whole < qty and whole > 0:
+                logger.debug(
+                    "Rounding equity SELL qty %.6f → %d whole shares for %s",
+                    qty, whole, symbol,
+                )
+                qty = float(whole)
+            elif whole == 0:
+                logger.debug("Equity SELL qty %.6f < 1 share — skipping %s", qty, symbol)
+                return None
+
         if event.order_type in {"market", "market_on_close"}:
             if event.order_type == "market_on_close":
                 tif = AlpacaTimeInForce.CLS
             return MarketOrderRequest(
                 symbol=symbol,
-                qty=event.quantity,
+                qty=qty,
                 side=side,
                 type=AlpacaOrderType.MARKET,
                 time_in_force=tif,
@@ -248,7 +267,7 @@ class AlpacaBroker:
                 tif = AlpacaTimeInForce.CLS
             return LimitOrderRequest(
                 symbol=symbol,
-                qty=event.quantity,
+                qty=qty,
                 side=side,
                 type=AlpacaOrderType.LIMIT,
                 time_in_force=tif,
@@ -336,8 +355,57 @@ class AlpacaBroker:
                             "Wash-trade: failed to cancel conflicting order for %s: %s",
                             self._alpaca_symbol(event.instrument_id), cancel_exc,
                         )
+            elif "insufficient balance" in err_str:
+                # Parse the available qty from Alpaca's error JSON and retry the
+                # sell with that qty so stale ledger positions don't loop-reject.
+                retried = False
+                if event.side == "sell":
+                    try:
+                        start = str(exc).find("{")
+                        body = json.loads(str(exc)[start:]) if start != -1 else {}
+                        available = float(body.get("available", 0.0))
+                        min_qty = 1e-6
+                        if available > min_qty and available < event.quantity:
+                            capped_qty = round(available * 0.999, 8)
+                            if capped_qty > min_qty:
+                                logger.warning(
+                                    "Insufficient balance for %s sell: requested %.8f, available %.8f — "
+                                    "retrying with %.8f",
+                                    self._alpaca_symbol(event.instrument_id),
+                                    event.quantity, available, capped_qty,
+                                )
+                                capped_event = OrderEvent(
+                                    instrument_id=event.instrument_id,
+                                    exchange_ts=event.exchange_ts,
+                                    received_ts=event.received_ts,
+                                    processed_ts=event.processed_ts,
+                                    sequence_id=event.sequence_id,
+                                    source=event.source,
+                                    strategy_id=event.strategy_id,
+                                    order_action=event.order_action,
+                                    order_scope=event.order_scope,
+                                    side=event.side,
+                                    order_type=event.order_type,
+                                    quantity=capped_qty,
+                                    time_in_force=event.time_in_force,
+                                    execution_algo=event.execution_algo,
+                                    limit_price=event.limit_price,
+                                    metadata=event.metadata,
+                                )
+                                retry_result = await self._submit_direct_order(capped_event)
+                                retried = True
+                                return retry_result
+                    except Exception as parse_exc:
+                        logger.debug("Could not parse available qty for retry: %s", parse_exc)
+                if not retried:
+                    logger.warning(
+                        "Order %s rejected by Alpaca (%s): %s",
+                        event.order_id,
+                        self._alpaca_symbol(event.instrument_id),
+                        exc,
+                    )
             elif any(k in err_str for k in (
-                "insufficient balance", "position_limit_exceeded", "forbidden",
+                "position_limit_exceeded", "forbidden",
                 "qty must be", "42210000", "unprocessable", "422",
             )):
                 logger.warning(

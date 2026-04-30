@@ -13749,6 +13749,33 @@ class ApexTradingSystem:
                                 except Exception:
                                     pass
 
+                            # Extract indicator state (vpin, rsi, atr) for observability pivot
+                            vpin_val = 0.0
+                            rsi_val = 50.0
+                            atr_val = 0.0
+                            try:
+                                # Try to fetch from neural metrics if available
+                                _metrics = getattr(self, '_last_neural_metrics', {}).get(symbol, {}).get('state_vector', [])
+                                if len(_metrics) >= 1:
+                                    vpin_val = float(_metrics[0])
+                                
+                                # Compute RSI and ATR from available prices
+                                if prices is not None and not prices.empty and len(prices) > 14:
+                                    import pandas as pd
+                                    delta = prices.diff()
+                                    gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
+                                    loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
+                                    rs = gain / loss
+                                    rs = rs.replace([np.inf, -np.inf], 100)
+                                    rsi_val = float(100 - (100 / (1 + rs)).iloc[-1])
+                                    
+                                    highs = prices.rolling(2).max()
+                                    lows = prices.rolling(2).min()
+                                    tr = highs - lows
+                                    atr_val = float(tr.rolling(14).mean().iloc[-1])
+                            except Exception as e:
+                                pass
+
                             # Audit log — live entry
                             self.trade_audit.log(
                                 event="ENTRY",
@@ -13761,6 +13788,9 @@ class ApexTradingSystem:
                                 signal=float(signal),
                                 confidence=float(confidence),
                                 regime=str(self._current_regime),
+                                vpin=vpin_val,
+                                rsi=rsi_val,
+                                atr=atr_val,
                                 broker=(
                                     "alpaca"
                                     if self._get_connector_for(symbol) is self.alpaca
