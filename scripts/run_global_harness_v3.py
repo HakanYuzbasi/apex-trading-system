@@ -110,6 +110,9 @@ from quant_system.analytics.tca import TransactionCostAnalyzer
 from core.logic.ml.meta_labeler import MetaLabeler
 from quant_system.strategies.kalman_pairs import KalmanPairsStrategy
 from quant_system.strategies.directional_equity import DirectionalEquityStrategy
+from quant_system.strategies.cross_sectional_momentum_strategy import CrossSectionalMomentumStrategy
+from quant_system.strategies.opening_range_breakout import OpeningRangeBreakoutStrategy
+from quant_system.risk.directional_rotator import DirectionalRotator
 from quant_system.core.rotator import StrategyRotator
 from quant_system.risk.tail_hedger import TailHedger
 from portfolio.correlation_manager import CorrelationManager
@@ -121,6 +124,8 @@ from config import ApexConfig
 from reconciliation.position_reconciler import PositionReconciler
 from reconciliation.broker_adapters import AlpacaReconcilerAdapter
 from quant_system.risk.sentiment_warden import SentimentWarden
+from quant_system.risk.social_pulse import SocialPulse
+from quant_system.portfolio.hrp import HRPOptimizer
 from risk.regime_router import RegimeRouter, CompositeRegime, get_global_regime_router
 
 logger = logging.getLogger("quant_system.global_harness_v3")
@@ -460,6 +465,14 @@ DEFAULT_WINNER_DICTIONARY: dict[str, list[dict[str, Any]]] = {
         {"slot": "dir_coin",  "strategy": "directional", "instrument_a": "COIN",  "instrument_b": "COIN",  "entry_z_score": 0.0, "exit_z_score": 0.0, "leg_notional": 1_500.0, "warmup_bars": 10},
         {"slot": "dir_ba",    "strategy": "directional", "instrument_a": "BA",    "instrument_b": "BA",    "entry_z_score": 0.0, "exit_z_score": 0.0, "leg_notional": 1_500.0, "warmup_bars": 10},
         {"slot": "dir_tgt",   "strategy": "directional", "instrument_a": "TGT",   "instrument_b": "TGT",   "entry_z_score": 0.0, "exit_z_score": 0.0, "leg_notional": 1_500.0, "warmup_bars": 10},
+        # Cross-sectional momentum: Jegadeesh-Titman intraday across equity universe.
+        # instrument_a="SPY" drives the market-hours gate; strategy watches all 15 symbols.
+        {"slot": "xsec_momentum", "strategy": "cross_sectional", "instrument_a": "SPY", "instrument_b": "SPY", "entry_z_score": 0.0, "exit_z_score": 0.0, "leg_notional": 1_500.0, "warmup_bars": 5},
+        # Opening Range Breakout: 15-min ORB on high-liquidity equities.
+        # One trade per day, forced close at 15:45 ET. Stop = ORB midpoint, TP = 2×range.
+        {"slot": "orb_spy",  "strategy": "orb", "instrument_a": "SPY",  "instrument_b": "SPY",  "entry_z_score": 0.0, "exit_z_score": 0.0, "leg_notional": 2_500.0, "warmup_bars": 1},
+        {"slot": "orb_qqq",  "strategy": "orb", "instrument_a": "QQQ",  "instrument_b": "QQQ",  "entry_z_score": 0.0, "exit_z_score": 0.0, "leg_notional": 2_000.0, "warmup_bars": 1},
+        {"slot": "orb_aapl", "strategy": "orb", "instrument_a": "AAPL", "instrument_b": "AAPL", "entry_z_score": 0.0, "exit_z_score": 0.0, "leg_notional": 1_500.0, "warmup_bars": 1},
     ],
     "forex": [
         # Forex pairs — executed via IBKR TWS using IBKRBroker.
@@ -1286,9 +1299,25 @@ class StrategyController:
             logger.debug("RegimeRouter notional adjustment skipped: %s", exc)
             return base
 
-    def _instantiate_strategy(self, config: StrategySlotConfig) -> KalmanPairsStrategy | DirectionalEquityStrategy:
+    def _instantiate_strategy(
+        self, config: StrategySlotConfig
+    ) -> KalmanPairsStrategy | DirectionalEquityStrategy | CrossSectionalMomentumStrategy | OpeningRangeBreakoutStrategy:
         if config.strategy == "directional":
             return DirectionalEquityStrategy(
+                self._event_bus,
+                instrument=config.instrument_a,
+                leg_notional=config.leg_notional,
+                warmup_bars=config.warmup_bars,
+            )
+        if config.strategy == "cross_sectional":
+            return CrossSectionalMomentumStrategy(
+                self._event_bus,
+                instrument=config.instrument_a,
+                leg_notional=config.leg_notional,
+                warmup_bars=config.warmup_bars,
+            )
+        if config.strategy == "orb":
+            return OpeningRangeBreakoutStrategy(
                 self._event_bus,
                 instrument=config.instrument_a,
                 leg_notional=config.leg_notional,
@@ -2418,11 +2447,19 @@ async def main() -> None:
     # ── Initializing Components ─────────────────────────────────────────────────
     bayesian_vol = BayesianVolatilityAdjuster(event_bus)
     meta_labeler = MetaLabeler()
+    # #6: Auto-train from historical closed trades if model is missing.
+    # Takes <5s; activates signal confidence filtering without a manual retrain step.
+    meta_labeler.auto_train_from_attribution(
+        attribution_json_path=str(state_dir / "performance_attribution.json"),
+    )
     sentiment_warden = SentimentWarden(
         api_key=api_key,
         secret_key=secret_key,
         state_path=state_dir / "sentiment_vetoes.json"
     )
+
+    social_pulse = SocialPulse(api_key=os.getenv("GEMINI_API_KEY"))
+    hrp_optimizer = HRPOptimizer()
 
     risk_manager = RiskManager(
         ledger,
@@ -2432,7 +2469,9 @@ async def main() -> None:
         equity_protector=equity_protector,
         bayesian_vol=bayesian_vol,
         meta_labeler=meta_labeler,
-        sentiment_warden=sentiment_warden
+        sentiment_warden=sentiment_warden,
+        social_pulse=social_pulse,
+        hrp_optimizer=hrp_optimizer
     )
 
     # IBKR Connectivity Monitoring (Dashboard Only for v3)
@@ -2519,6 +2558,9 @@ async def main() -> None:
         expected_sharpes,
         _emergency_flatten_pair,
     )
+
+    # Fix 5: live Sharpe-based symbol rotation for directional slots
+    dir_rotator = DirectionalRotator(event_bus)
 
     #  High-Availability (HA) Monitoring 
     reconciler_adapter = AlpacaReconcilerAdapter(trading_client)
@@ -2656,6 +2698,83 @@ async def main() -> None:
             
     sentiment_task = asyncio.create_task(_sentiment_refresh_loop(), name="sentiment-warden-v3")
 
+    # Social Pulse periodic task
+    async def _social_refresh_loop():
+        while not stop_event.is_set():
+            active_symbols = list(ledger.positions.keys())
+            if not active_symbols:
+                all_configured = [
+                    str(cfg["instrument_a"]) for group in _load_winner_dictionary().values() for cfg in group
+                ] + [
+                    str(cfg["instrument_b"]) for group in _load_winner_dictionary().values() for cfg in group
+                ]
+                active_symbols = list(set(all_configured))[:10]
+            
+            for sym in active_symbols:
+                if stop_event.is_set(): break
+                social_pulse.refresh_buzz(sym)
+                await asyncio.sleep(2) # Prevent hammering LLM
+            
+            await asyncio.sleep(1800) # Refresh every 30 mins
+            
+    social_task = asyncio.create_task(_social_refresh_loop(), name="social-pulse-v3")
+
+    # Fix 5: EOD directional slot rotation (fires weekdays ~16:15 ET)
+    async def _dir_rotation_loop() -> None:
+        while not stop_event.is_set():
+            now_et = datetime.now(_ET)
+            # Wait until next 16:15 ET on a weekday
+            target = now_et.replace(hour=16, minute=15, second=0, microsecond=0)
+            if now_et >= target or now_et.weekday() >= 5:
+                # Past today's window or weekend — sleep until next weekday 16:15
+                days_ahead = 1
+                while (now_et.weekday() + days_ahead) % 7 >= 5:
+                    days_ahead += 1
+                from datetime import timedelta as _td
+                target = (now_et + _td(days=days_ahead)).replace(
+                    hour=16, minute=15, second=0, microsecond=0
+                )
+            wait_s = (target - now_et).total_seconds()
+            try:
+                await asyncio.wait_for(stop_event.wait(), timeout=max(wait_s, 1.0))
+                break  # stop_event fired
+            except asyncio.TimeoutError:
+                pass
+
+            # Collect active directional slots
+            active_dir = [
+                (cfg.slot, cfg.instrument_a)
+                for cfg, _ in controller._active_strategies.values()
+                if cfg.strategy == "directional" and not cfg.instrument_a.startswith("CRYPTO:")
+            ]
+            backbench = [
+                e["instrument_a"]
+                for e in BACKBENCH_UNIVERSE
+                if not str(e["instrument_a"]).startswith("CRYPTO:")
+            ]
+            swaps = dir_rotator.rotation_candidates(active_dir, backbench)
+            for slot, new_sym in swaps:
+                old_cfg = controller._configured_slots.get(slot)
+                if old_cfg is None:
+                    continue
+                from dataclasses import replace as _dc_replace
+                new_cfg = _dc_replace(
+                    old_cfg,
+                    instrument_a=new_sym,
+                    instrument_b=new_sym,
+                )
+                controller._configured_slots[slot] = new_cfg
+                logger.info(
+                    "EOD rotation: slot=%s %s → %s (Sharpe below threshold)",
+                    slot, old_cfg.instrument_a, new_sym,
+                )
+                await notifier.notify_system_event(
+                    "Symbol Rotation",
+                    f"Slot {slot}: {old_cfg.instrument_a} → {new_sym} (low live Sharpe)",
+                )
+
+    dir_rotation_task = asyncio.create_task(_dir_rotation_loop(), name="dir-rotation-eod-v3")
+
     #  Equity REST quote poller (workaround for IEX bars-only websocket) 
     _alpaca_api_key = os.environ.get("APCA_API_KEY_ID", "")
     _alpaca_secret_key = os.environ.get("APCA_API_SECRET_KEY", "")
@@ -2720,9 +2839,11 @@ async def main() -> None:
             ha_heartbeat_task,
             shadow_acc_task,
             sentiment_task,
+            social_task,
             quote_poll_task,
             telemetry_task,
             health_task,
+            dir_rotation_task,
         )
         for task in all_tasks:
             task.cancel()
@@ -2733,6 +2854,7 @@ async def main() -> None:
         logger.info("RiskStateController: final state flushed")
         controller.save_kalman_states()
         logger.info("StrategyController: Kalman states flushed")
+        dir_rotator.close()
 
         await asyncio.gather(
             stock_supervisor.update_symbols(()),

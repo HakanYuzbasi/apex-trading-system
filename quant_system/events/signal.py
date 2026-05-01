@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass, field
+from dataclasses import KW_ONLY, dataclass, field
 from typing import Literal, Mapping
 
 from quant_system.events.base import BaseEvent, EventScalar, generate_event_id
@@ -10,8 +10,9 @@ SignalSide = Literal["buy", "sell", "short", "cover", "flatten", "rebalance"]
 TargetType = Literal["units", "notional", "weight"]
 
 
-@dataclass(frozen=True, slots=True, kw_only=True)
+@dataclass(frozen=True)
 class SignalEvent(BaseEvent):
+    _: KW_ONLY
     strategy_id: str
     side: SignalSide
     target_type: TargetType

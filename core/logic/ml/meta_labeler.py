@@ -8,7 +8,7 @@ import numpy as np
 
 logger = logging.getLogger(__name__)
 
-FEATURE_NAMES = ["vpin", "rsi", "atr"]
+FEATURE_NAMES = ["kalman_residual", "bayesian_prob", "vix_level", "sector_concentration"]
 N_FEATURES = len(FEATURE_NAMES)
 
 
@@ -54,20 +54,28 @@ class MetaLabeler:
                 self.model_path,
             )
 
-    def predict_confidence(self, vpin: float = 0.0, rsi: float = 50.0, atr: float = 0.0, **kwargs) -> float:
+    def predict_confidence(
+        self, 
+        kalman_residual: float = 0.0, 
+        bayesian_prob: float = 0.5, 
+        vix_level: float = 20.0, 
+        sector_concentration: float = 0.0,
+        **kwargs
+    ) -> float:
         """
         Returns the probability of success (0.0–1.0).
 
-        Expected kwargs: vpin, rsi, atr.
+        Expected kwargs: kalman_residual, bayesian_prob, vix_level, sector_concentration.
         Returns 1.0 (pass-through) when the model is not yet trained.
         """
         if not self._is_trained or self._model is None:
             return 1.0
 
         features = np.array([[
-            float(vpin),
-            float(rsi),
-            float(atr),
+            float(kalman_residual),
+            float(bayesian_prob),
+            float(vix_level),
+            float(sector_concentration),
         ]])
 
         try:
@@ -90,6 +98,10 @@ class MetaLabeler:
         """
         logger.info("MetaLabeler: Training model with %d samples...", len(X))
 
+        if X.shape[1] != N_FEATURES:
+            logger.error("MetaLabeler: X has %d features, expected %d. Aborting train.", X.shape[1], N_FEATURES)
+            return
+
         train_data = lgb.Dataset(X, label=y, feature_name=FEATURE_NAMES)
         params = {
             "objective": "binary",
@@ -105,6 +117,80 @@ class MetaLabeler:
         self._model.save_model(self.model_path)
         self._is_trained = True
         logger.info("MetaLabeler: Training complete. Saved to %s", self.model_path)
+
+
+    def auto_train_from_attribution(
+        self,
+        attribution_json_path: str = "data/performance_attribution.json",
+        min_samples: int = 50,
+    ) -> bool:
+        """
+        #6: Auto-train at startup from historical closed trades stored in
+        performance_attribution.json.  Called right after __init__ when the
+        model file is missing.  Returns True if training succeeded.
+
+        Each closed trade already carries kalman_residual, bayesian_prob,
+        vix_level, sector_concentration — no feature reconstruction needed.
+        Label = 1 if net_pnl > 0, else 0.
+        """
+        if self._is_trained:
+            return False  # already have a model — skip
+
+        import json, os
+        if not os.path.exists(attribution_json_path):
+            logger.info(
+                "MetaLabeler auto-train: attribution file not found at %s — skipping",
+                attribution_json_path,
+            )
+            return False
+
+        try:
+            with open(attribution_json_path) as f:
+                payload = json.load(f)
+        except Exception as exc:
+            logger.warning("MetaLabeler auto-train: failed to read attribution file: %s", exc)
+            return False
+
+        closed = payload.get("closed_trades", [])
+        if len(closed) < min_samples:
+            logger.info(
+                "MetaLabeler auto-train: only %d closed trades found (need ≥%d) — skipping",
+                len(closed), min_samples,
+            )
+            return False
+
+        rows_X, rows_y = [], []
+        for t in closed:
+            try:
+                x_row = [
+                    float(t.get("kalman_residual", 0.0) or 0.0),
+                    float(t.get("bayesian_prob",   0.5) or 0.5),
+                    float(t.get("vix_level",       20.0) or 20.0),
+                    float(t.get("sector_concentration", 0.0) or 0.0),
+                ]
+                label = 1 if float(t.get("net_pnl", 0.0) or 0.0) > 0 else 0
+                rows_X.append(x_row)
+                rows_y.append(label)
+            except Exception:
+                continue
+
+        if len(rows_X) < min_samples:
+            logger.info(
+                "MetaLabeler auto-train: only %d usable rows after filtering — skipping",
+                len(rows_X),
+            )
+            return False
+
+        X = np.array(rows_X, dtype=float)
+        y = np.array(rows_y, dtype=int)
+        positive_rate = float(y.mean())
+        logger.info(
+            "MetaLabeler auto-train: %d samples, %.1f%% profitable — training now",
+            len(y), positive_rate * 100,
+        )
+        self.train(X, y)
+        self.is_bootstrapped_on_synthetic = False
+        return True
 
     def score(self, X: np.ndarray, y: np.ndarray) -> dict:
         if not self._is_trained or self._model is None:

@@ -64,15 +64,27 @@ def main() -> None:
             n_real, MIN_REAL_TRADES,
         )
         # Generate synthetic data
+        # Generate synthetic data
         n_synthetic = 500
         np.random.seed(42)
-        vpin = np.random.beta(2, 5, n_synthetic)
-        rsi = np.random.uniform(20, 80, n_synthetic)
-        atr = np.random.uniform(0.001, 0.05, n_synthetic)
-        X = np.column_stack([vpin, rsi, atr])
-        # Make labels loosely correlated with sensible features so LightGBM has something to learn
-        # e.g., low VPIN and RSI around 50 is better
-        logits = -2.0 * vpin - np.abs(rsi - 50) / 30.0 + np.random.normal(0, 1, n_synthetic)
+        # kalman_residual: smaller absolute values are better (mean reversion)
+        kalman_residual = np.random.normal(0, 0.005, n_synthetic)
+        # bayesian_prob: high vol prob (>0.7) is usually worse for pairs
+        bayesian_prob = np.random.uniform(0, 1, n_synthetic)
+        # vix_level: higher VIX is more volatile
+        vix_level = np.random.uniform(15, 35, n_synthetic)
+        # sector_concentration: higher is riskier
+        sector_concentration = np.random.uniform(0.1, 0.5, n_synthetic)
+        
+        X = np.column_stack([kalman_residual, bayesian_prob, vix_level, sector_concentration])
+        
+        # Logic: Better chance if residual is small, vol prob is low, and VIX is stable
+        logits = (
+            -100.0 * np.abs(kalman_residual) 
+            - 2.0 * (bayesian_prob > 0.7) 
+            - 0.1 * vix_level 
+            + np.random.normal(0, 1, n_synthetic)
+        )
         y = (logits > np.median(logits)).astype(int)
         
         logger.info("Generated %d synthetic samples.", n_synthetic)

@@ -17,6 +17,7 @@ from quant_system.risk.bayesian_vol import BayesianVolatilityAdjuster
 from core.logic.ml.meta_labeler import MetaLabeler
 from quant_system.risk.sentiment_warden import SentimentWarden
 from quant_system.risk.social_pulse import SocialPulse
+from quant_system.portfolio.hrp import HRPOptimizer
 
 logger = logging.getLogger(__name__)
 
@@ -43,6 +44,7 @@ class RiskManager:
         bayesian_vol: BayesianVolatilityAdjuster | None = None,
         sentiment_warden: SentimentWarden | None = None,
         social_pulse: SocialPulse | None = None,
+        hrp_optimizer: HRPOptimizer | None = None,
     ) -> None:
         self.portfolio_ledger = portfolio_ledger
         self.event_bus = event_bus
@@ -55,6 +57,7 @@ class RiskManager:
         self.bayesian_vol = bayesian_vol
         self.sentiment_warden = sentiment_warden
         self.social_pulse = social_pulse
+        self.hrp_optimizer = hrp_optimizer
         
         self.latest_meta_confidence: float = 1.0
         self.latest_bayesian_prob: float = 0.0
@@ -260,8 +263,21 @@ class RiskManager:
             self.latest_meta_confidence = confidence
             logger.info("[RISK] MetaLabeler confidence for %s: %.4f", event.instrument_id, confidence)
             
-            # The leverage limit was already applied to adjusted_target_value above
-            
+            # ── HRP Regime Scaling ───────────────────────────────────────────
+            hrp_scalar = 1.0
+            if self.hrp_optimizer is not None:
+                # We use the current regime from HRP (1: Normal, 2: High Vol, 3: Crash)
+                # to scale the signal value.
+                regime = getattr(self.hrp_optimizer, "current_regime", 1)
+                if regime == 2: hrp_scalar = 0.7  # Scale down in High Vol
+                elif regime == 3: hrp_scalar = 0.3 # Scale down heavily in Crash
+                
+                if hrp_scalar < 1.0:
+                    logger.info("[RISK] HRP Regime Scaling active: regime=%d, scalar=%.2f", regime, hrp_scalar)
+                    adjusted_target_value *= hrp_scalar
+                    # Recalculate quantity based on HRP-scaled target
+                    quantity = self._quantity_from_signal_v2(event, adjusted_target_value, reference_price, self.portfolio_ledger.cash)
+
             if confidence < 0.65:
                 logger.warning(
                     "RiskManager vetoed entry for %s: Meta-Labeler confidence %.2f < 0.65",
@@ -324,6 +340,20 @@ class RiskManager:
             return None
 
         now = datetime.now(timezone.utc)
+        
+        # ── Dynamic Limit Pricing ──────────────────────────────────────────
+        # Emergency or circuit breaker orders use market for guaranteed execution
+        if event.source in {"circuit_breaker", "protector"} or event.side == "flatten":
+            order_type = "market"
+            limit_price = None
+        else:
+            order_type = "limit"
+            limit_price = self._calculate_limit_price(
+                reference_price=reference_price,
+                side=order_side,
+                confidence=self.latest_meta_confidence
+            )
+
         return OrderEvent(
             instrument_id=event.instrument_id,
             exchange_ts=now,
@@ -335,12 +365,38 @@ class RiskManager:
             order_action="submit",
             order_scope="parent",
             side=order_side,
-            order_type="market",
+            order_type=order_type,
             quantity=quantity,
             time_in_force="day",
             execution_algo="direct",
+            limit_price=limit_price,
             notional=abs(adjusted_target_value) if event.target_type == "notional" else None,
         )
+
+    def _calculate_limit_price(self, reference_price: float, side: str, confidence: float) -> float:
+        """
+        Calculates a limit price with an offset based on trade confidence.
+        High confidence trades are more aggressive (closer to the market) to ensure fill.
+        """
+        # Base offset: 5 basis points (0.0005)
+        base_offset = 0.0005
+        
+        # Aggression adjustment based on Meta-Labeler confidence
+        if confidence > 0.90:
+            aggression = 0.0005 # More aggressive (add 5bps more towards the market)
+        elif confidence > 0.80:
+            aggression = 0.0002
+        elif confidence < 0.70:
+            aggression = -0.0002 # Passive (bid lower/ask higher)
+        else:
+            aggression = 0.0
+            
+        total_offset = base_offset + aggression
+        
+        if side == "buy":
+            return reference_price * (1 + total_offset)
+        else:
+            return reference_price * (1 - total_offset)
 
     @staticmethod
     def _quantity_from_signal_v2(event: SignalEvent, target_value: float, reference_price: float, available_cash: float) -> float:

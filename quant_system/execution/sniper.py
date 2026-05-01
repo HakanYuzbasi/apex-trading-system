@@ -64,8 +64,22 @@ class LimitOrderChaser:
     async def submit(self, order_event: OrderEvent) -> str | None:
         initial_price = self._target_limit_price(order_event)
         if initial_price is None:
-            logger.warning("LimitOrderChaser has no market reference for %s", order_event.instrument_id)
-            return None
+            # #5: Fallback to any price embedded in the order itself before giving up.
+            # Stop-loss exits often carry a stop_price or limit_price even when no live
+            # quote is cached; using it allows the chaser to still submit a resting limit.
+            embedded = order_event.limit_price or order_event.stop_price
+            if embedded and embedded > 0.0:
+                initial_price = float(embedded)
+                logger.info(
+                    "LimitOrderChaser: no live quote for %s — using embedded price %.4f",
+                    order_event.instrument_id, initial_price,
+                )
+            else:
+                logger.warning(
+                    "LimitOrderChaser has no market reference for %s — order not chased",
+                    order_event.instrument_id,
+                )
+                return None
 
         venue_order_id = await self._submit_limit_order(order_event, order_event.quantity, initial_price)
         now_monotonic = asyncio.get_running_loop().time()

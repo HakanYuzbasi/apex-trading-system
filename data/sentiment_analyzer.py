@@ -99,6 +99,10 @@ class SentimentAnalyzer:
         """
         self.cache_minutes = cache_minutes
         self._cache: Dict[str, Tuple[SentimentResult, datetime]] = {}
+        # Per-symbol timestamp of last failed news fetch; suppresses repeated WARNINGs.
+        # After the first failure, retries are silently skipped for _NEWS_FAIL_TTL seconds.
+        self._news_fail_ts: Dict[str, float] = {}
+        self._NEWS_FAIL_TTL = 3_600.0   # 1 hour between warning re-fires per symbol
 
         from config import ApexConfig
         self.enabled = getattr(ApexConfig, "SENTIMENT_API_ENABLED", True)
@@ -318,6 +322,12 @@ class SentimentAnalyzer:
             return []
             
         import time
+        # Suppress repeated WARNING spam: if this symbol failed within the last hour,
+        # return [] silently rather than hammering Yahoo Finance and flooding the log.
+        last_fail = self._news_fail_ts.get(symbol, 0.0)
+        if time.monotonic() - last_fail < self._NEWS_FAIL_TTL:
+            return []
+
         max_retries = 1          # Was 3 — reduced to prevent 14s blocking sleep cascade
         delays = [0.5, 1.0]     # Was [2, 4, 8] — sub-second retries to stay within 10s timeout
 
@@ -331,6 +341,8 @@ class SentimentAnalyzer:
                     if attempt < max_retries:
                         time.sleep(delays[attempt])
                         continue
+                    # Clear failure stamp on empty (not an exception)
+                    self._news_fail_ts.pop(symbol, None)
                     return []
 
                 headlines = []
@@ -340,6 +352,8 @@ class SentimentAnalyzer:
                     if title:
                         headlines.append(title)
 
+                # Successful fetch: clear any prior failure stamp
+                self._news_fail_ts.pop(symbol, None)
                 return headlines
 
             except Exception as e:
@@ -347,7 +361,12 @@ class SentimentAnalyzer:
                     logger.debug(f"News fetch failed for {symbol} (attempt {attempt+1}/{max_retries+1}): {e}")
                     time.sleep(delays[attempt])
                 else:
-                    logger.warning(f"⚠️ Yahoo Finance news API failed for {symbol} after {max_retries+1} attempts: HTTP/Connection Error: {e}")
+                    # Stamp failure time; next call within 1h will silently skip
+                    self._news_fail_ts[symbol] = time.monotonic()
+                    logger.warning(
+                        "Yahoo Finance news unavailable for %s — suppressing retries for 1h: %s",
+                        symbol, e,
+                    )
                     return []
 
         return []

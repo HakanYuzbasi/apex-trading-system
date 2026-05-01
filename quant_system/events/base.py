@@ -26,7 +26,7 @@ def _require_timezone_aware(name: str, value: datetime) -> None:
         raise ValueError(f"{name} must be timezone-aware")
 
 
-@dataclass(frozen=True, slots=True, kw_only=True)
+@dataclass(frozen=True)
 class BaseEvent:
     instrument_id: str
     exchange_ts: datetime

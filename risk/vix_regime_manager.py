@@ -195,19 +195,21 @@ class VIXRegimeManager:
         return self._simulate_vix_data(lookback_days)
     
     def _simulate_vix_data(self, lookback_days: int) -> pd.DataFrame:
-        """Simulate VIX data when yfinance unavailable."""
+        """Return a neutral constant-VIX fallback when all live data sources fail.
+
+        Uses the long-run VIX median (18.0) as a safe deterministic value — this
+        maps to the 'normal' regime with risk_multiplier=1.0, meaning no position
+        sizing is distorted by a missing data feed.  Random/synthetic values are
+        intentionally avoided: they would produce different regime classifications
+        on each restart and corrupt the VIX-adaptive sizing logic.
+        """
         dates = pd.date_range(end=datetime.now(), periods=lookback_days, freq='D')
-        
-        # Simulate mean-reverting VIX around 18
-        np.random.seed(42)
-        vix_values = 18 + np.cumsum(np.random.randn(lookback_days) * 0.5)
-        vix_values = np.clip(vix_values, 10, 50)
-        
+        vix_neutral = 18.0
         return pd.DataFrame({
-            'Close': vix_values,
-            'Open': vix_values * (1 + np.random.randn(lookback_days) * 0.02),
-            'High': vix_values * 1.05,
-            'Low': vix_values * 0.95
+            'Close': vix_neutral,
+            'Open':  vix_neutral,
+            'High':  vix_neutral,
+            'Low':   vix_neutral,
         }, index=dates)
     
     def get_current_state(self, force_refresh: bool = False) -> VIXState:
