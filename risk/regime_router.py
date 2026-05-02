@@ -334,12 +334,8 @@ class RegimeRouter:
                 f"VIX={vix_regime_label} | vol_ratio={crypto_vol_ratio:.2f}x"
             )
 
-        # ── 7. Final notional multiplier — min of VIX mult and regime table ─
+        # ── 7. Final notional multiplier — regime table × VIX squeeze ─
         table_mult = _NOTIONAL_MULTIPLIERS[regime]
-        # vix_risk_mult ∈ [0.45, 1.0]; blend it into the table mult
-        # so a VIX spike squeezes further even within a TRENDING call.
-        notional_mult = round(min(table_mult, vix_risk_mult * table_mult / table_mult) * table_mult / table_mult, 4)
-        # Simplified: effective_mult = regime_table_mult × vix_risk_mult
         effective_mult = round(table_mult * vix_risk_mult, 4)
         effective_mult = max(0.10, min(1.50, effective_mult))
 

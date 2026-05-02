@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import logging
 import math
+from collections import deque
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -99,12 +100,22 @@ class KalmanPairsStrategy(BaseStrategy):
         self._SOFT_EXIT_COOLDOWN_HOURS = 4.0
         self._kalman_diverged: bool = False
         self._diverge_ts: float = 0.0
+        # IMP-1: rolling SNR history for notional scaling
+        self._snr_history: deque[float] = deque(maxlen=20)
+        self._snr_notional_mult: float = 1.0
 
     @property
     def current_entry_z(self) -> float:
         """Adaptive Z-score: higher VIX requires higher Z-score for entry."""
         vix_factor = (self._vix_level - self.vix_median) / self.vix_median
         return self.base_entry_z * (1.0 + max(0.0, vix_factor))
+
+    @property
+    def _safe_innovation_std(self) -> float:
+        """sqrt(innovation_variance) with a floor to prevent crash on near-zero or
+        negative variance (possible due to floating-point accumulation in the Kalman
+        covariance update).  1e-8 is orders of magnitude below any real price spread."""
+        return float(np.sqrt(max(self._last_innovation_variance, 1e-8)))
 
     def on_bar(self, event: BarEvent) -> None:
         if event.instrument_id == "VIX":
@@ -126,6 +137,11 @@ class KalmanPairsStrategy(BaseStrategy):
         
         if price_a is None or price_b is None:
             return
+
+        # Mark this pair timestamp consumed NOW — before any early returns — so that the
+        # second leg's bar (which arrives with the same canonical ts) doesn't trigger a
+        # duplicate Kalman update with stale prices during the warmup period.
+        self._last_processed_pair_ts = paired_ts
 
         # Keep history for cointegration check
         self._price_history_a.append(price_a)
@@ -185,7 +201,6 @@ class KalmanPairsStrategy(BaseStrategy):
 
         self._emit_state_transition(desired_state)
         self._pair_state = desired_state
-        self._last_processed_pair_ts = paired_ts
 
     def on_tick(self, event: TradeTick) -> None:
         pass
@@ -249,7 +264,7 @@ class KalmanPairsStrategy(BaseStrategy):
             self._last_innovation = innovation
             self._last_innovation_variance = innovation_variance
 
-        z_score = self._last_innovation / np.sqrt(self._last_innovation_variance)
+        z_score = self._last_innovation / self._safe_innovation_std
         self.last_z_score = float(z_score)
 
         # #1: Post-warm-start gate — if the first corrected z is already outside ±2.5σ,
@@ -319,9 +334,13 @@ class KalmanPairsStrategy(BaseStrategy):
         # #2: ADF stationarity test — residuals must be stationary (p ≤ 0.10) for the
         # pair to be cointegrated right now.  Non-stationary spreads produce persistent
         # z-drift that looks like signal but never reverts.
+        # Skip when warmup window is too small for a meaningful test (need ≥ 20 obs).
         try:
             from statsmodels.tsa.stattools import adfuller
-            _, adf_pval, *_ = adfuller(residuals, maxlag=1, autolag=None)
+            if len(residuals) >= 20:
+                _, adf_pval, *_ = adfuller(residuals, maxlag=1, autolag=None)
+            else:
+                adf_pval = 0.0  # not enough data — assume stationary, rely on z-gate
             if float(adf_pval) > 0.10:
                 logger.warning(
                     "📉 [%s/%s] Spread not stationary ADF p=%.3f > 0.10 — "
@@ -331,8 +350,8 @@ class KalmanPairsStrategy(BaseStrategy):
                 self._kalman_diverged = True
                 self._diverge_ts = _time.monotonic()
                 return
-        except Exception:
-            pass  # statsmodels unavailable — skip test
+        except Exception as exc:
+            logger.debug("[%s/%s] ADF test skipped: %s", self.instrument_a, self.instrument_b, exc)
 
         # #4: Auto-calibrate observation_noise from OLS residual variance.
         # A fixed tiny obs_noise (default 1e-3) against BTC/LTC resid_var≈690 makes
@@ -347,7 +366,8 @@ class KalmanPairsStrategy(BaseStrategy):
             ols_cov = np.linalg.inv(pb_mat.T @ pb_mat) * resid_var * n
         except np.linalg.LinAlgError:
             ols_cov = np.eye(2, dtype=float) * resid_var
-        self._kalman.theta = theta_ols
+        # OLS uses [intercept, slope] column order; Kalman uses [slope, intercept].
+        self._kalman.theta = np.array([theta_ols[1], theta_ols[0]], dtype=float)
         self._kalman.covariance = ols_cov
         logger.warning(
             "🎯 [%s/%s] Kalman OLS warm-start: beta=[%.4f, %.6f] resid_std=%.4f "
@@ -427,8 +447,8 @@ class KalmanPairsStrategy(BaseStrategy):
                     return 1.5   # require much larger dislocation
                 if regime in ("bear_trend", "strong_bear"):
                     return 1.3   # trend overrides reversion here too
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.debug("[%s/%s] Regime z-mult unavailable: %s", self.instrument_a, self.instrument_b, exc)
         return 1.0
 
     def _in_soft_exit_cooldown(self, current_ts: datetime) -> bool:
@@ -453,8 +473,8 @@ class KalmanPairsStrategy(BaseStrategy):
                 regime = getattr(rr.last_regime, "value", "neutral")
                 if regime in ("ranging", "neutral", "volatile"):
                     return 1.0
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.debug("[%s/%s] Half-life limit check failed: %s", self.instrument_a, self.instrument_b, exc)
         return 3.0  # default crypto limit when regime unknown
 
     def _is_altcoin_pair(self) -> bool:
@@ -469,7 +489,8 @@ class KalmanPairsStrategy(BaseStrategy):
             from quant_system.risk.btc_dominance_monitor import get_btc_dominance_monitor
             return get_btc_dominance_monitor().is_btc_dominance_rising()
         except Exception:
-            return False
+            # Conservative: assume rising when CoinGecko is unreachable — block new entries.
+            return True
 
     def _desired_state(self, z_score: float, current_ts: datetime) -> str | None:
         entry_z = self.current_entry_z * self._regime_entry_z_mult()
@@ -550,28 +571,41 @@ class KalmanPairsStrategy(BaseStrategy):
         )
 
     def _emit_state_transition(self, desired_state: str) -> None:
-        snr_val = abs(self._last_innovation) / np.sqrt(self._last_innovation_variance)
-        
-        # Add metadata for Meta-Labeler
+        snr_val = abs(self._last_innovation) / self._safe_innovation_std
+
+        # IMP-1: update rolling SNR history and recompute notional multiplier
+        self._snr_history.append(float(snr_val))
+        if len(self._snr_history) >= 10:
+            median_snr = float(np.median(list(self._snr_history)))
+            if median_snr > 1e-6:
+                ratio = float(snr_val) / median_snr
+                self._snr_notional_mult = float(np.clip(ratio, 0.7, 1.3))
+            else:
+                self._snr_notional_mult = 1.0
+
         metadata = {
             "kalman_residual": float(self._last_innovation),
-            "z_score": float(self._last_innovation / np.sqrt(self._last_innovation_variance)),
+            "z_score": float(self._last_innovation / self._safe_innovation_std),
             "vix_level": self._vix_level,
-            "snr": float(snr_val)
+            "snr": float(snr_val),
+            "snr_mult": round(self._snr_notional_mult, 3),
         }
+
+        # SNR-scaled notional: high-quality pairs get up to 1.3×, low-quality 0.7×
+        scaled_notional = self.leg_notional * self._snr_notional_mult
 
         if desired_state == "short_a_long_b":
             self.emit_signal(
                 instrument_id=self.instrument_a,
                 target_type="notional",
-                target_value=-self.leg_notional,
+                target_value=-scaled_notional,
                 confidence=0.92,
                 metadata=metadata
             )
             self.emit_signal(
                 instrument_id=self.instrument_b,
                 target_type="notional",
-                target_value=self.leg_notional,
+                target_value=scaled_notional,
                 confidence=0.92,
                 metadata=metadata
             )
@@ -579,14 +613,14 @@ class KalmanPairsStrategy(BaseStrategy):
             self.emit_signal(
                 instrument_id=self.instrument_a,
                 target_type="notional",
-                target_value=self.leg_notional,
+                target_value=scaled_notional,
                 confidence=0.92,
                 metadata=metadata
             )
             self.emit_signal(
                 instrument_id=self.instrument_b,
                 target_type="notional",
-                target_value=-self.leg_notional,
+                target_value=-scaled_notional,
                 confidence=0.92,
                 metadata=metadata
             )

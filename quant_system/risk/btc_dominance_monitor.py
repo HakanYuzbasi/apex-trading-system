@@ -66,6 +66,10 @@ class BtcDominanceMonitor:
         self._maybe_refresh()
         return self._last_dom
 
+    def force_refresh(self) -> None:
+        """Proactively fetch latest BTC dominance (called on a schedule from harness)."""
+        self._fetch()
+
     def is_btc_dominance_rising(self) -> bool:
         """
         True if BTC.D has risen by more than _BTC_DOM_THRESHOLD pp since

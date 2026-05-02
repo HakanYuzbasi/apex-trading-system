@@ -227,24 +227,36 @@ class OpeningRangeBreakoutStrategy(BaseStrategy):
 
         # ATR-compression quality filter: only trade when the range is compressed
         # relative to recent sessions (Crabel NR concept — tight range → expansion likely).
-        if len(self._historical_orb_ranges) >= 3:
-            avg_hist = sum(self._historical_orb_ranges) / len(self._historical_orb_ranges)
-            if avg_hist > 0 and orb_range > avg_hist * _ORB_COMPRESSION_RATIO:
-                logger.debug(
-                    "ORB compression skip [%s]: range=%.4f > %.0f%% of avg=%.4f",
-                    self.instrument, orb_range, _ORB_COMPRESSION_RATIO * 100, avg_hist,
-                )
-                return
+        # Require at least 2 sessions of history; skip entirely on day 1 (no baseline).
+        if len(self._historical_orb_ranges) < 2:
+            logger.debug(
+                "ORB cold-start skip [%s]: only %d session(s) of range history",
+                self.instrument, len(self._historical_orb_ranges),
+            )
+            return
+        avg_hist = sum(self._historical_orb_ranges) / len(self._historical_orb_ranges)
+        if avg_hist > 0 and orb_range > avg_hist * _ORB_COMPRESSION_RATIO:
+            logger.debug(
+                "ORB compression skip [%s]: range=%.4f > %.0f%% of avg=%.4f",
+                self.instrument, orb_range, _ORB_COMPRESSION_RATIO * 100, avg_hist,
+            )
+            return
 
         # Volume floor: thin build-period volume means the range levels are unreliable.
-        if len(self._historical_build_vols) >= 5:
-            avg_vol = sum(self._historical_build_vols) / len(self._historical_build_vols)
-            if avg_vol > 0 and self._orb_build_vol < avg_vol * _ORB_MIN_VOL_RATIO:
-                logger.debug(
-                    "ORB thin-volume skip [%s]: build_vol=%.0f < %.0f%% of avg=%.0f",
-                    self.instrument, self._orb_build_vol, _ORB_MIN_VOL_RATIO * 100, avg_vol,
-                )
-                return
+        # Require at least 3 sessions of volume history; skip on days 1-2 (no baseline).
+        if len(self._historical_build_vols) < 3:
+            logger.debug(
+                "ORB cold-start skip [%s]: only %d session(s) of volume history",
+                self.instrument, len(self._historical_build_vols),
+            )
+            return
+        avg_vol = sum(self._historical_build_vols) / len(self._historical_build_vols)
+        if avg_vol > 0 and self._orb_build_vol < avg_vol * _ORB_MIN_VOL_RATIO:
+            logger.debug(
+                "ORB thin-volume skip [%s]: build_vol=%.0f < %.0f%% of avg=%.0f",
+                self.instrument, self._orb_build_vol, _ORB_MIN_VOL_RATIO * 100, avg_vol,
+            )
+            return
 
         if close > self._orb_high:
             self._open("buy",  close, stop=midpoint, target=close + 2.0 * orb_range)

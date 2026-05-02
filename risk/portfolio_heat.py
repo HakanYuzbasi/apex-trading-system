@@ -85,6 +85,10 @@ class PortfolioHeatTracker:
     def heat_breakdown(self) -> dict[str, float]:
         return dict(self._heat)
 
+    def reset(self) -> None:
+        """Clear all tracked heat (call at process startup to prevent stale state)."""
+        self._heat.clear()
+
 
 _PORTFOLIO_HEAT = PortfolioHeatTracker()
 

@@ -186,10 +186,17 @@ class VIXRegimeManager:
             except Exception as e:
                 logger.debug("VIX fetch failed for %s: %s", url, e)
 
-        # All sources failed — stamp last_fetch so cache prevents retry spam
-        self._last_fetch = datetime.now()
+        # All sources failed — do NOT update _last_fetch so the next call after
+        # cache_minutes will retry the live feeds (prevents indefinitely stale cache).
         if self._vix_cache is not None:
-            logger.debug("All VIX sources failed; using last cached data")
+            cache_age_min = (
+                (datetime.now() - self._last_fetch).total_seconds() / 60
+                if self._last_fetch else float("inf")
+            )
+            logger.warning(
+                "All VIX sources failed; serving cache (age=%.1f min)",
+                cache_age_min,
+            )
             return self._vix_cache
         logger.warning("All VIX sources failed and no cache available; using simulated data")
         return self._simulate_vix_data(lookback_days)

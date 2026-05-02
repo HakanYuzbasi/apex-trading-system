@@ -176,10 +176,12 @@ class DirectionalEquityStrategy(BaseStrategy):
     TRAIL_ACTIVATE_MULT = 1.5
     TRAIL_ATR_MULT      = 1.0
 
-    # Staged exits: close 50% at TP1, trail the remaining 50%.
+    # Staged exits: close 50% at TP1, another 25% at TP2, trail the final 25%.
     # TP1 is intentionally the same level as TRAIL_ACTIVATE_MULT so both
     # actions fire together: half is banked, the other half starts trailing.
+    # TP2 at 2.5×ATR banks an additional 25%, leaving only 25% to trail free.
     TP1_ATR_MULT = 1.5
+    TP2_ATR_MULT = 2.5
 
     # GodLevel: require at least 30 × 5-min bars (~2.5 h) before using ML signal
     _GL_MIN_BARS  = 30
@@ -226,7 +228,7 @@ class DirectionalEquityStrategy(BaseStrategy):
         # ── ML signal overlay (lazy-init) ─────────────────────────────────────
         self._godlevel: Any | None = None
         self._godlevel_init_failed = False
-        self._gl_signal: float  = 0.0    # last GodLevel signal
+        self._gl_signal: float | None = None  # last GodLevel signal; None until first successful fetch
         self._gl_conf:   float  = 0.0    # last GodLevel confidence
         self._gl_ts:     float  = 0.0    # monotonic time of last GL call
 
@@ -254,8 +256,9 @@ class DirectionalEquityStrategy(BaseStrategy):
         self._trail_hwm:       float = 0.0   # high-water-mark for long / low-water for short
         self._trailing_active: bool  = False
 
-        # Staged exits: track if partial TP1 has fired and original notional
+        # Staged exits: track if partial TP1/TP2 have fired and original notional
         self._half_closed:   bool  = False
+        self._tp2_closed:    bool  = False
         self._open_notional: float = 0.0
 
         # Session VWAP (equity only, resets each calendar day ET)
@@ -402,7 +405,7 @@ class DirectionalEquityStrategy(BaseStrategy):
     def _refresh_godlevel(self, closes: list[float]) -> None:
         """Update GodLevel signal at most once per 5-min bar (TTL = 5 min)."""
         now = time.monotonic()
-        if now - self._gl_ts < 290.0:   # refresh every ~5 min
+        if now - self._gl_ts < 300.0:   # refresh every 5 min
             return
         if len(closes) < self._GL_MIN_BARS:
             return
@@ -532,11 +535,15 @@ class DirectionalEquityStrategy(BaseStrategy):
 
     # ── Session gate ─────────────────────────────────────────────────────────
 
+    @staticmethod
+    def _et_mins() -> int:
+        now = datetime.now(_ET)
+        return now.hour * 60 + now.minute
+
     def _is_equity_auction_window(self) -> bool:
         if self._is_crypto or self.instrument.startswith("FOREX:"):
             return False
-        now = datetime.now(_ET)
-        mins = now.hour * 60 + now.minute
+        mins = self._et_mins()
         # Fix 6: extend opening block to 10:00 (full high-volatility open window).
         # Keep 3:30–4:00 block to avoid EOD positioning (separate from EOD close).
         return (9 * 60 + 30 <= mins < 10 * 60) or (15 * 60 + 30 <= mins < 16 * 60)
@@ -558,7 +565,7 @@ class DirectionalEquityStrategy(BaseStrategy):
         Returns None to veto the entry.
         """
         if not self._godlevel_ok():
-            return 1.0  # no ML data yet — neutral
+            return 0.9  # GodLevel offline — small uncertainty discount, not full veto
 
         gl_side = 1 if self._gl_signal > 0.05 else (-1 if self._gl_signal < -0.05 else 0)
 
@@ -721,6 +728,9 @@ class DirectionalEquityStrategy(BaseStrategy):
         conviction = self._rsi_conviction_scalar(rsi, oversold if side == "buy" else overbought, rsi_side)
         final_notional = self.leg_notional * ml_scalar * mtf_scalar * conviction
 
+        # Intraday vol gate: reduce notional when recent hourly realized vol is >2× long-run
+        final_notional *= self._intraday_vol_mult()
+
         # VIX-adaptive notional scaling (equity only)
         if not self._is_crypto:
             try:
@@ -758,6 +768,7 @@ class DirectionalEquityStrategy(BaseStrategy):
         self._trailing_active = False
         self._trail_hwm       = price
         self._half_closed     = False
+        self._tp2_closed      = False
         self._open_notional   = abs(notional)
         _NET_EXPOSURE.register(self.instrument, abs(notional), self._state)
         if self._state == "long":
@@ -777,7 +788,7 @@ class DirectionalEquityStrategy(BaseStrategy):
         target = notional if side == "buy" else -notional
         self._emit_signal(side, target, metadata={
             "trigger": "rsi_5m_entry",
-            "ml_signal": round(self._gl_signal, 4),
+            "ml_signal": round(self._gl_signal or 0.0, 4),
             "ml_conf":   round(self._gl_conf, 4),
             "mtf_aligned": self._mtf_aligned,
         })
@@ -786,7 +797,7 @@ class DirectionalEquityStrategy(BaseStrategy):
             "ml=%.2f mtf_adj=%.2f",
             side.upper(), self.instrument, price,
             self._stop_price, self._tp_price, abs(target),
-            self._gl_signal, self._mtf_conf_adj,
+            self._gl_signal or 0.0, self._mtf_conf_adj,
         )
 
     def _half_close(self, price: float, reason: str) -> None:
@@ -801,6 +812,43 @@ class DirectionalEquityStrategy(BaseStrategy):
             "DirectionalEquity PARTIAL EXIT %s %s @ %.4f | banked 50%% | remaining=$%.0f",
             exit_side.upper(), self.instrument, price, remaining,
         )
+
+    def _quarter_close(self, price: float, reason: str) -> None:
+        """Bank another 25% at TP2 (2.5×ATR) — leaves only 25% running free."""
+        self._tp2_closed = True
+        remaining  = self._open_notional * 0.25
+        exit_side  = "sell" if self._state == "long" else "buy"
+        target     = remaining if self._state == "long" else -remaining
+        self._emit_signal(exit_side, target, metadata={"trigger": reason, "partial": True})
+        _NET_EXPOSURE.register(self.instrument, remaining, self._state)
+        logger.info(
+            "DirectionalEquity TP2 EXIT %s %s @ %.4f | banked 75%% total | remaining=$%.0f",
+            exit_side.upper(), self.instrument, price, remaining,
+        )
+
+    def _intraday_vol_mult(self) -> float:
+        """Scale down new-entry notional by 35% when recent hourly vol is >2× long-run.
+
+        Uses the existing _1h_closes deque — no external calls needed. Returns 1.0
+        when there is insufficient history (conservative: don't penalise at cold start).
+        """
+        closes = list(self._1h_closes)
+        if len(closes) < 8:
+            return 1.0
+        import math
+        log_rets = [math.log(closes[i] / closes[i - 1])
+                    for i in range(1, len(closes)) if closes[i - 1] > 0]
+        if len(log_rets) < 7:
+            return 1.0
+        recent  = log_rets[-4:]
+        longrun = log_rets
+        var_recent  = sum(r * r for r in recent) / len(recent)
+        var_longrun = sum(r * r for r in longrun) / len(longrun)
+        if var_longrun < 1e-12:
+            return 1.0
+        if var_recent > 2.0 * var_longrun:
+            return 0.65
+        return 1.0
 
     # ── Position management ───────────────────────────────────────────────────
 
@@ -827,6 +875,12 @@ class DirectionalEquityStrategy(BaseStrategy):
                 self._trailing_active = True
                 return
 
+            # Staged exit: at TP2_ATR_MULT (2.5×ATR) bank another 25%, leave 25% running
+            if (self._half_closed and not self._tp2_closed
+                    and close >= self._entry_price + self.TP2_ATR_MULT * atr):
+                self._quarter_close(close, "partial_tp2")
+                return
+
             if self._trailing_active:
                 trail_stop = self._trail_hwm - trail_mult * atr
                 if close <= trail_stop:
@@ -849,6 +903,12 @@ class DirectionalEquityStrategy(BaseStrategy):
             if not self._half_closed and close <= self._entry_price - self.TP1_ATR_MULT * atr:
                 self._half_close(close, "partial_tp1")
                 self._trailing_active = True
+                return
+
+            # Staged exit: at TP2_ATR_MULT (2.5×ATR) bank another 25%, leave 25% running
+            if (self._half_closed and not self._tp2_closed
+                    and close <= self._entry_price - self.TP2_ATR_MULT * atr):
+                self._quarter_close(close, "partial_tp2")
                 return
 
             if self._trailing_active:
@@ -891,6 +951,7 @@ class DirectionalEquityStrategy(BaseStrategy):
         self._stop_price    = 0.0
         self._tp_price      = 0.0
         self._half_closed   = False
+        self._tp2_closed    = False
         self._open_notional = 0.0
 
     # ── Signal emit ───────────────────────────────────────────────────────────

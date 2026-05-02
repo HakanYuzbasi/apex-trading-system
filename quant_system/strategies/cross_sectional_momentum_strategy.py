@@ -51,12 +51,12 @@ class CrossSectionalMomentumStrategy(BaseStrategy):
     Reranks every ~1h, longs top N, shorts bottom N.
     """
 
-    RANK_INTERVAL_BARS = 12   # rerank every 12 × 5-min bars ≈ 1h
-    LOOKBACK_HOURS     = 20   # momentum window: 20 × 1h bars ≈ 4 sessions
-    SKIP_HOURS         = 1    # skip last 1h to avoid short-term reversal
-    N_POSITIONS        = 3    # long top-N and short bottom-N
-
-    MIN_HOURS_FOR_RANK = 5    # need at least 5 hourly bars before any signal
+    RANK_INTERVAL_BARS        = 12       # rerank every 12 × 5-min bars ≈ 1h
+    LOOKBACK_HOURS            = 20       # momentum window: 20 × 1h bars ≈ 4 sessions
+    SKIP_HOURS                = 1        # skip last 1h to avoid short-term reversal
+    N_POSITIONS               = 3        # long top-N and short bottom-N
+    MIN_HOURS_FOR_RANK        = 5        # need at least 5 hourly bars before any signal
+    WALLCLOCK_RERANK_INTERVAL = 65 * 60  # fallback: rerank if SPY feed silent >65 min
 
     def __init__(
         self,
@@ -97,7 +97,7 @@ class CrossSectionalMomentumStrategy(BaseStrategy):
         self._day_open:  dict[str, float | None] = {sym: None for sym in _UNIVERSE}
         self._day_date:  dict[str, object]        = {sym: None for sym in _UNIVERSE}
 
-        # Timestamp of last rerank (for logging)
+        # Timestamp of last rerank (for logging and wall-clock fallback)
         self._last_rank_ts: float = 0.0
 
         logger.info(
@@ -150,7 +150,8 @@ class CrossSectionalMomentumStrategy(BaseStrategy):
         self._5m_acc[sym]    = None
         self._1m_count[sym]  = 0
 
-        # Use SPY as the clock signal so we rerank on a consistent cadence
+        # Use SPY as the clock signal so we rerank on a consistent cadence.
+        # Any symbol triggers the wall-clock fallback when SPY feed is silent.
         if sym == "SPY":
             self._global_5m += 1
 
@@ -171,6 +172,14 @@ class CrossSectionalMomentumStrategy(BaseStrategy):
 
             if self._global_5m % self.RANK_INTERVAL_BARS == 0:
                 self._rerank_and_trade()
+
+        elif time.monotonic() - self._last_rank_ts > self.WALLCLOCK_RERANK_INTERVAL:
+            # SPY feed is lagging — use wall-clock to keep reranking alive.
+            logger.warning(
+                "XSecMomentum: SPY feed silent >%ds — triggering wall-clock rerank",
+                self.WALLCLOCK_RERANK_INTERVAL,
+            )
+            self._rerank_and_trade()
 
     def on_tick(self, event: TradeTick) -> None:
         pass
@@ -334,6 +343,21 @@ class CrossSectionalMomentumStrategy(BaseStrategy):
         lean = long_mult if side == "long" else short_mult
         notional *= lean
         target = notional if side == "long" else -notional
+
+        # Portfolio heat gate: approximate stop as 2% of current price (equity momentum
+        # typical intraday stop). Prevents aggregate dollar-risk exceeding the global cap.
+        closes = self._5m_closes.get(sym)
+        entry_price = closes[-1] if closes else 0.0
+        stop_price  = entry_price * (0.98 if side == "long" else 1.02)
+        try:
+            from risk.portfolio_heat import get_portfolio_heat
+            if not get_portfolio_heat().can_open(sym, entry_price, stop_price, abs(notional)):
+                logger.debug("XSec HEAT GATE: skip %s %s — portfolio too hot", side.upper(), sym)
+                return
+            get_portfolio_heat().register(sym, entry_price, stop_price, abs(notional))
+        except Exception:
+            pass
+
         self.emit_signal(
             instrument_id=sym,
             target_type="notional",
@@ -360,6 +384,11 @@ class CrossSectionalMomentumStrategy(BaseStrategy):
             stop_model="rank_reversal",
             metadata={"source": "cross_sectional_momentum", "trigger": "rank_exit"},
         )
+        try:
+            from risk.portfolio_heat import get_portfolio_heat
+            get_portfolio_heat().deregister(sym)
+        except Exception:
+            pass
         logger.info("XSecMomentum EXIT %s %s", sym, current)
 
     def close(self) -> None:

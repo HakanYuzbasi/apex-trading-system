@@ -158,7 +158,7 @@ class ShadowAccounting:
             if sovereign_equity > 0 and abs(sovereign_equity - local_total_equity) > 100.0:
                 logger.critical(f"🚨 SOVEREIGN EQUITY FAILURE: Sovereign={sovereign_equity} Local={local_total_equity} (Diff > $100)")
                 if self._notifier:
-                    await self._notifier.notify_text("CRITICAL: Multi-Venue Sovereign Equity deviated by > $50 from internal ledgers.")
+                    await self._notifier.notify_text("CRITICAL: Multi-Venue Sovereign Equity deviated by > $100 from internal ledgers.")
                 return
 
             if sovereign_equity > 0 and len(active_balances) >= 2:

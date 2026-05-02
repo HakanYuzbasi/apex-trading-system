@@ -2496,8 +2496,13 @@ async def main() -> None:
         sovereign_truth = alpaca_equity + ibkr_equity
         current_equity = ledger.total_equity()
         drift = abs(current_equity - sovereign_truth)
-        
-        if drift > 10.0: # $10 threshold for multi-venue
+
+        if sovereign_truth < 100.0:
+            logger.warning(
+                " Master Sync: sovereign_truth=$%.2f looks like a degraded broker response — skipping ledger adjustment",
+                sovereign_truth,
+            )
+        elif drift > 10.0: # $10 threshold for multi-venue
             logger.info(" Master Sync: Aligning ledger to Sovereign Truth ($%.2f -> $%.2f)", current_equity, sovereign_truth)
             ledger.cash += (sovereign_truth - current_equity)
             
@@ -2593,7 +2598,7 @@ async def main() -> None:
         lambda stream, symbols: _subscribe_crypto_stream(stream, symbols, bridge),
     )
 
-    #  TCA scheduled report (weekdays 16:05 ET) 
+    #  TCA scheduled report (weekdays 16:05 ET)
     tca_task_obj = ScheduledTask(
         "tca_daily_report",
         hour=16,
@@ -2604,7 +2609,56 @@ async def main() -> None:
         poll_interval_seconds=30.0,
     )
 
-    #  Signal / stop machinery 
+    #  Weekly GodLevel ML retrain (Sunday 02:00 ET)
+    async def _weekly_retrain_coro() -> None:
+        if datetime.now(_ET).weekday() != 6:   # 6 = Sunday
+            return
+        logger.info("Weekly retrain: starting GodLevel ML retrain …")
+        try:
+            import scripts.weekly_retrain as _wrt
+            await asyncio.to_thread(_wrt.main)
+            logger.info("Weekly retrain: complete")
+        except SystemExit as exc:
+            logger.warning("Weekly retrain: script exited with code %s", exc.code)
+        except Exception as exc:
+            logger.error("Weekly retrain: failed — %s", exc)
+
+    weekly_retrain_task_obj = ScheduledTask(
+        "weekly_godlevel_retrain",
+        hour=2,
+        minute=0,
+        tz=_ET,
+        weekdays_only=False,   # ScheduledTask normally blocks weekends; we handle day filter above
+        coro_factory=_weekly_retrain_coro,
+        poll_interval_seconds=60.0,
+    )
+
+    # IMP-1: Weekly walk-forward optimisation (Saturday 03:00 ET).
+    # Runs RealisticPortfolioBacktester WFO sweeps and logs best params for review.
+    async def _weekly_optimize_coro() -> None:
+        if datetime.now(_ET).weekday() != 5:   # 5 = Saturday
+            return
+        logger.info("Weekly WFO: starting realistic portfolio optimisation …")
+        try:
+            import scripts.run_realistic_optimization as _wfo
+            await asyncio.to_thread(_wfo.main)
+            logger.info("Weekly WFO: complete")
+        except SystemExit as exc:
+            logger.warning("Weekly WFO: script exited with code %s", exc.code)
+        except Exception as exc:
+            logger.error("Weekly WFO: failed — %s", exc)
+
+    weekly_optimize_task_obj = ScheduledTask(
+        "weekly_wfo_optimize",
+        hour=3,
+        minute=0,
+        tz=_ET,
+        weekdays_only=False,
+        coro_factory=_weekly_optimize_coro,
+        poll_interval_seconds=60.0,
+    )
+
+    #  Signal / stop machinery
     loop = asyncio.get_running_loop()
     for sig in (signal.SIGINT, signal.SIGTERM):
         try:
@@ -2653,6 +2707,12 @@ async def main() -> None:
     )
     tca_schedule_task = asyncio.create_task(
         tca_task_obj.run(stop_event), name="tca-daily-report-v3"
+    )
+    weekly_retrain_task = asyncio.create_task(
+        weekly_retrain_task_obj.run(stop_event), name="weekly-godlevel-retrain-v3"
+    )
+    weekly_optimize_task = asyncio.create_task(
+        weekly_optimize_task_obj.run(stop_event), name="weekly-wfo-optimize-v3"
     )
     dashboard_task = asyncio.create_task(
         _run_dashboard_updates(
@@ -2819,7 +2879,57 @@ async def main() -> None:
             f" | Vol lookback: {vol_lookback_window}d",
         )
 
-    #  Run until signalled 
+    # IMP-4: Clear any stale in-process heat state from a previous run in the same
+    # Python process (e.g. test suite restart).  Docker restarts clear this automatically,
+    # but an explicit reset is cheap and defensive.
+    try:
+        from risk.portfolio_heat import get_portfolio_heat
+        get_portfolio_heat().reset()
+        logger.info("PortfolioHeatTracker: reset on startup")
+    except Exception as _exc:
+        logger.warning("PortfolioHeatTracker reset failed (non-fatal): %s", _exc)
+
+    #  Pre-flight backtest validation (non-blocking — warns but never prevents trading)
+    async def _run_preflight_backtest() -> None:
+        try:
+            from scripts.run_startup_backtest import run_validation
+            code = await asyncio.to_thread(run_validation)
+            if code == 1:
+                logger.warning(
+                    "PRE-FLIGHT BACKTEST FAILED — strategy may be degraded. "
+                    "Review run_startup_backtest.py output before trusting signals."
+                )
+                await notifier.notify_system_event(
+                    "Pre-flight backtest FAILED",
+                    "Signal quality validation on last 90 days returned a failing result. "
+                    "System is running but signals may be degraded.",
+                )
+            elif code == 0:
+                logger.info("Pre-flight backtest PASSED — infrastructure validated.")
+        except Exception as exc:
+            logger.warning("Pre-flight backtest skipped (non-fatal): %s", exc)
+
+    asyncio.create_task(_run_preflight_backtest(), name="preflight-backtest-v3")
+
+    # IMP-3: Proactive BTC dominance refresh every 15 min so Kalman pairs
+    # always have a fresh reading even when pairs are flat for hours.
+    async def _btc_dominance_poll_loop() -> None:
+        from quant_system.risk.btc_dominance_monitor import get_btc_dominance_monitor
+        while not stop_event.is_set():
+            try:
+                await asyncio.to_thread(get_btc_dominance_monitor().force_refresh)
+            except Exception as exc:
+                logger.debug("BTC dominance poll: %s", exc)
+            try:
+                await asyncio.wait_for(stop_event.wait(), timeout=900.0)
+            except asyncio.TimeoutError:
+                pass
+
+    btc_dom_poll_task = asyncio.create_task(
+        _btc_dominance_poll_loop(), name="btc-dominance-poll-v3"
+    )
+
+    #  Run until signalled
     try:
         await stop_event.wait()
     finally:
@@ -2835,6 +2945,9 @@ async def main() -> None:
             broker_task,
             forex_data_task,
             tca_schedule_task,
+            weekly_retrain_task,
+            weekly_optimize_task,
+            btc_dom_poll_task,
             dashboard_task,
             ha_heartbeat_task,
             shadow_acc_task,

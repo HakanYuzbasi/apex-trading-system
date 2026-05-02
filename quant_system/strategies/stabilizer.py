@@ -135,6 +135,9 @@ class JohansenStabilizer:
                     self._readonly_warn_logged = False
                     self._backoff_attempt = 0
                     self._next_eval_at = 0.0
+                    # Start with fail count at threshold-2 so a quick relapse re-enters
+                    # Read-Only after 2 failures instead of needing a full fresh streak.
+                    self._consecutive_fails = max(0, self.fail_streak - 2)
                 else:
                     logger.info(
                         "JohansenStabilizer: Re-evaluation pass %d/%d (elapsed %.0fs / min %.0fs).",

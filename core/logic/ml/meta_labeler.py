@@ -41,6 +41,7 @@ class MetaLabeler:
                     return
                 self._model = booster
                 self._is_trained = True
+                self.is_bootstrapped_on_synthetic = False
                 logger.info("MetaLabeler: Loaded model from %s", self.model_path)
             except Exception as e:
                 logger.error("MetaLabeler: Failed to load model: %s. Quarantining.", e)

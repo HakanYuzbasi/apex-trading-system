@@ -416,7 +416,6 @@ class RiskManager:
     @staticmethod
     def _quantity_from_signal(event: SignalEvent, reference_price: float, available_cash: float) -> float:
         return RiskManager._quantity_from_signal_v2(event, event.target_value, reference_price, available_cash)
-        return abs(float(event.target_value))
 
     def _passes_margin_check(
         self,

@@ -12,6 +12,7 @@ class BaseStrategy(ABC):
     def __init__(self, event_bus: InMemoryEventBus) -> None:
         self.event_bus = event_bus
         self.strategy_id = self.__class__.__name__
+        self._sequence_id: int = 0
         self._subscriptions: tuple[Subscription, ...] = (
             self.event_bus.subscribe("bar", self._handle_bar),
             self.event_bus.subscribe("trade_tick", self._handle_tick),
@@ -62,7 +63,7 @@ class BaseStrategy(ABC):
             exchange_ts=now,
             received_ts=now,
             processed_ts=now,
-            sequence_id=0,
+            sequence_id=self._next_sequence_id(),
             source=f"strategy.{self.strategy_id}",
             strategy_id=self.strategy_id,
             side=side,
@@ -90,6 +91,10 @@ class BaseStrategy(ABC):
             return
 
         loop.create_task(self.event_bus.publish_async(event))
+
+    def _next_sequence_id(self) -> int:
+        self._sequence_id += 1
+        return self._sequence_id
 
     @staticmethod
     def _utc_now() -> datetime:
