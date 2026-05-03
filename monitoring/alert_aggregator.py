@@ -10,7 +10,7 @@ import time
 from datetime import datetime, timezone
 from enum import Enum
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, ClassVar
 
 import aiohttp
 import requests
@@ -28,6 +28,25 @@ class AlertSeverity(Enum):
 
 class AlertAggregator:
     """Aggregate and deduplicate alerts with channel escalation policies."""
+
+    _instance: ClassVar[Optional["AlertAggregator"]] = None
+
+    @classmethod
+    def set_instance(cls, instance: "AlertAggregator") -> None:
+        """Register the singleton instance."""
+        cls._instance = instance
+
+    @classmethod
+    def get_instance(cls) -> "AlertAggregator":
+        """Return the singleton instance.
+        Raises RuntimeError if called before set_instance().
+        """
+        if cls._instance is None:
+            raise RuntimeError(
+                "AlertAggregator not initialized. "
+                "Call AlertAggregator.set_instance() first."
+            )
+        return cls._instance
 
     def __init__(
         self,
@@ -262,44 +281,3 @@ class AlertAggregator:
         self.alert_cache.clear()
         logger.info("Alert cooldowns reset")
 
-
-_aggregator: Optional[AlertAggregator] = None
-
-
-def get_alert_aggregator(
-    cooldown_seconds: int = 300,
-    log_file: Optional[Path] = None,
-    slack_webhook_url: Optional[str] = None,
-    pagerduty_routing_key: Optional[str] = None,
-) -> AlertAggregator:
-    """Return singleton alert aggregator."""
-    global _aggregator
-    if _aggregator is None:
-        _aggregator = AlertAggregator(
-            cooldown_seconds=cooldown_seconds,
-            log_file=log_file,
-            slack_webhook_url=slack_webhook_url,
-            pagerduty_routing_key=pagerduty_routing_key,
-        )
-    return _aggregator
-
-
-def send_alert(
-    alert_type: str,
-    message: str,
-    severity: AlertSeverity = AlertSeverity.WARNING,
-    metadata: Optional[Dict[str, Any]] = None,
-) -> None:
-    """Send a routed alert using the global aggregator."""
-    aggregator = get_alert_aggregator()
-    aggregator.send_alert(alert_type, message, severity, metadata)
-
-
-def fire_alert(
-    alert_type: str,
-    message: str,
-    severity: AlertSeverity = AlertSeverity.WARNING,
-    metadata: Optional[Dict[str, Any]] = None,
-) -> None:
-    """Non-blocking, rate-limited alert via global aggregator. Safe to call anywhere."""
-    get_alert_aggregator().fire_alert(alert_type, message, severity, metadata)

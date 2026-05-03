@@ -7,7 +7,7 @@ Monitors data staleness and alerts when prices or market data become outdated.
 import logging
 from datetime import datetime
 from typing import Dict, Optional
-from monitoring.alert_aggregator import send_alert, AlertSeverity
+from monitoring.alert_aggregator import AlertAggregator, AlertSeverity
 
 logger = logging.getLogger(__name__)
 
@@ -42,7 +42,7 @@ class DataFreshnessMonitor:
         age_seconds = (datetime.now() - price_timestamp).total_seconds()
         
         if age_seconds > self.price_staleness_threshold:
-            send_alert(
+            AlertAggregator.get_instance().send_alert(
                 alert_type="STALE_PRICE_DATA",
                 message=f"Stale price for {symbol}: {age_seconds:.0f}s old (price: ${current_price:.2f})",
                 severity=AlertSeverity.WARNING,
@@ -67,7 +67,7 @@ class DataFreshnessMonitor:
         try:
             state_time = datetime.fromisoformat(state_timestamp.replace("Z", "+00:00"))
         except (ValueError, AttributeError):
-            send_alert(
+            AlertAggregator.get_instance().send_alert(
                 alert_type="INVALID_STATE_TIMESTAMP",
                 message=f"Invalid state timestamp: {state_timestamp}",
                 severity=AlertSeverity.ERROR
@@ -79,7 +79,7 @@ class DataFreshnessMonitor:
         age_seconds = (now - state_time).total_seconds()
         
         if age_seconds > self.state_staleness_threshold:
-            send_alert(
+            AlertAggregator.get_instance().send_alert(
                 alert_type="STALE_TRADING_STATE",
                 message=f"Trading state is stale: {age_seconds:.0f}s old",
                 severity=AlertSeverity.ERROR,
@@ -111,7 +111,7 @@ class DataFreshnessMonitor:
             gap_seconds = (last_update - last_check).total_seconds()
             
             if gap_seconds > expected_interval_seconds * 2:
-                send_alert(
+                AlertAggregator.get_instance().send_alert(
                     alert_type="MARKET_DATA_GAP",
                     message=f"Market data gap for {symbol}: {gap_seconds:.0f}s since last update",
                     severity=AlertSeverity.WARNING,
@@ -142,7 +142,7 @@ class DataFreshnessMonitor:
         """
         # Check for zero or negative prices
         if current_price <= 0:
-            send_alert(
+            AlertAggregator.get_instance().send_alert(
                 alert_type="INVALID_PRICE",
                 message=f"Invalid price for {symbol}: ${current_price:.2f}",
                 severity=AlertSeverity.CRITICAL,
@@ -155,7 +155,7 @@ class DataFreshnessMonitor:
             change_pct = abs((current_price - previous_price) / previous_price * 100)
             
             if change_pct > max_change_pct:
-                send_alert(
+                AlertAggregator.get_instance().send_alert(
                     alert_type="EXTREME_PRICE_CHANGE",
                     message=f"Extreme price change for {symbol}: {change_pct:.1f}% "
                            f"(${previous_price:.2f} → ${current_price:.2f})",

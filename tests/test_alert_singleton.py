@@ -2,6 +2,7 @@ import pytest
 import logging
 from unittest.mock import MagicMock
 from core.alert_aggregator import AlertAggregator
+from monitoring.alert_aggregator import AlertAggregator as MonitoringAggregator
 
 def test_get_instance_returns_registered_instance():
     # Setup
@@ -50,3 +51,22 @@ def test_no_bare_global_in_module():
     assert "_global_aggregator" not in module.__dict__
     assert "get_alert_aggregator" not in module.__dict__
     assert "alert_agg" not in module.__dict__
+
+def test_monitoring_aggregator_get_instance_returns_singleton():
+    # Setup
+    mock_agg = MagicMock(spec=MonitoringAggregator)
+    MonitoringAggregator.set_instance(mock_agg)
+    
+    # Verify
+    assert MonitoringAggregator.get_instance() is mock_agg
+    
+    # Cleanup
+    MonitoringAggregator._instance = None
+
+def test_monitoring_aggregator_raises_before_set():
+    # Setup
+    MonitoringAggregator._instance = None
+    
+    # Verify
+    with pytest.raises(RuntimeError, match="AlertAggregator not initialized"):
+        MonitoringAggregator.get_instance()

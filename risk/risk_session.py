@@ -16,7 +16,7 @@ import collections
 from pathlib import Path
 
 from config import ApexConfig
-from monitoring.alert_aggregator import fire_alert, AlertSeverity as AlertSev
+from monitoring.alert_aggregator import AlertAggregator, AlertSeverity as AlertSev
 
 logger = logging.getLogger(__name__)
 
@@ -72,7 +72,7 @@ class CircuitBreaker:
             logger.error(
                 f"   Bar cooldown: {ApexConfig.CIRCUIT_BREAKER_COOLDOWN_BARS} bars"
             )
-            fire_alert("circuit_breaker", f"Circuit breaker TRIPPED: {reason}", AlertSev.CRITICAL)
+            AlertAggregator.get_instance().fire_alert("circuit_breaker", f"Circuit breaker TRIPPED: {reason}", AlertSev.CRITICAL)
 
     def tick_bar(self) -> bool:
         """
@@ -103,7 +103,7 @@ class CircuitBreaker:
                 self.bars_since_trip, cooldown_bars,
             )
             self.reset()
-            fire_alert(
+            AlertAggregator.get_instance().fire_alert(
                 "circuit_breaker",
                 f"Circuit breaker bar cooldown complete "
                 f"({self.bars_since_trip}/{cooldown_bars} bars) — trading resumed",
@@ -130,7 +130,7 @@ class CircuitBreaker:
         if datetime.now() - self.trip_time >= cooldown:
             logger.info("✅ Circuit breaker cooldown complete - trading resumed")
             self.reset()
-            fire_alert("circuit_breaker", "Circuit breaker cooldown complete — trading resumed", AlertSev.INFO)
+            AlertAggregator.get_instance().fire_alert("circuit_breaker", "Circuit breaker cooldown complete — trading resumed", AlertSev.INFO)
             return True
 
         remaining = cooldown - (datetime.now() - self.trip_time)

@@ -50,7 +50,7 @@ from data.social.validator import validate_social_risk_inputs
 from data.social.contract import write_social_risk_inputs
 from monitoring.performance_tracker import PerformanceTracker
 from monitoring.live_monitor import LiveMonitor
-from monitoring.alert_aggregator import fire_alert, AlertSeverity as AlertSev
+from monitoring.alert_aggregator import AlertAggregator, AlertSeverity as AlertSev
 from config import ApexConfig
 from backtesting.governor_walkforward import WalkForwardTuningConfig, tune_policies
 
@@ -386,8 +386,12 @@ class ApexTradingSystem:
         logger.info("=" * 80)
         logger.info(f"🚀 {ApexConfig.SYSTEM_NAME} V{ApexConfig.VERSION} [Tenant: {self.tenant_id}] [Session: {self.session_type}]")
         logger.info(f"   Universe: {len(self._session_symbols)} symbols | Capital: ${self._session_config['initial_capital']:,}")
-        logger.info("=" * 80)
-        
+        # Initialize AlertAggregator singleton (Fix 3E)
+        try:
+            AlertAggregator.get_instance()
+        except RuntimeError:
+            AlertAggregator.set_instance(AlertAggregator(cooldown_seconds=300))
+
         self.ibkr: Optional[IBKRConnector] = None
         self.alpaca = None
         self.advanced_executor: Optional[AdvancedOrderExecutor] = None
@@ -2990,20 +2994,20 @@ class ApexTradingSystem:
                 },
             )
             if update.current_status == "blocked":
-                fire_alert(
+                AlertAggregator.get_instance().fire_alert(
                     "shadow_deployment_blocked",
                     f"Shadow promotion blocked for {runtime_state.get('candidate_id')}: "
                     + ", ".join(list(runtime_state.get("reasons", []) or [])[:2]),
                     AlertSev.WARNING,
                 )
             elif update.current_status == "staged":
-                fire_alert(
+                AlertAggregator.get_instance().fire_alert(
                     "shadow_deployment_staged",
                     f"Shadow candidate {runtime_state.get('candidate_id')} staged for manual approval.",
                     AlertSev.INFO,
                 )
             elif update.current_status in {"ready", "active"}:
-                fire_alert(
+                AlertAggregator.get_instance().fire_alert(
                     "shadow_deployment_ready",
                     f"Shadow candidate {runtime_state.get('candidate_id')} passed promotion gate.",
                     AlertSev.INFO,
@@ -3077,7 +3081,7 @@ class ApexTradingSystem:
                     next_state.worst_scenario_name or next_state.worst_scenario_id,
                     next_state.worst_portfolio_return * 100.0,
                 )
-                fire_alert(
+                AlertAggregator.get_instance().fire_alert(
                     "intraday_stress_halt",
                     f"Intraday stress halt active: {next_state.reason}",
                     AlertSev.CRITICAL,
@@ -3090,7 +3094,7 @@ class ApexTradingSystem:
                     next_state.worst_scenario_name or next_state.worst_scenario_id,
                     next_state.worst_portfolio_return * 100.0,
                 )
-                fire_alert(
+                AlertAggregator.get_instance().fire_alert(
                     "intraday_stress_warning",
                     f"Intraday stress sizing active: {next_state.reason}",
                     AlertSev.WARNING,
@@ -4275,7 +4279,7 @@ class ApexTradingSystem:
                     "⚠️ FEATURE DRIFT: %d macro features out-of-distribution — triggering recalibration",
                     len(drifted),
                 )
-                fire_alert(
+                AlertAggregator.get_instance().fire_alert(
                     "feature_drift",
                     f"{len(drifted)} macro features drifted from baseline "
                     f"({', '.join(drifted.keys())}) — recalibrating thresholds",
@@ -5656,7 +5660,7 @@ class ApexTradingSystem:
                     self.kill_switch.triggered_at,
                     self.kill_switch.reason,
                 )
-                fire_alert(
+                AlertAggregator.get_instance().fire_alert(
                     "kill_switch",
                     f"Kill-switch restored from disk (reason={self.kill_switch.reason})",
                     AlertSev.CRITICAL,
@@ -7914,7 +7918,7 @@ class ApexTradingSystem:
                     symbol, _sc_sector, _sc_pct * 100,
                     getattr(ApexConfig, "SECTOR_CONCENTRATION_MAX_PCT", 0.25) * 100,
                 )
-                fire_alert(
+                AlertAggregator.get_instance().fire_alert(
                     "sector_concentration",
                     f"Sector guard blocked {symbol}: {_sc_sector} at {_sc_pct*100:.1f}% "
                     f"(max={getattr(ApexConfig, 'SECTOR_CONCENTRATION_MAX_PCT', 0.25)*100:.0f}%)",
@@ -8452,7 +8456,7 @@ class ApexTradingSystem:
                                 symbol, _fail_count, _oe,
                             )
                             if _fail_count >= 3:
-                                fire_alert(
+                                AlertAggregator.get_instance().fire_alert(
                                     "orphan_exit_stuck",
                                     f"Orphan position {symbol} (qty={orphan_qty}) failed "
                                     f"exit {_fail_count}x — manual intervention required",
@@ -14785,7 +14789,7 @@ class ApexTradingSystem:
                     recon_snapshot.reason,
                     recon_snapshot.breach_streak,
                 )
-                fire_alert(
+                AlertAggregator.get_instance().fire_alert(
                     "equity_recon_block",
                     f"Equity reconciliation block latched: gap=${recon_snapshot.gap_dollars:+.2f} "
                     f"({recon_snapshot.gap_pct*100:.2f}%), reason={recon_snapshot.reason}",
@@ -14798,7 +14802,7 @@ class ApexTradingSystem:
                     recon_snapshot.gap_pct * 100,
                     recon_snapshot.healthy_streak,
                 )
-                fire_alert("equity_recon_block", "Equity reconciliation block cleared", AlertSev.INFO)
+                AlertAggregator.get_instance().fire_alert("equity_recon_block", "Equity reconciliation block cleared", AlertSev.INFO)
 
             # Keep baseline/risk state sane when broker APIs temporarily return invalid values.
             self.risk_manager.heal_baselines(current_capital=current_value, source="check_risk")
@@ -14827,7 +14831,7 @@ class ApexTradingSystem:
                     _intraday_dd.get("window_minutes", 60),
                     _intraday_dd.get("limit", 0.015) * 100,
                 )
-                fire_alert(
+                AlertAggregator.get_instance().fire_alert(
                     "intraday_dd_gate",
                     f"Intraday DD gate tripped: {abs(_intraday_dd.get('rolling_loss_pct', 0.0))*100:.2f}% "
                     f"loss in last {_intraday_dd.get('window_minutes', 60)} min "
@@ -14836,7 +14840,7 @@ class ApexTradingSystem:
                 )
             elif _prev_gate and not self._intraday_dd_gate_active:
                 logger.info("✅ INTRADAY DD GATE cleared — entries re-enabled")
-                fire_alert("intraday_dd_gate", "Intraday DD gate cleared — entries re-enabled", AlertSev.INFO)
+                AlertAggregator.get_instance().fire_alert("intraday_dd_gate", "Intraday DD gate cleared — entries re-enabled", AlertSev.INFO)
 
             await self.risk_manager.save_state_async()
             await self.performance_tracker.record_equity(current_value)
@@ -15185,7 +15189,7 @@ class ApexTradingSystem:
 
             if kill_state and kill_state.active and not self._kill_switch_last_active:
                 logger.critical("🛑 HARD KILL-SWITCH TRIGGERED: %s", kill_state.reason)
-                fire_alert("kill_switch", f"HARD KILL-SWITCH TRIGGERED: {kill_state.reason}", AlertSev.CRITICAL)
+                AlertAggregator.get_instance().fire_alert("kill_switch", f"HARD KILL-SWITCH TRIGGERED: {kill_state.reason}", AlertSev.CRITICAL)
                 if getattr(self, '_alert_manager', None) is not None:
                     _ks_pnl = float(loss_check.get('daily_pnl', 0.0))
                     asyncio.create_task(self._alert_manager.send_kill_switch_alert(
@@ -17120,7 +17124,7 @@ class ApexTradingSystem:
                     # Log regime change if significant
                     if self._last_vix_regime is not None and self._last_vix_regime != vix_state.regime:
                         logger.warning(f"🚨 REGIME CHANGE: {self._last_vix_regime.value} -> {vix_state.regime.value} (VIX: {vix_state.current_vix:.1f})")
-                        fire_alert(
+                        AlertAggregator.get_instance().fire_alert(
                             "regime_change",
                             f"Regime change: {self._last_vix_regime.value} → {vix_state.regime.value} "
                             f"(VIX={vix_state.current_vix:.1f})",
@@ -17746,13 +17750,13 @@ class ApexTradingSystem:
                                         _bg_flags,
                                     )
                                     if _bg_record.mode == "paper":
-                                        fire_alert(
+                                        AlertAggregator.get_instance().fire_alert(
                                             "backtest_gate_paper",
                                             f"BacktestGate switched to PAPER — flags: {_bg_flags}",
                                             AlertSev.WARNING,
                                         )
                                     elif _bg_record.mode == "live":
-                                        fire_alert(
+                                        AlertAggregator.get_instance().fire_alert(
                                             "backtest_gate_live",
                                             "BacktestGate recovered to LIVE mode",
                                             AlertSev.INFO,
