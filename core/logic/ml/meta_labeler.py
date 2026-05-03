@@ -8,7 +8,14 @@ import numpy as np
 
 logger = logging.getLogger(__name__)
 
-FEATURE_NAMES = ["kalman_residual", "bayesian_prob", "vix_level", "sector_concentration"]
+FEATURE_NAMES = [
+    "kalman_residual", 
+    "bayesian_prob", 
+    "vix_level", 
+    "sector_concentration",
+    "relative_volume",
+    "market_impact"
+]
 N_FEATURES = len(FEATURE_NAMES)
 
 
@@ -31,7 +38,17 @@ class MetaLabeler:
     def _load_model(self) -> None:
         if os.path.exists(self.model_path):
             try:
-                booster = lgb.Booster(model_file=self.model_path)
+                import concurrent.futures
+                from config import ApexConfig
+                timeout = getattr(ApexConfig, "MODEL_LOAD_TIMEOUT_SECONDS", 15.0)
+
+                def _load_booster():
+                    return lgb.Booster(model_file=self.model_path)
+
+                with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+                    future = executor.submit(_load_booster)
+                    booster = future.result(timeout=timeout)
+
                 if booster.num_feature() != N_FEATURES:
                     logger.warning(
                         "MetaLabeler: stale model has %d features, expected %d. Quarantining.",
@@ -61,6 +78,8 @@ class MetaLabeler:
         bayesian_prob: float = 0.5, 
         vix_level: float = 20.0, 
         sector_concentration: float = 0.0,
+        relative_volume: float = 1.0,
+        market_impact: float = 0.0,
         **kwargs
     ) -> float:
         """
@@ -77,6 +96,8 @@ class MetaLabeler:
             float(bayesian_prob),
             float(vix_level),
             float(sector_concentration),
+            float(relative_volume),
+            float(market_impact),
         ]])
 
         try:
@@ -168,6 +189,8 @@ class MetaLabeler:
                     float(t.get("bayesian_prob",   0.5) or 0.5),
                     float(t.get("vix_level",       20.0) or 20.0),
                     float(t.get("sector_concentration", 0.0) or 0.0),
+                    float(t.get("relative_volume", 1.0) or 1.0),
+                    float(t.get("market_impact", 0.0) or 0.0),
                 ]
                 label = 1 if float(t.get("net_pnl", 0.0) or 0.0) > 0 else 0
                 rows_X.append(x_row)

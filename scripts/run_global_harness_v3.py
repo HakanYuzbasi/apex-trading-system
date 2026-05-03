@@ -1508,69 +1508,7 @@ async def _run_broker_forever(broker: AlpacaBroker, stop_event: asyncio.Event) -
             backoff_seconds = min(backoff_seconds * 2.0, 60.0)
 
 
-async def _run_forex_data_loop(
-    ibkr_connector: Any,
-    forex_symbols_fn: "Callable[[], tuple[str, ...]]",
-    event_bus: InMemoryEventBus,
-    stop_event: asyncio.Event,
-    poll_interval: float = 60.0,
-) -> None:
-    """
-    Poll IBKR every minute for forex mid-prices and synthesize BarEvents so
-    KalmanPairsStrategy can process them on the shared event bus.
-    No data is emitted when IBKR is offline — pairs stay in warmup until TWS reconnects.
-    """
-    # Wait for IBKR to fully connect before first poll attempt.
-    await asyncio.sleep(30.0)
 
-    _seq = 0
-    while not stop_event.is_set():
-        symbols = forex_symbols_fn()
-        # Only poll when IBKR is genuinely connected (respects offline_mode flag).
-        ibkr_live = (
-            ibkr_connector is not None
-            and hasattr(ibkr_connector, "is_connected")
-            and ibkr_connector.is_connected()
-        )
-        if symbols and ibkr_live:
-            for symbol in symbols:
-                try:
-                    quote = await ibkr_connector.get_quote(symbol)
-                    if not quote or not quote.get("mid"):
-                        continue
-                    mid = float(quote["mid"])
-                    now = datetime.now(timezone.utc)
-                    bar = BarEvent(
-                        instrument_id=symbol,
-                        exchange_ts=now,
-                        received_ts=now,
-                        processed_ts=now,
-                        sequence_id=_seq,
-                        source="ibkr.forex.poll",
-                        open_price=mid,
-                        high_price=mid,
-                        low_price=mid,
-                        close_price=mid,
-                        volume=1.0,
-                        metadata={
-                            "venue": "ibkr",
-                            "bid": quote.get("bid", mid),
-                            "ask": quote.get("ask", mid),
-                        },
-                    )
-                    _seq += 1
-                    await event_bus.publish_async(bar)
-                    logger.debug("Forex bar published: %s mid=%.5f", symbol, mid)
-                except asyncio.CancelledError:
-                    raise
-                except Exception as exc:
-                    logger.debug("Forex data poll error for %s: %s", symbol, exc)
-        elif symbols and not ibkr_live:
-            logger.debug("Forex data loop: IBKR offline, skipping poll for %d symbols", len(symbols))
-        try:
-            await asyncio.sleep(poll_interval)
-        except asyncio.CancelledError:
-            break
 
 
 def _subscribe_stock_stream(
@@ -2516,7 +2454,11 @@ async def main() -> None:
         model_path="run_state/models/ppo_execution_v1.zip"
     )
     broker = AlpacaBroker(trading_client, event_bus, limit_chaser=neural_sniper)
-    ibkr_broker = IBKRBroker(ibkr_connector, event_bus)
+    ibkr_broker = IBKRBroker(
+        ibkr_connector, 
+        event_bus, 
+        forex_symbols_fn=controller.configured_forex_symbols
+    )
     ibkr_broker.start()
     eod_liquidator = EODLiquidator(ledger, event_bus, session_manager=session_manager)
     
@@ -2583,6 +2525,7 @@ async def main() -> None:
         single_venue=(_broker_mode != "both"),
     )
     
+    health_monitor.set_force_sync_callback(shadow_accounting.force_sync)
     health_monitor.start()
     shadow_accounting.start()
 
@@ -2694,16 +2637,6 @@ async def main() -> None:
     )
     broker_task = asyncio.create_task(
         _run_broker_forever(broker, stop_event), name="alpaca-broker-supervisor-v3"
-    )
-    forex_data_task = asyncio.create_task(
-        _run_forex_data_loop(
-            ibkr_connector=ibkr_connector,
-            forex_symbols_fn=controller.configured_forex_symbols,
-            event_bus=event_bus,
-            stop_event=stop_event,
-            poll_interval=60.0,
-        ),
-        name="ibkr-forex-data-v3",
     )
     tca_schedule_task = asyncio.create_task(
         tca_task_obj.run(stop_event), name="tca-daily-report-v3"
@@ -2943,7 +2876,6 @@ async def main() -> None:
             stock_task,
             crypto_task,
             broker_task,
-            forex_data_task,
             tca_schedule_task,
             weekly_retrain_task,
             weekly_optimize_task,

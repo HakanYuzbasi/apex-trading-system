@@ -16,6 +16,7 @@ from core.symbols import AssetClass, parse_symbol
 from quant_system.core.bus import InMemoryEventBus, Subscription
 from quant_system.events.execution import ExecutionEvent
 from quant_system.events.order import OrderEvent
+from quant_system.events.market import BarEvent
 
 logger = logging.getLogger(__name__)
 
@@ -35,22 +36,88 @@ class IBKRBroker:
         self,
         ibkr_connector: Any,
         event_bus: InMemoryEventBus,
+        forex_symbols_fn: Optional[Callable[[], tuple[str, ...]]] = None,
     ) -> None:
         self._ibkr = ibkr_connector
         self._event_bus = event_bus
+        self._forex_symbols_fn = forex_symbols_fn
         self._sequence = count()
         self._subscription: Optional[Subscription] = None
+        self._poll_task: Optional[asyncio.Task] = None
 
     def start(self) -> None:
         self._subscription = self._event_bus.subscribe(
             "order", self._on_order_event, is_async=True
         )
-        logger.info("IBKRBroker started — handling FOREX order events via IBKR TWS")
+        # Start background polling as a non-blocking asyncio task
+        self._poll_task = asyncio.create_task(self._poll_loop())
+        logger.info("IBKRBroker started — handling FOREX order events and background polling")
 
-    def close(self) -> None:
+    def stop(self) -> None:
         if self._subscription is not None:
             self._event_bus.unsubscribe(self._subscription.token)
             self._subscription = None
+        if self._poll_task:
+            self._poll_task.cancel()
+            self._poll_task = None
+
+    async def _poll_loop(self) -> None:
+        """Background polling loop for IBKR data (e.g. Forex)."""
+        _poll_seq = 0
+        poll_interval = 60.0  # As requested: 60s loop
+        
+        while True:
+            try:
+                if not self._forex_symbols_fn or not self._ibkr.is_connected():
+                    await asyncio.sleep(10.0)
+                    continue
+
+                symbols = self._forex_symbols_fn()
+                if not symbols:
+                    await asyncio.sleep(10.0)
+                    continue
+
+                for symbol in symbols:
+                    try:
+                        # Use a timeout to prevent hanging the task if IBKR is slow
+                        quote = await asyncio.wait_for(self._ibkr.get_quote(symbol), timeout=10.0)
+                        if not quote or not quote.get("mid"):
+                            continue
+                        
+                        mid = float(quote["mid"])
+                        now = datetime.now(timezone.utc)
+                        bar = BarEvent(
+                            instrument_id=symbol,
+                            exchange_ts=now,
+                            received_ts=now,
+                            processed_ts=now,
+                            sequence_id=_poll_seq,
+                            source="ibkr.forex.poll",
+                            open_price=mid,
+                            high_price=mid,
+                            low_price=mid,
+                            close_price=mid,
+                            volume=1.0,
+                            metadata={
+                                "venue": "ibkr",
+                                "bid": quote.get("bid", mid),
+                                "ask": quote.get("ask", mid),
+                            },
+                        )
+                        _poll_seq += 1
+                        await self._event_bus.publish_async(bar)
+                        logger.debug("Forex bar published: %s mid=%.5f", symbol, mid)
+                    except asyncio.TimeoutError:
+                        logger.warning(f"Forex poll timeout for {symbol}")
+                    except Exception as e:
+                        logger.debug(f"Forex poll error for {symbol}: {e}")
+
+                await asyncio.sleep(poll_interval)
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.error(f"IBKRBroker poll loop error: {e}")
+                await asyncio.sleep(10.0)
 
     async def _on_order_event(self, event: Any) -> None:
         if not isinstance(event, OrderEvent):

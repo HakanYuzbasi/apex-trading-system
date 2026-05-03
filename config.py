@@ -108,6 +108,8 @@ class ApexConfig:
     IBKR_FX_EXCHANGE: str = os.getenv("APEX_IBKR_FX_EXCHANGE", "IDEALPRO")
     IBKR_CRYPTO_EXCHANGE: str = os.getenv("APEX_IBKR_CRYPTO_EXCHANGE", "PAXOS")
     IBKR_CONNECT_TIMEOUT: int = int(os.getenv("APEX_IBKR_CONNECT_TIMEOUT", "10"))
+    DEFAULT_HTTP_TIMEOUT: float = float(os.getenv("APEX_DEFAULT_HTTP_TIMEOUT", "10.0"))
+    WATCHDOG_HARD_EXIT_TIMEOUT: float = float(os.getenv("APEX_WATCHDOG_HARD_EXIT_TIMEOUT", "120.0"))
 
     # ═══════════════════════════════════════════════════════════════
     # FX/CRYPTO PAPER TRADING TUNING (OPTIMIZE FOR OBSERVABILITY)

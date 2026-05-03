@@ -285,7 +285,12 @@ class AlpacaBroker:
 
         self._orders_by_client_order_id[event.order_id] = event
         try:
-            submitted_order = await asyncio.to_thread(self._trading_client.submit_order, alpaca_request)
+            from config import ApexConfig
+            timeout = getattr(ApexConfig, "ALPACA_HTTP_TIMEOUT_SECONDS", 15.0)
+            submitted_order = await asyncio.wait_for(
+                asyncio.to_thread(self._trading_client.submit_order, alpaca_request),
+                timeout=timeout
+            )
         except Exception as exc:
             err_str = str(exc).lower()
             # Wash-trade rejection: Alpaca refuses to place an order on the same
@@ -328,8 +333,11 @@ class AlpacaBroker:
                             conflict_id, _now - self._pending_cancels[conflict_id],
                         )
                     else:
-                        await asyncio.to_thread(
-                            self._trading_client.cancel_order_by_id, conflict_id
+                        from config import ApexConfig
+                        timeout = getattr(ApexConfig, "ALPACA_HTTP_TIMEOUT_SECONDS", 15.0)
+                        await asyncio.wait_for(
+                            asyncio.to_thread(self._trading_client.cancel_order_by_id, conflict_id),
+                            timeout=timeout
                         )
                         self._pending_cancels[conflict_id] = _now
                         self._cycle_cancel_ids.add(conflict_id)
@@ -470,10 +478,15 @@ class AlpacaBroker:
             limit_price=new_limit_price,
         )
         try:
-            replaced_order = await asyncio.to_thread(
-                self._trading_client.replace_order_by_id,
-                state.venue_order_id,
-                replace_request,
+            from config import ApexConfig
+            timeout = getattr(ApexConfig, "ALPACA_HTTP_TIMEOUT_SECONDS", 15.0)
+            replaced_order = await asyncio.wait_for(
+                asyncio.to_thread(
+                    self._trading_client.replace_order_by_id,
+                    state.venue_order_id,
+                    replace_request,
+                ),
+                timeout=timeout
             )
         except Exception as exc:
             err_str = str(exc).lower()

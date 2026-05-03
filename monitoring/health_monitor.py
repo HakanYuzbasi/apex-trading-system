@@ -4,8 +4,10 @@ import time
 import threading
 import logging
 import asyncio
+import os
+import sys
 from datetime import datetime
-from typing import Any, Optional
+from typing import Any, Optional, Callable
 
 logger = logging.getLogger("health_monitor")
 
@@ -25,10 +27,24 @@ class HealthMonitor:
         self._hang_threshold = hang_threshold_seconds
         self._check_interval = check_interval_seconds
         
+        # Hard exit threshold (default 120s)
+        try:
+            from config import ApexConfig
+            self._hard_exit_threshold = getattr(ApexConfig, "WATCHDOG_HARD_EXIT_TIMEOUT", 120.0)
+        except Exception:
+            self._hard_exit_threshold = 120.0
+            
+        self._force_sync_callback: Optional[Callable] = None
+        
         self._last_heartbeat = time.time()
         self._stop_event = threading.Event()
         self._watchdog_thread: Optional[threading.Thread] = None
         self._is_hanging = False
+        self._hard_exit_triggered = False
+
+    def set_force_sync_callback(self, callback: Callable) -> None:
+        """Set a callback to be executed before hard-exit (e.g. shadow_accounting.force_sync)."""
+        self._force_sync_callback = callback
 
     def heartbeat(self) -> None:
         """Update the last heartbeat timestamp (call from main loop)."""
@@ -70,14 +86,32 @@ class HealthMonitor:
                 logger.error(msg)
                 
                 if self._notifier:
-                    # Notifier is likely async, but we are in a thread.
-                    # We use asyncio.run_coroutine_threadsafe if we have a loop,
-                    # or just a synchronous fallback if possible.
-                    # For this harness, we'll try to reach the notifier.
                     try:
+                        # Attempt async notification in a one-off loop if needed
                         asyncio.run(self._notifier.notify_text(msg))
                     except Exception as e:
                         logger.error(f"Failed to send hang alert: {e}")
+
+            # Hard Exit Check
+            if gap > self._hard_exit_threshold and not self._hard_exit_triggered:
+                self._hard_exit_triggered = True
+                logger.critical(
+                    f"💀 CRITICAL: SYSTEM HANG PERSISTED FOR {gap:.1f}s. TRIGGERING HARD EXIT!"
+                )
+                
+                # 1. Attempt Force Sync
+                if self._force_sync_callback:
+                    try:
+                        logger.info("Attempting emergency state sync before exit...")
+                        self._force_sync_callback()
+                    except Exception as e:
+                        logger.error(f"Emergency sync failed: {e}")
+                
+                # 2. Final log flush
+                logging.shutdown()
+                
+                # 3. Hard Exit (force container restart)
+                os._exit(1)
             
             time.sleep(self._check_interval)
 

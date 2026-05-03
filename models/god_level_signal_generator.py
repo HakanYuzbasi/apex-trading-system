@@ -807,8 +807,17 @@ class GodLevelSignalGenerator:
             return False
 
         try:
-            with open(model_path, 'rb') as f:
-                model_data = pickle.load(f)
+            import concurrent.futures
+            from config import ApexConfig
+            timeout = getattr(ApexConfig, "MODEL_LOAD_TIMEOUT_SECONDS", 15.0)
+
+            def _load_pickle():
+                with open(model_path, 'rb') as f:
+                    return pickle.load(f)
+
+            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+                future = executor.submit(_load_pickle)
+                model_data = future.result(timeout=timeout)
 
             scaler = model_data['scaler']
 
