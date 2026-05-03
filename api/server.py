@@ -84,8 +84,7 @@ setup_logging(
 
 
 # Alert aggregator for reducing log noise
-from core.alert_aggregator import get_alert_aggregator
-alert_agg = get_alert_aggregator(logger)
+from core.alert_aggregator import AlertAggregator
 
 PREFLIGHT_STATUS_FILE = ApexConfig.DATA_DIR / "preflight_status.json"
 
@@ -562,7 +561,10 @@ try:
     from services.backtest_validator.router import router as backtest_validator_router
     app.include_router(backtest_validator_router)
 except Exception as e:
-    alert_agg.add("router_load_failed", "Backtest validator router not loaded", data={"service": "backtest_validator", "error": str(e)})
+    try:
+        AlertAggregator.get_instance().add("router_load_failed", "Backtest validator router not loaded", data={"service": "backtest_validator", "error": str(e)})
+    except RuntimeError:
+        pass  # AlertAggregator not yet initialized — skip alert
 
 try:
     from services.execution_simulator.router import router as execution_sim_router
@@ -574,44 +576,65 @@ try:
     from services.drift_monitor.router import router as drift_monitor_router
     app.include_router(drift_monitor_router)
 except Exception as e:
-    alert_agg.add("router_load_failed", "Drift monitor router not loaded", data={"service": "drift_monitor", "error": str(e)})
+    try:
+        AlertAggregator.get_instance().add("router_load_failed", "Drift monitor router not loaded", data={"service": "drift_monitor", "error": str(e)})
+    except RuntimeError:
+        pass  # AlertAggregator not yet initialized — skip alert
 
 try:
     from services.compliance_copilot.router import router as compliance_copilot_router
     app.include_router(compliance_copilot_router)
 except Exception as e:
-    alert_agg.add("router_load_failed", "Compliance copilot router not loaded", data={"service": "compliance_copilot", "error": str(e)})
+    try:
+        AlertAggregator.get_instance().add("router_load_failed", "Compliance copilot router not loaded", data={"service": "compliance_copilot", "error": str(e)})
+    except RuntimeError:
+        pass  # AlertAggregator not yet initialized — skip alert
 
 try:
     from services.portfolio_allocator.router import router as portfolio_allocator_router
     app.include_router(portfolio_allocator_router)
 except Exception as e:
-    alert_agg.add("router_load_failed", "Portfolio allocator router not loaded", data={"service": "portfolio_allocator", "error": str(e)})
+    try:
+        AlertAggregator.get_instance().add("router_load_failed", "Portfolio allocator router not loaded", data={"service": "portfolio_allocator", "error": str(e)})
+    except RuntimeError:
+        pass  # AlertAggregator not yet initialized — skip alert
 
 try:
     from services.mandate_copilot.router import router as mandate_copilot_router
     app.include_router(mandate_copilot_router)
 except Exception as e:
-    alert_agg.add("router_load_failed", "Mandate copilot router not loaded", data={"service": "mandate_copilot", "error": str(e)})
+    try:
+        AlertAggregator.get_instance().add("router_load_failed", "Mandate copilot router not loaded", data={"service": "mandate_copilot", "error": str(e)})
+    except RuntimeError:
+        pass  # AlertAggregator not yet initialized — skip alert
 
 # Health check endpoints
 try:
     from api.health import router as health_router
     app.include_router(health_router)
 except Exception as e:
-    alert_agg.add("router_load_failed", "Health router not loaded", data={"service": "health", "error": str(e)})
+    try:
+        AlertAggregator.get_instance().add("router_load_failed", "Health router not loaded", data={"service": "health", "error": str(e)})
+    except RuntimeError:
+        pass  # AlertAggregator not yet initialized — skip alert
 
 try:
     from services.tca.router import router as tca_router
     app.include_router(tca_router)
 except Exception as e:
-    alert_agg.add("router_load_failed", "TCA router not loaded", data={"service": "tca", "error": str(e)})
+    try:
+        AlertAggregator.get_instance().add("router_load_failed", "TCA router not loaded", data={"service": "tca", "error": str(e)})
+    except RuntimeError:
+        pass  # AlertAggregator not yet initialized — skip alert
 
 try:
     from services.replay_inspector.router import router as replay_inspector_router
     app.include_router(replay_inspector_router)
 except Exception as e:
-    alert_agg.add("router_load_failed", "Replay inspector router not loaded", data={"service": "replay_inspector", "error": str(e)})
+    try:
+        AlertAggregator.get_instance().add("router_load_failed", "Replay inspector router not loaded", data={"service": "replay_inspector", "error": str(e)})
+    except RuntimeError:
+        pass  # AlertAggregator not yet initialized — skip alert
 
 # Broker Service Routers
 try:
@@ -619,7 +642,10 @@ try:
     app.include_router(broker_router)
     app.include_router(portfolio_router)
 except Exception as e:
-    alert_agg.add("router_load_failed", "Broker router not loaded", data={"service": "broker", "error": str(e)})
+    try:
+        AlertAggregator.get_instance().add("router_load_failed", "Broker router not loaded", data={"service": "broker", "error": str(e)})
+    except RuntimeError:
+        pass  # AlertAggregator not yet initialized — skip alert
 
 
 

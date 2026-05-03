@@ -38,8 +38,7 @@ from sqlalchemy import select
 logger = logging.getLogger(__name__)
 
 # Alert aggregator for reducing auth warning noise
-from core.alert_aggregator import get_alert_aggregator
-alert_agg = get_alert_aggregator(logger)
+from core.alert_aggregator import AlertAggregator
 from services.auth.models import ApiKeyModel, UserModel, UserRoleModel
 from services.common.db import db_session
 from services.common.redis_client import get_redis
@@ -527,10 +526,16 @@ async def verify_token_async(token: str, expected_token_type: Optional[str] = No
             return None
         return token_data
     except jwt.ExpiredSignatureError:
-        alert_agg.add("token_expired", "Authentication token expired")
+        try:
+            AlertAggregator.get_instance().add("token_expired", "Authentication token expired")
+        except RuntimeError:
+            pass  # AlertAggregator not yet initialized — skip alert
         return None
     except jwt.InvalidTokenError as e:
-        alert_agg.add("token_invalid", "Invalid authentication token", data={"error": str(e)})
+        try:
+            AlertAggregator.get_instance().add("token_invalid", "Invalid authentication token", data={"error": str(e)})
+        except RuntimeError:
+            pass  # AlertAggregator not yet initialized — skip alert
         return None
 
 
