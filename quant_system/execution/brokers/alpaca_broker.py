@@ -109,6 +109,8 @@ class AlpacaBroker:
             if self._limit_chaser is not None:
                 await self._limit_chaser.close()
             await self._trading_stream.stop_ws()
+        except Exception as e:
+            logger.warning(f"AlpacaBroker.stop() cleanup error (non-fatal): {e}")
         finally:
             await self._trading_stream.close()
 

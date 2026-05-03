@@ -22,6 +22,8 @@ from collections import defaultdict
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
+logger = logging.getLogger(__name__)
+
 
 @dataclass
 class Alert:
@@ -169,19 +171,24 @@ class AlertAggregator:
     def _start_flusher(self):
         """Start background thread to auto-flush old alerts."""
         def flusher():
-            while True:
-                time.sleep(self.window_seconds / 2)
-                
-                # Check for old alerts
-                now = time.time()
-                with self.lock:
-                    keys_to_flush = [
-                        key for key, first_time in self.first_seen.items()
-                        if now - first_time >= self.window_seconds
-                    ]
-                
-                for key in keys_to_flush:
-                    self._flush_key(key)
+            try:
+                while True:
+                    time.sleep(self.window_seconds / 2)
+                    
+                    # Check for old alerts
+                    now = time.time()
+                    with self.lock:
+                        keys_to_flush = [
+                            key for key, first_time in self.first_seen.items()
+                            if now - first_time >= self.window_seconds
+                        ]
+                    
+                    for key in keys_to_flush:
+                        self._flush_key(key)
+            except Exception as e:
+                logger.error(
+                    f"AlertAggregator flusher thread crashed: {e}", exc_info=True
+                )
         
         self._flusher_thread = threading.Thread(target=flusher, daemon=True, name="AlertAggregatorFlusher")
         self._flusher_thread.start()

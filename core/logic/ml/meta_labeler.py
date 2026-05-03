@@ -61,7 +61,9 @@ class MetaLabeler:
                 self.is_bootstrapped_on_synthetic = False
                 logger.info("MetaLabeler: Loaded model from %s", self.model_path)
             except Exception as e:
-                logger.error("MetaLabeler: Failed to load model: %s. Quarantining.", e)
+                logger.warning(
+                    f"MetaLabeler model load failed, running in pass-through mode: {e}"
+                )
                 try:
                     shutil.move(self.model_path, self.model_path + ".bak")
                 except Exception as move_err:

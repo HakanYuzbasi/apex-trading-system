@@ -32,9 +32,7 @@ _config_logger = logging.getLogger(__name__)
 def _resolve_environment_name() -> str:
     return (
         os.getenv("APEX_ENVIRONMENT")
-        or os.getenv("APEX_ENV")
-        or os.getenv("ENV")
-        or "prod"
+        or os.getenv("ENV", "prod")
     ).strip().lower()
 
 
@@ -82,21 +80,21 @@ class ApexConfig:
     # ═══════════════════════════════════════════════════════════════
     # TRADING MODE
     # ═══════════════════════════════════════════════════════════════
-    LIVE_TRADING: bool = os.getenv(
-        "APEX_LIVE_TRADING",
-        os.getenv("LIVE_TRADING", "false"),
+    LIVE_TRADING: bool = (
+        os.getenv("APEX_LIVE_TRADING")
+        or os.getenv("LIVE_TRADING", "false")
     ).lower() == "true"
-    LIVE_TRADING_CONFIRMED: bool = os.getenv(
-        "APEX_LIVE_TRADING_CONFIRMED",
-        os.getenv("LIVE_TRADING_CONFIRMED", "false"),
+    LIVE_TRADING_CONFIRMED: bool = (
+        os.getenv("APEX_LIVE_TRADING_CONFIRMED")
+        or os.getenv("LIVE_TRADING_CONFIRMED", "false")
     ).lower() == "true"
 
     # ═══════════════════════════════════════════════════════════════
     # IBKR CONNECTION
     # ═══════════════════════════════════════════════════════════════
-    IBKR_HOST: str = os.getenv("APEX_IBKR_HOST", os.getenv("IBKR_HOST", "127.0.0.1"))
+    IBKR_HOST: str = os.getenv("APEX_IBKR_HOST") or os.getenv("IBKR_HOST", "127.0.0.1")
     IBKR_PORT: int = int(
-        os.getenv("APEX_IBKR_PORT", os.getenv("IBKR_PORT", "7497")).split("#")[0].strip()
+        (os.getenv("APEX_IBKR_PORT") or os.getenv("IBKR_PORT", "7497")).split("#")[0].strip()
     )  # 7497 = Paper, 7496 = Live
     import random
     IBKR_CLIENT_ID: int = int(

@@ -5447,14 +5447,22 @@ class ApexTradingSystem:
                 if not _is_ibkr_symbol(symbol):
                     continue  # Skip crypto that IBKR paper-account mis-holds; Alpaca owns those
                 self.positions[symbol] = qty
-                try: asyncio.create_task(state_set("positions", symbol, qty))
-                except Exception: pass
+                try:
+                    asyncio.create_task(state_set("positions", symbol, qty))
+                except Exception as e:
+                    logger.warning(
+                        f"Redis state update failed — positions cache stale: {e}"
+                    )
             # Zero out any IBKR symbols that disappeared from IBKR (closed positions)
             for symbol in list(self.positions.keys()):
                 if _is_ibkr_symbol(symbol) and symbol not in actual_positions:
                     self.positions[symbol] = 0
-                    try: asyncio.create_task(state_set("positions", symbol, 0))
-                    except Exception: pass
+                    try:
+                        asyncio.create_task(state_set("positions", symbol, 0))
+                    except Exception as e:
+                        logger.warning(
+                            f"Redis state update failed — positions cache stale: {e}"
+                        )
             # Also zero out any non-IBKR symbols that IBKR paper account mis-holds
             # (e.g. CRVUSD, FILUSD — unqualifiable contracts that can't be exited)
             for symbol in actual_positions:
