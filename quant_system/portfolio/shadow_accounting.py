@@ -1,9 +1,11 @@
 from __future__ import annotations
-
 import logging
 import asyncio
-from typing import Dict, Any, Optional
 import numpy as np
+import os
+import httpx
+from datetime import datetime, timezone
+from typing import Dict, Any, Optional
 
 from quant_system.core.bus import InMemoryEventBus, Subscription
 from quant_system.events.execution import ExecutionEvent
@@ -43,6 +45,69 @@ class ShadowAccounting:
         # Seed from ledger so shadow doesn't diverge on every restart
         self.shadow_positions: Dict[str, float] = {
             sym: pos.quantity for sym, pos in self._ledger.positions.items()
+        }
+        self._intraday_pnl = 0.0
+        # Shared async HTTP client for Alpaca REST calls
+        self._http = httpx.AsyncClient(timeout=10.0)
+
+    async def close(self) -> None:
+        """Properly close the shared HTTP client."""
+        await self._http.aclose()
+
+    async def force_sync(self, reason: str = "circuit_breaker") -> dict:
+        """
+        Fetches live positions from Alpaca, replaces local ledger with broker
+        truth, resets intraday PnL accumulators.
+        Returns before/after diff for audit logging.
+        """
+        # 1. Snapshot current local ledger state
+        before_snapshot = dict(self.shadow_positions)
+
+        # 2. Fetch live positions from Alpaca REST
+        api_key = os.environ.get("APEX_ALPACA_API_KEY")
+        secret_key = os.environ.get("APEX_ALPACA_SECRET_KEY")
+        base_url = os.environ.get("APEX_ALPACA_BASE_URL", "https://paper-api.alpaca.markets")
+
+        headers = {
+            "APCA-API-KEY-ID": api_key,
+            "APCA-API-SECRET-KEY": secret_key
+        }
+
+        after_snapshot = {}
+        try:
+            # Use the shared async client instead of a sync context manager
+            response = await self._http.get(f"{base_url}/v2/positions", headers=headers)
+            response.raise_for_status()
+            positions_data = response.json()
+            
+            # 3. Parse response
+            for pos in positions_data:
+                symbol = pos["symbol"]
+                qty = float(pos["qty"])
+                after_snapshot[symbol] = qty
+        except Exception as e:
+            logger.error(f"ShadowAccounting.force_sync failed to fetch from Alpaca: {e}")
+            # If fetch fails, we can't sync, but we should still return what we have
+            after_snapshot = before_snapshot
+
+        # 4. Replace self.shadow_positions with broker data
+        self.shadow_positions = dict(after_snapshot)
+
+        # 5. Reset intraday PnL accumulators to 0.0
+        self._intraday_pnl = 0.0
+
+        # 6. Log WARN
+        logger.warning(
+            f"ShadowAccounting.force_sync [{reason}] — "
+            f"before={before_snapshot} after={after_snapshot}"
+        )
+
+        # 7. Return
+        return {
+            "before": before_snapshot,
+            "after": after_snapshot,
+            "reason": reason,
+            "synced_at": datetime.now(timezone.utc).isoformat()
         }
 
     def start(self) -> None:

@@ -4,10 +4,10 @@ core/alert_aggregator.py - Alert Aggregation Utility
 Reduces log noise by aggregating similar alerts into periodic summaries.
 
 Usage:
-    from core.alert_aggregator import alert_agg
+    from core.alert_aggregator import AlertAggregator
     
     # Instead of logging every occurrence
-    alert_agg.add("price_fetch_failed", 
+    AlertAggregator.get_instance().add("price_fetch_failed", 
                   "Failed to fetch price",
                   data={"symbol": symbol})
     
@@ -20,7 +20,7 @@ import threading
 import time
 from collections import defaultdict
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, ClassVar
 
 logger = logging.getLogger(__name__)
 
@@ -45,6 +45,26 @@ class AlertAggregator:
     - Immediately if priority=True
     """
     
+    _instance: ClassVar[Optional["AlertAggregator"]] = None
+
+    @classmethod
+    def set_instance(cls, instance: "AlertAggregator") -> None:
+        """Register the global singleton instance."""
+        cls._instance = instance
+
+    @classmethod
+    def get_instance(cls) -> "AlertAggregator":
+        """
+        Return the registered global singleton instance.
+        Raises RuntimeError if not initialized.
+        """
+        if cls._instance is None:
+            raise RuntimeError(
+                "AlertAggregator not initialized. "
+                "Call AlertAggregator.set_instance() first."
+            )
+        return cls._instance
+
     def __init__(
         self,
         logger: logging.Logger,
@@ -207,16 +227,3 @@ class AlertAggregator:
                 "window_seconds": self.window_seconds,
                 "max_count": self.max_count
             }
-
-
-# Global instance for convenience (optional)
-_global_aggregator = None
-
-def get_alert_aggregator(logger: Optional[logging.Logger] = None) -> AlertAggregator:
-    """Get or create global alert aggregator."""
-    global _global_aggregator
-    if _global_aggregator is None:
-        if logger is None:
-            logger = logging.getLogger("apex")
-        _global_aggregator = AlertAggregator(logger, window_seconds=60.0)
-    return _global_aggregator
