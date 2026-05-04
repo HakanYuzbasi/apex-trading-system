@@ -2448,6 +2448,25 @@ async def main() -> None:
     except Exception as e:
         logger.error(" Master Sync failed: %s", e)
 
+    #  Regime Router (forensic audit 2026-04-28) 
+    # Must be initialised before StrategyController so _resolve_notional can call it.
+    crypto_beta_scalar = float(os.getenv("CRYPTO_BETA_SCALAR", "0.55"))
+    _regime_router_instance = get_global_regime_router(crypto_beta_scalar=crypto_beta_scalar)
+    logger.info(
+        "✅ RegimeRouter ready | crypto_beta_scalar=%.2f | CASH_GATE_BUFFER=%.0f%%",
+        crypto_beta_scalar,
+        float(os.getenv("CASH_GATE_SAFETY_BUFFER", "0.85")) * 100,
+    )
+
+    #  Strategy controller (v3  vol-sized + regime-aware) 
+    controller = StrategyController(
+        event_bus,
+        session_manager,
+        volatility_sizer=volatility_sizer,
+    )
+    telemetry_state["controller"] = controller
+    telemetry_state["is_ready"] = True
+
     #  Execution + EOD 
     neural_sniper = NeuralSniper(
         event_bus=event_bus,
@@ -2457,7 +2476,7 @@ async def main() -> None:
     ibkr_broker = IBKRBroker(
         ibkr_connector, 
         event_bus, 
-        forex_symbols_fn=controller.configured_forex_symbols
+        forex_symbols=controller.configured_forex_symbols()
     )
     ibkr_broker.start()
     eod_liquidator = EODLiquidator(ledger, event_bus, session_manager=session_manager)
@@ -2478,25 +2497,6 @@ async def main() -> None:
         ledger,
         bayesian_vol,
     )
-
-    #  Regime Router (forensic audit 2026-04-28) 
-    # Must be initialised before StrategyController so _resolve_notional can call it.
-    crypto_beta_scalar = float(os.getenv("CRYPTO_BETA_SCALAR", "0.55"))
-    _regime_router_instance = get_global_regime_router(crypto_beta_scalar=crypto_beta_scalar)
-    logger.info(
-        "✅ RegimeRouter ready | crypto_beta_scalar=%.2f | CASH_GATE_BUFFER=%.0f%%",
-        crypto_beta_scalar,
-        float(os.getenv("CASH_GATE_SAFETY_BUFFER", "0.85")) * 100,
-    )
-
-    #  Strategy controller (v3  vol-sized + regime-aware) 
-    controller = StrategyController(
-        event_bus,
-        session_manager,
-        volatility_sizer=volatility_sizer,
-    )
-    telemetry_state["controller"] = controller
-    telemetry_state["is_ready"] = True
 
     alpha_controller = AlphaMonitorController(
         ledger,

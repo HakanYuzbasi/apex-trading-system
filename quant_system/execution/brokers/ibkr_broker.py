@@ -36,11 +36,11 @@ class IBKRBroker:
         self,
         ibkr_connector: Any,
         event_bus: InMemoryEventBus,
-        forex_symbols_fn: Optional[Callable[[], tuple[str, ...]]] = None,
+        forex_symbols: Optional[tuple[str, ...]] = None,
     ) -> None:
         self._ibkr = ibkr_connector
         self._event_bus = event_bus
-        self._forex_symbols_fn = forex_symbols_fn
+        self._forex_symbols = forex_symbols
         self._sequence = count()
         self._subscription: Optional[Subscription] = None
         self._poll_task: Optional[asyncio.Task] = None
@@ -68,11 +68,11 @@ class IBKRBroker:
         
         while True:
             try:
-                if not self._forex_symbols_fn or not self._ibkr.is_connected():
+                if not self._forex_symbols or not self._ibkr.is_connected():
                     await asyncio.sleep(10.0)
                     continue
 
-                symbols = self._forex_symbols_fn()
+                symbols = self._forex_symbols
                 if not symbols:
                     await asyncio.sleep(10.0)
                     continue
