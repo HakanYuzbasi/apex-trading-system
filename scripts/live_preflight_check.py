@@ -7,7 +7,7 @@ from pathlib import Path
 ALPACA_PROD_URL = "api.alpaca.markets"
 MODEL_PATH = "run_state/models/ppo_execution_v1.zip"
 
-logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
+logging.basicConfig(level=logging.INFO, stream=sys.stdout, format="%(levelname)s: %(message)s")
 logger = logging.getLogger("preflight_gatekeeper")
 
 class FatalPreflightError(Exception):

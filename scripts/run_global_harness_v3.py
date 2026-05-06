@@ -8,6 +8,9 @@ import collections
 import os
 import signal
 import sys
+import warnings
+
+warnings.filterwarnings("ignore", category=Warning, module="requests")
 from pathlib import Path
 
 # Initialize search path BEFORE any local imports
