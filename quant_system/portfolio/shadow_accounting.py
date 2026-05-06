@@ -259,8 +259,14 @@ class ShadowAccounting:
                 def force_update(symbol: str, qty: float):
                     pos = self._ledger.get_position(symbol)
                     pos.quantity = float(qty)
-                    # We don't adjust avg_price here for simplicity, or we should re-pull it
                     self.shadow_positions[symbol] = float(qty)
+                    # avg_price is NOT synced here — reconciler only provides broker qty.
+                    # Stale avg_price will cause incorrect P&L until next full force_sync.
+                    logger.warning(
+                        "ShadowAccounting.force_update: qty synced for %s → %.4f "
+                        "but avg_price NOT updated — run force_sync to restore full state.",
+                        symbol, qty,
+                    )
                 
                 self._reconciler.auto_resolve(result, force_update)
                 

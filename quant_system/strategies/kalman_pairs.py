@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import math
@@ -22,6 +23,19 @@ from quant_system.strategies.stabilizer import JohansenStabilizer
 from quant_system.execution.fast_math import cython_kalman_update
 
 logger = logging.getLogger(__name__)
+
+# Global semaphore: cap concurrent heavy statistical tests (Johansen + ADF) to 4.
+# Without this, 30+ pairs firing at market-open saturate the thread pool and
+# block the event loop for 200+ seconds.
+_STAT_TEST_SEMAPHORE: asyncio.Semaphore | None = None
+
+def _get_stat_semaphore() -> asyncio.Semaphore:
+    """Return the process-wide stat-test semaphore, creating it lazily."""
+    global _STAT_TEST_SEMAPHORE
+    if _STAT_TEST_SEMAPHORE is None:
+        _STAT_TEST_SEMAPHORE = asyncio.Semaphore(4)
+    return _STAT_TEST_SEMAPHORE
+
 
 @dataclass(slots=True)
 class KalmanState:
@@ -103,6 +117,17 @@ class KalmanPairsStrategy(BaseStrategy):
         # IMP-1: rolling SNR history for notional scaling
         self._snr_history: deque[float] = deque(maxlen=20)
         self._snr_notional_mult: float = 1.0
+        # Throttle: run the expensive Johansen test at most once every N bars
+        # to prevent event-loop saturation when 30+ pairs all fire simultaneously.
+        self._JOHANSEN_INTERVAL_BARS = 30  # ≈30 min on 1-min data
+        self._bars_since_johansen: int = 0
+
+        # Re-subscribe as async to support await in on_bar/on_tick
+        self.close()
+        self._subscriptions = (
+            self.event_bus.subscribe("bar", self._handle_bar, is_async=True),
+            self.event_bus.subscribe("trade_tick", self._handle_tick, is_async=True),
+        )
 
     @property
     def current_entry_z(self) -> float:
@@ -117,7 +142,13 @@ class KalmanPairsStrategy(BaseStrategy):
         covariance update).  1e-8 is orders of magnitude below any real price spread."""
         return float(np.sqrt(max(self._last_innovation_variance, 1e-8)))
 
-    def on_bar(self, event: BarEvent) -> None:
+    async def _handle_bar(self, event: BarEvent) -> None:
+        await self.on_bar(event)
+
+    async def _handle_tick(self, event: TradeTick) -> None:
+        await self.on_tick(event)
+
+    async def on_bar(self, event: BarEvent) -> None:
         if event.instrument_id == "VIX":
             self._vix_level = event.close_price
             return
@@ -150,12 +181,19 @@ class KalmanPairsStrategy(BaseStrategy):
             self._price_history_a.pop(0)
             self._price_history_b.pop(0)
 
-        z_score = self._update_filter_and_score(price_a=float(price_a), price_b=float(price_b))
+        z_score = await self._update_filter_and_score(price_a=float(price_a), price_b=float(price_b))
         if z_score is None:
             return
 
-        # Stability Check (Johansen) — debounce logic lives in the stabilizer
-        self._stabilizer.test(self._price_history_a, self._price_history_b)
+        # Stability Check (Johansen) — throttled to every JOHANSEN_INTERVAL_BARS
+        # to prevent event-loop saturation at market open when many pairs fire simultaneously.
+        self._bars_since_johansen += 1
+        if self._bars_since_johansen >= self._JOHANSEN_INTERVAL_BARS:
+            self._bars_since_johansen = 0
+            async with _get_stat_semaphore():
+                await asyncio.to_thread(
+                    self._stabilizer.test, list(self._price_history_a), list(self._price_history_b)
+                )
         self._is_read_only = self._stabilizer.is_read_only
 
         # Layered exit: close 50% when spread has converged past PARTIAL_EXIT_Z.
@@ -198,14 +236,19 @@ class KalmanPairsStrategy(BaseStrategy):
             self._entry_ts = None
             self._entry_z_score = None
             self._entry_vix = None
+            # Stale z/innovation history from the closed trade would bias the
+            # post-exit SNR multiplier and OU half-life estimate toward the old
+            # regime.  Clear so the next trade starts from a clean baseline.
+            self._z_history.clear()
+            self._innovation_history.clear()
 
         self._emit_state_transition(desired_state)
         self._pair_state = desired_state
 
-    def on_tick(self, event: TradeTick) -> None:
+    async def on_tick(self, event: TradeTick) -> None:
         pass
 
-    def _update_filter_and_score(self, price_a: float, price_b: float) -> float | None:
+    async def _update_filter_and_score(self, price_a: float, price_b: float) -> float | None:
         import time
 
         # #3: Auto-reinit after 4h divergence cooldown — pairs self-heal without restart.
@@ -250,7 +293,7 @@ class KalmanPairsStrategy(BaseStrategy):
         # sensible hedge-ratio prior instead of starting cold at theta=[0,0].
         # Without this, BTC/XRP (price ratio ~40,800) produces z>500 on bar 20.
         if self._kalman.observation_count == self.warmup_bars:
-            self._warm_start_kalman()
+            await self._warm_start_kalman()
             if self._kalman_diverged:
                 # ADF test or obs_noise calibration flagged this pair as non-cointegrated.
                 return None
@@ -308,7 +351,7 @@ class KalmanPairsStrategy(BaseStrategy):
             )
         return self.last_z_score
 
-    def _warm_start_kalman(self) -> None:
+    async def _warm_start_kalman(self) -> None:
         """
         Reinitialise Kalman theta/covariance from an OLS estimate over the
         warmup window.  Prevents cold-start divergence when price_a / price_b
@@ -338,7 +381,10 @@ class KalmanPairsStrategy(BaseStrategy):
         try:
             from statsmodels.tsa.stattools import adfuller
             if len(residuals) >= 20:
-                _, adf_pval, *_ = adfuller(residuals, maxlag=1, autolag=None)
+                async with _get_stat_semaphore():
+                    _, adf_pval, *_ = await asyncio.to_thread(
+                        adfuller, residuals, maxlag=1, autolag=None
+                    )
             else:
                 adf_pval = 0.0  # not enough data — assume stationary, rely on z-gate
             if float(adf_pval) > 0.10:
@@ -388,7 +434,7 @@ class KalmanPairsStrategy(BaseStrategy):
         """True during windows when new equity pair entries are blocked:
           - 9:30–9:45 ET  (opening auction, wide spreads)
           - 14:30–16:00 ET (afternoon + closing auction; EOD rebalancing creates
-                            spurious spread divergences that are not mean-reverting)
+                             spurious spread divergences that are not mean-reverting)
         """
         if self.instrument_a.startswith("CRYPTO:") or self.instrument_a.startswith("FOREX:"):
             return False
@@ -411,7 +457,7 @@ class KalmanPairsStrategy(BaseStrategy):
         """
         hist = self._innovation_history
         if len(hist) < 10:
-            return 0.0  # not enough data — allow entry during warmup
+            return float("inf")  # insufficient data — skip half-life filter until calibrated
         e = np.array(hist, dtype=float)
         lag0 = np.dot(e[:-1], e[:-1])
         lag1 = np.dot(e[:-1], e[1:])
@@ -495,8 +541,23 @@ class KalmanPairsStrategy(BaseStrategy):
     def _desired_state(self, z_score: float, current_ts: datetime) -> str | None:
         entry_z = self.current_entry_z * self._regime_entry_z_mult()
 
+        # IMP-A: regime panic exit — close open pairs positions immediately in
+        # HIGH_VOL_PANIC.  Spread mean-reversion assumptions break in panic regimes
+        # (forced liquidations widen spreads directionally, not randomly).
+        if self._pair_state != "flat":
+            try:
+                from risk.regime_router import get_global_regime_router, CompositeRegime
+                rr = get_global_regime_router()
+                if rr is not None and rr.last_regime == CompositeRegime.HIGH_VOL_PANIC:
+                    logger.warning(
+                        "🚨 [%s/%s] Panic regime — force-exiting open %s pair position",
+                        self.instrument_a, self.instrument_b, self._pair_state,
+                    )
+                    return "flat"
+            except Exception:
+                pass
+
         # Hard stop-loss: if spread has blown past 4σ while in a position, cut losses.
-        # This caps drawdown from structural breaks that the Kalman filter can't predict.
         if self._pair_state != "flat" and abs(z_score) > 4.0:
             logger.warning(
                 "🛑 [%s/%s] Hard stop-loss triggered z=%.2f > 4.0 — exiting %s",
@@ -504,13 +565,27 @@ class KalmanPairsStrategy(BaseStrategy):
             )
             return "flat"
 
+        # Improvement 9: 4-hour time-in-trade hard stop.
+        # Zombie positions that never reach exit_z tie up capital and hurt Sortino.
+        _MAX_HOLD_HOURS = 4.0
+        if self._pair_state != "flat" and self._entry_ts is not None:
+            held_hours = (current_ts - self._entry_ts).total_seconds() / 3600.0
+            if held_hours >= _MAX_HOLD_HOURS:
+                logger.info(
+                    "⏱ [%s/%s] Time-in-trade stop: %.1fh >= %.0fh — exiting %s z=%.2f",
+                    self.instrument_a, self.instrument_b,
+                    held_hours, _MAX_HOLD_HOURS, self._pair_state, z_score,
+                )
+                return "flat"
+
         if z_score > entry_z:
             if self._pair_state == "flat":
                 if (self._kalman_diverged
                         or self._is_crypto_overnight()
                         or self._is_equity_auction_window()):
                     return None
-                if self._ou_half_life_days() > self._half_life_limit():
+                _hl = self._ou_half_life_days()
+                if math.isfinite(_hl) and _hl > self._half_life_limit():
                     return None
                 if not self._spread_converging():
                     return None
@@ -525,7 +600,8 @@ class KalmanPairsStrategy(BaseStrategy):
                         or self._is_crypto_overnight()
                         or self._is_equity_auction_window()):
                     return None
-                if self._ou_half_life_days() > self._half_life_limit():
+                _hl = self._ou_half_life_days()
+                if math.isfinite(_hl) and _hl > self._half_life_limit():
                     return None
                 if not self._spread_converging():
                     return None
@@ -542,13 +618,17 @@ class KalmanPairsStrategy(BaseStrategy):
             decay_factor = math.pow(0.5, dt_hours / self.decay_half_life_hours)
             current_exit_z = self.exit_z_score * decay_factor
 
-            # Asymmetric exit: exit 2× faster when profitable
-            is_profitable = (
-                (self._pair_state == "long_a_short_b" and z_score > self._entry_z_score)
-                or (self._pair_state == "short_a_long_b" and z_score < self._entry_z_score)
-            )
-            if is_profitable:
-                current_exit_z *= 0.5
+            # Asymmetric hold: cut losers faster, let winners run.
+            # A "loser" is a position where z is moving AWAY from 0 after entry
+            # (spread widening further rather than reverting).
+            if self._entry_z_score is not None:
+                z_moved_against = (
+                    (self._pair_state == "long_a_short_b" and z_score < -abs(self._entry_z_score))
+                    or (self._pair_state == "short_a_long_b" and z_score > abs(self._entry_z_score))
+                )
+                if z_moved_against:
+                    # Spread has blown past entry point in wrong direction — tighten exit
+                    current_exit_z = min(current_exit_z * 1.5, self.base_entry_z * 0.75)
 
         if abs(z_score) <= current_exit_z:
             return "flat"
@@ -560,11 +640,12 @@ class KalmanPairsStrategy(BaseStrategy):
         z    = self.last_z_score
         meta = {"trigger": "partial_z_exit", "z": round(z, 3)}
         if self._pair_state == "long_a_short_b":
-            self.emit_signal(self.instrument_a, "notional", +half, confidence=0.92, metadata=meta)
-            self.emit_signal(self.instrument_b, "notional", -half, confidence=0.92, metadata=meta)
-        else:  # short_a_long_b
+            # To reduce a long, sell (-half); to reduce a short, buy (+half)
             self.emit_signal(self.instrument_a, "notional", -half, confidence=0.92, metadata=meta)
             self.emit_signal(self.instrument_b, "notional", +half, confidence=0.92, metadata=meta)
+        else:  # short_a_long_b
+            self.emit_signal(self.instrument_a, "notional", +half, confidence=0.92, metadata=meta)
+            self.emit_signal(self.instrument_b, "notional", -half, confidence=0.92, metadata=meta)
         logger.info(
             "Kalman PARTIAL EXIT 50%% [%s/%s] z=%.3f | remaining $%.0f each leg",
             self.instrument_a, self.instrument_b, z, half,
@@ -583,16 +664,28 @@ class KalmanPairsStrategy(BaseStrategy):
             else:
                 self._snr_notional_mult = 1.0
 
+        # IMP-E: OU half-life continuous scaling — faster mean-reverting pairs get
+        # proportionally more notional; slow pairs (close to the limit) get less.
+        # Only applied at ENTRY (desired_state != "flat") to avoid shrinking exits.
+        hl_score = 1.0
+        if desired_state != "flat":
+            hl = self._ou_half_life_days()
+            if math.isfinite(hl):
+                limit = self._half_life_limit()
+                # Linear ramp: hl=0 → 1.0×, hl=limit → 0.5×
+                hl_score = max(0.5, 1.0 - 0.5 * hl / limit)
+
         metadata = {
             "kalman_residual": float(self._last_innovation),
             "z_score": float(self._last_innovation / self._safe_innovation_std),
             "vix_level": self._vix_level,
             "snr": float(snr_val),
             "snr_mult": round(self._snr_notional_mult, 3),
+            "hl_score": round(hl_score, 3),
         }
 
-        # SNR-scaled notional: high-quality pairs get up to 1.3×, low-quality 0.7×
-        scaled_notional = self.leg_notional * self._snr_notional_mult
+        # SNR × HL-quality scaled notional
+        scaled_notional = self.leg_notional * self._snr_notional_mult * hl_score
 
         if desired_state == "short_a_long_b":
             self.emit_signal(
@@ -697,10 +790,15 @@ class KalmanPairsStrategy(BaseStrategy):
         ts_b = self._latest_bar_ts[self.instrument_b]
         if ts_a is None or ts_b is None:
             return None
-        # Use the most-recent of the two timestamps as the canonical clock tick.
-        # Alpaca delivers bars for different symbols at different wall-clock times
-        # (BTC may arrive 1-2 minutes before ETH for the same calendar minute),
-        # so strict equality would permanently block all pair updates.
-        # Using max(ts_a, ts_b) and guarding with _last_processed_pair_ts ensures
-        # each unique canonical minute is processed exactly once.
-        return max(ts_a, ts_b)
+        
+        # If timestamps match, we are perfectly synchronized.
+        if ts_a == ts_b:
+            return ts_a
+            
+        # If one leg is significantly ahead (> 3600s), proceed with the latest
+        # to avoid blocking on a missing bar from the other leg.
+        if abs((ts_a - ts_b).total_seconds()) > 3600:
+            return max(ts_a, ts_b)
+            
+        # Otherwise, wait for the second leg to arrive with the same timestamp.
+        return None

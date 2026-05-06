@@ -5,6 +5,10 @@ from risk.risk_manager import RiskManager
 
 @pytest.fixture
 def risk_manager():
+    from monitoring.alert_aggregator import AlertAggregator
+    from unittest.mock import MagicMock
+    if AlertAggregator._instance is None:
+        AlertAggregator.set_instance(MagicMock())
     # Patch load_state to avoid reading from disk during test init
     with patch('risk.risk_session.RiskSession.load_state'), \
          patch('risk.risk_session.RiskSession.save_state'):

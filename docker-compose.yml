@@ -1,5 +1,3 @@
-version: '3.8'
-
 services:
   # --- Infrastructure ---
   postgres:
@@ -117,8 +115,6 @@ services:
       - NEXT_PUBLIC_API_URL=http://localhost:8000
       - APEX_API_URL=http://apex-api:8000
       - APEX_API_BASE=http://apex-api:8000
-      - CHOKIDAR_USEPOLLING=true
-      - WATCHPACK_POLLING=true
       # Disable Turbopack — ARM64 Linux WASM fallback doesn't support createProject
       - TURBOPACK=0
     command: npm run dev

@@ -18,6 +18,8 @@ from core.logic.ml.meta_labeler import MetaLabeler
 from quant_system.risk.sentiment_warden import SentimentWarden
 from quant_system.risk.social_pulse import SocialPulse
 from quant_system.portfolio.hrp import HRPOptimizer
+from quant_system.risk.kelly import KellySizer
+from quant_system.portfolio.shadow_accounting import ShadowAccounting
 
 logger = logging.getLogger(__name__)
 
@@ -45,6 +47,8 @@ class RiskManager:
         sentiment_warden: SentimentWarden | None = None,
         social_pulse: SocialPulse | None = None,
         hrp_optimizer: HRPOptimizer | None = None,
+        kelly_sizer: KellySizer | None = None,
+        shadow_accounting: ShadowAccounting | None = None,
     ) -> None:
         self.portfolio_ledger = portfolio_ledger
         self.event_bus = event_bus
@@ -58,6 +62,8 @@ class RiskManager:
         self.sentiment_warden = sentiment_warden
         self.social_pulse = social_pulse
         self.hrp_optimizer = hrp_optimizer
+        self.kelly_sizer = kelly_sizer
+        self.shadow_accounting = shadow_accounting
         
         self.latest_meta_confidence: float = 1.0
         self.latest_bayesian_prob: float = 0.0
@@ -115,26 +121,30 @@ class RiskManager:
             
     def _emit_flatten_all(self) -> None:
         """Emits flatten signals for all active positions to aggressively de-risk."""
-        now = datetime.now(timezone.utc)
-        for instrument_id, position in self.portfolio_ledger.positions.items():
-            if abs(position.quantity) > 0:
-                flatten_order = OrderEvent(
-                    instrument_id=instrument_id,
-                    exchange_ts=now,
-                    received_ts=now,
-                    processed_ts=now,
-                    sequence_id=0,
-                    source="circuit_breaker",
-                    strategy_id="risk_manager_breaker",
-                    order_action="submit",
-                    order_scope="parent",
-                    side="sell" if position.quantity > 0 else "buy",
-                    order_type="market",
-                    quantity=abs(position.quantity),
-                    time_in_force="day",
-                    execution_algo="direct",
-                )
-                self._dispatch_order(flatten_order)
+        try:
+            now = datetime.now(timezone.utc)
+            for instrument_id, position in self.portfolio_ledger.positions.items():
+                if abs(position.quantity) > 0:
+                    flatten_order = OrderEvent(
+                        instrument_id=instrument_id,
+                        exchange_ts=now,
+                        received_ts=now,
+                        processed_ts=now,
+                        sequence_id=0,
+                        source="circuit_breaker",
+                        strategy_id="risk_manager_breaker",
+                        order_action="submit",
+                        order_scope="parent",
+                        side="sell" if position.quantity > 0 else "buy",
+                        order_type="market",
+                        quantity=abs(position.quantity),
+                        time_in_force="day",
+                        execution_algo="direct",
+                    )
+                    self._dispatch_order(flatten_order)
+        finally:
+            if self.shadow_accounting is not None:
+                self.shadow_accounting.force_sync("circuit_breaker")
 
     def _translate_signal_to_order(self, event: SignalEvent) -> OrderEvent | None:
         position = self.portfolio_ledger.get_position(event.instrument_id)
@@ -226,7 +236,24 @@ class RiskManager:
                     )
                     return None
 
-        # ── Meta-Labeler Veto ───────────────────────────────────────────────
+        # ── STEP 1: Base Notional ───────────────────────────────────────────
+        # (Computed above in the initial side check)
+
+        # ── STEP 2: Apply HRP Volatility Scaling ────────────────────────────
+        if self.hrp_optimizer is not None:
+            regime = getattr(self.hrp_optimizer, "current_regime", 1)
+            hrp_scalar = 1.0
+            if regime == 2:
+                hrp_scalar = 0.7
+            elif regime == 3:
+                hrp_scalar = 0.3
+            
+            if hrp_scalar < 1.0:
+                logger.info("[RISK] HRP Scaling: regime=%d, scalar=%.2f", regime, hrp_scalar)
+                adjusted_target_value *= hrp_scalar
+                quantity = self._quantity_from_signal_v2(event, adjusted_target_value, reference_price, self.portfolio_ledger.cash)
+
+        # ── STEP 3: Apply MetaLabeler Confidence Filter ─────────────────────
         if (
             event.side not in {"flatten", "rebalance", "cover"}
             and self.meta_labeler is not None
@@ -237,7 +264,7 @@ class RiskManager:
             bayesian_prob = 0.5
             if self.bayesian_vol is not None:
                 bayesian_prob = self.bayesian_vol.probability_of_high_vol(event.instrument_id)
-                
+
             sector_concentration = 0.0
             if self.factor_monitor is not None:
                 sector = self.factor_monitor.sector_for(event.instrument_id)
@@ -245,46 +272,34 @@ class RiskManager:
                 if equity > 0:
                     sector_concentration = self.factor_monitor.sector_gross_notional(sector) / equity
 
-            self.latest_bayesian_prob = bayesian_prob
-            
-            logger.info("[RISK] Processing signal for %s (Residual: %.4f, Vol Prob: %.4f)", event.instrument_id, kalman_residual, bayesian_prob)
-            
+            relative_volume = event.metadata.get("relative_volume", 1.0) if event.metadata else 1.0
+            market_impact = self._estimate_market_impact(event.instrument_id, quantity, reference_price)
+
             if hasattr(self.meta_labeler, "predict_confidence"):
                 confidence = self.meta_labeler.predict_confidence(
                     kalman_residual=kalman_residual,
                     bayesian_prob=bayesian_prob,
                     vix_level=vix_level,
-                    sector_concentration=sector_concentration
+                    sector_concentration=sector_concentration,
+                    relative_volume=relative_volume,
+                    market_impact=market_impact
                 )
             else:
-                logger.warning("[RISK] MetaLabeler missing predict_confidence method! Using pass-through confidence=1.0")
                 confidence = 1.0
                 
             self.latest_meta_confidence = confidence
             logger.info("[RISK] MetaLabeler confidence for %s: %.4f", event.instrument_id, confidence)
-            
-            # ── HRP Regime Scaling ───────────────────────────────────────────
-            hrp_scalar = 1.0
-            if self.hrp_optimizer is not None:
-                # We use the current regime from HRP (1: Normal, 2: High Vol, 3: Crash)
-                # to scale the signal value.
-                regime = getattr(self.hrp_optimizer, "current_regime", 1)
-                if regime == 2: hrp_scalar = 0.7  # Scale down in High Vol
-                elif regime == 3: hrp_scalar = 0.3 # Scale down heavily in Crash
-                
-                if hrp_scalar < 1.0:
-                    logger.info("[RISK] HRP Regime Scaling active: regime=%d, scalar=%.2f", regime, hrp_scalar)
-                    adjusted_target_value *= hrp_scalar
-                    # Recalculate quantity based on HRP-scaled target
-                    quantity = self._quantity_from_signal_v2(event, adjusted_target_value, reference_price, self.portfolio_ledger.cash)
 
             if confidence < 0.65:
                 logger.warning(
                     "RiskManager vetoed entry for %s: Meta-Labeler confidence %.2f < 0.65",
-                    event.instrument_id,
-                    confidence
+                    event.instrument_id, confidence
                 )
                 return None
+            
+            # Apply confidence scaling to notional if confidence is provided
+            adjusted_target_value *= confidence
+            quantity = self._quantity_from_signal_v2(event, adjusted_target_value, reference_price, self.portfolio_ledger.cash)
 
         # ── EquityProtector halt veto (equity-scoped) ───────────────────────
         # When the daily loss limit has been breached the bot is halted for
@@ -370,6 +385,7 @@ class RiskManager:
             time_in_force="day",
             execution_algo="direct",
             limit_price=limit_price,
+            confidence=self.latest_meta_confidence,
             notional=abs(adjusted_target_value) if event.target_type == "notional" else None,
         )
 
@@ -404,14 +420,33 @@ class RiskManager:
             return abs(float(target_value))
         if event.target_type == "notional":
             if reference_price <= 0:
+                logger.warning(
+                    "RiskManager: zero/negative reference_price=%.6f for %s (notional) — skipping order",
+                    reference_price, getattr(event, "instrument_id", "?"),
+                )
                 return 0.0
             return abs(float(target_value)) / reference_price
         if event.target_type == "weight":
             if reference_price <= 0:
+                logger.warning(
+                    "RiskManager: zero/negative reference_price=%.6f for %s (weight) — skipping order",
+                    reference_price, getattr(event, "instrument_id", "?"),
+                )
                 return 0.0
             notional = abs(float(target_value)) * available_cash
             return notional / reference_price
         return abs(float(target_value))
+
+    def _estimate_market_impact(self, instrument_id: str, quantity: float, price: float) -> float:
+        """
+        Simple model: Impact = 0.5 * spread + (quantity / daily_vol) * price_vol
+        Defaults to 10bps if data is missing.
+        """
+        try:
+            # For now, use a fixed 10bps impact floor for simplicity
+            return 0.0010 
+        except Exception:
+            return 0.0005
 
     @staticmethod
     def _quantity_from_signal(event: SignalEvent, reference_price: float, available_cash: float) -> float:

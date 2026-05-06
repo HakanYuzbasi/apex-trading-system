@@ -123,7 +123,7 @@ class VIXRegimeManager:
     #   VIXRegimeManager × EnhancedSignalFilter × DynamicConfigAdjuster
     #   ≈ 0.90 × 0.86 × 0.95 ≈ 0.74  (was 0.65 × 0.71 × 0.95 ≈ 0.44)
     RISK_MULTIPLIERS = {
-        VIXRegime.COMPLACENCY: 1.0,  # Low VIX = best environment for pairs mean-reversion
+        VIXRegime.COMPLACENCY: 1.20,  # Low VIX = best mean-reversion env; size up 20%
         VIXRegime.NORMAL: 1.0,
         VIXRegime.ELEVATED: 0.90,    # Raised from 0.85: stressed market, keep most size
         VIXRegime.FEAR: 0.75,        # Raised from 0.65: meaningful reduction but still tradeable

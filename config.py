@@ -366,6 +366,9 @@ class ApexConfig:
         "APEX_UNIFIED_LATCH_RESET_REBASE_PERFORMANCE", "true"
     ).lower() == "true"
 
+    # Universal sizing control
+    GLOBAL_NOTIONAL_SCALAR: float = float(os.getenv("APEX_GLOBAL_NOTIONAL_SCALAR", "1.0"))
+    
     # ═══════════════════════════════════════════════════════════════
     # CAPITAL & POSITION SIZING
     # ═══════════════════════════════════════════════════════════════

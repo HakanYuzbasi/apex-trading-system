@@ -46,8 +46,8 @@ class LimitOrderChaser:
     ) -> None:
         if chase_interval_seconds <= 0 or max_rest_seconds <= 0:
             raise ValueError("chase timing parameters must be positive")
-        if pricing_mode not in {"join", "mid"}:
-            raise ValueError("pricing_mode must be 'join' or 'mid'")
+        if pricing_mode not in {"join", "mid", "aggressive"}:
+            raise ValueError("pricing_mode must be 'join', 'mid', or 'aggressive'")
         self._latest_market = latest_market
         self._submit_limit_order = submit_limit_order
         self._replace_limit_order = replace_limit_order
@@ -208,6 +208,17 @@ class LimitOrderChaser:
         if isinstance(market_event, QuoteTick):
             if self._pricing_mode == "mid":
                 raw_price = (market_event.bid + market_event.ask) / 2.0
+            elif self._pricing_mode == "aggressive":
+                # If confidence > 0.90, cross the spread (take liquidity)
+                # If confidence > 0.80, use mid
+                # Otherwise, join
+                conf = order_event.confidence or 0.70
+                if conf > 0.90:
+                    raw_price = market_event.ask if order_event.side == "buy" else market_event.bid
+                elif conf > 0.80:
+                    raw_price = (market_event.bid + market_event.ask) / 2.0
+                else:
+                    raw_price = market_event.bid if order_event.side == "buy" else market_event.ask
             else:
                 raw_price = market_event.bid if order_event.side == "buy" else market_event.ask
             return max(self._min_price_increment, round(raw_price / self._min_price_increment) * self._min_price_increment)

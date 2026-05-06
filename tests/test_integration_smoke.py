@@ -238,6 +238,12 @@ def test_circuit_breaker_trips_after_consecutive_losses(
     exceeds ``CIRCUIT_BREAKER_MIN_LOSS_USD`` trips the breaker.
     """
     from risk.risk_session import CircuitBreaker
+    from monitoring.alert_aggregator import AlertAggregator
+    from unittest.mock import MagicMock
+
+    # Ensure the singleton is initialized for this test
+    if AlertAggregator._instance is None:
+        AlertAggregator.set_instance(MagicMock())
 
     # Force breaker enabled regardless of deployment env for this smoke test.
     monkeypatch.setattr(ApexConfig, "CIRCUIT_BREAKER_ENABLED", True, raising=False)

@@ -103,7 +103,10 @@ class HealthMonitor:
                 if self._force_sync_callback:
                     try:
                         logger.info("Attempting emergency state sync before exit...")
-                        self._force_sync_callback()
+                        res = self._force_sync_callback()
+                        if asyncio.iscoroutine(res):
+                            # Running in a background thread, so we can use a new loop or a runner
+                            asyncio.run(res)
                     except Exception as e:
                         logger.error(f"Emergency sync failed: {e}")
                 

@@ -24,6 +24,10 @@ def test_heal_baselines_recovers_invalid_state(monkeypatch):
 
 
 def test_manual_reset_circuit_breaker_resets_latch_when_tripped(monkeypatch):
+    from monitoring.alert_aggregator import AlertAggregator
+    from unittest.mock import MagicMock
+    if AlertAggregator._instance is None:
+        AlertAggregator.set_instance(MagicMock())
     with tempfile.TemporaryDirectory() as tmp_dir:
         monkeypatch.setattr(ApexConfig, "DATA_DIR", Path(tmp_dir))
         manager = RiskManager(max_daily_loss=0.02, max_drawdown=0.1)

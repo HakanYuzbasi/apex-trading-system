@@ -50,7 +50,7 @@ _MAIN_LOG_INFO_KEYWORDS = (
     # Walk-forward / model / PPO
     "model retrained", "regime change", "[shadow mode] ppo suggests",
     # Regime Router (2026-04-28 forensic audit fix)
-    "regime |", "cash gate",
+    "regime |", "cash gate", "capital conservation", "system boot",
 )
 
 

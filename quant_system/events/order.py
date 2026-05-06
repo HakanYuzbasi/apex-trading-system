@@ -31,6 +31,7 @@ class OrderEvent(BaseEvent):
     notional: float | None = None
     limit_price: float | None = None
     stop_price: float | None = None
+    confidence: float | None = None
     event_type: Literal["order"] = field(init=False, default="order")
 
     def __post_init__(self) -> None:

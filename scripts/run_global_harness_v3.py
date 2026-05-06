@@ -1,44 +1,4 @@
-"""
-scripts/run_global_harness_v3.py
-
-Global Harness v3  Market-Neutral Portfolio with Sector Guardrails
-
-New in v3 vs v2
----------------
-* **VolatilitySizer** is wired into the strategy factory.  Every pair's
-  ``leg_notional`` is dynamically scaled by the 30-day realised spread
-  volatility so each pair risks the same target dollar amount regardless
-  of market conditions.
-
-* **FactorMonitor** (``quant_system/risk/factors.py``) enforces a sector
-  concentration limit (default 30 % of equity per sector).  Its
-  configuration (limit + any dynamic overrides) is persisted to a JSON
-  sidecar file by the ``RiskStateController`` so restarts don't lose any
-  manual adjustments.
-
-* **EquityProtector** (``quant_system/risk/protector.py``) monitors the
-  daily drawdown from the day's opening equity.  When the daily loss
-  limit is breached (default -2 %) it publishes FLATTEN signals for every
-  open position  including crypto  and refuses new entries for the rest
-  of the UTC calendar day.  Its halt state is also persisted to a JSON
-  sidecar file and reloaded on startup so a process restart mid-day does
-  not clear the halt.
-
-* **TCA ScheduledTask** fires ``TransactionCostAnalyzer.send_summary()``
-  every weekday at 16:05 ET (5 minutes after the US equity market close).
-
-* All new state is handled by ``RiskStateController.save()`` /
-  ``RiskStateController.load()``, which are called alongside the existing
-  ``StateManager`` to guarantee a clean restart.
-
-24/7 compatibility
-------------------
-Crypto strategies remain active at all times.  Equity strategies are
-activated / deactivated by ``StrategyController.reconcile()`` which
-queries ``SessionManager``, identical to v2.  The TCA report is posted
-only on weekdays (the scheduled-task implementation checks this before
-dispatching).
-"""
+""" scripts/run_global_harness_v3.py """
 from __future__ import annotations
 
 import asyncio
@@ -85,8 +45,10 @@ from quant_system.core.market_clock import AlpacaMarketClock
 from quant_system.data.normalizers.live_bridge import LiveDataBridge
 from quant_system.data.stores.client import TimescaleDBClient
 from quant_system.execution.brokers.alpaca_broker import AlpacaBroker
+
 from quant_system.execution.brokers.ibkr_broker import IBKRBroker
 from quant_system.events.market import BarEvent
+
 try:
     from quant_system.execution.neural_sniper import NeuralSniper
 except ModuleNotFoundError:
@@ -94,11 +56,13 @@ except ModuleNotFoundError:
     import logging as _logging
     _logging.getLogger(__name__).warning("neural_sniper not found - falling back to OBISniper")
 
+
 from quant_system.portfolio.ledger import PortfolioLedger
 from quant_system.portfolio.persistence import StateManager
 from quant_system.risk.eod_liquidator import EODLiquidator
 from quant_system.risk.factors import FactorMonitor
 from quant_system.risk.manager import RiskManager
+
 from quant_system.risk.protector import EquityProtector
 from quant_system.risk.regime_detector import RegimeDetector
 from quant_system.risk.sizer import VolatilitySizer
@@ -110,6 +74,7 @@ from quant_system.analytics.tca import TransactionCostAnalyzer
 from core.logic.ml.meta_labeler import MetaLabeler
 from quant_system.strategies.kalman_pairs import KalmanPairsStrategy
 from quant_system.strategies.directional_equity import DirectionalEquityStrategy
+
 from quant_system.strategies.cross_sectional_momentum_strategy import CrossSectionalMomentumStrategy
 from quant_system.strategies.opening_range_breakout import OpeningRangeBreakoutStrategy
 from quant_system.risk.directional_rotator import DirectionalRotator
@@ -120,6 +85,7 @@ from monitoring.live_monitor import LiveMonitor
 from monitoring.health_monitor import HealthMonitor
 from quant_system.portfolio.shadow_accounting import ShadowAccounting
 from core.logging_config import setup_logging
+
 from config import ApexConfig
 from reconciliation.position_reconciler import PositionReconciler
 from reconciliation.broker_adapters import AlpacaReconcilerAdapter
@@ -127,6 +93,8 @@ from quant_system.risk.sentiment_warden import SentimentWarden
 from quant_system.risk.social_pulse import SocialPulse
 from quant_system.portfolio.hrp import HRPOptimizer
 from risk.regime_router import RegimeRouter, CompositeRegime, get_global_regime_router
+
+
 
 logger = logging.getLogger("quant_system.global_harness_v3")
 
@@ -190,9 +158,9 @@ DEFAULT_WINNER_DICTIONARY: dict[str, list[dict[str, Any]]] = {
             "instrument_a": "CRYPTO:BTC/USD",
             "instrument_b": "CRYPTO:ETH/USD",
             "entry_z_score": 2.0,
-            "exit_z_score": 0.5,
+            "exit_z_score": 0.3,
             "leg_notional": 2_500.0,
-            "warmup_bars": 24,
+            "warmup_bars": 12,
         },
         {
             "slot": "crypto_eth_sol",
@@ -200,9 +168,9 @@ DEFAULT_WINNER_DICTIONARY: dict[str, list[dict[str, Any]]] = {
             "instrument_a": "CRYPTO:ETH/USD",
             "instrument_b": "CRYPTO:SOL/USD",
             "entry_z_score": 2.2,
-            "exit_z_score": 0.5,
+            "exit_z_score": 0.3,
             "leg_notional": 2_000.0,
-            "warmup_bars": 24,
+            "warmup_bars": 12,
         },
         {
             "slot": "crypto_btc_sol",
@@ -210,9 +178,9 @@ DEFAULT_WINNER_DICTIONARY: dict[str, list[dict[str, Any]]] = {
             "instrument_a": "CRYPTO:BTC/USD",
             "instrument_b": "CRYPTO:SOL/USD",
             "entry_z_score": 2.2,
-            "exit_z_score": 0.5,
+            "exit_z_score": 0.3,
             "leg_notional": 2_000.0,
-            "warmup_bars": 24,
+            "warmup_bars": 12,
         },
         {
             "slot": "crypto_eth_avax",
@@ -220,7 +188,7 @@ DEFAULT_WINNER_DICTIONARY: dict[str, list[dict[str, Any]]] = {
             "instrument_a": "CRYPTO:ETH/USD",
             "instrument_b": "CRYPTO:AVAX/USD",
             "entry_z_score": 2.3,
-            "exit_z_score": 0.5,
+            "exit_z_score": 0.3,
             "leg_notional": 1_500.0,
             "warmup_bars": 24,
         },
@@ -238,60 +206,60 @@ DEFAULT_WINNER_DICTIONARY: dict[str, list[dict[str, Any]]] = {
             "strategy": "kalman_pairs",
             "instrument_a": "AAPL",
             "instrument_b": "MSFT",
-            "entry_z_score": 1.5,
+            "entry_z_score": 2.0,
             "exit_z_score": 0.5,
             "leg_notional": 3_500.0,
-            "warmup_bars": 10,
+            "warmup_bars": 6,
         },
         {
             "slot": "equity_v_ma",
             "strategy": "kalman_pairs",
             "instrument_a": "V",
             "instrument_b": "MA",
-            "entry_z_score": 1.5,
+            "entry_z_score": 2.0,
             "exit_z_score": 0.5,
             "leg_notional": 3_500.0,
-            "warmup_bars": 10,
+            "warmup_bars": 6,
         },
         {
             "slot": "equity_amzn_googl",
             "strategy": "kalman_pairs",
             "instrument_a": "AMZN",
             "instrument_b": "GOOGL",
-            "entry_z_score": 1.5,
+            "entry_z_score": 2.0,
             "exit_z_score": 0.5,
             "leg_notional": 3_500.0,
-            "warmup_bars": 10,
+            "warmup_bars": 6,
         },
         {
             "slot": "equity_jpm_bac",
             "strategy": "kalman_pairs",
             "instrument_a": "JPM",
             "instrument_b": "BAC",
-            "entry_z_score": 1.5,
+            "entry_z_score": 2.0,
             "exit_z_score": 0.5,
             "leg_notional": 3_000.0,
-            "warmup_bars": 10,
+            "warmup_bars": 6,
         },
         {
             "slot": "equity_ko_pep",
             "strategy": "kalman_pairs",
             "instrument_a": "KO",
             "instrument_b": "PEP",
-            "entry_z_score": 1.5,
+            "entry_z_score": 2.0,
             "exit_z_score": 0.5,
             "leg_notional": 3_000.0,
-            "warmup_bars": 10,
+            "warmup_bars": 6,
         },
         {
             "slot": "equity_amd_nvda",
             "strategy": "kalman_pairs",
             "instrument_a": "AMD",
             "instrument_b": "NVDA",
-            "entry_z_score": 1.5,
+            "entry_z_score": 2.0,
             "exit_z_score": 0.5,
             "leg_notional": 3_000.0,
-            "warmup_bars": 10,
+            "warmup_bars": 6,
         },
         # New pairs — all reuse existing subscribed symbols (no IEX cap impact).
         {
@@ -299,39 +267,39 @@ DEFAULT_WINNER_DICTIONARY: dict[str, list[dict[str, Any]]] = {
             "strategy": "kalman_pairs",
             "instrument_a": "MSFT",
             "instrument_b": "GOOGL",
-            "entry_z_score": 1.5,
+            "entry_z_score": 2.0,
             "exit_z_score": 0.5,
-            "leg_notional": 2_500.0,
-            "warmup_bars": 10,
+            "leg_notional": 3_000.0,
+            "warmup_bars": 6,
         },
         {
             "slot": "equity_msft_amzn",
             "strategy": "kalman_pairs",
             "instrument_a": "MSFT",
             "instrument_b": "AMZN",
-            "entry_z_score": 1.5,
+            "entry_z_score": 2.0,
             "exit_z_score": 0.5,
-            "leg_notional": 2_500.0,
-            "warmup_bars": 10,
+            "leg_notional": 3_000.0,
+            "warmup_bars": 6,
         },
         {
             "slot": "equity_aapl_amzn",
             "strategy": "kalman_pairs",
             "instrument_a": "AAPL",
             "instrument_b": "AMZN",
-            "entry_z_score": 1.5,
+            "entry_z_score": 2.0,
             "exit_z_score": 0.5,
-            "leg_notional": 2_500.0,
-            "warmup_bars": 10,
+            "leg_notional": 3_000.0,
+            "warmup_bars": 6,
         },
         {
             "slot": "equity_jpm_v",
             "strategy": "kalman_pairs",
             "instrument_a": "JPM",
             "instrument_b": "V",
-            "entry_z_score": 1.5,
+            "entry_z_score": 2.0,
             "exit_z_score": 0.5,
-            "leg_notional": 2_500.0,
+            "leg_notional": 3_000.0,
             "warmup_bars": 10,
         },
         {
@@ -339,9 +307,9 @@ DEFAULT_WINNER_DICTIONARY: dict[str, list[dict[str, Any]]] = {
             "strategy": "kalman_pairs",
             "instrument_a": "NVDA",
             "instrument_b": "AAPL",
-            "entry_z_score": 1.5,
+            "entry_z_score": 2.0,
             "exit_z_score": 0.5,
-            "leg_notional": 2_000.0,
+            "leg_notional": 3_000.0,
             "warmup_bars": 10,
         },
         # ETF Pairs — tradeable via Alpaca (IEX feed), no new API needed.
@@ -350,7 +318,7 @@ DEFAULT_WINNER_DICTIONARY: dict[str, list[dict[str, Any]]] = {
             "strategy": "kalman_pairs",
             "instrument_a": "GLD",
             "instrument_b": "SLV",
-            "entry_z_score": 1.5,
+            "entry_z_score": 2.0,
             "exit_z_score": 0.5,
             "leg_notional": 2_500.0,
             "warmup_bars": 10,
@@ -360,7 +328,7 @@ DEFAULT_WINNER_DICTIONARY: dict[str, list[dict[str, Any]]] = {
             "strategy": "kalman_pairs",
             "instrument_a": "TLT",
             "instrument_b": "IEF",
-            "entry_z_score": 1.5,
+            "entry_z_score": 2.0,
             "exit_z_score": 0.5,
             "leg_notional": 2_500.0,
             "warmup_bars": 10,
@@ -370,7 +338,7 @@ DEFAULT_WINNER_DICTIONARY: dict[str, list[dict[str, Any]]] = {
             "strategy": "kalman_pairs",
             "instrument_a": "USO",
             "instrument_b": "XLE",
-            "entry_z_score": 1.5,
+            "entry_z_score": 2.0,
             "exit_z_score": 0.5,
             "leg_notional": 2_500.0,
             "warmup_bars": 10,
@@ -380,7 +348,7 @@ DEFAULT_WINNER_DICTIONARY: dict[str, list[dict[str, Any]]] = {
             "strategy": "kalman_pairs",
             "instrument_a": "SPY",
             "instrument_b": "QQQ",
-            "entry_z_score": 1.5,
+            "entry_z_score": 2.0,
             "exit_z_score": 0.5,
             "leg_notional": 2_500.0,
             "warmup_bars": 10,
@@ -390,7 +358,7 @@ DEFAULT_WINNER_DICTIONARY: dict[str, list[dict[str, Any]]] = {
             "strategy": "kalman_pairs",
             "instrument_a": "XLF",
             "instrument_b": "XLK",
-            "entry_z_score": 1.5,
+            "entry_z_score": 2.0,
             "exit_z_score": 0.5,
             "leg_notional": 2_500.0,
             "warmup_bars": 10,
@@ -452,19 +420,8 @@ DEFAULT_WINNER_DICTIONARY: dict[str, list[dict[str, Any]]] = {
         {"slot": "dir_aapl",  "strategy": "directional", "instrument_a": "AAPL",  "instrument_b": "AAPL",  "entry_z_score": 0.0, "exit_z_score": 0.0, "leg_notional": 2_000.0, "warmup_bars": 10},
         {"slot": "dir_msft",  "strategy": "directional", "instrument_a": "MSFT",  "instrument_b": "MSFT",  "entry_z_score": 0.0, "exit_z_score": 0.0, "leg_notional": 2_000.0, "warmup_bars": 10},
         {"slot": "dir_nvda",  "strategy": "directional", "instrument_a": "NVDA",  "instrument_b": "NVDA",  "entry_z_score": 0.0, "exit_z_score": 0.0, "leg_notional": 2_000.0, "warmup_bars": 10},
-        {"slot": "dir_amzn",  "strategy": "directional", "instrument_a": "AMZN",  "instrument_b": "AMZN",  "entry_z_score": 0.0, "exit_z_score": 0.0, "leg_notional": 2_000.0, "warmup_bars": 10},
-        {"slot": "dir_googl", "strategy": "directional", "instrument_a": "GOOGL", "instrument_b": "GOOGL", "entry_z_score": 0.0, "exit_z_score": 0.0, "leg_notional": 2_000.0, "warmup_bars": 10},
-        {"slot": "dir_amd",   "strategy": "directional", "instrument_a": "AMD",   "instrument_b": "AMD",   "entry_z_score": 0.0, "exit_z_score": 0.0, "leg_notional": 1_500.0, "warmup_bars": 10},
         {"slot": "dir_spy",   "strategy": "directional", "instrument_a": "SPY",   "instrument_b": "SPY",   "entry_z_score": 0.0, "exit_z_score": 0.0, "leg_notional": 2_500.0, "warmup_bars": 10},
         {"slot": "dir_qqq",   "strategy": "directional", "instrument_a": "QQQ",   "instrument_b": "QQQ",   "entry_z_score": 0.0, "exit_z_score": 0.0, "leg_notional": 2_500.0, "warmup_bars": 10},
-        {"slot": "dir_meta",  "strategy": "directional", "instrument_a": "META",  "instrument_b": "META",  "entry_z_score": 0.0, "exit_z_score": 0.0, "leg_notional": 2_000.0, "warmup_bars": 10},
-        {"slot": "dir_tsla",  "strategy": "directional", "instrument_a": "TSLA",  "instrument_b": "TSLA",  "entry_z_score": 0.0, "exit_z_score": 0.0, "leg_notional": 1_500.0, "warmup_bars": 10},
-        {"slot": "dir_nflx",  "strategy": "directional", "instrument_a": "NFLX",  "instrument_b": "NFLX",  "entry_z_score": 0.0, "exit_z_score": 0.0, "leg_notional": 2_000.0, "warmup_bars": 10},
-        {"slot": "dir_crm",   "strategy": "directional", "instrument_a": "CRM",   "instrument_b": "CRM",   "entry_z_score": 0.0, "exit_z_score": 0.0, "leg_notional": 1_500.0, "warmup_bars": 10},
-        {"slot": "dir_uber",  "strategy": "directional", "instrument_a": "UBER",  "instrument_b": "UBER",  "entry_z_score": 0.0, "exit_z_score": 0.0, "leg_notional": 1_500.0, "warmup_bars": 10},
-        {"slot": "dir_coin",  "strategy": "directional", "instrument_a": "COIN",  "instrument_b": "COIN",  "entry_z_score": 0.0, "exit_z_score": 0.0, "leg_notional": 1_500.0, "warmup_bars": 10},
-        {"slot": "dir_ba",    "strategy": "directional", "instrument_a": "BA",    "instrument_b": "BA",    "entry_z_score": 0.0, "exit_z_score": 0.0, "leg_notional": 1_500.0, "warmup_bars": 10},
-        {"slot": "dir_tgt",   "strategy": "directional", "instrument_a": "TGT",   "instrument_b": "TGT",   "entry_z_score": 0.0, "exit_z_score": 0.0, "leg_notional": 1_500.0, "warmup_bars": 10},
         # Cross-sectional momentum: Jegadeesh-Titman intraday across equity universe.
         # instrument_a="SPY" drives the market-hours gate; strategy watches all 15 symbols.
         {"slot": "xsec_momentum", "strategy": "cross_sectional", "instrument_a": "SPY", "instrument_b": "SPY", "entry_z_score": 0.0, "exit_z_score": 0.0, "leg_notional": 1_500.0, "warmup_bars": 5},
@@ -826,6 +783,21 @@ def _load_winner_dictionary() -> dict[str, list[dict[str, Any]]]:
             )
             normalized_config.setdefault("strategy", "kalman_pairs")
             normalized_config.setdefault("warmup_bars", 20)
+            # Apply global notional scalar for capital conservation
+            if "leg_notional" in normalized_config:
+                scalar = ApexConfig.GLOBAL_NOTIONAL_SCALAR
+                original = normalized_config["leg_notional"]
+                normalized_config["leg_notional"] = float(original * scalar)
+
+                if scalar != 1.0:
+                    logger.info(
+                        "CAPITAL CONSERVATION: %s leg_notional scaled $%.0f -> $%.0f (scalar=%.2f)",
+                        normalized_config.get("slot", "pair"),
+                        original,
+                        normalized_config["leg_notional"],
+                        scalar
+                    )
+
             normalized[asset_group].append(normalized_config)
     
     # Adaptive Calibration Injection
@@ -1116,6 +1088,10 @@ class StrategyController:
     def active_slot_configs(self) -> tuple[StrategySlotConfig, ...]:
         return tuple(config for config, _ in self._active_strategies.values())
 
+    def set_ledger(self, ledger: "PortfolioLedger") -> None:
+        """Wire in the portfolio ledger so reconcile can auto-pause losing pairs."""
+        self._ledger_ref = ledger
+
     async def reconcile(self) -> None:
         desired_slots = set(self._configured_slots)
         for slot in list(self._active_strategies):
@@ -1125,10 +1101,31 @@ class StrategyController:
         EQUITY_ACTIVATION_BATCH_SIZE = 3
         EQUITY_ACTIVATION_DELAY_S = 3.0
 
+        # Auto-pause: track per-slot 5-day P&L and pause persistent losers
+        _AUTO_PAUSE_THRESHOLD = -150.0  # pause if realized P&L < -$150
+
         equity_slots_to_activate = []
         crypto_slots_to_activate = []
 
         for slot, config in self._configured_slots.items():
+            # Auto-pause kalman_pairs slots with persistent realized losses
+            if config.strategy == "kalman_pairs" and hasattr(self, "_ledger_ref"):
+                try:
+                    ledger = self._ledger_ref
+                    pnl_a = ledger.get_position(config.instrument_a).realized_pnl
+                    pnl_b = (ledger.get_position(config.instrument_b).realized_pnl
+                             if config.instrument_b != config.instrument_a else 0.0)
+                    slot_pnl = pnl_a + pnl_b
+                    if slot_pnl < _AUTO_PAUSE_THRESHOLD and slot not in self._paused_slots:
+                        self._paused_slots.add(slot)
+                        logger.warning("PERF PAUSE: slot=%s pnl=$%.1f < $%.1f — auto-paused",
+                                       slot, slot_pnl, _AUTO_PAUSE_THRESHOLD)
+                    elif slot_pnl > _AUTO_PAUSE_THRESHOLD / 2 and slot in self._paused_slots:
+                        self._paused_slots.discard(slot)
+                        logger.info("PERF RESUME: slot=%s pnl=$%.1f — auto-resumed", slot, slot_pnl)
+                except Exception:
+                    pass
+
             should_be_active = self._should_be_active(config)
             active = self._active_strategies.get(slot)
             if not should_be_active:
@@ -1168,6 +1165,7 @@ class StrategyController:
                 slot, live_config.pair_label, sized_notional,
                 "vol-adjusted" if self._volatility_sizer is not None else "fixed",
             )
+            await asyncio.sleep(1.0)  # stagger: spread Kalman warmup across time
 
         for i in range(0, len(equity_slots_to_activate), EQUITY_ACTIVATION_BATCH_SIZE):
             batch = equity_slots_to_activate[i:i + EQUITY_ACTIVATION_BATCH_SIZE]
@@ -1180,6 +1178,7 @@ class StrategyController:
                     slot, live_config.pair_label, sized_notional,
                     "vol-adjusted" if self._volatility_sizer is not None else "fixed",
                 )
+                await asyncio.sleep(1.0)  # stagger: 1s between each slot reduces burst Johansen load
             if i + EQUITY_ACTIVATION_BATCH_SIZE < len(equity_slots_to_activate):
                 await asyncio.sleep(EQUITY_ACTIVATION_DELAY_S)
 
@@ -1257,8 +1256,22 @@ class StrategyController:
 
     #  Private helpers 
 
+    def _instrument_open_slot_count(self, instrument: str) -> int:
+        """Return how many currently-open (non-flat) slots hold a position in `instrument`."""
+        count = 0
+        for _slot, (_cfg, strat) in self._active_strategies.items():
+            state = getattr(strat, "_pair_state", None)
+            if state is None:
+                state = getattr(strat, "_position_state", None)
+            if state not in (None, "flat"):
+                cfg2 = _cfg
+                if instrument in (cfg2.instrument_a, cfg2.instrument_b):
+                    count += 1
+        return count
+
     def _resolve_notional(self, config: StrategySlotConfig) -> float:
-        """Return VolatilitySizer-scaled notional with regime multiplier + crypto beta."""
+        """Return VolatilitySizer-scaled notional with regime multiplier + crypto beta
+        + drawdown ramp-down + instrument overlap correlation guard."""
         if self._volatility_sizer is None:
             base = config.leg_notional
         else:
@@ -1267,17 +1280,14 @@ class StrategyController:
                 config.instrument_b,
                 target_risk_dollars=config.leg_notional,
             )
-            # Guard: cap at 1.5 base and floor at 50% for zero vol history.
             base = max(config.leg_notional * 0.50, min(config.leg_notional * 1.5, sized))
             if abs(base - config.leg_notional) / config.leg_notional > 0.01:
                 logger.debug(
                     "VolatilitySizer: pair=%s base=$%.0f  sized=$%.0f",
-                    config.pair_label,
-                    config.leg_notional,
-                    base,
+                    config.pair_label, config.leg_notional, base,
                 )
 
-        # ── Regime-aware scaling (wired 2026-04-28 forensic audit fix) ──
+        # ── Improvement 5: Regime-aware scaling with tightened floor (10%) ──
         try:
             decision = get_global_regime_router().evaluate()
             regime_mult = decision.notional_multiplier
@@ -1285,19 +1295,62 @@ class StrategyController:
             if is_crypto:
                 regime_mult *= decision.crypto_beta_scalar
             adjusted = base * regime_mult
-            # Floor: never drop below 25% of base so a pair isn't accidentally silenced.
-            adjusted = max(config.leg_notional * 0.25, adjusted)
+            # Floor lowered to 10% so HIGH_VOL_PANIC (×0.40 × 0.55 = ×0.22) is not overridden.
+            adjusted = max(config.leg_notional * 0.10, adjusted)
             if abs(adjusted - base) / max(base, 1.0) > 0.02:
                 logger.debug(
                     "RegimeRouter: pair=%s base=$%.0f regime_mult=%.2f%s -> $%.0f",
                     config.pair_label, base, regime_mult,
-                    " (crypto_beta)" if is_crypto else "",
-                    adjusted,
+                    " (crypto_beta)" if is_crypto else "", adjusted,
                 )
-            return adjusted
+            base = adjusted
         except Exception as exc:
             logger.debug("RegimeRouter notional adjustment skipped: %s", exc)
-            return base
+
+        # ── Improvement 7: Drawdown-based linear ramp-down ──
+        # 0% DD -> 1.0x | 3% DD -> 0.75x | 6% DD -> 0.50x
+        try:
+            from risk.equity_protector import get_global_equity_protector
+            ep = get_global_equity_protector()
+            if ep is not None:
+                dd = abs(min(0.0, getattr(ep, 'current_drawdown', lambda: 0.0)()))
+                if dd >= 0.06:
+                    dd_scalar = 0.50
+                elif dd >= 0.03:
+                    dd_scalar = 1.0 - (dd - 0.03) / 0.03 * 0.25
+                else:
+                    dd_scalar = 1.0
+                if dd_scalar < 0.999:
+                    logger.debug(
+                        "DD ramp-down: pair=%s dd=%.1f%% scalar=%.2f",
+                        config.pair_label, dd * 100, dd_scalar,
+                    )
+                base *= dd_scalar
+        except Exception:
+            pass
+
+        # ── Improvement 6: Instrument overlap correlation guard ──
+        # Block size increase (cap at 50% base) when 2+ slots already hold this instrument.
+        try:
+            overlap_a = self._instrument_open_slot_count(config.instrument_a)
+            overlap_b = (
+                self._instrument_open_slot_count(config.instrument_b)
+                if config.instrument_b != config.instrument_a else 0
+            )
+            max_overlap = max(overlap_a, overlap_b)
+            if max_overlap >= 2:
+                # 3rd+ concurrent exposure on same instrument — cap at 50% base notional
+                capped = min(base, config.leg_notional * 0.50)
+                if capped < base:
+                    logger.debug(
+                        "CorrelGuard: pair=%s overlap=%d -> capping $%.0f to $%.0f",
+                        config.pair_label, max_overlap, base, capped,
+                    )
+                base = capped
+        except Exception:
+            pass
+
+        return base
 
     def _instantiate_strategy(
         self, config: StrategySlotConfig
@@ -2338,7 +2391,9 @@ async def main() -> None:
 
     #  Risk modules 
     # Load winner dictionary first so we know all pairs for the sizer.
+    logger.info("SYSTEM BOOT: Triggering _load_winner_dictionary...")
     initial_winner_dict = _load_winner_dictionary()
+    logger.info("SYSTEM BOOT: winner_dictionary loaded successfully.")
     
     # Monday Open Adaptive Alert
     tuned_meta = initial_winner_dict.get("_metadata", {})
@@ -2480,7 +2535,8 @@ async def main() -> None:
     )
     ibkr_broker.start()
     eod_liquidator = EODLiquidator(ledger, event_bus, session_manager=session_manager)
-    
+    controller.set_ledger(ledger)  # enables auto-pause of losing pairs in reconcile()
+
     # Dashboard integration
     monitor = LiveMonitor()
     correlation_manager = CorrelationManager()

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -30,7 +31,8 @@ def _bar(instrument_id: str, when: datetime, close_price: float) -> BarEvent:
     )
 
 
-def test_kalman_pairs_strategy_emits_entry_signals_after_warmup() -> None:
+@pytest.mark.asyncio
+async def test_kalman_pairs_strategy_emits_entry_signals_after_warmup() -> None:
     bus = InMemoryEventBus()
     strategy = KalmanPairsStrategy(
         bus,
@@ -40,11 +42,18 @@ def test_kalman_pairs_strategy_emits_entry_signals_after_warmup() -> None:
         exit_z_score=0.5,
         warmup_bars=5,
         leg_notional=1_000.0,
+        observation_noise=1.0,
     )
+    strategy._spread_converging = lambda: True  # type: ignore[method-assign]
+    strategy._is_equity_auction_window = lambda: False  # type: ignore[method-assign]
     signals: list[SignalEvent] = []
-    bus.subscribe("signal", lambda event: signals.append(event))
+    
+    async def capture_signal(event: SignalEvent) -> None:
+        signals.append(event)
+        
+    bus.subscribe("signal", capture_signal, is_async=True)
 
-    start = datetime(2026, 1, 5, 14, 30, tzinfo=timezone.utc)
+    start = datetime(2026, 1, 5, 10, 0, tzinfo=timezone.utc)
     # 5 warmup bars with ~3-unit variation so OLS is non-degenerate and
     # the post-warm-start z-gate doesn't fire on a pathological theta.
     # Followed by a large gap bar that drives entry signals for both legs.
@@ -54,13 +63,17 @@ def test_kalman_pairs_strategy_emits_entry_signals_after_warmup() -> None:
         (98.0, 96.0),
         (101.0, 99.0),
         (99.0, 97.0),
-        (115.0, 97.0),   # A spikes well above the spread → entry
+        (105.0, 97.0),   # A spikes above the spread → entry widening
+        (104.0, 97.0),   # A starts to revert → entry converging
     ]
 
     for index, (price_a, price_b) in enumerate(paired_prices):
-        ts = start + timedelta(hours=index)
-        bus.publish(_bar("AAPL", ts, price_a))
-        bus.publish(_bar("MSFT", ts, price_b))
+        ts = start + timedelta(minutes=index)
+        await bus.publish_async(_bar("AAPL", ts, price_a))
+        await bus.publish_async(_bar("MSFT", ts, price_b))
+
+    # Give time for the async background tasks (signal publishing) to complete
+    await asyncio.sleep(0.5)
 
     assert len(signals) >= 2
     instruments = {s.instrument_id for s in signals}

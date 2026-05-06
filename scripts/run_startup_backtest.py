@@ -53,22 +53,90 @@ _DEFAULT_MIN_WINRATE = 0.40
 _MAX_DRAWDOWN_HARD  = -0.20    # hard-fail threshold
 
 
-def _fetch_price_data(symbols: list[str], days: int) -> Dict[str, pd.DataFrame]:
+def _fetch_via_polygon(
+    symbols: list[str],
+    start: str,
+    end: str,
+) -> Dict[str, pd.DataFrame]:
+    """
+    Fetch daily OHLCV from Polygon.io REST API.
+
+    Uses the POLYGON_API_KEY env var (already configured in .env).
+    Returns only symbols where ≥20 bars were retrieved.
+    """
+    import os
+    import requests as _requests
+
+    api_key = os.getenv("POLYGON_API_KEY", "")
+    if not api_key:
+        logger.warning("POLYGON_API_KEY not set — skipping Polygon fetch")
+        return {}
+
+    base = "https://api.polygon.io/v2/aggs/ticker"
+    session = _requests.Session()
+    adapter = _requests.adapters.HTTPAdapter(max_retries=3)
+    session.mount("https://", adapter)
+
+    data: Dict[str, pd.DataFrame] = {}
+    for sym in symbols:
+        url = f"{base}/{sym}/range/1/day/{start}/{end}"
+        params = {"apiKey": api_key, "limit": 500, "adjusted": "true"}
+        for attempt in range(2):  # one retry on 429
+            try:
+                import time as _time
+                resp = session.get(url, params=params, timeout=15)
+                if resp.status_code == 429:
+                    if attempt == 0:
+                        _time.sleep(15)  # back off 15s on rate-limit then retry
+                        continue
+                    logger.warning("  Polygon 429 twice for %s — skipping", sym)
+                    break
+                resp.raise_for_status()
+                payload = resp.json()
+                if payload.get("status") not in ("OK", "DELAYED") or not payload.get("results"):
+                    logger.debug("Polygon: no results for %s (status=%s)", sym, payload.get("status"))
+                    break
+                rows = payload["results"]
+                df = pd.DataFrame(rows)
+                # Polygon returns epoch milliseconds in 't'
+                df["date"] = pd.to_datetime(df["t"], unit="ms", utc=True).dt.tz_convert(None)
+                df = df.rename(columns={"o": "Open", "h": "High", "l": "Low", "c": "Close", "v": "Volume"})
+                df = df.set_index("date").sort_index()
+                df = df[["Open", "High", "Low", "Close", "Volume"]]
+                if len(df) >= 20:
+                    data[sym] = df
+                else:
+                    logger.debug("Polygon: only %d bars for %s — skipping", len(df), sym)
+                break
+            except Exception as exc:
+                logger.warning("  Polygon fetch failed for %s: %s", sym, exc)
+                break
+        _time.sleep(0.25)  # 4 req/s — stays within free-tier 5 req/min limit
+    return data
+
+
+def _fetch_via_yfinance(
+    symbols: list[str],
+    start: str,
+    end: str,
+) -> Dict[str, pd.DataFrame]:
+    """
+    yfinance fallback — may fail in Docker due to urllib3 version mismatch,
+    but works fine in local development.
+    """
     try:
         import yfinance as yf
     except ImportError:
-        logger.error("yfinance not installed — pip install yfinance")
-        sys.exit(2)
+        logger.debug("yfinance not installed — skipping")
+        return {}
 
-    end   = datetime.now()
-    start = end - timedelta(days=days + 10)
     data: Dict[str, pd.DataFrame] = {}
     for sym in symbols:
         try:
             df = yf.download(
                 sym,
-                start=start.strftime("%Y-%m-%d"),
-                end=end.strftime("%Y-%m-%d"),
+                start=start,
+                end=end,
                 interval="1d",
                 progress=False,
                 auto_adjust=True,
@@ -76,10 +144,46 @@ def _fetch_price_data(symbols: list[str], days: int) -> Dict[str, pd.DataFrame]:
             if len(df) >= 20:
                 df.columns = [c[0] if isinstance(c, tuple) else c for c in df.columns]
                 data[sym] = df[["Open", "High", "Low", "Close", "Volume"]].copy()
+            else:
+                logger.debug("yfinance: only %d bars for %s — skipping", len(df), sym)
         except Exception as exc:
-            logger.warning("  %s fetch failed: %s", sym, exc)
-    logger.info("Fetched %d / %d symbols (%d+ bars each)", len(data), len(symbols), 20)
+            logger.warning("  yfinance fetch failed for %s: %s", sym, exc)
     return data
+
+
+def _fetch_price_data(symbols: list[str], days: int) -> Dict[str, pd.DataFrame]:
+    """
+    Fetch daily OHLCV for all symbols over the requested lookback period.
+
+    Strategy:
+      1. Try Polygon.io REST (reliable in Docker, uses POLYGON_API_KEY).
+      2. For any symbol not returned by Polygon, try yfinance as fallback.
+      3. Return the merged dataset; exit-code 2 (pass) if < 5 symbols fetched.
+    """
+    from datetime import datetime, timedelta
+
+    end_dt   = datetime.now()
+    start_dt = end_dt - timedelta(days=days + 10)
+    start    = start_dt.strftime("%Y-%m-%d")
+    end      = end_dt.strftime("%Y-%m-%d")
+
+    # --- Primary: Polygon --------------------------------------------------
+    data = _fetch_via_polygon(symbols, start, end)
+    missing = [s for s in symbols if s not in data]
+
+    # --- Fallback: yfinance (for any missed symbols) -----------------------
+    if missing:
+        logger.info("Polygon returned %d/%d symbols; trying yfinance for %d missing",
+                    len(data), len(symbols), len(missing))
+        yf_data = _fetch_via_yfinance(missing, start, end)
+        data.update(yf_data)
+
+    logger.info(
+        "Fetched %d / %d symbols (%d+ bars each)",
+        len(data), len(symbols), 20,
+    )
+    return data
+
 
 
 def _build_momentum_probabilities(

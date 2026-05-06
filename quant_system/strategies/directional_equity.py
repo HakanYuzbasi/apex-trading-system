@@ -261,6 +261,9 @@ class DirectionalEquityStrategy(BaseStrategy):
         self._tp2_closed:    bool  = False
         self._open_notional: float = 0.0
 
+        # Improvement 8: Track SPY hedge (complacency regime)
+        self._hedge_notional: float = 0.0
+
         # Session VWAP (equity only, resets each calendar day ET)
         self._vwap_cum_pv:       float      = 0.0
         self._vwap_cum_v:        float      = 0.0
@@ -271,6 +274,9 @@ class DirectionalEquityStrategy(BaseStrategy):
         self._daily_realized_pnl:   float      = 0.0
         self._daily_pnl_date:       date | None = None
         self._daily_circuit_fired:  bool        = False
+
+        # IMP-D: intraday win-rate circuit — rolling last-20 trade P&L signs
+        self._session_trades: list[float] = []
 
         self.last_z_score = 0.0
 
@@ -645,6 +651,7 @@ class DirectionalEquityStrategy(BaseStrategy):
             self._daily_pnl_date      = today
             self._daily_realized_pnl  = 0.0
             self._daily_circuit_fired = False
+            self._session_trades      = []   # IMP-D: reset win-rate history each session
         if self._daily_realized_pnl < self._DAILY_LOSS_LIMIT:
             if not self._daily_circuit_fired:
                 logger.warning(
@@ -728,8 +735,22 @@ class DirectionalEquityStrategy(BaseStrategy):
         conviction = self._rsi_conviction_scalar(rsi, oversold if side == "buy" else overbought, rsi_side)
         final_notional = self.leg_notional * ml_scalar * mtf_scalar * conviction
 
+        # IMP-B: entry quality floor — reject low-confidence entries where the combined
+        # signal scalar falls below 55% of leg_notional.  Weak ML × weak MTF × shallow
+        # conviction produces noise trades that drag win rate without adding alpha.
+        quality_mult = final_notional / self.leg_notional
+        if quality_mult < 0.55:
+            logger.debug(
+                "Quality floor [%s]: combined scalar=%.2f < 0.55 — skipping entry",
+                self.instrument, quality_mult,
+            )
+            return
+
         # Intraday vol gate: reduce notional when recent hourly realized vol is >2× long-run
         final_notional *= self._intraday_vol_mult()
+
+        # IMP-D: win-rate circuit — reduce size when rolling win rate is poor
+        final_notional *= self._winrate_circuit_mult()
 
         # VIX-adaptive notional scaling (equity only)
         if not self._is_crypto:
@@ -739,6 +760,20 @@ class DirectionalEquityStrategy(BaseStrategy):
                 final_notional *= vix_state.risk_multiplier
             except Exception:
                 pass
+
+        # IMP-C: graduated daily loss size reduction — scale down proportionally to
+        # how close we are to the daily loss limit, rather than binary block.
+        # (Binary block at 100% loss_ratio is preserved as the hard stop.)
+        if self._daily_realized_pnl < 0 and self._DAILY_LOSS_LIMIT < 0:
+            loss_ratio = abs(self._daily_realized_pnl) / abs(self._DAILY_LOSS_LIMIT)
+            if loss_ratio < 1.0:
+                size_mult = max(0.25, 1.0 - loss_ratio)
+                if size_mult < 1.0:
+                    logger.debug(
+                        "Daily loss sizing [%s]: pnl=$%.0f → size_mult=%.2f",
+                        self.instrument, self._daily_realized_pnl, size_mult,
+                    )
+                    final_notional *= size_mult
 
         # Portfolio net-exposure cap
         direction = "long" if side == "buy" else "short"
@@ -792,6 +827,32 @@ class DirectionalEquityStrategy(BaseStrategy):
             "ml_conf":   round(self._gl_conf, 4),
             "mtf_aligned": self._mtf_aligned,
         })
+
+        # Improvement 8: VIX Complacency hedge
+        if self._state == "long" and not self._is_crypto and not self.instrument.startswith("FOREX:"):
+            try:
+                from risk.vix_regime_manager import get_global_vix_manager
+                vix_mgr = get_global_vix_manager()
+                if vix_mgr is not None:
+                    hedge_needed, reason = vix_mgr.should_hedge()
+                    if hedge_needed:
+                        # Hedge with a 15% short on SPY
+                        self._hedge_notional = abs(notional) * 0.15
+                        self.emit_signal(
+                            instrument_id="SPY",
+                            target_type="notional",
+                            target_value=-self._hedge_notional,
+                            confidence=0.75,
+                            metadata={
+                                "trigger": "complacency_hedge",
+                                "reason": reason,
+                                "parent": self.instrument
+                            }
+                        )
+                        logger.info("Complacency Hedge: shorting SPY for %s (notional=$%.0f)", self.instrument, self._hedge_notional)
+            except Exception as exc:
+                logger.debug("VIX hedge failed: %s", exc)
+
         logger.info(
             "DirectionalEquity ENTRY %s %s @ %.4f | stop=%.4f tp=%.4f notional=$%.0f "
             "ml=%.2f mtf_adj=%.2f",
@@ -803,27 +864,66 @@ class DirectionalEquityStrategy(BaseStrategy):
     def _half_close(self, price: float, reason: str) -> None:
         """Close 50% of position — banks guaranteed P&L, lets remaining 50% trail."""
         self._half_closed = True
-        remaining  = self._open_notional * 0.5
+        partial_notional = self._open_notional * 0.5
         exit_side  = "sell" if self._state == "long" else "buy"
-        target     = remaining if self._state == "long" else -remaining
+        # Fix: Target must be opposite to the position's direction to reduce it.
+        target     = -partial_notional if self._state == "long" else partial_notional
         self._emit_signal(exit_side, target, metadata={"trigger": reason, "partial": True})
-        _NET_EXPOSURE.register(self.instrument, remaining, self._state)
+        
+        # Close 50% of the SPY hedge if it exists
+        if self._hedge_notional > 0:
+            hedge_partial = self._hedge_notional * 0.5
+            self._hedge_notional -= hedge_partial
+            self.emit_signal(
+                instrument_id="SPY",
+                target_type="notional",
+                target_value=hedge_partial,  # Buy to close the short hedge
+                confidence=0.75,
+                metadata={"trigger": "partial_hedge_close", "parent": self.instrument}
+            )
+
+        _NET_EXPOSURE.register(self.instrument, partial_notional, self._state)
+        # Track realized P&L for the 50% we just closed
+        if self._entry_price > 0:
+            direction = 1.0 if self._state == "long" else -1.0
+            self._daily_realized_pnl += direction * (price - self._entry_price) / self._entry_price * partial_notional
         logger.info(
             "DirectionalEquity PARTIAL EXIT %s %s @ %.4f | banked 50%% | remaining=$%.0f",
-            exit_side.upper(), self.instrument, price, remaining,
+            exit_side.upper(), self.instrument, price, partial_notional,
         )
 
     def _quarter_close(self, price: float, reason: str) -> None:
         """Bank another 25% at TP2 (2.5×ATR) — leaves only 25% running free."""
         self._tp2_closed = True
-        remaining  = self._open_notional * 0.25
+        partial_notional = self._open_notional * 0.25
         exit_side  = "sell" if self._state == "long" else "buy"
-        target     = remaining if self._state == "long" else -remaining
+        # Fix: Target must be opposite to the position's direction to reduce it.
+        target     = -partial_notional if self._state == "long" else partial_notional
         self._emit_signal(exit_side, target, metadata={"trigger": reason, "partial": True})
-        _NET_EXPOSURE.register(self.instrument, remaining, self._state)
+        
+        # Close another 25% of the original SPY hedge if it exists
+        if self._hedge_notional > 0:
+            # The remaining hedge is currently 50% of original. We want to close 25% of original.
+            hedge_partial = self._open_notional * 0.15 * 0.25 
+            # Protect against rounding issues
+            hedge_partial = min(hedge_partial, self._hedge_notional)
+            self._hedge_notional -= hedge_partial
+            self.emit_signal(
+                instrument_id="SPY",
+                target_type="notional",
+                target_value=hedge_partial,
+                confidence=0.75,
+                metadata={"trigger": "quarter_hedge_close", "parent": self.instrument}
+            )
+
+        _NET_EXPOSURE.register(self.instrument, partial_notional, self._state)
+        # Track realized P&L for the 25% we just closed
+        if self._entry_price > 0:
+            direction = 1.0 if self._state == "long" else -1.0
+            self._daily_realized_pnl += direction * (price - self._entry_price) / self._entry_price * partial_notional
         logger.info(
             "DirectionalEquity TP2 EXIT %s %s @ %.4f | banked 75%% total | remaining=$%.0f",
-            exit_side.upper(), self.instrument, price, remaining,
+            exit_side.upper(), self.instrument, price, partial_notional,
         )
 
     def _intraday_vol_mult(self) -> float:
@@ -850,6 +950,38 @@ class DirectionalEquityStrategy(BaseStrategy):
             return 0.65
         return 1.0
 
+    # ── Risk helpers ─────────────────────────────────────────────────────────
+
+    def _is_panic_regime(self) -> bool:
+        """True when the composite regime router signals HIGH_VOL_PANIC."""
+        try:
+            from risk.regime_router import get_global_regime_router, CompositeRegime
+            rr = get_global_regime_router()
+            if rr is not None:
+                return rr.last_regime == CompositeRegime.HIGH_VOL_PANIC
+        except Exception:
+            pass
+        return False
+
+    def _winrate_circuit_mult(self) -> float:
+        """IMP-D: reduce new-entry size 40% when rolling win rate < 35% on ≥ 10 trades.
+
+        Win rate drops below 35% before the regime detector catches up with a
+        market regime shift — this closes the lag window.
+        """
+        if len(self._session_trades) < 10:
+            return 1.0
+        wins = sum(1 for p in self._session_trades if p > 0)
+        if wins / len(self._session_trades) < 0.35:
+            logger.info(
+                "Win-rate circuit [%s]: win_rate=%.0f%% on last %d trades — sizing 60%%",
+                self.instrument,
+                100.0 * wins / len(self._session_trades),
+                len(self._session_trades),
+            )
+            return 0.60
+        return 1.0
+
     # ── Position management ───────────────────────────────────────────────────
 
     def _manage_position(self, close: float, rsi: float) -> None:
@@ -860,11 +992,32 @@ class DirectionalEquityStrategy(BaseStrategy):
 
         atr = self._atr_at_entry or 1e-6
 
-        # After 14:30 ET, tighten trailing stop to lock in afternoon gains before
-        # EOD rebalancing noise pushes price back against intraday trend positions.
-        trail_mult = (self.TRAIL_ATR_MULT * self._AFTERNOON_TRAIL_TIGHTEN
-                      if self._et_mins() >= 14 * 60 + 30
-                      else self.TRAIL_ATR_MULT)
+        # IMP-A: regime-triggered exit — close losing positions immediately in panic;
+        # tighten trail to 0.5× ATR on profitable positions (no whipsaw risk).
+        if self._is_panic_regime():
+            is_losing = (
+                (self._state == "long" and close < self._entry_price)
+                or (self._state == "short" and close > self._entry_price)
+            )
+            if is_losing:
+                logger.warning(
+                    "Panic regime exit [%s]: closing losing %s position @ %.4f",
+                    self.instrument, self._state, close,
+                )
+                self._close_position(close, "regime_panic_exit")
+                return
+            # Profitable position: activate trailing immediately with tight mult
+            if not self._trailing_active:
+                self._trailing_active = True
+                self._trail_hwm = close
+
+        # Trail multiplier: tightest in panic, then afternoon, then normal
+        if self._is_panic_regime():
+            trail_mult = self.TRAIL_ATR_MULT * 0.5
+        elif self._et_mins() >= 14 * 60 + 30:
+            trail_mult = self.TRAIL_ATR_MULT * self._AFTERNOON_TRAIL_TIGHTEN
+        else:
+            trail_mult = self.TRAIL_ATR_MULT
 
         if self._state == "long":
             self._trail_hwm = max(self._trail_hwm, close)
@@ -927,6 +1080,18 @@ class DirectionalEquityStrategy(BaseStrategy):
     def _close_position(self, price: float, reason: str) -> None:
         exit_side = "sell" if self._state == "long" else "buy"
         self._emit_signal(exit_side, 0.0, metadata={"trigger": reason})
+        
+        # Close any remaining SPY hedge
+        if self._hedge_notional > 0:
+            self.emit_signal(
+                instrument_id="SPY",
+                target_type="notional",
+                target_value=self._hedge_notional,
+                confidence=0.75,
+                metadata={"trigger": "full_hedge_close", "parent": self.instrument}
+            )
+            self._hedge_notional = 0.0
+
         logger.info(
             "DirectionalEquity EXIT %s %s @ %.4f | reason=%s",
             exit_side.upper(), self.instrument, price, reason,
@@ -939,10 +1104,29 @@ class DirectionalEquityStrategy(BaseStrategy):
         except Exception:
             pass
         # Track realized P&L for daily circuit breaker
-        if self._entry_price > 0 and self._open_notional > 0:
+        if self._entry_price <= 0.0:
+            logger.warning(
+                "DirectionalEquity _close_position called with zero entry_price — "
+                "P&L for %s skipped (reason=%s)",
+                self.instrument, reason,
+            )
+        elif self._open_notional > 0:
             direction = 1.0 if self._state == "long" else -1.0
-            pnl = direction * (price - self._entry_price) / self._entry_price * self._open_notional
+            # Use remaining notional — partial exits (TP1/TP2) have already closed
+            # 50%/75% of the position and tracked their P&L separately.
+            if self._tp2_closed:
+                remaining_frac = 0.25
+            elif self._half_closed:
+                remaining_frac = 0.50
+            else:
+                remaining_frac = 1.0
+            remaining_notional = self._open_notional * remaining_frac
+            pnl = direction * (price - self._entry_price) / self._entry_price * remaining_notional
             self._daily_realized_pnl += pnl
+            # IMP-D: record this trade in the rolling win-rate tracker (max 20)
+            self._session_trades.append(pnl)
+            if len(self._session_trades) > 20:
+                self._session_trades.pop(0)
         # 15-min cooldown after stop-loss to prevent re-entering the same losing move
         if reason == "stop_loss":
             self._cooldown_until = time.monotonic() + 900.0
@@ -972,5 +1156,14 @@ class DirectionalEquityStrategy(BaseStrategy):
         super().close()
         if self._state != "flat":
             self._emit_signal("flatten", 0.0, metadata={"trigger": "slot_closed"})
+            if self._hedge_notional > 0:
+                self.emit_signal(
+                    instrument_id="SPY",
+                    target_type="notional",
+                    target_value=self._hedge_notional,
+                    confidence=0.75,
+                    metadata={"trigger": "full_hedge_close", "parent": self.instrument}
+                )
+                self._hedge_notional = 0.0
             _NET_EXPOSURE.deregister(self.instrument)
             self._state = "flat"

@@ -75,14 +75,28 @@ def main() -> None:
         vix_level = np.random.uniform(15, 35, n_synthetic)
         # sector_concentration: higher is riskier
         sector_concentration = np.random.uniform(0.1, 0.5, n_synthetic)
+        # relative_volume: 1.0 is normal, >2.0 is high volume (often good for breakouts)
+        relative_volume = np.random.uniform(0.5, 3.0, n_synthetic)
+        # market_impact: smaller is better
+        market_impact = np.random.uniform(0.0001, 0.0050, n_synthetic)
         
-        X = np.column_stack([kalman_residual, bayesian_prob, vix_level, sector_concentration])
+        X = np.column_stack([
+            kalman_residual, 
+            bayesian_prob, 
+            vix_level, 
+            sector_concentration,
+            relative_volume,
+            market_impact
+        ])
         
-        # Logic: Better chance if residual is small, vol prob is low, and VIX is stable
+        # Logic: Better chance if residual is small, vol prob is low, VIX is stable, 
+        # volume is high (breakout confirmation), and impact is low.
         logits = (
             -100.0 * np.abs(kalman_residual) 
             - 2.0 * (bayesian_prob > 0.7) 
             - 0.1 * vix_level 
+            + 0.5 * (relative_volume > 1.5)
+            - 10.0 * market_impact
             + np.random.normal(0, 1, n_synthetic)
         )
         y = (logits > np.median(logits)).astype(int)

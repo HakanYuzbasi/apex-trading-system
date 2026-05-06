@@ -57,6 +57,7 @@ class CrossSectionalMomentumStrategy(BaseStrategy):
     N_POSITIONS               = 3        # long top-N and short bottom-N
     MIN_HOURS_FOR_RANK        = 5        # need at least 5 hourly bars before any signal
     WALLCLOCK_RERANK_INTERVAL = 65 * 60  # fallback: rerank if SPY feed silent >65 min
+    WALLCLOCK_RERANK_COOLDOWN = 60 * 60  # minimum gap between wall-clock reranks (1h)
 
     def __init__(
         self,
@@ -97,8 +98,13 @@ class CrossSectionalMomentumStrategy(BaseStrategy):
         self._day_open:  dict[str, float | None] = {sym: None for sym in _UNIVERSE}
         self._day_date:  dict[str, object]        = {sym: None for sym in _UNIVERSE}
 
-        # Timestamp of last rerank (for logging and wall-clock fallback)
+        # Timestamps for rerank cadence and wall-clock fallback
         self._last_rank_ts: float = 0.0
+        # Track when we last received a SPY bar to detect feed silence
+        self._last_spy_bar_ts: float = time.monotonic()
+        # Track when we last fired a wall-clock rerank (separate cooldown so we
+        # don't spam one rerank per non-SPY bar during SPY downtime)
+        self._last_wallclock_rerank_ts: float = 0.0
 
         logger.info(
             "CrossSectionalMomentum: watching %d symbols | top/bottom %d | notional=$%.0f",
@@ -151,8 +157,8 @@ class CrossSectionalMomentumStrategy(BaseStrategy):
         self._1m_count[sym]  = 0
 
         # Use SPY as the clock signal so we rerank on a consistent cadence.
-        # Any symbol triggers the wall-clock fallback when SPY feed is silent.
         if sym == "SPY":
+            self._last_spy_bar_ts = time.monotonic()  # update liveness timestamp
             self._global_5m += 1
 
             # Forced EOD exit: close all momentum positions by 15:30 ET.
@@ -173,13 +179,23 @@ class CrossSectionalMomentumStrategy(BaseStrategy):
             if self._global_5m % self.RANK_INTERVAL_BARS == 0:
                 self._rerank_and_trade()
 
-        elif time.monotonic() - self._last_rank_ts > self.WALLCLOCK_RERANK_INTERVAL:
-            # SPY feed is lagging — use wall-clock to keep reranking alive.
-            logger.warning(
-                "XSecMomentum: SPY feed silent >%ds — triggering wall-clock rerank",
-                self.WALLCLOCK_RERANK_INTERVAL,
-            )
-            self._rerank_and_trade()
+        else:
+            # Non-SPY bar: check if SPY feed has been silent long enough to warrant
+            # a wall-clock rerank — but only fire ONCE per WALLCLOCK_RERANK_COOLDOWN
+            # to prevent one rerank per tick during SPY downtime.
+            now_mono = time.monotonic()
+            spy_silence_secs = now_mono - self._last_spy_bar_ts
+            since_last_wallclock = now_mono - self._last_wallclock_rerank_ts
+            if (
+                spy_silence_secs > self.WALLCLOCK_RERANK_INTERVAL
+                and since_last_wallclock > self.WALLCLOCK_RERANK_COOLDOWN
+            ):
+                logger.warning(
+                    "XSecMomentum: SPY feed silent >%.0fs — triggering wall-clock rerank",
+                    spy_silence_secs,
+                )
+                self._last_wallclock_rerank_ts = now_mono
+                self._rerank_and_trade()
 
     def on_tick(self, event: TradeTick) -> None:
         pass
@@ -238,7 +254,7 @@ class CrossSectionalMomentumStrategy(BaseStrategy):
         # Window: from -(LOOKBACK_HOURS + SKIP_HOURS) to -(SKIP_HOURS)
         start_close = closes[-(self.LOOKBACK_HOURS + self.SKIP_HOURS + 1)]
         end_close   = closes[-(self.SKIP_HOURS + 1)]
-        if start_close <= 0.0:
+        if start_close <= 0.0 or end_close <= 0.0:
             return None
         return float(np.log(end_close / start_close))
 
